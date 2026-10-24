@@ -37,7 +37,8 @@ struct DisplayDims {
 pub struct LiveRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    compute: wgpu::ComputePipeline,
+    /// The camera passes: the cached render, or a visibility pass then cached shading.
+    camera_passes: Vec<wgpu::ComputePipeline>,
     display: wgpu::RenderPipeline,
     mark: wgpu::ComputePipeline,
     rebake: wgpu::ComputePipeline,
@@ -46,7 +47,7 @@ pub struct LiveRenderer {
     camera_buf: wgpu::Buffer,
     dims_buf: wgpu::Buffer,
     colors_buf: wgpu::Buffer,
-    compute_bind: wgpu::BindGroup,
+    camera_binds: Vec<wgpu::BindGroup>,
     display_bind: wgpu::BindGroup,
     motion: Motion,
     indirect: Option<Indirect>,
@@ -211,9 +212,17 @@ impl LiveRenderer {
             multiview_mask: None,
             cache: None,
         });
-        let (colors_buf, compute_bind, display_bind) = Self::targets(
+        let camera_passes = if kernel.split.get() {
+            vec![
+                kernel.visibility_pipeline.clone(),
+                kernel.shade_cached_pipeline.clone(),
+            ]
+        } else {
+            vec![kernel.cached_pipeline.clone()]
+        };
+        let (colors_buf, camera_binds, display_bind) = Self::targets(
             &device,
-            &kernel.cached_pipeline,
+            &camera_passes,
             &display,
             &scene,
             &camera_buf,
@@ -227,7 +236,7 @@ impl LiveRenderer {
         LiveRenderer {
             device,
             queue: kernel.queue.clone(),
-            compute: kernel.cached_pipeline.clone(),
+            camera_passes,
             display,
             mark: kernel.mark_pipeline.clone(),
             rebake: kernel.rebake_pipeline.clone(),
@@ -236,7 +245,7 @@ impl LiveRenderer {
             camera_buf,
             dims_buf,
             colors_buf,
-            compute_bind,
+            camera_binds,
             display_bind,
             motion,
             indirect,
@@ -603,25 +612,49 @@ impl LiveRenderer {
     #[allow(clippy::too_many_arguments)]
     fn targets(
         device: &wgpu::Device,
-        compute: &wgpu::ComputePipeline,
+        camera_passes: &[wgpu::ComputePipeline],
         display: &wgpu::RenderPipeline,
         scene: &[(u32, wgpu::Buffer)],
         camera_buf: &wgpu::Buffer,
         dims_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
-    ) -> (wgpu::Buffer, wgpu::BindGroup, wgpu::BindGroup) {
-        let colors_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("colors"),
-            size: (width as u64 * height as u64 * 16).max(16),
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
+    ) -> (wgpu::Buffer, Vec<wgpu::BindGroup>, wgpu::BindGroup) {
+        let size = (width as u64 * height as u64 * 16).max(16);
+        let buffer = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let colors_buf = buffer("colors");
+        let vis_buf = buffer("visibility");
         let mut entries: Vec<(u32, &wgpu::Buffer)> =
             scene.iter().map(|(b, buf)| (*b, buf)).collect();
         entries.push((6, camera_buf));
         entries.push((7, &colors_buf));
-        let compute_bind = bind_group(device, "live compute", compute, &entries);
+        let camera_binds = if camera_passes.len() == 2 {
+            let visibility: Vec<(u32, &wgpu::Buffer)> = entries
+                .iter()
+                .copied()
+                .chain([(31, &vis_buf)])
+                .filter(|(b, _)| crate::VISIBILITY_BINDINGS.contains(b))
+                .collect();
+            entries.push((31, &vis_buf));
+            vec![
+                bind_group(device, "live visibility", &camera_passes[0], &visibility),
+                bind_group(device, "live shading", &camera_passes[1], &entries),
+            ]
+        } else {
+            vec![bind_group(
+                device,
+                "live compute",
+                &camera_passes[0],
+                &entries,
+            )]
+        };
         let display_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live display"),
             layout: &display.get_bind_group_layout(0),
@@ -636,7 +669,7 @@ impl LiveRenderer {
                 },
             ],
         });
-        (colors_buf, compute_bind, display_bind)
+        (colors_buf, camera_binds, display_bind)
     }
 
     /// Call when the surface size changes.
@@ -644,9 +677,9 @@ impl LiveRenderer {
         if (width, height) == (self.width, self.height) || width == 0 || height == 0 {
             return;
         }
-        (self.colors_buf, self.compute_bind, self.display_bind) = Self::targets(
+        (self.colors_buf, self.camera_binds, self.display_bind) = Self::targets(
             &self.device,
-            &self.compute,
+            &self.camera_passes,
             &self.display,
             &self.scene,
             &self.camera_buf,
@@ -905,10 +938,10 @@ impl LiveRenderer {
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
+        for (pipeline, group) in self.camera_passes.iter().zip(&self.camera_binds) {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.compute);
-            pass.set_bind_group(0, &self.compute_bind, &[]);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
         }
         {

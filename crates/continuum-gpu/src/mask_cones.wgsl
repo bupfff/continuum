@@ -880,6 +880,60 @@ fn hit_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
 
 @group(0) @binding(24) var<storage, read> normals: array<vec4<f32>>;
 
+// --- Camera passes. Either one pass casts the camera ray and shades, or a
+// visibility pass writes each pixel's nearest hit to `vis` and a shading pass
+// reads it back. Both shade with the same functions, so their output is the
+// same; the split keeps the ray cast free of the cone code's register cost.
+
+// Per pixel: object, triangle, the hit distance's bits, and 1 if the front of
+// a one-sided light is nearer than the hit.
+@group(0) @binding(31) var<storage, read_write> vis: array<vec4<u32>>;
+
+// The camera ray's nearest hit, as one pass computes it.
+fn camera_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
+    cull_back = true;
+    return primary_hit(eye, dir);
+}
+
+@compute @workgroup_size(8, 8)
+fn visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
+    let eye = camera.eye.xyz;
+    let hit = camera_hit(eye, dir);
+    let sees_light = select(0u, 1u, light_distance(eye, dir) < hit.distance);
+    vis[gid.y * w + gid.x] = vec4<u32>(hit.mesh, hit.tri, bitcast<u32>(hit.distance), sees_light);
+}
+
+// The hit a visibility pass recorded, rebuilt exactly as `camera_hit` returns
+// it (the normal is recomputed the same way). `w` of the result: 1 if the
+// pixel sees the light.
+fn recorded_hit(pixel: u32, dir: vec3<f32>) -> Hit {
+    let v = vis[pixel];
+    var hit = Hit(bitcast<f32>(v.z), v.x, v.y, vec3<f32>(0.0));
+    if (v.x != 0xffffffffu) {
+        let v0 = tris[3u * v.y].xyz;
+        hit.normal = normalize(cross(tris[3u * v.y + 1u].xyz - v0, tris[3u * v.y + 2u].xyz - v0));
+        let x = meshes[v.x].w;
+        if (x != NONE) { hit.normal = normalize(rotate_to_world(x, hit.normal)); }
+        if (dot(hit.normal, dir) > 0.0) { hit.normal = -hit.normal; }
+    }
+    return hit;
+}
+
+// Per-pixel shading: a mask cone at the hit.
+fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, sees_light: bool) {
+    if (sees_light) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
+    if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
+    let surface = eye + dir * hit.distance;
+    let point = surface + hit.normal * surface_offset(hit.distance);
+    let irradiance = hit_irradiance(pixel, point, shading_normal(hit.mesh, hit.tri, surface, -dir));
+    let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
+    colors[pixel] = vec4<f32>(c, 1.0);
+}
+
 @compute @workgroup_size(8, 8)
 fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u32(camera.params.x);
@@ -887,16 +941,18 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= w || gid.y >= h) { return; }
     let dir = camera_dir(gid);
     let eye = camera.eye.xyz;
-    cull_back = true;
-    let hit = primary_hit(eye, dir);
+    let hit = camera_hit(eye, dir);
+    shade_per_pixel(gid.y * w + gid.x, eye, dir, hit, light_distance(eye, dir) < hit.distance);
+}
+
+@compute @workgroup_size(8, 8)
+fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
     let pixel = gid.y * w + gid.x;
-    if (light_distance(eye, dir) < hit.distance) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
-    if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
-    let surface = eye + dir * hit.distance;
-    let point = surface + hit.normal * surface_offset(hit.distance);
-    let irradiance = hit_irradiance(pixel, point, shading_normal(hit.mesh, hit.tri, surface, -dir));
-    let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
-    colors[pixel] = vec4<f32>(c, 1.0);
+    shade_per_pixel(pixel, camera.eye.xyz, dir, recorded_hit(pixel, dir), vis[pixel].w == 1u);
 }
 
 // --- World-space lighting cache: lightmap texels on static faces. ---
@@ -949,17 +1005,9 @@ fn lookup(face: Face, uv: vec2<f32>) -> f32 {
     return mix(a, b, ft);
 }
 
-@compute @workgroup_size(8, 8)
-fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let w = u32(camera.params.x);
-    let h = u32(camera.params.y);
-    if (gid.x >= w || gid.y >= h) { return; }
-    let dir = camera_dir(gid);
-    let eye = camera.eye.xyz;
-    cull_back = true;
-    let hit = primary_hit(eye, dir);
-    let pixel = gid.y * w + gid.x;
-    if (light_distance(eye, dir) < hit.distance) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
+// Cached shading: lightmap and probe lookups, or a mask cone on moving meshes.
+fn shade_cached(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, sees_light: bool) {
+    if (sees_light) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
     let surface = eye + dir * hit.distance;
     let f = tri_face[hit.tri];
@@ -974,6 +1022,27 @@ fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let c = albedo[hit.mesh].xyz * irradiance * (camera.params.w / 3.14159265);
     colors[pixel] = vec4<f32>(c, 1.0);
+}
+
+@compute @workgroup_size(8, 8)
+fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
+    let eye = camera.eye.xyz;
+    let hit = camera_hit(eye, dir);
+    shade_cached(gid.y * w + gid.x, eye, dir, hit, light_distance(eye, dir) < hit.distance);
+}
+
+@compute @workgroup_size(8, 8)
+fn shade_cached_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
+    let pixel = gid.y * w + gid.x;
+    shade_cached(pixel, camera.eye.xyz, dir, recorded_hit(pixel, dir), vis[pixel].w == 1u);
 }
 
 // --- Moving geometry: re-bake exactly the lightmap blocks a change can reach. ---

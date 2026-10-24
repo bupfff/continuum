@@ -46,8 +46,12 @@ pub struct MaskConeKernel {
     probe_build_pipeline: wgpu::ComputePipeline,
     probe_gather_pipeline: wgpu::ComputePipeline,
     bake_static_pipeline: wgpu::ComputePipeline,
+    visibility_pipeline: wgpu::ComputePipeline,
+    shade_pipeline: wgpu::ComputePipeline,
+    shade_cached_pipeline: wgpu::ComputePipeline,
     prefilter: std::cell::Cell<f32>,
     nearest_first: std::cell::Cell<bool>,
+    split: std::cell::Cell<bool>,
     pub adapter_name: String,
 }
 
@@ -132,6 +136,9 @@ impl RectLight {
 /// buffers to these when a lightmap provides more).
 const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30];
 
+/// Bindings the `visibility` pass uses.
+const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31];
+
 impl MaskConeKernel {
     /// `None` if no GPU adapter is available.
     pub fn new() -> Option<Self> {
@@ -175,6 +182,9 @@ impl MaskConeKernel {
         let probe_build_pipeline = entry("probe_build");
         let probe_gather_pipeline = entry("probe_gather");
         let bake_static_pipeline = entry("bake_static");
+        let visibility_pipeline = entry("visibility");
+        let shade_pipeline = entry("shade");
+        let shade_cached_pipeline = entry("shade_cached_pass");
         MaskConeKernel {
             device,
             queue,
@@ -186,8 +196,12 @@ impl MaskConeKernel {
             probe_build_pipeline,
             probe_gather_pipeline,
             bake_static_pipeline,
+            visibility_pipeline,
+            shade_pipeline,
+            shade_cached_pipeline,
             prefilter: std::cell::Cell::new(0.0),
             nearest_first: std::cell::Cell::new(true),
+            split: std::cell::Cell::new(false),
             adapter_name,
         }
     }
@@ -212,6 +226,13 @@ impl MaskConeKernel {
     /// order (as before M4 gate 3). Results are the same; only speed differs.
     pub fn set_nearest_first(&self, on: bool) {
         self.nearest_first.set(on);
+    }
+
+    /// Camera frames as a visibility pass then a shading pass, or as one pass
+    /// (the default: M4 gate 4 found the split slower). Results are the same;
+    /// only speed differs. Applies to [`LiveRenderer`]s created after the call.
+    pub fn set_visibility_buffer(&self, on: bool) {
+        self.split.set(on);
     }
 
     /// Irradiance per unit radiance at each receiver `(point, normal)`, and the
@@ -267,7 +288,7 @@ impl MaskConeKernel {
             radiance,
             hierarchy: hierarchy.into(),
         };
-        self.render_frame(&self.render_pipeline, &frame, None, runs)
+        self.render_frame(false, &frame, None, runs)
     }
 
     /// Like [`Self::render`] (mask cones at every pixel, with the hierarchy),
@@ -296,7 +317,7 @@ impl MaskConeKernel {
             radiance,
             hierarchy: Hierarchy::Triangles,
         };
-        self.render_frame(&self.render_pipeline, &frame, Some(lightmap), runs)
+        self.render_frame(false, &frame, Some(lightmap), runs)
     }
 
     /// Like [`Self::render`] (with the hierarchy), but static faces read their
@@ -325,7 +346,7 @@ impl MaskConeKernel {
             radiance,
             hierarchy: Hierarchy::Triangles,
         };
-        self.render_frame(&self.cached_pipeline, &frame, Some(lightmap), runs)
+        self.render_frame(true, &frame, Some(lightmap), runs)
     }
 
     /// Per-pixel mask cones over an instanced scene: shared geometry placed many
@@ -412,8 +433,7 @@ impl MaskConeKernel {
         ];
         let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
         let cam = camera_uniform(camera, width, height, radiance);
-        let (pixels, time) =
-            self.render_buffers(&self.render_pipeline, cam, width, height, buffers, runs);
+        let (pixels, time) = self.render_buffers(false, cam, width, height, buffers, runs);
         (pixels, time, bytes)
     }
 
@@ -427,7 +447,7 @@ impl MaskConeKernel {
 
     fn render_frame(
         &self,
-        pipeline: &wgpu::ComputePipeline,
+        cached: bool,
         frame: &Frame,
         lightmap: Option<&Lightmap>,
         runs: usize,
@@ -435,14 +455,14 @@ impl MaskConeKernel {
         let (width, height) = (frame.width, frame.height);
         let cam = camera_uniform(frame.camera, width, height, frame.radiance);
         let buffers = self.scene_buffers(frame, lightmap);
-        self.render_buffers(pipeline, cam, width, height, buffers, runs)
+        self.render_buffers(cached, cam, width, height, buffers, runs)
     }
 
     /// Runs a render pipeline over prepared scene buffers; returns linear RGB
     /// and the fastest of `runs` executions.
     fn render_buffers(
         &self,
-        pipeline: &wgpu::ComputePipeline,
+        cached: bool,
         cam: CameraUniform,
         width: u32,
         height: u32,
@@ -472,31 +492,63 @@ impl MaskConeKernel {
             size,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
-        let per_pixel = std::ptr::eq(pipeline, &self.render_pipeline);
-        let mut entries: Vec<wgpu::BindGroupEntry> = buffers
+        let vis_buf = storage("visibility", size, wgpu::BufferUsages::STORAGE);
+        buffers.push((7, colors_buf.clone()));
+        buffers.push((31, vis_buf));
+        // Single pass, or a visibility pass then a shading pass; each pipeline
+        // gets exactly the bindings it uses.
+        let split = self.split.get();
+        let passes: Vec<(&wgpu::ComputePipeline, Box<dyn Fn(u32) -> bool>)> = match (cached, split)
+        {
+            (false, false) => vec![(
+                &self.render_pipeline,
+                Box::new(|b| RENDER_BINDINGS.contains(&b)),
+            )],
+            (true, false) => vec![(&self.cached_pipeline, Box::new(|b| b != 31))],
+            (false, true) => vec![
+                (
+                    &self.visibility_pipeline,
+                    Box::new(|b| VISIBILITY_BINDINGS.contains(&b)),
+                ),
+                (
+                    &self.shade_pipeline,
+                    Box::new(|b| b == 31 || RENDER_BINDINGS.contains(&b)),
+                ),
+            ],
+            (true, true) => vec![
+                (
+                    &self.visibility_pipeline,
+                    Box::new(|b| VISIBILITY_BINDINGS.contains(&b)),
+                ),
+                (&self.shade_cached_pipeline, Box::new(|_| true)),
+            ],
+        };
+        let groups: Vec<(&wgpu::ComputePipeline, wgpu::BindGroup)> = passes
             .iter()
-            .filter(|(binding, _)| !per_pixel || RENDER_BINDINGS.contains(binding))
-            .map(|(binding, buffer)| wgpu::BindGroupEntry {
-                binding: *binding,
-                resource: buffer.as_entire_binding(),
+            .map(|(pipeline, keep)| {
+                let entries: Vec<wgpu::BindGroupEntry> = buffers
+                    .iter()
+                    .filter(|(binding, _)| keep(*binding))
+                    .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                        binding: *binding,
+                        resource: buffer.as_entire_binding(),
+                    })
+                    .collect();
+                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("render"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &entries,
+                });
+                (*pipeline, group)
             })
             .collect();
-        entries.push(wgpu::BindGroupEntry {
-            binding: 7,
-            resource: colors_buf.as_entire_binding(),
-        });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("render"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &entries,
-        });
         let mut best = Duration::MAX;
         for _ in 0..runs.max(1) {
             let mut encoder = self.device.create_command_encoder(&Default::default());
-            {
+            for (pipeline, group) in &groups {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
                 pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
             }
             let start = Instant::now();
