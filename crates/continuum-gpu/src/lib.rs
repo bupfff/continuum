@@ -87,6 +87,15 @@ struct CameraUniform {
     params: [f32; 4],
 }
 
+/// Compile-time choices for a [`MaskConeKernel`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KernelOptions {
+    /// Traversal stacks in workgroup memory, or in per-thread arrays (the
+    /// default: M4 gate 5 found workgroup stacks 2.6× slower, as their 12 KB per
+    /// workgroup limits how many workgroups run at once).
+    pub workgroup_stacks: bool,
+}
+
 /// A pinhole camera looking from `eye` toward `target`, with `+Z` up.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
@@ -163,17 +172,54 @@ impl MaskConeKernel {
 
     /// A kernel on an existing device (for example one that also drives a window).
     pub fn with_device(device: wgpu::Device, queue: wgpu::Queue, adapter_name: String) -> Self {
+        Self::with_options(device, queue, adapter_name, KernelOptions::default())
+    }
+
+    /// [`Self::new`] with options.
+    pub fn new_with(options: KernelOptions) -> Option<Self> {
+        let kernel = Self::new()?;
+        Some(Self::with_options(
+            kernel.device,
+            kernel.queue,
+            kernel.adapter_name,
+            options,
+        ))
+    }
+
+    /// [`Self::with_device`] with options.
+    pub fn with_options(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_name: String,
+        options: KernelOptions,
+    ) -> Self {
+        // Without workgroup stacks, the workgroup array is never used; shrink it
+        // so it costs no workgroup memory (an override cannot remove it).
+        let mut source = include_str!("mask_cones.wgsl").to_string();
+        if !options.workgroup_stacks {
+            source = source.replace(
+                "var<workgroup> wg_stacks: array<u32, 3072>;",
+                "var<workgroup> wg_stacks: array<u32, 1>;",
+            );
+        }
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mask_cones"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("mask_cones.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
+        let constants = [(
+            "WORKGROUP_STACKS",
+            if options.workgroup_stacks { 1.0 } else { 0.0 },
+        )];
         let entry = |name: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(name),
                 layout: None,
                 module: &module,
                 entry_point: Some(name),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
                 cache: None,
             })
         };

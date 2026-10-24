@@ -94,6 +94,26 @@ const NONE: u32 = 0xffffffffu;
 // mesh's triangle hierarchy.
 const STACK: u32 = 48u;
 
+// Traversal stacks: a per-thread array, or with WORKGROUP_STACKS a slice of a
+// workgroup array (interleaved across the 64 invocations of a workgroup). M4
+// gate 5 found the workgroup version 2.6× slower on the M4: 12 KB per workgroup
+// limits how many workgroups run at once. Every entry point that traverses
+// sets `lane` and runs 64 invocations per workgroup. (The kernel shrinks
+// `wg_stacks` when it is unused.)
+override WORKGROUP_STACKS: bool = false;
+var<workgroup> wg_stacks: array<u32, 3072>;
+var<private> thread_stack: array<u32, STACK>;
+var<private> lane: u32 = 0u;
+
+fn stack_get(i: u32) -> u32 {
+    if (WORKGROUP_STACKS) { return wg_stacks[i * 64u + lane]; }
+    return thread_stack[i];
+}
+
+fn stack_set(i: u32, v: u32) {
+    if (WORKGROUP_STACKS) { wg_stacks[i * 64u + lane] = v; } else { thread_stack[i] = v; }
+}
+
 // Debug mode 3: clipped polygons are appended to `debug` from this offset.
 var<private> debug_cursor: u32 = 0u;
 
@@ -454,8 +474,7 @@ fn cone_to_object(c: Cone, m: u32) -> Cone {
     return o;
 }
 
-fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32,
-                     stack: ptr<function, array<u32, STACK>>, base: u32) {
+fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32, base: u32) {
     let c = cone_to_object(world_cone, m);
     let range = meshes[m];
     var acc: array<f32, 68>;
@@ -466,10 +485,10 @@ fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>
     if (light.counts.z == 2u) {
         if (range.z != NONE) {
             var sp = base + 1u;
-            (*stack)[base] = range.z;
+            stack_set(base, range.z);
             while (sp > base) {
                 sp--;
-                let n = (*stack)[sp];
+                let n = stack_get(sp);
                 let node = blas[n];
                 if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
                 if (light.params.x > 0.0) {
@@ -482,8 +501,8 @@ fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>
                         if (cover_triangle(c, &acc, &span, blas_items[k])) { touched = true; }
                     }
                 } else {
-                    (*stack)[sp] = node.info.x;
-                    (*stack)[sp + 1u] = node.info.x + 1u;
+                    stack_set(sp, node.info.x);
+                    stack_set(sp + 1u, node.info.x + 1u);
                     sp += 2u;
                 }
             }
@@ -549,29 +568,28 @@ fn light_cone(apex: vec3<f32>) -> LightCone {
 
 // Adds the coverage of every mesh in the bound hierarchy (or every mesh) to `cov`.
 fn scene_coverage(c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) {
-    var stack: array<u32, STACK>;
     if (light.counts.z >= 1u) {
         var sp = 1u;
-        stack[0] = 0u;
+        stack_set(0, 0u);
         while (sp > 0u) {
             sp--;
-            let node = nodes[stack[sp]];
+            let node = nodes[stack_get(sp)];
             if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                    add_mesh_coverage(c, items[k], cov, full, i, &stack, sp);
+                    add_mesh_coverage(c, items[k], cov, full, i, sp);
                 }
                 // Every bin fully covered: nothing further can change the result.
                 if (*full == BINS) { break; }
             } else {
-                stack[sp] = node.info.x;
-                stack[sp + 1u] = node.info.x + 1u;
+                stack_set(sp, node.info.x);
+                stack_set(sp + 1u, node.info.x + 1u);
                 sp += 2u;
             }
         }
     } else {
         for (var m = 0u; m < light.counts.x; m++) {
-            add_mesh_coverage(c, m, cov, full, i, &stack, 0u);
+            add_mesh_coverage(c, m, cov, full, i, 0u);
             if (*full == BINS) { break; }
         }
     }
@@ -615,7 +633,8 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let i = gid.x;
     if (i >= arrayLength(&receivers)) { return; }
     // Same rule as camera hits: a receiver facing away from the light gets none.
@@ -707,11 +726,10 @@ fn ray_box_entry(eye: vec3<f32>, inv: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, l
 // (the one the ray enters first is popped first, and a child the ray misses is
 // skipped), or both in a fixed order.
 fn push_children(eye: vec3<f32>, inv: vec3<f32>, left: u32, lo_l: vec3<f32>, hi_l: vec3<f32>,
-                 lo_r: vec3<f32>, hi_r: vec3<f32>, limit: f32,
-                 stack: ptr<function, array<u32, STACK>>, sp: ptr<function, u32>) {
+                 lo_r: vec3<f32>, hi_r: vec3<f32>, limit: f32, sp: ptr<function, u32>) {
     if (light.params.y < 0.5) {
-        (*stack)[*sp] = left;
-        (*stack)[*sp + 1u] = left + 1u;
+        stack_set(*sp, left);
+        stack_set(*sp + 1u, left + 1u);
         *sp += 2u;
         return;
     }
@@ -719,26 +737,25 @@ fn push_children(eye: vec3<f32>, inv: vec3<f32>, left: u32, lo_l: vec3<f32>, hi_
     let tr = ray_box_entry(eye, inv, lo_r, hi_r, limit);
     if (tl >= 0.0 && tr >= 0.0) {
         if (tl <= tr) {
-            (*stack)[*sp] = left + 1u;
-            (*stack)[*sp + 1u] = left;
+            stack_set(*sp, left + 1u);
+            stack_set(*sp + 1u, left);
         } else {
-            (*stack)[*sp] = left;
-            (*stack)[*sp + 1u] = left + 1u;
+            stack_set(*sp, left);
+            stack_set(*sp + 1u, left + 1u);
         }
         *sp += 2u;
     } else if (tl >= 0.0) {
-        (*stack)[*sp] = left;
+        stack_set(*sp, left);
         *sp += 1u;
     } else if (tr >= 0.0) {
-        (*stack)[*sp] = left + 1u;
+        stack_set(*sp, left + 1u);
         *sp += 1u;
     }
 }
 
 // The nearest hit in mesh `m`, if nearer than `best`. Triangle hierarchy
 // traversal uses `stack` from `base` up.
-fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit,
-                   stack: ptr<function, array<u32, STACK>>, base: u32) -> Hit {
+fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit, base: u32) -> Hit {
     var hit = best;
     let range = meshes[m];
     // In the object's space with the same ray parameter: distances stay world distances.
@@ -752,10 +769,10 @@ fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit
         if (range.z == NONE) { return hit; }
         let inv = 1.0 / dir;
         var sp = base + 1u;
-        (*stack)[base] = range.z;
+        stack_set(base, range.z);
         while (sp > base) {
             sp--;
-            let node = blas[(*stack)[sp]];
+            let node = blas[stack_get(sp)];
             if (!ray_box(eye, inv, node.lo.xyz, node.hi.xyz, hit.distance)) { continue; }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
@@ -764,7 +781,7 @@ fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit
             } else {
                 let l = blas[node.info.x];
                 let r = blas[node.info.x + 1u];
-                push_children(eye, inv, node.info.x, l.lo.xyz, l.hi.xyz, r.lo.xyz, r.hi.xyz, hit.distance, stack, &sp);
+                push_children(eye, inv, node.info.x, l.lo.xyz, l.hi.xyz, r.lo.xyz, r.hi.xyz, hit.distance, &sp);
             }
         }
     } else {
@@ -788,29 +805,28 @@ fn camera_dir(gid: vec3<u32>) -> vec3<f32> {
 // Nearest triangle along a ray, through the mesh hierarchy or by testing every mesh.
 fn primary_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
     var hit = Hit(3.4e38, 0xffffffffu, 0xffffffffu, vec3<f32>(0.0));
-    var stack: array<u32, STACK>;
     if (light.counts.z >= 1u) {
         let inv = 1.0 / dir;
         var sp = 1u;
-        stack[0] = 0u;
+        stack_set(0, 0u);
         while (sp > 0u) {
             sp--;
-            let node = nodes[stack[sp]];
+            let node = nodes[stack_get(sp)];
             // Slab test against the node's box, closer than the best hit so far.
             if (!ray_box(eye, inv, node.lo.xyz, node.hi.xyz, hit.distance)) { continue; }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                    hit = nearest_in_mesh(eye, dir, items[k], hit, &stack, sp);
+                    hit = nearest_in_mesh(eye, dir, items[k], hit, sp);
                 }
             } else {
                 let l = nodes[node.info.x];
                 let r = nodes[node.info.x + 1u];
-                push_children(eye, inv, node.info.x, l.lo.xyz, l.hi.xyz, r.lo.xyz, r.hi.xyz, hit.distance, &stack, &sp);
+                push_children(eye, inv, node.info.x, l.lo.xyz, l.hi.xyz, r.lo.xyz, r.hi.xyz, hit.distance, &sp);
             }
         }
     } else {
         for (var m = 0u; m < light.counts.x; m++) {
-            hit = nearest_in_mesh(eye, dir, m, hit, &stack, 0u);
+            hit = nearest_in_mesh(eye, dir, m, hit, 0u);
         }
     }
     if (dot(hit.normal, dir) > 0.0) { hit.normal = -hit.normal; }
@@ -896,7 +912,8 @@ fn camera_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
 }
 
 @compute @workgroup_size(8, 8)
-fn visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn visibility(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
@@ -935,7 +952,8 @@ fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, sees_li
 }
 
 @compute @workgroup_size(8, 8)
-fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn render(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
@@ -946,7 +964,8 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 @compute @workgroup_size(8, 8)
-fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
@@ -1025,7 +1044,8 @@ fn shade_cached(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, sees_light
 }
 
 @compute @workgroup_size(8, 8)
-fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
@@ -1036,7 +1056,8 @@ fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 @compute @workgroup_size(8, 8)
-fn shade_cached_pass(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn shade_cached_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
@@ -1107,6 +1128,7 @@ fn mark_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
 // the static meshes only.
 @compute @workgroup_size(64)
 fn bake_static(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let slot = block_slot[wg.x];
     if (slot == NONE) { return; }
     let i = wg.x * 64u + li;
@@ -1140,11 +1162,10 @@ fn cached_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>, slot: u32, li: 
         cov[b] = static_cov[base + b];
         if (cov[b] >= 1.0) { full++; }
     }
-    var stack: array<u32, STACK>;
     for (var k = 0u; k < probe_params.counts.w; k++) {
         if (full == BINS) { break; }
         if (!may_touch_box(lc.c, probe_params.bounds[2u * k].xyz, probe_params.bounds[2u * k + 1u].xyz)) { continue; }
-        add_mesh_coverage(lc.c, probe_params.moving[k].x, &cov, &full, i, &stack, 0u);
+        add_mesh_coverage(lc.c, probe_params.moving[k].x, &cov, &full, i, 0u);
     }
     return cone_visible(lc.c, normal, &cov);
 }
@@ -1153,6 +1174,7 @@ fn cached_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>, slot: u32, li: 
 // lightmap's texel buffer and `receivers` its texels.
 @compute @workgroup_size(64)
 fn rebake(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let block = dirty[wg.x];
     let i = block * 64u + li;
     result[i] = cached_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz, block_slot[block], li);
@@ -1250,13 +1272,12 @@ fn composite(origin: vec3<f32>, dir: vec3<f32>, g: vec2<u32>) -> vec2<u32> {
     }
     let inv = 1.0 / dir;
     var blocked = false;
-    var stack: array<u32, STACK>;
     for (var k = 0u; k < probe_params.counts.w; k++) {
         let lo = probe_params.bounds[2u * k].xyz;
         let hi = probe_params.bounds[2u * k + 1u].xyz;
         if (!ray_box(origin, inv, lo, hi, best.distance)) { continue; }
         let m = probe_params.moving[k].x;
-        let hit = nearest_in_mesh(origin, dir, m, best, &stack, 0u);
+        let hit = nearest_in_mesh(origin, dir, m, best, 0u);
         if (hit.mesh == m) {
             best = hit;
             blocked = true;
@@ -1278,7 +1299,8 @@ fn bin_radiance(origin: vec3<f32>, dir: vec3<f32>, g: vec2<u32>) -> vec4<f32> {
 
 // One invocation per (bin, probe): dispatched as (bins / 64, probes).
 @compute @workgroup_size(64)
-fn probe_build(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn probe_build(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let bins = bins_per_probe();
     let p = gid.y;
     if (gid.x >= bins || p >= probe_params.counts.x) { return; }
@@ -1293,6 +1315,7 @@ var<workgroup> partial: array<vec4<f32>, 64>;
 // tree reduction, so the sum order never depends on scheduling.
 @compute @workgroup_size(64)
 fn probe_gather(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
     let p = wg.x;
     let bins = bins_per_probe();
     var sum = vec4<f32>(0.0);
