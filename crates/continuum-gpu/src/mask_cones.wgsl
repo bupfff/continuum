@@ -509,12 +509,13 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // --- World-space lighting cache: lightmap texels on static faces. ---
 
-// A rectangular face with an `nu × nv` texel grid starting at texel `info.x`.
+// A rectangular face with an `nu × nv` texel grid starting at texel `info.x`,
+// stored as 8×8 blocks of 64 consecutive texels, `info.w` blocks per row.
 struct Face {
     origin: vec4<f32>,
     u: vec4<f32>,
     v: vec4<f32>,
-    // x: first texel, y: nu, z: nv
+    // x: first texel, y: nu, z: nv, w: blocks per row
     info: vec4<u32>,
 };
 
@@ -524,7 +525,7 @@ struct Face {
 @group(0) @binding(13) var<storage, read> texels: array<f32>;
 
 fn texel(face: Face, i: u32, j: u32) -> f32 {
-    return texels[face.info.x + j * face.info.y + i];
+    return texels[face.info.x + ((j / 8u) * face.info.w + i / 8u) * 64u + (j % 8u) * 8u + (i % 8u)];
 }
 
 // Bilinear lookup of cached irradiance at a point on a face (texel centers at
@@ -566,4 +567,58 @@ fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
     colors[pixel] = vec4<f32>(c, 1.0);
+}
+
+// --- Moving geometry: re-bake exactly the lightmap blocks a change can reach. ---
+//
+// Each 8×8 texel block has up to 16 planes (`n · p <= w` inside) of a convex
+// volume enclosing every one of its texels' cones: the hull of the block and the
+// light. A changed mesh's swept bounds (old ∪ new) can alter a texel only if they
+// reach inside that volume, so only blocks no plane separates are re-baked.
+
+const BLOCK_PLANES: u32 = 16u;
+
+struct Motion {
+    // x: swept boxes, y: blocks
+    counts: vec4<u32>,
+    // Box k is `boxes[2k] .. boxes[2k + 1]`.
+    boxes: array<vec4<f32>, 32>,
+};
+
+@group(0) @binding(14) var<uniform> motion: Motion;
+@group(0) @binding(15) var<storage, read> block_planes: array<vec4<f32>>;
+// Indirect dispatch arguments for `rebake`; x counts the marked blocks.
+@group(0) @binding(16) var<storage, read_write> rebake_args: array<atomic<u32>, 3>;
+@group(0) @binding(17) var<storage, read_write> dirty: array<u32>;
+
+@compute @workgroup_size(64)
+fn mark_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let b = gid.x;
+    if (b >= motion.counts.y) { return; }
+    for (var k = 0u; k < motion.counts.x; k++) {
+        let lo = motion.boxes[2u * k].xyz;
+        let hi = motion.boxes[2u * k + 1u].xyz;
+        let center = (lo + hi) * 0.5;
+        let extent = (hi - lo) * 0.5;
+        var separated = false;
+        for (var p = 0u; p < BLOCK_PLANES; p++) {
+            let plane = block_planes[b * BLOCK_PLANES + p];
+            if (dot(plane.xyz, center) - dot(abs(plane.xyz), extent) > plane.w) {
+                separated = true;
+                break;
+            }
+        }
+        if (!separated) {
+            dirty[atomicAdd(&rebake_args[0], 1u)] = b;
+            return;
+        }
+    }
+}
+
+// One workgroup per marked block, one invocation per texel; `result` is the
+// lightmap's texel buffer and `receivers` its texels.
+@compute @workgroup_size(64)
+fn rebake(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let i = dirty[wg.x] * 64u + li;
+    result[i] = hit_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz);
 }

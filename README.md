@@ -5,7 +5,8 @@ rendering. Every visibility question is asked by a cone that answers in bits,
 and cached answers are recomputed only when they could have changed by more
 than a chosen, invisible error bound.
 
-Status: research stage. The core bets are being tested in 2D before any GPU work.
+Status: research stage. The core bets were tested in 2D (M0) and in 3D on the
+CPU (M1); the GPU renderer (M2) runs a real-time viewer with moving objects.
 See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 [docs/results/](docs/results/) for measured results.
 
@@ -16,12 +17,15 @@ cargo run --release -p viewer
 ```
 
 Fly through the test room: WASD to move, Q/E down and up, drag with the left
-mouse button to look, Shift to move faster, V to toggle vsync, Esc to quit.
-The title bar shows the frame rate. Direct light from the area light is baked
-into a world-space lighting cache (one mask cone per texel) at startup; each
-frame is a camera ray per pixel plus a cache lookup. On an M4 MacBook Air it
-runs at about 3.6 ms per frame at 2560×1440. Lighting is direct only for now,
-so shadows are black.
+mouse button to look, Shift to move faster, P to pause the moving boxes, V to
+toggle vsync, Esc to quit. The title bar shows the frame rate.
+
+Direct light from the area light is baked into a world-space lighting cache
+(one mask cone per texel) at startup; each frame is a camera ray per pixel plus
+a cache lookup. Three boxes move through the room. Each frame re-bakes exactly
+the cache blocks they can reach, so their soft shadows match a full re-bake
+(M2 gate 5). On an M4 MacBook Air it runs at about 7.5 ms per frame at
+2560×1440. Lighting is direct only for now, so shadows are black.
 
 ## Layout
 
@@ -55,6 +59,7 @@ cargo run --release -p room3d --bin m2_gate2
 cargo run --release -p room3d --bin m2_gate3 -- capture   # once, before kernel changes
 cargo run --release -p room3d --bin m2_gate3
 cargo run --release -p room3d --bin m2_gate4
+cargo run --release -p room3d --bin m2_gate5
 ```
 
 ![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)

@@ -321,6 +321,46 @@ pub fn render_scene() -> RenderScene {
     }
 }
 
+/// Three boxes moving between the floor and the light, as in 3D gate 4: one
+/// sliding under the fences, one orbiting near the light, one bobbing. `frame`
+/// counts 60 Hz frames; returns box meshes.
+pub fn movers(frame: f32) -> Vec<Vec<Tri>> {
+    let t = frame;
+    let cube = |c: Vec3, half: f32| box_mesh(c - Vec3::splat(half), c + Vec3::splat(half));
+    vec![
+        cube(
+            Vec3::new(0.2 + 0.6 * (0.5 + 0.5 * (t * 0.03).sin()), 0.5, 0.45),
+            0.03,
+        ),
+        cube(
+            Vec3::new(
+                0.5 + 0.25 * (t * 0.02).cos(),
+                0.5 + 0.25 * (t * 0.02).sin(),
+                0.8,
+            ),
+            0.02,
+        ),
+        cube(Vec3::new(0.75, 0.25, 0.35 + 0.15 * (t * 0.05).sin()), 0.025),
+    ]
+}
+
+/// Albedo of the three [`movers`].
+pub const MOVER_ALBEDO: [Vec3; 3] = [
+    Vec3::new(0.80, 0.25, 0.20),
+    Vec3::new(0.85, 0.75, 0.25),
+    Vec3::new(0.30, 0.65, 0.35),
+];
+
+impl RenderScene {
+    /// Appends the [`movers`] at `frame`; returns the index of the first.
+    pub fn add_movers(&mut self, frame: f32) -> usize {
+        let first = self.room.meshes.len();
+        self.room.meshes.extend(movers(frame));
+        self.albedo.extend(MOVER_ALBEDO);
+        first
+    }
+}
+
 /// A camera ray's nearest surface hit, nudged off the surface.
 pub struct Hit {
     pub point: Vec3,

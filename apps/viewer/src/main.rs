@@ -2,10 +2,12 @@
 //!
 //! Direct light from the area light is baked into a world-space lighting cache
 //! (one mask cone per texel) at startup; each frame is a camera ray per pixel
-//! plus a cache lookup, on the GPU.
+//! plus a cache lookup, on the GPU. Three boxes move through the room: they are
+//! shaded per pixel, and each frame re-bakes exactly the cache blocks they can
+//! reach, so their soft shadows stay exact.
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
-//! Shift to move faster, V to toggle vsync, Esc to quit.
+//! Shift to move faster, P to pause the boxes, V to toggle vsync, Esc to quit.
 //! `--frames N` renders N frames, prints timings, and exits.
 
 use std::collections::HashSet;
@@ -15,7 +17,7 @@ use std::time::Instant;
 use continuum::glam::Vec3;
 use continuum_gpu::wgpu;
 use continuum_gpu::{Camera, Lightmap, LiveRenderer, MaskConeKernel, RectLight};
-use room3d::render_scene;
+use room3d::{movers, render_scene};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -70,6 +72,11 @@ struct Gpu {
 
 struct App {
     gpu: Option<Gpu>,
+    /// Index of the first moving box.
+    first_mover: usize,
+    /// Animation time in 60 Hz frames.
+    time: f32,
+    paused: bool,
     camera: FlyCamera,
     keys: HashSet<KeyCode>,
     drag: Option<PhysicalPosition<f64>>,
@@ -80,7 +87,7 @@ struct App {
 }
 
 impl App {
-    fn init(event_loop: &ActiveEventLoop) -> Gpu {
+    fn init(event_loop: &ActiveEventLoop) -> (Gpu, usize) {
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -125,7 +132,8 @@ impl App {
         };
         surface.configure(&device, &config);
 
-        let scene = render_scene();
+        let mut scene = render_scene();
+        let first_mover = scene.add_movers(0.0);
         let l = &scene.room.light;
         let light = RectLight {
             corner: l.corner,
@@ -134,7 +142,7 @@ impl App {
         };
         let kernel =
             MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
-        let mut lightmap = Lightmap::boxes(&scene.room.meshes, TEXEL, |_| true);
+        let mut lightmap = Lightmap::boxes(&scene.room.meshes, TEXEL, |m| m < first_mover);
         let bake = kernel.bake(&mut lightmap, light, &scene.room.meshes);
         println!(
             "{}: baked {} texels in {:.1} ms; rendering at {}×{}.",
@@ -155,14 +163,17 @@ impl App {
             scene.radiance,
             &lightmap,
         );
-        Gpu {
-            window,
-            surface,
-            config,
-            device,
-            queue,
-            renderer,
-        }
+        (
+            Gpu {
+                window,
+                surface,
+                config,
+                device,
+                queue,
+                renderer,
+            },
+            first_mover,
+        )
     }
 
     fn update(&mut self, dt: f32) {
@@ -188,15 +199,19 @@ impl App {
             }
         }
         self.camera.position += motion.normalize_or_zero() * speed;
+        if !self.paused {
+            self.time += dt * 60.0;
+        }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_none() {
-            let gpu = Self::init(event_loop);
+            let (gpu, first_mover) = Self::init(event_loop);
             gpu.window.request_redraw();
             self.gpu = Some(gpu);
+            self.first_mover = first_mover;
             self.last = Instant::now();
         }
     }
@@ -227,6 +242,9 @@ impl ApplicationHandler for App {
                 ElementState::Pressed => {
                     if code == KeyCode::Escape {
                         event_loop.exit();
+                    }
+                    if code == KeyCode::KeyP && !repeat {
+                        self.paused = !self.paused;
                     }
                     if code == KeyCode::KeyV
                         && !repeat
@@ -271,7 +289,14 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last).as_secs_f32();
                 self.last = now;
                 self.update(dt.min(0.1));
-                let Some(gpu) = &self.gpu else { return };
+                let first_mover = self.first_mover;
+                let changes: Vec<_> = movers(self.time)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, mesh)| (first_mover + k, mesh))
+                    .collect();
+                let Some(gpu) = &mut self.gpu else { return };
+                gpu.renderer.update_meshes(&changes);
                 let texture = match gpu.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -295,7 +320,7 @@ impl ApplicationHandler for App {
                         "off"
                     };
                     gpu.window.set_title(&format!(
-                        "Continuum — {:.0} fps ({avg:.1} ms) at {}×{} — vsync {vsync} — WASD/QE move, drag to look, V vsync",
+                        "Continuum — {:.0} fps ({avg:.1} ms) at {}×{} — vsync {vsync} — WASD/QE move, drag to look, P pause, V vsync",
                         1000.0 / avg,
                         gpu.config.width,
                         gpu.config.height
@@ -337,6 +362,9 @@ fn main() {
         .and_then(|n| n.parse().ok());
     let mut app = App {
         gpu: None,
+        first_mover: 0,
+        time: 0.0,
+        paused: false,
         camera: FlyCamera::looking_at(scene.eye, scene.target),
         keys: HashSet::new(),
         drag: None,

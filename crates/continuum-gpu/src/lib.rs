@@ -1,8 +1,9 @@
 //! GPU backend for Continuum (wgpu compute; Metal, Vulkan, DX12).
 //!
-//! For now one kernel: mask cones from receivers to a rectangular light, a port
-//! of `continuum::cone3` (see `mask_cones.wgsl`). Every receiver tests every
-//! triangle; hierarchy traversal on the GPU comes later.
+//! One kernel family: mask cones from receivers to a rectangular light, a port
+//! of `continuum::cone3` (see `mask_cones.wgsl`), used for receivers, camera
+//! renders, a world-space lighting cache ([`Lightmap`]), and live rendering with
+//! moving meshes ([`LiveRenderer`]).
 
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,8 @@ pub struct MaskConeKernel {
     pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::ComputePipeline,
     cached_pipeline: wgpu::ComputePipeline,
+    mark_pipeline: wgpu::ComputePipeline,
+    rebake_pipeline: wgpu::ComputePipeline,
     pub adapter_name: String,
 }
 
@@ -57,7 +60,7 @@ struct FaceGpu {
     origin: [f32; 4],
     u: [f32; 4],
     v: [f32; 4],
-    /// `[first texel, nu, nv, 0]`
+    /// `[first texel, nu, nv, blocks per row]`
     info: [u32; 4],
 }
 
@@ -65,6 +68,10 @@ struct FaceGpu {
 /// mesh (triangles from `continuum::cone3::box_mesh`, two per face in order).
 /// Each texel caches direct irradiance; dynamic meshes have no texels and are
 /// shaded per pixel.
+///
+/// Texels are stored in 8×8 blocks of 64 consecutive entries (faces are padded
+/// to whole blocks; padding texels have a zero normal and stay dark), so a block
+/// can be re-baked as a unit when something moves near it.
 pub struct Lightmap {
     faces: Vec<FaceGpu>,
     /// Face of each triangle (global index), or `u32::MAX` for dynamic geometry.
@@ -73,7 +80,12 @@ pub struct Lightmap {
     pub receivers: Vec<(Vec3, Vec3)>,
     /// Cached irradiance per texel (empty until baked).
     pub irradiance: Vec<f32>,
+    /// Bounds of each block's real texels (their receiver points).
+    pub blocks: Vec<(Vec3, Vec3)>,
 }
+
+/// Texels per block side; a block is `BLOCK × BLOCK` consecutive texels.
+pub const BLOCK: u32 = 8;
 
 impl Lightmap {
     /// Texels of about `texel_size` on every face of the meshes `is_static`
@@ -88,6 +100,7 @@ impl Lightmap {
             tri_face: Vec::new(),
             receivers: Vec::new(),
             irradiance: Vec::new(),
+            blocks: Vec::new(),
         };
         for (m, mesh) in meshes.iter().enumerate() {
             if !is_static(m) {
@@ -102,20 +115,32 @@ impl Lightmap {
                 let (u, v) = (q1 - q0, q3 - q0);
                 let nu = ((u.length() / texel_size).ceil() as u32).clamp(1, 1024);
                 let nv = ((v.length() / texel_size).ceil() as u32).clamp(1, 1024);
+                let (nbu, nbv) = (nu.div_ceil(BLOCK), nv.div_ceil(BLOCK));
                 let normal = u.cross(v).normalize();
                 let face = lm.faces.len() as u32;
                 lm.faces.push(FaceGpu {
                     origin: [q0.x, q0.y, q0.z, 0.0],
                     u: [u.x, u.y, u.z, 0.0],
                     v: [v.x, v.y, v.z, 0.0],
-                    info: [lm.receivers.len() as u32, nu, nv, 0],
+                    info: [lm.receivers.len() as u32, nu, nv, nbu],
                 });
-                for j in 0..nv {
-                    for i in 0..nu {
-                        let p = q0
-                            + u * ((i as f32 + 0.5) / nu as f32)
-                            + v * ((j as f32 + 0.5) / nv as f32);
-                        lm.receivers.push((p + normal * 1e-4, normal));
+                for bj in 0..nbv {
+                    for bi in 0..nbu {
+                        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+                        for k in 0..BLOCK * BLOCK {
+                            let (i, j) = (bi * BLOCK + k % BLOCK, bj * BLOCK + k / BLOCK);
+                            if i < nu && j < nv {
+                                let p = q0
+                                    + u * ((i as f32 + 0.5) / nu as f32)
+                                    + v * ((j as f32 + 0.5) / nv as f32)
+                                    + normal * 1e-4;
+                                (lo, hi) = (lo.min(p), hi.max(p));
+                                lm.receivers.push((p, normal));
+                            } else {
+                                lm.receivers.push((q0, Vec3::ZERO));
+                            }
+                        }
+                        lm.blocks.push((lo, hi));
                     }
                 }
                 lm.tri_face.extend([face, face]);
@@ -127,7 +152,84 @@ impl Lightmap {
     pub fn texels(&self) -> usize {
         self.receivers.len()
     }
+
+    /// For each block, [`BLOCK_PLANES`] planes `[n.x, n.y, n.z, w]` (inside:
+    /// `n · p <= w`) of a convex volume enclosing every one of its texels' cones
+    /// toward `light`: the hull of the block's texels and the light, pushed out by
+    /// a small margin. Unused planes are zero (they exclude nothing). A block whose
+    /// texels all face away from the light never receives direct light and gets a
+    /// plane that excludes everything.
+    pub fn block_planes(&self, light: RectLight) -> Vec<[f32; 4]> {
+        const MARGIN: f32 = 1e-3;
+        let center = light.corner + (light.edge_u + light.edge_v) * 0.5;
+        let light_corners = [
+            light.corner,
+            light.corner + light.edge_u,
+            light.corner + light.edge_v,
+            light.corner + light.edge_u + light.edge_v,
+        ];
+        let mut out = Vec::with_capacity(self.blocks.len() * BLOCK_PLANES);
+        for (b, &(lo, hi)) in self.blocks.iter().enumerate() {
+            let texels = &self.receivers[b * 64..(b + 1) * 64];
+            let mut planes: Vec<[f32; 4]> = Vec::new();
+            if !texels.iter().any(|&(p, n)| n.dot(center - p) > -1e-3) {
+                planes.push([0.0, 0.0, 0.0, -1.0]);
+            } else {
+                let mut points: Vec<Vec3> = Vec::new();
+                for k in 0..8 {
+                    let p = Vec3::new(
+                        if k & 1 == 0 { lo.x } else { hi.x },
+                        if k & 2 == 0 { lo.y } else { hi.y },
+                        if k & 4 == 0 { lo.z } else { hi.z },
+                    );
+                    if !points.contains(&p) {
+                        points.push(p);
+                    }
+                }
+                points.extend(light_corners);
+                // Every plane through three points with all points on one side is
+                // a face plane of the hull.
+                for i in 0..points.len() {
+                    for j in i + 1..points.len() {
+                        for k in j + 1..points.len() {
+                            let n = (points[j] - points[i]).cross(points[k] - points[i]);
+                            if n.length_squared() < 1e-14 {
+                                continue;
+                            }
+                            let n = n.normalize();
+                            let d = n.dot(points[i]);
+                            let (mut below, mut above) = (0.0f32, 0.0f32);
+                            for &p in &points {
+                                (below, above) = (below.min(n.dot(p) - d), above.max(n.dot(p) - d));
+                            }
+                            let (n, d) = if above <= 1e-6 {
+                                (n, d)
+                            } else if below >= -1e-6 {
+                                (-n, -d)
+                            } else {
+                                continue;
+                            };
+                            if planes.iter().any(|q| {
+                                Vec3::new(q[0], q[1], q[2]).dot(n) > 1.0 - 1e-6
+                                    && (q[3] - MARGIN - d).abs() < 1e-6
+                            }) {
+                                continue;
+                            }
+                            planes.push([n.x, n.y, n.z, d + MARGIN]);
+                        }
+                    }
+                }
+            }
+            // Fewer planes enclose more, so dropping extras stays conservative.
+            planes.resize(BLOCK_PLANES, [0.0; 4]);
+            out.extend(planes);
+        }
+        out
+    }
 }
+
+/// Planes per block in [`Lightmap::block_planes`].
+pub const BLOCK_PLANES: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -193,14 +295,22 @@ impl MaskConeKernel {
         let pipeline = entry("main");
         let render_pipeline = entry("render");
         let cached_pipeline = entry("render_cached");
+        let mark_pipeline = entry("mark_blocks");
+        let rebake_pipeline = entry("rebake");
         MaskConeKernel {
             device,
             queue,
             pipeline,
             render_pipeline,
             cached_pipeline,
+            mark_pipeline,
+            rebake_pipeline,
             adapter_name,
         }
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
     }
 
     /// Irradiance per unit radiance at each receiver `(point, normal)`, and the
@@ -414,7 +524,9 @@ impl MaskConeKernel {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(label),
                     contents,
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
                 })
         };
         let mut buffers = vec![
@@ -766,21 +878,87 @@ struct DisplayDims {
 /// Persistent GPU state for interactive rendering with a lighting cache. The
 /// scene, its hierarchy and the baked lightmap stay on the GPU; a frame uploads
 /// only the camera, runs the cached kernel, and draws into a surface texture.
+///
+/// Meshes without lightmap texels are dynamic: they are shaded per pixel and can
+/// move ([`Self::update_meshes`]), which re-bakes on the GPU exactly the lightmap
+/// blocks they can affect.
 pub struct LiveRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     compute: wgpu::ComputePipeline,
     display: wgpu::RenderPipeline,
+    mark: wgpu::ComputePipeline,
+    rebake: wgpu::ComputePipeline,
     scene: Vec<(u32, wgpu::Buffer)>,
     camera_buf: wgpu::Buffer,
     dims_buf: wgpu::Buffer,
     colors_buf: wgpu::Buffer,
     compute_bind: wgpu::BindGroup,
     display_bind: wgpu::BindGroup,
+    motion: Motion,
     width: u32,
     height: u32,
     radiance: f32,
     srgb: bool,
+}
+
+/// What [`LiveRenderer`] keeps to move dynamic meshes.
+struct Motion {
+    meshes: Vec<Vec<Tri>>,
+    ranges: Vec<[u32; 2]>,
+    bounds: Vec<(Vec3, Vec3)>,
+    dynamic: Vec<bool>,
+    blocks: u32,
+    uniform: wgpu::Buffer,
+    args: wgpu::Buffer,
+    mark_bind: wgpu::BindGroup,
+    rebake_bind: wgpu::BindGroup,
+}
+
+/// Swept boxes per update (each `[lo, hi]`) and the block count.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MotionUniform {
+    counts: [u32; 4],
+    boxes: [[f32; 4]; 2 * MAX_SWEPT],
+}
+
+/// Changed meshes per [`LiveRenderer::update_meshes`] call.
+pub const MAX_SWEPT: usize = 16;
+
+fn mesh_bounds(mesh: &[Tri]) -> (Vec3, Vec3) {
+    mesh.iter().flatten().fold(
+        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+        |(lo, hi), &p| (lo.min(p), hi.max(p)),
+    )
+}
+
+fn binding(scene: &[(u32, wgpu::Buffer)], b: u32) -> &wgpu::Buffer {
+    &scene
+        .iter()
+        .find(|(k, _)| *k == b)
+        .expect("scene binding")
+        .1
+}
+
+fn bind_group(
+    device: &wgpu::Device,
+    label: &str,
+    pipeline: &wgpu::ComputePipeline,
+    buffers: &[(u32, &wgpu::Buffer)],
+) -> wgpu::BindGroup {
+    let entries: Vec<wgpu::BindGroupEntry> = buffers
+        .iter()
+        .map(|(b, buffer)| wgpu::BindGroupEntry {
+            binding: *b,
+            resource: buffer.as_entire_binding(),
+        })
+        .collect();
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &entries,
+    })
 }
 
 impl LiveRenderer {
@@ -854,21 +1032,119 @@ impl LiveRenderer {
             width,
             height,
         );
+        let motion = Self::motion(kernel, &scene, light, meshes, lightmap);
         LiveRenderer {
             device,
             queue: kernel.queue.clone(),
             compute: kernel.cached_pipeline.clone(),
             display,
+            mark: kernel.mark_pipeline.clone(),
+            rebake: kernel.rebake_pipeline.clone(),
             scene,
             camera_buf,
             dims_buf,
             colors_buf,
             compute_bind,
             display_bind,
+            motion,
             width,
             height,
             radiance,
             srgb: target_format.is_srgb(),
+        }
+    }
+
+    fn motion(
+        kernel: &MaskConeKernel,
+        scene: &[(u32, wgpu::Buffer)],
+        light: RectLight,
+        meshes: &[Vec<Tri>],
+        lightmap: &Lightmap,
+    ) -> Motion {
+        let device = &kernel.device;
+        let (_, ranges) = flatten(meshes);
+        let dynamic = meshes
+            .iter()
+            .zip(&ranges)
+            .map(|(mesh, r)| mesh.is_empty() || lightmap.tri_face[r[0] as usize] == u32::MAX)
+            .collect();
+        let blocks = lightmap.blocks.len() as u32;
+        assert!(
+            blocks <= kernel.device.limits().max_compute_workgroups_per_dimension,
+            "too many lightmap blocks for one re-bake dispatch"
+        );
+        let storage = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage: wgpu::BufferUsages::STORAGE | usage,
+            })
+        };
+        let receivers: Vec<ReceiverGpu> = lightmap
+            .receivers
+            .iter()
+            .map(|&(p, n)| ReceiverGpu {
+                point: [p.x, p.y, p.z, 0.0],
+                normal: [n.x, n.y, n.z, 0.0],
+            })
+            .collect();
+        let receivers = storage(
+            "texel receivers",
+            bytemuck::cast_slice(&receivers),
+            wgpu::BufferUsages::empty(),
+        );
+        let planes = lightmap.block_planes(light);
+        let planes = storage(
+            "block planes",
+            bytemuck::cast_slice(&planes),
+            wgpu::BufferUsages::empty(),
+        );
+        let args = storage(
+            "rebake args",
+            bytemuck::cast_slice(&[0u32, 1, 1]),
+            wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+        let dirty = storage(
+            "dirty blocks",
+            &vec![0; 4 * blocks.max(1) as usize],
+            wgpu::BufferUsages::empty(),
+        );
+        let uniform = uniform_buffer(device, "motion", &[0; std::mem::size_of::<MotionUniform>()]);
+        let mark_bind = bind_group(
+            device,
+            "mark",
+            &kernel.mark_pipeline,
+            &[(14, &uniform), (15, &planes), (16, &args), (17, &dirty)],
+        );
+        let s = |b| binding(scene, b);
+        let rebake_bind = bind_group(
+            device,
+            "rebake",
+            &kernel.rebake_pipeline,
+            &[
+                (0, s(0)),
+                (1, &receivers),
+                (2, s(2)),
+                (3, s(3)),
+                (4, s(13)),
+                (5, s(5)),
+                (9, s(9)),
+                (10, s(10)),
+                (17, &dirty),
+            ],
+        );
+        Motion {
+            meshes: meshes.to_vec(),
+            ranges,
+            bounds: meshes.iter().map(|m| mesh_bounds(m)).collect(),
+            dynamic,
+            blocks,
+            uniform,
+            args,
+            mark_bind,
+            rebake_bind,
         }
     }
 
@@ -889,26 +1165,11 @@ impl LiveRenderer {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let mut entries: Vec<wgpu::BindGroupEntry> = scene
-            .iter()
-            .map(|(binding, buffer)| wgpu::BindGroupEntry {
-                binding: *binding,
-                resource: buffer.as_entire_binding(),
-            })
-            .collect();
-        entries.push(wgpu::BindGroupEntry {
-            binding: 6,
-            resource: camera_buf.as_entire_binding(),
-        });
-        entries.push(wgpu::BindGroupEntry {
-            binding: 7,
-            resource: colors_buf.as_entire_binding(),
-        });
-        let compute_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("live compute"),
-            layout: &compute.get_bind_group_layout(0),
-            entries: &entries,
-        });
+        let mut entries: Vec<(u32, &wgpu::Buffer)> =
+            scene.iter().map(|(b, buf)| (*b, buf)).collect();
+        entries.push((6, camera_buf));
+        entries.push((7, &colors_buf));
+        let compute_bind = bind_group(device, "live compute", compute, &entries);
         let display_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live display"),
             layout: &display.get_bind_group_layout(0),
@@ -942,6 +1203,79 @@ impl LiveRenderer {
             height,
         );
         (self.width, self.height) = (width, height);
+    }
+
+    /// Moves dynamic meshes: each change replaces a mesh's triangles (same count).
+    /// Uploads them, rebuilds the mesh hierarchy, and re-bakes on the GPU exactly
+    /// the lightmap blocks whose cone volumes a changed mesh's swept bounds (old ∪
+    /// new) reach. Submitted at once; the next frame sees the result.
+    pub fn update_meshes(&mut self, changes: &[(usize, Vec<Tri>)]) {
+        let m = &mut self.motion;
+        let mut boxes = Vec::new();
+        for (mesh, tris) in changes {
+            let mesh = *mesh;
+            assert!(
+                m.dynamic[mesh],
+                "mesh {mesh} has lightmap texels and cannot move"
+            );
+            assert_eq!(
+                tris.len(),
+                m.meshes[mesh].len(),
+                "a moved mesh keeps its triangle count"
+            );
+            if *tris == m.meshes[mesh] {
+                continue;
+            }
+            let (old, new) = (m.bounds[mesh], mesh_bounds(tris));
+            let (lo, hi) = (old.0.min(new.0), old.1.max(new.1));
+            boxes.push([lo.x, lo.y, lo.z, 0.0]);
+            boxes.push([hi.x, hi.y, hi.z, 0.0]);
+            let vertices: Vec<[f32; 4]> = tris
+                .iter()
+                .flatten()
+                .map(|v| [v.x, v.y, v.z, 0.0])
+                .collect();
+            self.queue.write_buffer(
+                binding(&self.scene, 2),
+                m.ranges[mesh][0] as u64 * 48,
+                bytemuck::cast_slice(&vertices),
+            );
+            m.meshes[mesh] = tris.clone();
+            m.bounds[mesh] = new;
+        }
+        if boxes.is_empty() {
+            return;
+        }
+        assert!(
+            boxes.len() <= 2 * MAX_SWEPT,
+            "at most {MAX_SWEPT} meshes per update"
+        );
+        // Median splits depend only on the mesh count, so the layout is unchanged.
+        let (nodes, items) = mesh_hierarchy(&m.meshes);
+        self.queue
+            .write_buffer(binding(&self.scene, 9), 0, bytemuck::cast_slice(&nodes));
+        self.queue
+            .write_buffer(binding(&self.scene, 10), 0, bytemuck::cast_slice(&items));
+        let mut uniform = MotionUniform::zeroed();
+        uniform.counts = [(boxes.len() / 2) as u32, m.blocks, 0, 0];
+        uniform.boxes[..boxes.len()].copy_from_slice(&boxes);
+        self.queue
+            .write_buffer(&m.uniform, 0, bytemuck::bytes_of(&uniform));
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.clear_buffer(&m.args, 0, Some(4));
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.mark);
+            pass.set_bind_group(0, &m.mark_bind, &[]);
+            pass.dispatch_workgroups(m.blocks.div_ceil(64), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.rebake);
+            pass.set_bind_group(0, &m.rebake_bind, &[]);
+            pass.dispatch_workgroups_indirect(&m.args, 0);
+        }
+        self.queue.submit([encoder.finish()]);
     }
 
     /// Renders one frame from `camera` into `target` and submits it.
@@ -996,5 +1330,45 @@ impl LiveRenderer {
             pass.draw(0..3, 0..1);
         }
         self.queue.submit([encoder.finish()]);
+    }
+
+    /// Blocks until submitted GPU work is done.
+    pub fn wait(&self) {
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+    }
+
+    /// The lightmap's current texels, read back from the GPU.
+    pub fn read_texels(&self) -> Vec<f32> {
+        bytemuck::cast_slice(&self.read(binding(&self.scene, 13))).to_vec()
+    }
+
+    /// Blocks re-baked by the last [`Self::update_meshes`] that moved something.
+    pub fn rebaked_blocks(&self) -> u32 {
+        bytemuck::cast_slice::<u8, u32>(&self.read(&self.motion.args))[0]
+    }
+
+    /// Total lightmap blocks.
+    pub fn blocks(&self) -> u32 {
+        self.motion.blocks
+    }
+
+    fn read(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
+        self.queue.submit([encoder.finish()]);
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        self.wait();
+        let bytes = slice.get_mapped_range().expect("mapped readback").to_vec();
+        staging.unmap();
+        bytes
     }
 }

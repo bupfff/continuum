@@ -58,3 +58,10 @@ Attempt 1 had the same speed but 3.78% RMSE. The error map showed two causes:
 - 751k texels includes faces that are never visible (box bottoms, wall
   backs); culling those would cut memory and bake time.
 - Lightmap resolution limits sharp contact shadows; fine shadow detail blurs.
+
+## Rerun after the block layout (gate 5)
+
+For gate 5, texels are now stored in 8×8 blocks, and faces are padded to whole
+blocks: 821,376 entries, of which the padding is unlit and never read. Rerun on
+2026-10-24: cached render 5.66 ms, 0.58% RMSE (unchanged), bake 49.8 ms (more
+entries, and the run includes first-dispatch warm-up).
