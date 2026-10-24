@@ -229,12 +229,9 @@ fn main() -> std::io::Result<()> {
     let gap = 8;
     let (w, h) = (QW as usize, QH as usize);
     let mut sheet = Image::new(3 * w + 4 * gap, h + 2 * gap, [28; 3]);
-    for i in 0..w * h {
+    for (i, (a, b)) in ours.iter().zip(&cycles_full.pixels).enumerate() {
         let (x, y) = (i % w, i / w);
-        let (a, b) = (
-            Vec3::from_array(ours[i]),
-            Vec3::from_array(cycles_full.pixels[i]),
-        );
+        let (a, b) = (Vec3::from_array(*a), Vec3::from_array(*b));
         sheet.set(gap + x, gap + y, to_rgb(a));
         sheet.set(2 * gap + w + x, gap + y, to_rgb(b));
         let d = ((a - b).abs().max_element() / full_mean as f32 * 255.0 * 4.0).min(255.0) as u8;
@@ -242,8 +239,8 @@ fn main() -> std::io::Result<()> {
     }
     sheet.save(&out_dir.join("m3_gate3_vs_cycles.png"))?;
     let mut image = Image::new(w, h, [0; 3]);
-    for i in 0..w * h {
-        image.set(i % w, i / w, to_rgb(Vec3::from_array(ours[i])));
+    for (i, p) in ours.iter().enumerate() {
+        image.set(i % w, i / w, to_rgb(Vec3::from_array(*p)));
     }
     image.save(&out_dir.join("m3_gate3_ours.png"))?;
 
