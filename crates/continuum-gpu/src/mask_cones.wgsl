@@ -379,7 +379,8 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= arrayLength(&receivers)) { return; }
-    result[i] = cone_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz);
+    // Same rule as camera hits: a receiver facing away from the light gets none.
+    result[i] = hit_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz);
 }
 
 // --- Camera rendering: ray cast to the nearest triangle, then a mask cone. ---
@@ -416,6 +417,8 @@ fn ray_triangle(o: vec3<f32>, d: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: ve
 struct Hit {
     distance: f32,
     mesh: u32,
+    // Global triangle index.
+    tri: u32,
     normal: vec3<f32>,
 };
 
@@ -430,23 +433,22 @@ fn nearest_in_mesh(eye: vec3<f32>, dir: vec3<f32>, m: u32, best: Hit) -> Hit {
         // Ties (coplanar faces of different meshes) go to the lower mesh index,
         // so the result does not depend on traversal order.
         if (d > 0.0 && (d < hit.distance || (d == hit.distance && m < hit.mesh))) {
-            hit = Hit(d, m, normalize(cross(v1 - v0, v2 - v0)));
+            hit = Hit(d, m, t, normalize(cross(v1 - v0, v2 - v0)));
         }
     }
     return hit;
 }
 
-@compute @workgroup_size(8, 8)
-fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let w = u32(camera.params.x);
-    let h = u32(camera.params.y);
-    if (gid.x >= w || gid.y >= h) { return; }
+fn camera_dir(gid: vec3<u32>) -> vec3<f32> {
     let aspect = camera.params.x / camera.params.y;
     let sx = ((f32(gid.x) + 0.5) / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
     let sy = (1.0 - (f32(gid.y) + 0.5) / camera.params.y * 2.0) * camera.params.z;
-    let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
-    let eye = camera.eye.xyz;
-    var hit = Hit(3.4e38, 0xffffffffu, vec3<f32>(0.0));
+    return normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+}
+
+// Nearest triangle along a ray, through the mesh hierarchy or by testing every mesh.
+fn primary_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
+    var hit = Hit(3.4e38, 0xffffffffu, 0xffffffffu, vec3<f32>(0.0));
     if (light.counts.z == 1u) {
         let inv = 1.0 / dir;
         var stack: array<u32, 32>;
@@ -476,18 +478,92 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
             hit = nearest_in_mesh(eye, dir, m, hit);
         }
     }
-    let best = hit.distance;
-    let hit_mesh = hit.mesh;
-    var hit_normal = hit.normal;
-    let pixel = gid.y * w + gid.x;
-    if (hit_mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
-    if (dot(hit_normal, dir) > 0.0) { hit_normal = -hit_normal; }
-    let point = eye + dir * best + hit_normal * 1e-4;
+    if (dot(hit.normal, dir) > 0.0) { hit.normal = -hit.normal; }
+    return hit;
+}
+
+// Direct irradiance at a hit through a mask cone (0 if the surface faces away).
+fn hit_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
     let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
-    var irradiance = 0.0;
-    if (dot(hit_normal, to_light) > 0.0) {
-        irradiance = cone_irradiance(pixel, point, hit_normal);
+    if (dot(normal, to_light) > 0.0) {
+        return cone_irradiance(pixel, point, normal);
     }
-    let c = albedo[hit_mesh].xyz * (camera.params.w * irradiance / 3.14159265);
+    return 0.0;
+}
+
+@compute @workgroup_size(8, 8)
+fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
+    let eye = camera.eye.xyz;
+    let hit = primary_hit(eye, dir);
+    let pixel = gid.y * w + gid.x;
+    if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
+    let point = eye + dir * hit.distance + hit.normal * 1e-4;
+    let irradiance = hit_irradiance(pixel, point, hit.normal);
+    let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
+    colors[pixel] = vec4<f32>(c, 1.0);
+}
+
+// --- World-space lighting cache: lightmap texels on static faces. ---
+
+// A rectangular face with an `nu × nv` texel grid starting at texel `info.x`.
+struct Face {
+    origin: vec4<f32>,
+    u: vec4<f32>,
+    v: vec4<f32>,
+    // x: first texel, y: nu, z: nv
+    info: vec4<u32>,
+};
+
+// Face of each triangle, or 0xffffffff for dynamic geometry (shaded per pixel).
+@group(0) @binding(11) var<storage, read> tri_face: array<u32>;
+@group(0) @binding(12) var<storage, read> faces: array<Face>;
+@group(0) @binding(13) var<storage, read> texels: array<f32>;
+
+fn texel(face: Face, i: u32, j: u32) -> f32 {
+    return texels[face.info.x + j * face.info.y + i];
+}
+
+// Bilinear lookup of cached irradiance at a point on a face (texel centers at
+// half-integer grid coordinates, clamped at the edges).
+fn lookup(face: Face, point: vec3<f32>) -> f32 {
+    let d = point - face.origin.xyz;
+    let nu = face.info.y;
+    let nv = face.info.z;
+    let s = clamp(dot(d, face.u.xyz) / dot(face.u.xyz, face.u.xyz) * f32(nu) - 0.5, 0.0, f32(nu - 1u));
+    let t = clamp(dot(d, face.v.xyz) / dot(face.v.xyz, face.v.xyz) * f32(nv) - 0.5, 0.0, f32(nv - 1u));
+    let i0 = u32(s);
+    let j0 = u32(t);
+    let i1 = min(i0 + 1u, nu - 1u);
+    let j1 = min(j0 + 1u, nv - 1u);
+    let fs = s - f32(i0);
+    let ft = t - f32(j0);
+    let a = mix(texel(face, i0, j0), texel(face, i1, j0), fs);
+    let b = mix(texel(face, i0, j1), texel(face, i1, j1), fs);
+    return mix(a, b, ft);
+}
+
+@compute @workgroup_size(8, 8)
+fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
+    let eye = camera.eye.xyz;
+    let hit = primary_hit(eye, dir);
+    let pixel = gid.y * w + gid.x;
+    if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
+    let point = eye + dir * hit.distance + hit.normal * 1e-4;
+    let f = tri_face[hit.tri];
+    var irradiance: f32;
+    if (f == 0xffffffffu) {
+        irradiance = hit_irradiance(pixel, point, hit.normal);
+    } else {
+        irradiance = lookup(faces[f], point);
+    }
+    let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
     colors[pixel] = vec4<f32>(c, 1.0);
 }

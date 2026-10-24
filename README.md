@@ -39,6 +39,7 @@ cargo run --release -p room3d --bin render_gpu
 cargo run --release -p room3d --bin m2_gate2
 cargo run --release -p room3d --bin m2_gate3 -- capture   # once, before kernel changes
 cargo run --release -p room3d --bin m2_gate3
+cargo run --release -p room3d --bin m2_gate4
 ```
 
 ![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)

@@ -33,7 +33,98 @@ pub struct MaskConeKernel {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::ComputePipeline,
+    cached_pipeline: wgpu::ComputePipeline,
     pub adapter_name: String,
+}
+
+/// Everything a frame needs besides the pipeline.
+struct Frame<'a> {
+    camera: Camera,
+    width: u32,
+    height: u32,
+    light: RectLight,
+    meshes: &'a [Vec<Tri>],
+    albedo: &'a [Vec3],
+    radiance: f32,
+    hierarchy: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FaceGpu {
+    origin: [f32; 4],
+    u: [f32; 4],
+    v: [f32; 4],
+    /// `[first texel, nu, nv, 0]`
+    info: [u32; 4],
+}
+
+/// A world-space lighting cache: a texel grid on every face of every static box
+/// mesh (triangles from `continuum::cone3::box_mesh`, two per face in order).
+/// Each texel caches direct irradiance; dynamic meshes have no texels and are
+/// shaded per pixel.
+pub struct Lightmap {
+    faces: Vec<FaceGpu>,
+    /// Face of each triangle (global index), or `u32::MAX` for dynamic geometry.
+    tri_face: Vec<u32>,
+    /// Texel centers nudged off their faces, with face normals: the receivers to bake.
+    pub receivers: Vec<(Vec3, Vec3)>,
+    /// Cached irradiance per texel (empty until baked).
+    pub irradiance: Vec<f32>,
+}
+
+impl Lightmap {
+    /// Texels of about `texel_size` on every face of the meshes `is_static`
+    /// selects (each must be a 12-triangle box mesh).
+    pub fn boxes(
+        meshes: &[Vec<Tri>],
+        texel_size: f32,
+        is_static: impl Fn(usize) -> bool,
+    ) -> Lightmap {
+        let mut lm = Lightmap {
+            faces: Vec::new(),
+            tri_face: Vec::new(),
+            receivers: Vec::new(),
+            irradiance: Vec::new(),
+        };
+        for (m, mesh) in meshes.iter().enumerate() {
+            if !is_static(m) {
+                lm.tri_face
+                    .extend(std::iter::repeat_n(u32::MAX, mesh.len()));
+                continue;
+            }
+            assert_eq!(mesh.len(), 12, "lightmaps support box meshes only");
+            for quad in mesh.chunks(2) {
+                // box_mesh emits each face as [q0, q1, q2], [q0, q2, q3].
+                let (q0, q1, q3) = (quad[0][0], quad[0][1], quad[1][2]);
+                let (u, v) = (q1 - q0, q3 - q0);
+                let nu = ((u.length() / texel_size).ceil() as u32).clamp(1, 1024);
+                let nv = ((v.length() / texel_size).ceil() as u32).clamp(1, 1024);
+                let normal = u.cross(v).normalize();
+                let face = lm.faces.len() as u32;
+                lm.faces.push(FaceGpu {
+                    origin: [q0.x, q0.y, q0.z, 0.0],
+                    u: [u.x, u.y, u.z, 0.0],
+                    v: [v.x, v.y, v.z, 0.0],
+                    info: [lm.receivers.len() as u32, nu, nv, 0],
+                });
+                for j in 0..nv {
+                    for i in 0..nu {
+                        let p = q0
+                            + u * ((i as f32 + 0.5) / nu as f32)
+                            + v * ((j as f32 + 0.5) / nv as f32);
+                        lm.receivers.push((p + normal * 1e-4, normal));
+                    }
+                }
+                lm.tri_face.extend([face, face]);
+            }
+        }
+        lm
+    }
+
+    pub fn texels(&self) -> usize {
+        self.receivers.len()
+    }
 }
 
 #[repr(C)]
@@ -94,18 +185,20 @@ impl MaskConeKernel {
         };
         let pipeline = entry("main");
         let render_pipeline = entry("render");
+        let cached_pipeline = entry("render_cached");
         Some(MaskConeKernel {
             device,
             queue,
             pipeline,
             render_pipeline,
+            cached_pipeline,
             adapter_name,
         })
     }
 
     /// Irradiance per unit radiance at each receiver `(point, normal)`, and the
     /// fastest of `runs` GPU executions (submit to completion, excluding uploads
-    /// and readback).
+    /// and readback). Every receiver tests every mesh.
     pub fn irradiance(
         &self,
         receivers: &[(Vec3, Vec3)],
@@ -113,7 +206,19 @@ impl MaskConeKernel {
         meshes: &[Vec<Tri>],
         runs: usize,
     ) -> (Vec<f32>, Duration) {
-        let (values, _, best) = self.run(receivers, light, meshes, runs, 0);
+        self.irradiance_with(receivers, light, meshes, false, runs)
+    }
+
+    /// [`Self::irradiance`], optionally culling through the mesh hierarchy.
+    pub fn irradiance_with(
+        &self,
+        receivers: &[(Vec3, Vec3)],
+        light: RectLight,
+        meshes: &[Vec<Tri>],
+        hierarchy: bool,
+        runs: usize,
+    ) -> (Vec<f32>, Duration) {
+        let (values, _, best) = self.run(receivers, light, meshes, runs, 0, hierarchy);
         (values, best)
     }
 
@@ -134,7 +239,65 @@ impl MaskConeKernel {
         hierarchy: bool,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
+        let frame = Frame {
+            camera,
+            width,
+            height,
+            light,
+            meshes,
+            albedo,
+            radiance,
+            hierarchy,
+        };
+        self.render_frame(&self.render_pipeline, &frame, None, runs)
+    }
+
+    /// Like [`Self::render`] (with the hierarchy), but static faces read their
+    /// irradiance from a baked [`Lightmap`]; only dynamic geometry gets a cone
+    /// per pixel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_cached(
+        &self,
+        camera: Camera,
+        width: u32,
+        height: u32,
+        light: RectLight,
+        meshes: &[Vec<Tri>],
+        albedo: &[Vec3],
+        radiance: f32,
+        lightmap: &Lightmap,
+        runs: usize,
+    ) -> (Vec<[f32; 3]>, Duration) {
+        let frame = Frame {
+            camera,
+            width,
+            height,
+            light,
+            meshes,
+            albedo,
+            radiance,
+            hierarchy: true,
+        };
+        self.render_frame(&self.cached_pipeline, &frame, Some(lightmap), runs)
+    }
+
+    /// Bakes a lightmap: one mask cone per texel (through the hierarchy).
+    /// Returns the bake time.
+    pub fn bake(&self, lightmap: &mut Lightmap, light: RectLight, meshes: &[Vec<Tri>]) -> Duration {
+        let (values, time) = self.irradiance_with(&lightmap.receivers, light, meshes, true, 1);
+        lightmap.irradiance = values;
+        time
+    }
+
+    fn render_frame(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        frame: &Frame,
+        lightmap: Option<&Lightmap>,
+        runs: usize,
+    ) -> (Vec<[f32; 3]>, Duration) {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+        let (camera, width, height) = (frame.camera, frame.width, frame.height);
         let forward = (camera.target - camera.eye).normalize();
         let right = forward.cross(Vec3::Z).normalize();
         let up = right.cross(forward);
@@ -147,61 +310,45 @@ impl MaskConeKernel {
                 width as f32,
                 height as f32,
                 (camera.vertical_fov_degrees.to_radians() * 0.5).tan(),
-                radiance,
+                frame.radiance,
             ],
         };
         let uniform = LightUniform {
-            corner: v4(light.corner),
-            edge_u: v4(light.edge_u),
-            edge_v: v4(light.edge_v),
-            counts: [meshes.len() as u32, 0, hierarchy as u32, 0],
+            corner: v4(frame.light.corner),
+            edge_u: v4(frame.light.edge_u),
+            edge_v: v4(frame.light.edge_v),
+            counts: [frame.meshes.len() as u32, 0, frame.hierarchy as u32, 0],
         };
-        let (tris, ranges) = flatten(meshes);
-        let (nodes, items) = mesh_hierarchy(meshes);
-        let albedo4: Vec<[f32; 4]> = albedo.iter().map(|&a| v4(a)).collect();
-        let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+        let (tris, ranges) = flatten(frame.meshes);
+        let (nodes, items) = mesh_hierarchy(frame.meshes);
+        let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
+        let init = |label: &str, contents: &[u8]| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(label),
                     contents,
-                    usage,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
                 })
         };
-        let light_buf = init(
-            "light",
-            bytemuck::bytes_of(&uniform),
-            wgpu::BufferUsages::UNIFORM,
-        );
-        let camera_buf = init(
-            "camera",
-            bytemuck::bytes_of(&cam),
-            wgpu::BufferUsages::UNIFORM,
-        );
-        let tris_buf = init(
-            "tris",
-            bytemuck::cast_slice(&tris),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let meshes_buf = init(
-            "meshes",
-            bytemuck::cast_slice(&ranges),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let albedo_buf = init(
-            "albedo",
-            bytemuck::cast_slice(&albedo4),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let nodes_buf = init(
-            "nodes",
-            bytemuck::cast_slice(&nodes),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let items_buf = init(
-            "items",
-            bytemuck::cast_slice(&items),
-            wgpu::BufferUsages::STORAGE,
-        );
+        let mut buffers = vec![
+            (0, init("light", bytemuck::bytes_of(&uniform))),
+            (2, init("tris", bytemuck::cast_slice(&tris))),
+            (3, init("meshes", bytemuck::cast_slice(&ranges))),
+            (6, init("camera", bytemuck::bytes_of(&cam))),
+            (8, init("albedo", bytemuck::cast_slice(&albedo4))),
+            (9, init("nodes", bytemuck::cast_slice(&nodes))),
+            (10, init("items", bytemuck::cast_slice(&items))),
+        ];
+        if let Some(lm) = lightmap {
+            let texels: &[f32] = if lm.irradiance.is_empty() {
+                &[0.0]
+            } else {
+                &lm.irradiance
+            };
+            buffers.push((11, init("tri_face", bytemuck::cast_slice(&lm.tri_face))));
+            buffers.push((12, init("faces", bytemuck::cast_slice(&lm.faces))));
+            buffers.push((13, init("texels", bytemuck::cast_slice(texels))));
+        }
         let size = (width * height) as u64 * 16;
         let storage = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -222,54 +369,29 @@ impl MaskConeKernel {
             size,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
+        buffers.push((5, debug_buf));
+        let mut entries: Vec<wgpu::BindGroupEntry> = buffers
+            .iter()
+            .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: buffer.as_entire_binding(),
+            })
+            .collect();
+        entries.push(wgpu::BindGroupEntry {
+            binding: 7,
+            resource: colors_buf.as_entire_binding(),
+        });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("render"),
-            layout: &self.render_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: light_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: tris_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: meshes_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: debug_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: colors_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: albedo_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: nodes_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: items_buf.as_entire_binding(),
-                },
-            ],
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &entries,
         });
         let mut best = Duration::MAX;
         for _ in 0..runs.max(1) {
             let mut encoder = self.device.create_command_encoder(&Default::default());
             {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.render_pipeline);
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
                 pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
             }
@@ -302,7 +424,7 @@ impl MaskConeKernel {
         light: RectLight,
         meshes: &[Vec<Tri>],
     ) -> Vec<[f32; 64]> {
-        let (_, debug, _) = self.run(receivers, light, meshes, 1, 1);
+        let (_, debug, _) = self.run(receivers, light, meshes, 1, 1, false);
         debug.chunks(64).map(|c| c.try_into().unwrap()).collect()
     }
 
@@ -315,7 +437,7 @@ impl MaskConeKernel {
         light: RectLight,
         meshes: &[Vec<Tri>],
     ) -> Vec<Vec<f32>> {
-        let (_, debug, _) = self.run(&[receiver], light, meshes, 1, 3);
+        let (_, debug, _) = self.run(&[receiver], light, meshes, 1, 3, false);
         debug
             .as_chunks::<21>()
             .0
@@ -333,7 +455,7 @@ impl MaskConeKernel {
         light: RectLight,
         meshes: &[Vec<Tri>],
     ) -> Vec<[f32; 64]> {
-        let (_, debug, _) = self.run(receivers, light, meshes, 1, 2);
+        let (_, debug, _) = self.run(receivers, light, meshes, 1, 2, false);
         debug.chunks(64).map(|c| c.try_into().unwrap()).collect()
     }
 
@@ -344,6 +466,7 @@ impl MaskConeKernel {
         meshes: &[Vec<Tri>],
         runs: usize,
         debug_mode: u32,
+        hierarchy: bool,
     ) -> (Vec<f32>, Vec<f32>, Duration) {
         let debug = debug_mode != 0;
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
@@ -351,7 +474,7 @@ impl MaskConeKernel {
             corner: v4(light.corner),
             edge_u: v4(light.edge_u),
             edge_v: v4(light.edge_v),
-            counts: [meshes.len() as u32, debug_mode, 0, 0],
+            counts: [meshes.len() as u32, debug_mode, hierarchy as u32, 0],
         };
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()
