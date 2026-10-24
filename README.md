@@ -11,7 +11,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 
 ## Layout
 
-- `crates/continuum`: the library (currently the direction-mask primitive).
+- `crates/continuum`: the library (so far the direction mask and the error ledger).
 - `experiments/flatland`: 2D experiments that test the core bets.
 - `docs/`: design document and experiment results.
 
@@ -19,9 +19,15 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 
 ```bash
 cargo test --release
-cargo run --release -p flatland
+cargo run --release -p flatland --bin gate1
+cargo run --release -p flatland --bin ledger
 ```
 
-The flatland run prints a results table and writes images to
-`experiments/flatland/out/` (`sheet.png` is the overview: top row renders,
-bottom row signed error maps, red too dark, blue too bright).
+Each run prints a results table and writes images to `experiments/flatland/out/`:
+
+- `sheet.png` (gate 1): top row renders, bottom row signed error maps (red too
+  dark, blue too bright).
+- `ledger_<scenario>.png` (gates 2–3): one row per key frame; columns are the
+  lit result, tiles recomputed that frame (orange), the certified error bound,
+  and the actual error. `_stress` versions use a deliberately huge ε so the
+  bound and error columns have something to show.

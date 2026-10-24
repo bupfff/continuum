@@ -3,6 +3,7 @@
 use std::io;
 use std::path::Path;
 
+use crate::geom::Segment;
 use crate::scene::Scene;
 
 pub type Rgb = [u8; 3];
@@ -26,6 +27,10 @@ impl Image {
         if x < self.w && y < self.h {
             self.data[y * self.w + x] = c;
         }
+    }
+
+    pub fn get(&self, x: usize, y: usize) -> Rgb {
+        self.data[y * self.w + x]
     }
 
     pub fn blit(&mut self, src: &Image, ox: usize, oy: usize) {
@@ -75,21 +80,37 @@ pub fn signed_error(estimate: &[f32], reference: &[f32], size: usize, scale: f32
     img
 }
 
-/// Draws occluders (green) and the light (yellow) over an image of the unit square.
-pub fn draw_scene(img: &mut Image, scene: &Scene) {
+pub const OCCLUDER_COLOR: Rgb = [120, 220, 140];
+pub const LIGHT_COLOR: Rgb = [255, 220, 90];
+
+/// Black at 0, rising through orange to pale yellow at `scale` and above.
+pub fn magnitude(values: &[f32], size: usize, scale: f32) -> Image {
+    let mut img = Image::new(size, size, [0; 3]);
+    for (i, &v) in values.iter().enumerate() {
+        let m = (v / scale).clamp(0.0, 1.0).sqrt();
+        let rgb = [255.0 * m, 200.0 * m * m, 120.0 * m.powi(4)];
+        img.set(i % size, i / size, rgb.map(|c| c as u8));
+    }
+    img
+}
+
+/// Draws segments over an image of the unit square (y up).
+pub fn draw_segments(img: &mut Image, segments: &[Segment], color: Rgb) {
     let size = img.w as f32;
-    let mut line = |s: &crate::geom::Segment, c: Rgb| {
+    for s in segments {
         let steps = ((s.b - s.a).length() * size * 2.0).ceil().max(1.0) as usize;
         for k in 0..=steps {
             let q = s.a + (s.b - s.a) * (k as f32 / steps as f32);
             let (x, y) = (q.x * size, (1.0 - q.y) * size);
             if x >= 0.0 && y >= 0.0 {
-                img.set(x as usize, y as usize, c);
+                img.set(x as usize, y as usize, color);
             }
         }
-    };
-    for s in &scene.occluders {
-        line(s, [120, 220, 140]);
     }
-    line(&scene.light, [255, 220, 90]);
+}
+
+/// Draws occluders (green) and the light (yellow) over an image of the unit square.
+pub fn draw_scene(img: &mut Image, scene: &Scene) {
+    draw_segments(img, &scene.occluders, OCCLUDER_COLOR);
+    draw_segments(img, &[scene.light], LIGHT_COLOR);
 }

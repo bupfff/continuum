@@ -4,19 +4,14 @@
 //! compares each against the analytic answer, and writes images plus a results
 //! table to `out/`.
 
-mod geom;
-mod img;
-mod methods;
-mod rng;
-mod scene;
-
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
-use geom::{Cone, Vec2, v2};
-use rng::Pcg32;
-use scene::Scene;
+use flatland::geom::{Cone, Vec2, v2};
+use flatland::rng::Pcg32;
+use flatland::scene::{self, Scene};
+use flatland::{img, methods};
 
 const SIZE: usize = 384;
 /// Absolute fluence error (radians of visible light) shown at full intensity in error maps.

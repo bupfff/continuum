@@ -36,6 +36,11 @@ pub fn exact(cone: &Cone, occluders: &[Segment], scratch: &mut Vec<(f32, f32)>) 
 
 /// One mask cone: each occluder sets the bins it covers.
 pub fn mask(cone: &Cone, occluders: &[Segment]) -> f32 {
+    mask_bits(cone, occluders).visible_fraction()
+}
+
+/// The direction mask of one cone against `occluders`.
+pub fn mask_bits(cone: &Cone, occluders: &[Segment]) -> ConeMask {
     let mut m = ConeMask::EMPTY;
     for s in occluders {
         if let Some((a, b)) = cone.project(s) {
@@ -45,7 +50,7 @@ pub fn mask(cone: &Cone, occluders: &[Segment]) -> f32 {
             }
         }
     }
-    m.visible_fraction()
+    m
 }
 
 /// Multiplies per-occluder transmittance, which assumes every occluder is

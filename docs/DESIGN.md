@@ -113,7 +113,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 
 | Milestone | Content | Gate |
 |---|---|---|
-| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed in 2D**, see `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame; G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes; G4 everything-moving case costs no more than a conventional equivalent |
+| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (preview: 1.1× faster); G5 (new) magnitude deferral pays off for wide GI cones with continuous visibility |
 | M1 3D CPU reference | 3D mask cones over a BVH, reference path tracer, scene import | G1 repeated in 3D with 8×8 bins; agreement with Cycles/Mitsuba |
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | Frame time at 1080p on M4 Air; image-diffed in CI |
 | M3 prefiltered hierarchy | Directional coverage per node, detail to roughness | Zoom and flythrough with no shimmer; flat cost |
@@ -134,10 +134,17 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 ## 8. Risks and open questions
 
 - **Ledger bound tightness** (biggest risk): too-pessimistic charges mean
-  everything recomputes and the edge disappears. Measured by G3.
-- **Mask quantization**: 64 bins quantize penumbrae into 1/64 steps (visible as
-  faint banding in gate 1's error map). Candidates: analytic coverage for the two
-  partially covered edge bins, or 2 bits per bin.
+  everything recomputes and the edge disappears. Flatland: actual error used only
+  0.2–8% of the certified bound. Sources: one charge per tile applied to all its
+  receivers, bin terms, accumulation over oscillating motion.
+- **Mask quantization**: 64 bins quantize penumbrae into 1/64 steps (faint
+  banding in gate 1) and make visibility discontinuous, so any mover touching a
+  cone costs at least one bin. That floor exceeded realistic ε, which is why the
+  ledger never deferred direct shadows. Fix candidate for both: analytic
+  coverage for partially covered edge bins (continuous visibility).
+- **Where magnitude deferral pays**: direct shadows of moving objects change
+  visibly every frame, so recomputing them is correct; the gain must come from
+  wide, low-frequency queries (GI) and slow global changes. Unproven until G5.
 - **3D projection cost**: projecting a triangle or node into 8×8 bins costs more
   than a 2D interval, so gate 1's speedup will shrink in 3D. Re-measure in M1.
 - **GPU mask layout**: WGSL has no 64-bit integers without native-only features;

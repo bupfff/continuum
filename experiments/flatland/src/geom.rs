@@ -57,7 +57,7 @@ impl Mul<f32> for Vec2 {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Segment {
     pub a: Vec2,
     pub b: Vec2,
