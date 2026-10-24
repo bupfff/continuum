@@ -1,23 +1,30 @@
-//! Continuum viewer: fly through the test room in real time.
+//! Continuum viewer: fly through a scene in real time.
 //!
 //! Direct light from the area light is baked into a world-space lighting cache
 //! (one mask cone per texel) at startup; each frame is a camera ray per pixel
-//! plus a cache lookup, on the GPU. Three boxes move through the room: they are
+//! plus a cache lookup, on the GPU. Objects move through the scene: they are
 //! shaded per pixel, and each frame re-bakes exactly the cache blocks they can
-//! reach, so their soft shadows stay exact. Probes on static surfaces add one
-//! bounce of indirect light, gathered each frame through cached G-buffers.
+//! reach, so their soft shadows stay exact. Probes add one bounce of indirect
+//! light, gathered each frame through cached G-buffers (probes on moving
+//! objects are traced from scratch).
+//!
+//! Scenes: `--scene showcase` (the default: a gallery with a sculpture,
+//! columns and an arch) or `--scene room` (the M2 test room).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
-//! Shift to move faster, P to pause the boxes, V to toggle vsync, Esc to quit.
-//! `--frames N` renders N frames, prints timings, and exits.
+//! Shift to move faster, C to play the camera path, P to pause moving objects,
+//! V to toggle vsync, Esc to quit. `--frames N` renders N frames (along the
+//! camera path, if the scene has one), prints timings, and exits.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use continuum::glam::Vec3;
+use continuum::mesh::Surface;
 use continuum_gpu::wgpu;
 use continuum_gpu::{Camera, Lightmap, LiveRenderer, MaskConeKernel, RectLight};
+use room3d::showcase::{self, PATH_FRAMES, Showcase};
 use room3d::{movers, render_scene};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -26,10 +33,98 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const TEXEL: f32 = 0.005;
-/// Spacing of indirect-light probes.
-const PROBES: f32 = 0.04;
-const FOV: f32 = 60.0;
+/// A scene to view: its surfaces (static first, then moving), light, cache
+/// resolution and how its objects move.
+struct World {
+    name: &'static str,
+    surfaces: Vec<Surface>,
+    albedo: Vec<Vec3>,
+    light: RectLight,
+    radiance: f32,
+    first_mover: usize,
+    texel: f32,
+    probes: f32,
+    fov: f32,
+    /// Walking speed in meters per second.
+    speed: f32,
+    start: (Vec3, Vec3),
+    showcase: Option<Showcase>,
+}
+
+impl World {
+    fn showcase() -> World {
+        let scene = Showcase::new();
+        let camera = scene.camera(0.0);
+        World {
+            name: "showcase",
+            surfaces: scene.surfaces.clone(),
+            albedo: scene.albedo.clone(),
+            light: scene.light,
+            radiance: scene.radiance,
+            first_mover: scene.first_mover,
+            texel: showcase::TEXEL,
+            probes: showcase::PROBES,
+            fov: scene.vertical_fov_degrees,
+            speed: 1.2,
+            start: (camera.eye, camera.target),
+            showcase: Some(scene),
+        }
+    }
+
+    fn room() -> World {
+        let mut scene = render_scene();
+        let first_mover = scene.add_movers(0.0);
+        let l = &scene.room.light;
+        World {
+            name: "room",
+            surfaces: scene
+                .room
+                .meshes
+                .iter()
+                .map(|m| Surface::from_triangles(m.clone()))
+                .collect(),
+            albedo: scene.albedo.clone(),
+            light: RectLight {
+                corner: l.corner,
+                edge_u: l.edge_u,
+                edge_v: l.edge_v,
+                one_sided: false,
+            },
+            radiance: scene.radiance,
+            first_mover,
+            texel: 0.005,
+            probes: 0.04,
+            fov: 60.0,
+            speed: 0.5,
+            start: (scene.eye, scene.target),
+            showcase: None,
+        }
+    }
+
+    /// The moving surfaces at `time` (60 Hz frames), with their mesh indices.
+    fn movers(&mut self, time: f32) -> Vec<(usize, Surface)> {
+        let first = self.first_mover;
+        let moved: Vec<Surface> = match &mut self.showcase {
+            Some(scene) => {
+                scene.set_frame(time);
+                scene.surfaces[first..].to_vec()
+            }
+            None => movers(time)
+                .into_iter()
+                .map(Surface::from_triangles)
+                .collect(),
+        };
+        moved
+            .into_iter()
+            .enumerate()
+            .map(|(k, s)| (first + k, s))
+            .collect()
+    }
+
+    fn path_camera(&self, frame: f32) -> Option<Camera> {
+        self.showcase.as_ref().map(|s| s.camera(frame))
+    }
+}
 
 struct FlyCamera {
     position: Vec3,
@@ -55,11 +150,11 @@ impl FlyCamera {
         )
     }
 
-    fn camera(&self) -> Camera {
+    fn camera(&self, fov: f32) -> Camera {
         Camera {
             eye: self.position,
             target: self.position + self.forward(),
-            vertical_fov_degrees: FOV,
+            vertical_fov_degrees: fov,
         }
     }
 }
@@ -75,11 +170,12 @@ struct Gpu {
 
 struct App {
     gpu: Option<Gpu>,
-    /// Index of the first moving box.
-    first_mover: usize,
+    world: World,
     /// Animation time in 60 Hz frames.
     time: f32,
     paused: bool,
+    /// Playing the camera path: time along it in 60 Hz frames.
+    path: Option<f32>,
     camera: FlyCamera,
     keys: HashSet<KeyCode>,
     drag: Option<PhysicalPosition<f64>>,
@@ -90,7 +186,7 @@ struct App {
 }
 
 impl App {
-    fn init(event_loop: &ActiveEventLoop) -> (Gpu, usize) {
+    fn init(event_loop: &ActiveEventLoop, world: &World) -> Gpu {
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -135,58 +231,54 @@ impl App {
         };
         surface.configure(&device, &config);
 
-        let mut scene = render_scene();
-        let first_mover = scene.add_movers(0.0);
-        let l = &scene.room.light;
-        let light = RectLight {
-            corner: l.corner,
-            edge_u: l.edge_u,
-            edge_v: l.edge_v,
-            one_sided: false,
-        };
         let kernel =
             MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
-        let mut lightmap = Lightmap::from_meshes(&scene.room.meshes, TEXEL, |m| m < first_mover)
-            .with_probes(PROBES);
-        let bake = kernel.bake(&mut lightmap, light, &scene.room.meshes);
-        println!(
-            "{}: baked {} texels in {:.1} ms; rendering at {}×{}.",
-            kernel.adapter_name,
-            lightmap.texels(),
-            bake.as_secs_f64() * 1000.0,
-            config.width,
-            config.height
-        );
+        let meshes: Vec<_> = world.surfaces.iter().map(|s| s.triangles.clone()).collect();
+        let first_mover = world.first_mover;
+        let mut lightmap = Lightmap::new(&world.surfaces, world.texel, |m| m < first_mover)
+            .with_probes(world.probes);
+        let bake = kernel.bake(&mut lightmap, world.light, &meshes);
+        let start = Instant::now();
         let renderer = LiveRenderer::new(
             &kernel,
             format,
             config.width,
             config.height,
-            light,
-            &scene.room.meshes,
-            &scene.albedo,
-            scene.radiance,
+            world.light,
+            &meshes,
+            &world.albedo,
+            world.radiance,
             &lightmap,
         );
-        (
-            Gpu {
-                window,
-                surface,
-                config,
-                device,
-                queue,
-                renderer,
-            },
-            first_mover,
-        )
+        renderer.wait();
+        println!(
+            "{} ({} scene): {} texels baked in {:.0} ms, {} probes; caches ready in {:.0} ms; rendering at {}×{}.",
+            kernel.adapter_name,
+            world.name,
+            lightmap.texels(),
+            bake.as_secs_f64() * 1000.0,
+            renderer.probes(),
+            start.elapsed().as_secs_f64() * 1000.0,
+            config.width,
+            config.height
+        );
+        Gpu {
+            window,
+            surface,
+            config,
+            device,
+            queue,
+            renderer,
+        }
     }
 
     fn update(&mut self, dt: f32) {
         let speed = if self.keys.contains(&KeyCode::ShiftLeft) {
-            1.5
+            3.0
         } else {
-            0.5
-        } * dt;
+            1.0
+        } * self.world.speed
+            * dt;
         let forward = self.camera.forward();
         let flat = Vec3::new(forward.x, forward.y, 0.0).normalize_or_zero();
         let right = flat.cross(Vec3::Z);
@@ -207,16 +299,21 @@ impl App {
         if !self.paused {
             self.time += dt * 60.0;
         }
+        if let Some(t) = &mut self.path {
+            *t = (*t + dt * 60.0) % PATH_FRAMES as f32;
+            if let Some(c) = self.world.path_camera(*t) {
+                self.camera = FlyCamera::looking_at(c.eye, c.target);
+            }
+        }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_none() {
-            let (gpu, first_mover) = Self::init(event_loop);
+            let gpu = Self::init(event_loop, &self.world);
             gpu.window.request_redraw();
             self.gpu = Some(gpu);
-            self.first_mover = first_mover;
             self.last = Instant::now();
         }
     }
@@ -250,6 +347,12 @@ impl ApplicationHandler for App {
                     }
                     if code == KeyCode::KeyP && !repeat {
                         self.paused = !self.paused;
+                    }
+                    if code == KeyCode::KeyC && !repeat && self.world.showcase.is_some() {
+                        self.path = match self.path {
+                            Some(_) => None,
+                            None => Some(0.0),
+                        };
                     }
                     if code == KeyCode::KeyV
                         && !repeat
@@ -294,14 +397,11 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last).as_secs_f32();
                 self.last = now;
                 self.update(dt.min(0.1));
-                let first_mover = self.first_mover;
-                let changes: Vec<_> = movers(self.time)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(k, mesh)| (first_mover + k, mesh))
-                    .collect();
+                let moved = self.world.movers(self.time);
+                let changes: Vec<_> = moved.iter().map(|(m, s)| (*m, s)).collect();
+                let fov = self.world.fov;
                 let Some(gpu) = &mut self.gpu else { return };
-                gpu.renderer.update_meshes(&changes);
+                gpu.renderer.update_surfaces(&changes);
                 let texture = match gpu.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -312,7 +412,7 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = texture.texture.create_view(&Default::default());
-                gpu.renderer.frame(self.camera.camera(), FOV, &view);
+                gpu.renderer.frame(self.camera.camera(fov), fov, &view);
                 gpu.queue.present(texture);
 
                 self.frame_times.push(dt * 1000.0);
@@ -325,7 +425,8 @@ impl ApplicationHandler for App {
                         "off"
                     };
                     gpu.window.set_title(&format!(
-                        "Continuum — {:.0} fps ({avg:.1} ms) at {}×{} — vsync {vsync} — WASD/QE move, drag to look, P pause, V vsync",
+                        "Continuum ({}) — {:.0} fps ({avg:.1} ms) at {}×{} — vsync {vsync} — WASD/QE move, drag to look, C camera path, P pause, V vsync",
+                        self.world.name,
                         1000.0 / avg,
                         gpu.config.width,
                         gpu.config.height
@@ -334,8 +435,10 @@ impl ApplicationHandler for App {
                 }
                 if let Some(left) = &mut self.frames_left {
                     *left = left.saturating_sub(1);
-                    // Look around a little so the run exercises a moving camera.
-                    self.camera.yaw += 0.01;
+                    // Exercise a moving camera: the path if there is one.
+                    if self.world.showcase.is_none() {
+                        self.camera.yaw += 0.01;
+                    }
                     if *left == 0 {
                         let times = &self.all_times[self.all_times.len().min(10)..];
                         let mut sorted = times.to_vec();
@@ -360,17 +463,25 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    let scene = render_scene();
-    let frames_left = std::env::args()
-        .skip_while(|a| a != "--frames")
-        .nth(1)
-        .and_then(|n| n.parse().ok());
+    let arg = |name: &str| std::env::args().skip_while(|a| a != name).nth(1);
+    let frames_left: Option<u32> = arg("--frames").and_then(|n| n.parse().ok());
+    let world = match arg("--scene").as_deref() {
+        None | Some("showcase") => World::showcase(),
+        Some("room") => World::room(),
+        Some(other) => {
+            eprintln!("Unknown scene {other:?}: use showcase or room.");
+            std::process::exit(2);
+        }
+    };
+    let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
+    let camera = FlyCamera::looking_at(world.start.0, world.start.1);
     let mut app = App {
         gpu: None,
-        first_mover: 0,
+        world,
         time: 0.0,
         paused: false,
-        camera: FlyCamera::looking_at(scene.eye, scene.target),
+        path,
+        camera,
         keys: HashSet::new(),
         drag: None,
         last: Instant::now(),

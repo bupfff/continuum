@@ -1,7 +1,7 @@
 # Continuum design
 
 Living document. It is the source of truth for what we are building and why;
-update it whenever a decision changes. Last updated 2026-10-23.
+update it whenever a decision changes. Last updated 2026-10-24.
 
 ## 1. Goal
 
@@ -125,6 +125,34 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
+## 3.6 Where we stand (2026-10-24)
+
+Against the goal in §1, honestly:
+
+- **Proven in test scenes.** Mask cones as the primitive, on the CPU and the
+  GPU. The paradigm's first two rules: caches of what cannot change (texels,
+  static coverage, probe G-buffers), and exact incremental updates for moving
+  objects and bounce light, bit-exact on every frame (M2 G5–G6, M3 G3). The
+  first measurement against an independent path tracer: 3.8% RMSE vs Cycles
+  on the showcase (M3 G3).
+- **Not yet shown in 3D or on the GPU.** The ledger, which is the third rule
+  and "the invention" (§3.1). It has only run in 2D, with mixed results (G4,
+  G6, G7 failed), and moving lights depend on it.
+- **Not started.** Mask cones for primary visibility and anti-aliasing (the
+  camera casts one ray per pixel), glossy reflections, the prefiltered
+  hierarchy (§3.4, the path to Nanite-scale scenes, with M3 G1 as its
+  motivation), the quality contract (§3.3), materials beyond Lambert, more
+  than one light, more than one bounce, and asset import with automatic
+  charts.
+- **Against UE5.** No direct comparison has been made, so none is claimed.
+  The measured edge is narrow:
+  - Soft shadows from an area light, and bounce light, that update exactly in
+    the frame the change happens, with no noise, denoiser or temporal lag.
+    UE5 approximates area-light penumbrae (virtual shadow maps), and Lumen
+    accumulates over frames.
+  - UE5 leads on everything else: scene scale, materials, lights, GI bounces,
+    anti-aliasing and upscaling, platforms and tooling.
+
 ## 4. Design rules
 
 1. **Worst case parity, typical case win.** The everything-moving fallback must
@@ -162,11 +190,12 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (**failed** on one configuration: geometric charging 0.90–0.95× a full recompute, projected charging 1.84–1.96×, `docs/results/flatland-gate4.md`); G5 magnitude deferral pays off for wide cones with continuous visibility (**passed on attempt 2: 34% of ε = 0 work**, `docs/results/flatland-gate5.md`); G6 one-bounce GI with charges that propagate through surfaces (**failed**: best implementable charges 66.9% vs ≤ 50%, zero violations; an oracle with exact charges reaches 27.4%, so the gap is charge tightness, `docs/results/flatland-gate6.md`); G6b exact incremental indirect via cone G-buffers (**passed: bit-exact, 7.4× faster than a full recompute**, `docs/results/flatland-gate6b.md`); G7 moving light, the ledger's own job (**failed narrowly**: 25.1% of cones recomputed vs ≤ 25% at a realistic sun speed, zero violations; exact invalidation needs 100%, `docs/results/flatland-gate7.md`) |
 | M1 3D CPU reference | 3D mask cones over a BVH, reference path tracer, scene import | G1 repeated in 3D with 8×8 bins (**passed on attempt 2**: lower error than 64 jittered rays at 0.22× their cost, no flicker, `docs/results/m1-gate1.md`); G2 hierarchy culling (**failed on the letter**: identical candidate sets, but float summation order differed by 2.5e-6 vs a 1e-6 tolerance; culling scales 6.3× for ~100× triangles, `docs/results/m1-gate2.md`); G3 tile-shared traversal (**failed**: identical candidates but only 20–24% cheaper vs a 67% target, `docs/results/m1-gate3.md`); G4 exact incremental direct light in 3D (**passed: bit-exact, 14.9× faster**, `docs/results/m1-gate4.md`); agreement with Cycles/Mitsuba |
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | G1 mask cones in a WGSL compute shader (**passed on attempt 2**: matches the CPU to 6.4e-6, 7.5× faster than 10 CPU threads on the M4, `docs/results/m2-gate1.md`); G2 mesh hierarchy on the GPU (**failed**: identical output, rays 7.5× faster, but the frame only 1.6× faster because cone setup and rasterization dominate, `docs/results/m2-gate2.md`); G3 960×540 at 60 fps with per-pixel cones every frame (**failed**: 33.6 → 26.0 ms, identical output; per-pixel cones every frame are the brute-force path, `docs/results/m2-gate3.md`); G4 world-space lighting cache (**passed on attempt 2**: 1080p in 5.66 ms at 0.58% RMSE vs per-pixel cones, `docs/results/m2-gate4.md`); G5 moving objects with exact soft shadows (**passed**: incremental block re-bake on the GPU equals a full re-bake exactly on every frame; 9.85 ms per 1080p frame with 6.1% of blocks re-baked, vs 21.9 ms for a full re-bake alone, `docs/results/m2-gate5.md`); G6 one-bounce indirect light from cone G-buffers (**passed on attempt 2**: exact against a from-scratch trace on every frame after padding hierarchy boxes, 3.6% RMSE vs 16× the directions, 11.66 ms per 1080p frame with moving boxes, `docs/results/m2-gate6.md`); real-time viewer with moving boxes and indirect light (`apps/viewer`, about 10.8 ms per frame at 2560×1440 on the M4 Air); frame time at 1080p on M4 Air; image-diffed in CI |
-| M3 prefiltered hierarchy | Directional coverage per node, detail to roughness | Zoom and flythrough with no shimmer; flat cost |
-| M4 direct light + ledger on GPU | Area lights, cone shadows, ledger | G2/G3 on GPU; light switch with no lag |
-| M5 GI and reflections | Cascades of mask cones, roughness cones | FLIP vs reference |
-| M6 showcase | glTF import, Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
-| M7 deforming geometry, Bevy | Subtree refit, `bevy_continuum` | Characters in the showcase |
+| M3 general meshes and a first showcase | Per-mesh triangle hierarchies, chart-based lightmaps with smooth normals, static coverage cache, probes on moving objects, procedural showcase, Cycles reference pipeline | G1 triangle hierarchies on the GPU (**failed**: identical output but 3.9× vs a 10× target on a 40k-triangle sphere, because cone cost grows with the triangles really inside cones; that is the prefiltered hierarchy's job, `docs/results/m3-gate1.md`); G2 general meshes in the lighting cache (**passed**: 1.61% RMSE vs per-pixel cones with the same normals, 4.99 ms at 1080p, `docs/results/m3-gate2.md`); G3 the showcase in real time vs Cycles (**failed narrowly on speed**: bit-exact on all 300 frames and 3.80% RMSE vs Cycles, but 17.76 ms vs 16.7 ms per 1080p frame, `docs/results/m3-gate3.md`) |
+| M4 prefiltered hierarchy | Directional coverage per node, detail to roughness | Zoom and flythrough with no shimmer; flat cost |
+| M5 ledger on GPU | Moving lights, ledger-bounded deferral | G2/G3 on GPU; light switch with no lag |
+| M6 GI and reflections | More bounces, cascades of mask cones, roughness cones | FLIP vs reference |
+| M7 showcase | glTF import with automatic charts, Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
+| M8 deforming geometry, Bevy | Subtree refit, `bevy_continuum` | Characters in the showcase |
 
 ## 7. Benchmark protocol
 

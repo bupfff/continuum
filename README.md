@@ -6,9 +6,11 @@ and cached answers are recomputed only when they could have changed by more
 than a chosen, invisible error bound.
 
 Status: research stage. The core bets were tested in 2D (M0) and in 3D on the
-CPU (M1); the GPU renderer (M2) runs a real-time viewer with moving objects.
-See [docs/DESIGN.md](docs/DESIGN.md) for the design and
-[docs/results/](docs/results/) for measured results.
+CPU (M1). The GPU renderer (M2, M3) renders a procedural showcase scene in real
+time with moving objects, exact soft shadows and one bounce of indirect light,
+and is measured against Blender's Cycles. See [docs/DESIGN.md](docs/DESIGN.md)
+for the design and an honest status (§3.6), and [docs/results/](docs/results/)
+for measured results.
 
 ## Try it: the real-time viewer
 
@@ -16,29 +18,67 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 cargo run --release -p viewer
 ```
 
-Fly through the test room: WASD to move, Q/E down and up, drag with the left
-mouse button to look, Shift to move faster, P to pause the moving boxes, V to
-toggle vsync, Esc to quit. The title bar shows the frame rate.
+Fly through the showcase: a gallery with a colonnade, an arch and a torus-knot
+sculpture, lit by one skylight, with a bouncing ball and a spinning cube.
 
-Direct light from the area light is baked into a world-space lighting cache
-(one mask cone per texel) at startup; each frame is a camera ray per pixel plus
-a cache lookup. Three boxes move through the room. Each frame re-bakes exactly
-the cache blocks they can reach, so their soft shadows match a full re-bake
-(M2 gate 5). Probes on static surfaces add one bounce of indirect light: each
-caches which static surface it sees in 768 directions, and re-gathers their
-radiance every frame (M2 gate 6). On an M4 MacBook Air it runs at about 10.8 ms
-per frame at 2560×1440.
+Controls:
 
-![Direct light only (left) and with one bounce (right)](docs/images/m2-direct-vs-indirect.png)
+- WASD to move, Q/E down and up, Shift to move faster.
+- Drag with the left mouse button to look.
+- C plays the camera path, P pauses the moving objects.
+- V toggles vsync, Esc quits.
+
+The title bar shows the frame rate. `--scene room` opens the M2 test room
+instead.
+
+How it renders:
+
+- Direct light from the area light is baked at startup into a world-space
+  lighting cache: one mask cone per texel, on every mesh's charts.
+- Each frame is a camera ray per pixel plus a cache lookup.
+- When objects move, each frame re-bakes exactly the cache blocks they can
+  reach, adding only the moving meshes to each texel's cached static coverage.
+  Their soft shadows match a full re-bake (M2 gate 5).
+- Probes add one bounce of indirect light. Each caches which static surface it
+  sees in 768 directions and re-gathers their radiance every frame (M2 gate
+  6). Probes on the moving objects are traced from scratch.
+
+On an M4 MacBook Air, on battery, it runs at about 21 ms per frame at
+2560×1440. At 1080p the frame is 17.8 ms, just over the 16.7 ms target
+(M3 gate 3).
+
+![Continuum (left), Cycles at 4096 samples per pixel (middle), difference ×4 (right)](docs/images/m3-gate3-vs-cycles.png)
+
+The same frame from Continuum and from Cycles, configured to compute the same
+thing (Lambertian materials, direct light plus one diffuse bounce): 3.8%
+relative RMSE (M3 gate 3).
+
+## Comparing with other renderers
+
+- `cargo run --release -p room3d --bin export_showcase` writes the showcase to
+  `experiments/room3d/out/showcase/`, ready to rebuild in another renderer (for
+  a UE5 side-by-side, for example):
+  - `showcase.obj`: one object per mesh, Z up, meters, per-vertex normals.
+  - `showcase.json`: linear albedos, the light (a one-sided rectangle with its
+    radiance), and the camera path and movers sampled every 30 frames.
+  - When rebuilding it, use non-metallic, fully rough materials with no
+    specular, and fix exposure (no auto-exposure), so differences come from
+    lighting.
+- `cargo run --release -p room3d --bin cycles_calibration` checks the Cycles
+  pipeline on a scene with a known answer. The M3 gate 3 binary renders the
+  references itself. Both need Blender 4.2 or later; set `BLENDER` if it is
+  not in `/Applications`.
 
 ## Layout
 
 - `crates/continuum`: the library: direction masks (binary and continuous), the
-  error ledger, 3D pyramid cones with exact per-bin rasterization, and a BVH.
+  error ledger, 3D pyramid cones with exact per-bin rasterization, a BVH, and
+  meshes with charts and smooth normals (`mesh::Surface`).
 - `crates/continuum-gpu`: wgpu compute backend (mask cones in WGSL, lighting cache, live renderer).
 - `apps/viewer`: the real-time viewer.
 - `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
-- `experiments/room3d`: 3D experiments on triangle scenes (milestone M1).
+- `experiments/room3d`: 3D experiments on triangle scenes (milestones M1–M3),
+  the showcase scene, and the Cycles reference pipeline (`cycles/`).
 - `docs/`: design document and experiment results.
 
 ## Running
@@ -66,6 +106,10 @@ cargo run --release -p room3d --bin m2_gate4
 cargo run --release -p room3d --bin m2_gate5
 cargo run --release -p room3d --bin m2_gate6
 cargo run --release -p room3d --bin render_indirect   # side-by-side image
+cargo run --release -p room3d --bin m3_gate1
+cargo run --release -p room3d --bin m3_gate2
+cargo run --release -p room3d --bin m3_gate3           # needs Blender
+cargo run --release -p room3d --bin render_showcase    # three frames of the path
 ```
 
 ![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)

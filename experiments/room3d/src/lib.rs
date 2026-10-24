@@ -1,6 +1,7 @@
 //! Shared pieces for the 3D experiments: scenes of box meshes over a floor of
 //! receivers, lit by a rectangular area light.
 
+pub mod cycles;
 pub mod showcase;
 
 use continuum::bvh::Bvh;
