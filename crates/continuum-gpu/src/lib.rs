@@ -10,6 +10,8 @@ use bytemuck::{Pod, Zeroable};
 use continuum::glam::Vec3;
 use wgpu::util::DeviceExt;
 
+pub use wgpu;
+
 type Tri = [Vec3; 3];
 
 #[repr(C)]
@@ -169,6 +171,11 @@ impl MaskConeKernel {
             ..Default::default()
         }))
         .ok()?;
+        Some(Self::with_device(device, queue, adapter_name))
+    }
+
+    /// A kernel on an existing device (for example one that also drives a window).
+    pub fn with_device(device: wgpu::Device, queue: wgpu::Queue, adapter_name: String) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mask_cones"),
             source: wgpu::ShaderSource::Wgsl(include_str!("mask_cones.wgsl").into()),
@@ -186,14 +193,14 @@ impl MaskConeKernel {
         let pipeline = entry("main");
         let render_pipeline = entry("render");
         let cached_pipeline = entry("render_cached");
-        Some(MaskConeKernel {
+        MaskConeKernel {
             device,
             queue,
             pipeline,
             render_pipeline,
             cached_pipeline,
             adapter_name,
-        })
+        }
     }
 
     /// Irradiance per unit radiance at each receiver `(point, normal)`, and the
@@ -313,42 +320,11 @@ impl MaskConeKernel {
                 frame.radiance,
             ],
         };
-        let uniform = LightUniform {
-            corner: v4(frame.light.corner),
-            edge_u: v4(frame.light.edge_u),
-            edge_v: v4(frame.light.edge_v),
-            counts: [frame.meshes.len() as u32, 0, frame.hierarchy as u32, 0],
-        };
-        let (tris, ranges) = flatten(frame.meshes);
-        let (nodes, items) = mesh_hierarchy(frame.meshes);
-        let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
-        let init = |label: &str, contents: &[u8]| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
-                })
-        };
-        let mut buffers = vec![
-            (0, init("light", bytemuck::bytes_of(&uniform))),
-            (2, init("tris", bytemuck::cast_slice(&tris))),
-            (3, init("meshes", bytemuck::cast_slice(&ranges))),
-            (6, init("camera", bytemuck::bytes_of(&cam))),
-            (8, init("albedo", bytemuck::cast_slice(&albedo4))),
-            (9, init("nodes", bytemuck::cast_slice(&nodes))),
-            (10, init("items", bytemuck::cast_slice(&items))),
-        ];
-        if let Some(lm) = lightmap {
-            let texels: &[f32] = if lm.irradiance.is_empty() {
-                &[0.0]
-            } else {
-                &lm.irradiance
-            };
-            buffers.push((11, init("tri_face", bytemuck::cast_slice(&lm.tri_face))));
-            buffers.push((12, init("faces", bytemuck::cast_slice(&lm.faces))));
-            buffers.push((13, init("texels", bytemuck::cast_slice(texels))));
-        }
+        let mut buffers = self.scene_buffers(frame, lightmap);
+        buffers.push((
+            6,
+            uniform_buffer(&self.device, "camera", bytemuck::bytes_of(&cam)),
+        ));
         let size = (width * height) as u64 * 16;
         let storage = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -363,13 +339,11 @@ impl MaskConeKernel {
             size,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
-        let debug_buf = storage("debug", 256, wgpu::BufferUsages::STORAGE);
         let staging = storage(
             "staging",
             size,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
-        buffers.push((5, debug_buf));
         let mut entries: Vec<wgpu::BindGroupEntry> = buffers
             .iter()
             .map(|(binding, buffer)| wgpu::BindGroupEntry {
@@ -415,6 +389,62 @@ impl MaskConeKernel {
                 .to_vec();
         staging.unmap();
         (rgba.iter().map(|c| [c[0], c[1], c[2]]).collect(), best)
+    }
+
+    /// Static scene buffers for the render kernels, by binding: light (0),
+    /// triangles (2), mesh ranges (3), debug (5), albedo (8), hierarchy (9, 10),
+    /// and with a lightmap its faces and texels (11-13).
+    fn scene_buffers(
+        &self,
+        frame: &Frame,
+        lightmap: Option<&Lightmap>,
+    ) -> Vec<(u32, wgpu::Buffer)> {
+        let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+        let uniform = LightUniform {
+            corner: v4(frame.light.corner),
+            edge_u: v4(frame.light.edge_u),
+            edge_v: v4(frame.light.edge_v),
+            counts: [frame.meshes.len() as u32, 0, frame.hierarchy as u32, 0],
+        };
+        let (tris, ranges) = flatten(frame.meshes);
+        let (nodes, items) = mesh_hierarchy(frame.meshes);
+        let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
+        let storage = |label: &str, contents: &[u8]| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
+        };
+        let mut buffers = vec![
+            (
+                0,
+                uniform_buffer(&self.device, "light", bytemuck::bytes_of(&uniform)),
+            ),
+            (2, storage("tris", bytemuck::cast_slice(&tris))),
+            (3, storage("meshes", bytemuck::cast_slice(&ranges))),
+            (5, storage("debug", &[0; 256])),
+            (8, storage("albedo", bytemuck::cast_slice(&albedo4))),
+            (9, storage("nodes", bytemuck::cast_slice(&nodes))),
+            (10, storage("items", bytemuck::cast_slice(&items))),
+        ];
+        if let Some(lm) = lightmap {
+            let texels: &[f32] = if lm.irradiance.is_empty() {
+                &[0.0]
+            } else {
+                &lm.irradiance
+            };
+            let faces: &[FaceGpu] = if lm.faces.is_empty() {
+                &[FaceGpu::zeroed()]
+            } else {
+                &lm.faces
+            };
+            buffers.push((11, storage("tri_face", bytemuck::cast_slice(&lm.tri_face))));
+            buffers.push((12, storage("faces", bytemuck::cast_slice(faces))));
+            buffers.push((13, storage("texels", bytemuck::cast_slice(texels))));
+        }
+        buffers
     }
 
     /// Per-bin coverage (64 per receiver) as the kernel computed it, for debugging.
@@ -716,4 +746,255 @@ fn mesh_hierarchy(meshes: &[Vec<Tri>]) -> (Vec<NodeGpu>, Vec<u32>) {
         split(&mut nodes, 0, &mut items, 0, &bounds);
     }
     (nodes, items)
+}
+
+fn uniform_buffer(device: &wgpu::Device, label: &str, contents: &[u8]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DisplayDims {
+    size: [u32; 2],
+    flags: [u32; 2],
+}
+
+/// Persistent GPU state for interactive rendering with a lighting cache. The
+/// scene, its hierarchy and the baked lightmap stay on the GPU; a frame uploads
+/// only the camera, runs the cached kernel, and draws into a surface texture.
+pub struct LiveRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    compute: wgpu::ComputePipeline,
+    display: wgpu::RenderPipeline,
+    scene: Vec<(u32, wgpu::Buffer)>,
+    camera_buf: wgpu::Buffer,
+    dims_buf: wgpu::Buffer,
+    colors_buf: wgpu::Buffer,
+    compute_bind: wgpu::BindGroup,
+    display_bind: wgpu::BindGroup,
+    width: u32,
+    height: u32,
+    radiance: f32,
+    srgb: bool,
+}
+
+impl LiveRenderer {
+    /// Uploads a scene and its baked lightmap. `target_format` is the surface's format.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        kernel: &MaskConeKernel,
+        target_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        light: RectLight,
+        meshes: &[Vec<Tri>],
+        albedo: &[Vec3],
+        radiance: f32,
+        lightmap: &Lightmap,
+    ) -> Self {
+        let device = kernel.device.clone();
+        let frame = Frame {
+            camera: Camera {
+                eye: Vec3::ZERO,
+                target: Vec3::X,
+                vertical_fov_degrees: 50.0,
+            },
+            width,
+            height,
+            light,
+            meshes,
+            albedo,
+            radiance,
+            hierarchy: true,
+        };
+        let scene = kernel.scene_buffers(&frame, Some(lightmap));
+        let camera_buf = uniform_buffer(
+            &device,
+            "camera",
+            &[0; std::mem::size_of::<CameraUniform>()],
+        );
+        let dims_buf = uniform_buffer(&device, "dims", &[0; std::mem::size_of::<DisplayDims>()]);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("display"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("display.wgsl").into()),
+        });
+        let display = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("display"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(target_format.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let (colors_buf, compute_bind, display_bind) = Self::targets(
+            &device,
+            &kernel.cached_pipeline,
+            &display,
+            &scene,
+            &camera_buf,
+            &dims_buf,
+            width,
+            height,
+        );
+        LiveRenderer {
+            device,
+            queue: kernel.queue.clone(),
+            compute: kernel.cached_pipeline.clone(),
+            display,
+            scene,
+            camera_buf,
+            dims_buf,
+            colors_buf,
+            compute_bind,
+            display_bind,
+            width,
+            height,
+            radiance,
+            srgb: target_format.is_srgb(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn targets(
+        device: &wgpu::Device,
+        compute: &wgpu::ComputePipeline,
+        display: &wgpu::RenderPipeline,
+        scene: &[(u32, wgpu::Buffer)],
+        camera_buf: &wgpu::Buffer,
+        dims_buf: &wgpu::Buffer,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Buffer, wgpu::BindGroup, wgpu::BindGroup) {
+        let colors_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("colors"),
+            size: (width as u64 * height as u64 * 16).max(16),
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let mut entries: Vec<wgpu::BindGroupEntry> = scene
+            .iter()
+            .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: buffer.as_entire_binding(),
+            })
+            .collect();
+        entries.push(wgpu::BindGroupEntry {
+            binding: 6,
+            resource: camera_buf.as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 7,
+            resource: colors_buf.as_entire_binding(),
+        });
+        let compute_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("live compute"),
+            layout: &compute.get_bind_group_layout(0),
+            entries: &entries,
+        });
+        let display_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("live display"),
+            layout: &display.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: colors_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: dims_buf.as_entire_binding(),
+                },
+            ],
+        });
+        (colors_buf, compute_bind, display_bind)
+    }
+
+    /// Call when the surface size changes.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if (width, height) == (self.width, self.height) || width == 0 || height == 0 {
+            return;
+        }
+        (self.colors_buf, self.compute_bind, self.display_bind) = Self::targets(
+            &self.device,
+            &self.compute,
+            &self.display,
+            &self.scene,
+            &self.camera_buf,
+            &self.dims_buf,
+            width,
+            height,
+        );
+        (self.width, self.height) = (width, height);
+    }
+
+    /// Renders one frame from `camera` into `target` and submits it.
+    pub fn frame(&self, camera: Camera, vertical_fov_degrees: f32, target: &wgpu::TextureView) {
+        let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+        let forward = (camera.target - camera.eye).normalize();
+        let right = forward.cross(Vec3::Z).normalize();
+        let up = right.cross(forward);
+        let cam = CameraUniform {
+            eye: v4(camera.eye),
+            forward: v4(forward),
+            right: v4(right),
+            up: v4(up),
+            params: [
+                self.width as f32,
+                self.height as f32,
+                (vertical_fov_degrees.to_radians() * 0.5).tan(),
+                self.radiance,
+            ],
+        };
+        self.queue
+            .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
+        let dims = DisplayDims {
+            size: [self.width, self.height],
+            flags: [!self.srgb as u32, 0],
+        };
+        self.queue
+            .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.compute);
+            pass.set_bind_group(0, &self.compute_bind, &[]);
+            pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("display"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.display);
+            pass.set_bind_group(0, &self.display_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
+    }
 }

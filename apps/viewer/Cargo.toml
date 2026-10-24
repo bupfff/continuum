@@ -1,0 +1,13 @@
+[package]
+name = "viewer"
+description = "Real-time Continuum viewer: fly through a scene lit by mask cones."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+continuum = { path = "../../crates/continuum" }
+continuum-gpu = { path = "../../crates/continuum-gpu" }
+pollster = "1.0.1"
+room3d = { path = "../../experiments/room3d" }
+winit = "0.30.13"

@@ -9,11 +9,26 @@ Status: research stage. The core bets are being tested in 2D before any GPU work
 See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 [docs/results/](docs/results/) for measured results.
 
+## Try it: the real-time viewer
+
+```bash
+cargo run --release -p viewer
+```
+
+Fly through the test room: WASD to move, Q/E down and up, drag with the left
+mouse button to look, Shift to move faster, V to toggle vsync, Esc to quit.
+The title bar shows the frame rate. Direct light from the area light is baked
+into a world-space lighting cache (one mask cone per texel) at startup; each
+frame is a camera ray per pixel plus a cache lookup. On an M4 MacBook Air it
+runs at about 3.6 ms per frame at 2560×1440. Lighting is direct only for now,
+so shadows are black.
+
 ## Layout
 
 - `crates/continuum`: the library: direction masks (binary and continuous), the
   error ledger, 3D pyramid cones with exact per-bin rasterization, and a BVH.
-- `crates/continuum-gpu`: wgpu compute backend (mask cones in WGSL).
+- `crates/continuum-gpu`: wgpu compute backend (mask cones in WGSL, lighting cache, live renderer).
+- `apps/viewer`: the real-time viewer.
 - `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
 - `experiments/room3d`: 3D experiments on triangle scenes (milestone M1).
 - `docs/`: design document and experiment results.
