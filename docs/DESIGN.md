@@ -128,7 +128,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 
 | Milestone | Content | Gate |
 |---|---|---|
-| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (preview: 1.1× faster); G5 magnitude deferral pays off for wide cones with continuous visibility (**passed on attempt 2: 34% of ε = 0 work**, `docs/results/flatland-gate5.md`); G6 one-bounce GI with charges that propagate through surfaces (**failed**: best implementable charges 66.9% vs ≤ 50%, zero violations; an oracle with exact charges reaches 27.4%, so the gap is charge tightness, `docs/results/flatland-gate6.md`); G6b exact incremental indirect via cone G-buffers (**passed: bit-exact, 7.4× faster than a full recompute**, `docs/results/flatland-gate6b.md`) |
+| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (preview: 1.1× faster); G5 magnitude deferral pays off for wide cones with continuous visibility (**passed on attempt 2: 34% of ε = 0 work**, `docs/results/flatland-gate5.md`); G6 one-bounce GI with charges that propagate through surfaces (**failed**: best implementable charges 66.9% vs ≤ 50%, zero violations; an oracle with exact charges reaches 27.4%, so the gap is charge tightness, `docs/results/flatland-gate6.md`); G6b exact incremental indirect via cone G-buffers (**passed: bit-exact, 7.4× faster than a full recompute**, `docs/results/flatland-gate6b.md`); G7 moving light, the ledger's own job (**failed narrowly**: 25.1% of cones recomputed vs ≤ 25% at a realistic sun speed, zero violations; exact invalidation needs 100%, `docs/results/flatland-gate7.md`) |
 | M1 3D CPU reference | 3D mask cones over a BVH, reference path tracer, scene import | G1 repeated in 3D with 8×8 bins; agreement with Cycles/Mitsuba |
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | Frame time at 1080p on M4 Air; image-diffed in CI |
 | M3 prefiltered hierarchy | Directional coverage per node, detail to roughness | Zoom and flythrough with no shimmer; flat cost |
@@ -165,8 +165,10 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
   exact, 7.4×), at 384 bytes per cone and with a binned estimator that is 2.5%
   off the exact gather. Open: coloured or emissive movers, moving reflective
   surfaces, and the GPU memory layout.
-- **The ledger's remaining role is unproven on its own terms**: moving lights and
-  slow global changes, where exact updates touch every cone. Next test.
+- **Moving lights** (gate 7): the ledger recomputes a quarter of the cones
+  that exact invalidation must (realistic sun speed, ε = 1%), narrowly missing
+  its target. Next: occlusion-aware light-motion charges; and with mask
+  estimators, a bound term for bins realigning as the cone moves.
 - **Depth-correct mask gathers**: binned gathers with partial coverage depend on
   processing order when several surfaces share a bin, which breaks charge
   bounds. Flatland used an exact angular sweep; 3D needs a depth-correct

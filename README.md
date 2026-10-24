@@ -24,6 +24,7 @@ cargo run --release -p flatland --bin ledger
 cargo run --release -p flatland --bin gate5
 cargo run --release -p flatland --bin gate6
 cargo run --release -p flatland --bin gate6b
+cargo run --release -p flatland --bin gate7
 ```
 
 Each run prints a results table and writes images to `experiments/flatland/out/`:
