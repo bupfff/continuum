@@ -1,4 +1,4 @@
-//! Animated scenarios for the ledger experiments (gates 2–4). Frames are at
+//! Animated scenarios for the ledger experiments (gates 2–5). Frames are at
 //! 60 fps in a unit square that stands in for a room about 10 m across.
 
 use std::f32::consts::TAU;
@@ -12,6 +12,37 @@ pub struct Light {
     pub radiance: Box<dyn Fn(u32) -> f32>,
 }
 
+/// Uniform light arriving from every direction, gathered through `sectors`
+/// equal wide cones per receiver.
+pub struct Sky {
+    pub sectors: usize,
+    pub radiance: Box<dyn Fn(u32) -> f32>,
+}
+
+/// Distance to the far edge of sky cones: beyond everything in the unit square.
+const SKY_DISTANCE: f32 = 4.0;
+
+/// Where a family of cones ends for a receiver.
+#[derive(Clone, Copy, Debug)]
+pub enum Target {
+    /// A light: the same segment for every receiver.
+    Fixed(Segment),
+    /// A sky sector: a far segment carried along with the receiver.
+    Relative(Segment),
+}
+
+impl Target {
+    pub fn at(self, p: Vec2) -> Segment {
+        match self {
+            Target::Fixed(s) => s,
+            Target::Relative(s) => Segment {
+                a: p + s.a,
+                b: p + s.b,
+            },
+        }
+    }
+}
+
 pub struct Scenario {
     pub name: &'static str,
     /// File-name-safe identifier.
@@ -22,10 +53,44 @@ pub struct Scenario {
     /// Occluders that may move, by frame. Same count and order every frame.
     pub movers: Box<dyn Fn(u32) -> Vec<Segment>>,
     pub lights: Vec<Light>,
+    pub sky: Option<Sky>,
     /// Named frame ranges reported separately.
     pub phases: Vec<(&'static str, Range<u32>)>,
     /// Frames shown in the image sheet.
     pub key_frames: [u32; 3],
+    /// Fluence scale applied before tone mapping images.
+    pub exposure: f32,
+}
+
+impl Scenario {
+    /// One target per cone family: lights first, then sky sectors.
+    pub fn targets(&self) -> Vec<Target> {
+        let mut targets: Vec<Target> = self
+            .lights
+            .iter()
+            .map(|l| Target::Fixed(l.segment))
+            .collect();
+        if let Some(sky) = &self.sky {
+            targets.extend((0..sky.sectors).map(|k| {
+                let angle = |i: usize| i as f32 * TAU / sky.sectors as f32;
+                let dir = |a: f32| v2(a.cos(), a.sin()) * SKY_DISTANCE;
+                Target::Relative(Segment {
+                    a: dir(angle(k)),
+                    b: dir(angle(k + 1)),
+                })
+            }));
+        }
+        targets
+    }
+
+    /// Radiance of each cone family at frame `f`, in the order of [`Self::targets`].
+    pub fn weights(&self, f: u32) -> Vec<f32> {
+        let mut w: Vec<f32> = self.lights.iter().map(|l| (l.radiance)(f)).collect();
+        if let Some(sky) = &self.sky {
+            w.extend(std::iter::repeat_n((sky.radiance)(f), sky.sectors));
+        }
+        w
+    }
 }
 
 const LIGHT_B_ON: u32 = 60;
@@ -39,31 +104,33 @@ fn rotated(center: Vec2, half_length: f32, angle: f32) -> Segment {
     }
 }
 
-/// A mostly static room, which is what most game frames look like: the gate 1
-/// geometry plus a swinging door, a person walking, and a spinning fan. A second
-/// light switches on at frame 60 and flickers from frame 150.
-pub fn typical() -> Scenario {
-    let movers = |f: u32| {
-        let t = f as f32 / 60.0;
-        let hinge = v2(0.40, 0.40);
-        let door_angle = (40.0 + 40.0 * (TAU * t / 3.0).sin()).to_radians();
-        let door = Segment {
-            a: hinge,
-            b: hinge + v2(door_angle.cos(), door_angle.sin()) * 0.08,
-        };
-        // Walks back and forth at about 1.5 m/s (0.0025 of the room per frame).
-        let walk = (f as f32 * 0.0025) % 1.4;
-        let x = 0.15 + if walk < 0.7 { walk } else { 1.4 - walk };
-        let walker = seg(x - 0.015, 0.28, x + 0.015, 0.28);
-        let fan = rotated(v2(0.50, 0.55), 0.025, (f as f32 * 2.0).to_radians());
-        vec![door, walker, fan]
+/// A swinging door, a person walking, and a spinning fan.
+fn room_movers(f: u32) -> Vec<Segment> {
+    let t = f as f32 / 60.0;
+    let hinge = v2(0.40, 0.40);
+    let door_angle = (40.0 + 40.0 * (TAU * t / 3.0).sin()).to_radians();
+    let door = Segment {
+        a: hinge,
+        b: hinge + v2(door_angle.cos(), door_angle.sin()) * 0.08,
     };
+    // Walks back and forth at about 1.5 m/s (0.0025 of the room per frame).
+    let walk = (f as f32 * 0.0025) % 1.4;
+    let x = 0.15 + if walk < 0.7 { walk } else { 1.4 - walk };
+    let walker = seg(x - 0.015, 0.28, x + 0.015, 0.28);
+    let fan = rotated(v2(0.50, 0.55), 0.025, (f as f32 * 2.0).to_radians());
+    vec![door, walker, fan]
+}
+
+/// A mostly static room, which is what most game frames look like: the gate 1
+/// geometry plus the room movers. A second light switches on at frame 60 and
+/// flickers from frame 150.
+pub fn typical() -> Scenario {
     Scenario {
         name: "Typical: mostly static room",
         slug: "typical",
         frames: 240,
         statics: scene::gate1().occluders,
-        movers: Box::new(movers),
+        movers: Box::new(room_movers),
         lights: vec![
             Light {
                 segment: seg(0.38, 0.95, 0.62, 0.95),
@@ -78,6 +145,7 @@ pub fn typical() -> Scenario {
                 }),
             },
         ],
+        sky: None,
         phases: vec![
             ("Movers only", 1..LIGHT_B_ON),
             ("Light B switches on", LIGHT_B_ON..LIGHT_B_ON + 1),
@@ -85,6 +153,7 @@ pub fn typical() -> Scenario {
             ("Movers + flicker", FLICKER_FROM..240),
         ],
         key_frames: [30, LIGHT_B_ON, 200],
+        exposure: 1.0,
     }
 }
 
@@ -121,7 +190,30 @@ pub fn everything_moves() -> Scenario {
                 radiance: Box::new(|_| 0.8),
             },
         ],
+        sky: None,
         phases: vec![("All occluders move", 1..240)],
         key_frames: [30, 120, 200],
+        exposure: 1.0,
+    }
+}
+
+/// Wide cones: the same room and movers, lit only by a sky gathered through 8
+/// cones of 45° per receiver. Every mover is a sliver of a wide cone, and the sky
+/// brightens and dims slowly like passing clouds.
+pub fn sky() -> Scenario {
+    Scenario {
+        name: "Sky light through 8 wide cones",
+        slug: "sky",
+        frames: 180,
+        statics: scene::gate1().occluders,
+        movers: Box::new(room_movers),
+        lights: Vec::new(),
+        sky: Some(Sky {
+            sectors: 8,
+            radiance: Box::new(|f| 1.0 + 0.15 * (TAU * f as f32 / 180.0).sin()),
+        }),
+        phases: vec![("Movers under a changing sky", 1..180)],
+        key_frames: [30, 90, 150],
+        exposure: 0.12,
     }
 }

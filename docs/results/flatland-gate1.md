@@ -65,3 +65,16 @@ Correlation error below each fence (relative to the reference mean there):
   penumbrae at high contrast could show it. Candidate fix: analytic coverage for
   the two partially covered edge bins.
 - The error maps use a square-root scale, which exaggerates small errors.
+
+## Update (gate 5): continuous masks
+
+`CoverageMask` keeps a fraction for partially covered bins. Rerunning gate 1
+with it added (same setup):
+
+| Method | Rel. RMSE | Max abs error | ns/pixel |
+|---|---|---|---|
+| Mask cone, 64 bins | 0.69% | 0.0165 | 163 |
+| Mask cone, 64 bins, fractional edges | 0.09% | 0.0040 | 220 |
+
+Correlation error under the fences drops from 2.6–2.8% to 0.3–0.4% RMSE, and the
+banding in the error map is gone.

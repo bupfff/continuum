@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use continuum::ConeMask;
+use continuum::{ConeMask, CoverageMask};
 
 use crate::geom::{Cone, Segment, ray_hits};
 use crate::rng::Pcg32;
@@ -51,6 +51,20 @@ pub fn mask_bits(cone: &Cone, occluders: &[Segment]) -> ConeMask {
         }
     }
     m
+}
+
+/// One mask cone with fractional edge bins (continuous visibility).
+pub fn coverage(cone: &Cone, occluders: &[Segment]) -> f32 {
+    let mut m = CoverageMask::EMPTY;
+    for s in occluders {
+        if let Some((a, b)) = cone.project(s) {
+            m.add_interval(a, b);
+            if m.is_full() {
+                break;
+            }
+        }
+    }
+    m.visible_fraction()
 }
 
 /// Multiplies per-occluder transmittance, which assumes every occluder is

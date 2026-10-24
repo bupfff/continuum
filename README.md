@@ -11,7 +11,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 
 ## Layout
 
-- `crates/continuum`: the library (so far the direction mask and the error ledger).
+- `crates/continuum`: the library (so far the binary and continuous direction masks and the error ledger).
 - `experiments/flatland`: 2D experiments that test the core bets.
 - `docs/`: design document and experiment results.
 
@@ -21,6 +21,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 cargo test --release
 cargo run --release -p flatland --bin gate1
 cargo run --release -p flatland --bin ledger
+cargo run --release -p flatland --bin gate5
 ```
 
 Each run prints a results table and writes images to `experiments/flatland/out/`:
@@ -31,3 +32,5 @@ Each run prints a results table and writes images to `experiments/flatland/out/`
   lit result, tiles recomputed that frame (orange), the certified error bound,
   and the actual error. `_stress` versions use a deliberately huge ε so the
   bound and error columns have something to show.
+- `gate5_<visibility>_<charging>.png` (gate 5): the same four columns for the
+  sky scenario at ε = 1%.

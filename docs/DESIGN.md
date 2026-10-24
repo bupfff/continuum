@@ -32,8 +32,10 @@ Every cached lighting result (a probe cone, a shadow query) stores:
 Every scene change (object moves, light dims, sun shifts) computes a conservative
 worst-case effect on each cached result whose dependency region it touches and
 charges it to that result's ledger. Some charges are exact (lighting is linear in
-emitted power); others come from bounds (an occluder of a given size moving a
-given distance can flip at most k bins). When a ledger exceeds ε, scaled by how
+emitted power); others come from bounds. The tightest charges found so far are
+projected: project the mover's old and new positions into the cached cone and
+charge the larger of the coverage gained and lost (gate 5), which is far
+cheaper than recomputing the cone. When a ledger exceeds ε, scaled by how
 much the result contributes to visible pixels, the result is recomputed, largest
 first. Indirect changes propagate through the same rule and die out because
 energy shrinks every bounce.
@@ -57,7 +59,10 @@ baked GI (2019), path verification (2021), temporally adaptive shading reuse
 Every visibility query is a cone carrying a direction mask (64 bins on the CPU;
 see open questions for the GPU layout). Occluders set the bins they cover;
 combining is bitwise OR, which keeps correlated occlusion exact up to bin
-resolution, unlike multiplied transmittance. One primitive serves anti-aliasing
+resolution, unlike multiplied transmittance. The continuous variant
+(`CoverageMask`) keeps a fraction for partially covered bins: 7.7× more
+accurate in gate 1 and continuous in occluder position, which the ledger needs
+to defer small changes (gate 5). One primitive serves anti-aliasing
 (pixel footprint), soft shadows (light size), glossy reflections (roughness)
 and GI (wide cones, radiance-cascade style).
 
@@ -113,7 +118,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 
 | Milestone | Content | Gate |
 |---|---|---|
-| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (preview: 1.1× faster); G5 (new) magnitude deferral pays off for wide GI cones with continuous visibility |
+| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (preview: 1.1× faster); G5 magnitude deferral pays off for wide cones with continuous visibility (**passed on attempt 2: 34% of ε = 0 work**, `docs/results/flatland-gate5.md`); G6 (next) one-bounce GI with charges that propagate through surfaces |
 | M1 3D CPU reference | 3D mask cones over a BVH, reference path tracer, scene import | G1 repeated in 3D with 8×8 bins; agreement with Cycles/Mitsuba |
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | Frame time at 1080p on M4 Air; image-diffed in CI |
 | M3 prefiltered hierarchy | Directional coverage per node, detail to roughness | Zoom and flythrough with no shimmer; flat cost |
@@ -134,17 +139,24 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 ## 8. Risks and open questions
 
 - **Ledger bound tightness** (biggest risk): too-pessimistic charges mean
-  everything recomputes and the edge disappears. Flatland: actual error used only
-  0.2–8% of the certified bound. Sources: one charge per tile applied to all its
-  receivers, bin terms, accumulation over oscillating motion.
+  everything recomputes and the edge disappears. Flatland: geometric bounds used
+  0.2–8% of the certified bound; projected charges about 6% and halved the work.
+  Remaining sources: per-tile charges, accumulation over oscillating motion.
+- **Continuous static cache**: continuous recomputes currently re-project every
+  static occluder; caching static coverage costs 264 bytes per cone on the CPU.
+  Needed for continuous masks to win on wall-clock, not just on work.
+- **Direction-dependent radiance**: charging max(gained, lost) relies on uniform
+  radiance across the cone; real GI needs gained + lost weighted by radiance
+  differences (up to 2× looser). Test in G6.
 - **Mask quantization**: 64 bins quantize penumbrae into 1/64 steps (faint
   banding in gate 1) and make visibility discontinuous, so any mover touching a
   cone costs at least one bin. That floor exceeded realistic ε, which is why the
   ledger never deferred direct shadows. Fix candidate for both: analytic
   coverage for partially covered edge bins (continuous visibility).
 - **Where magnitude deferral pays**: direct shadows of moving objects change
-  visibly every frame, so recomputing them is correct; the gain must come from
-  wide, low-frequency queries (GI) and slow global changes. Unproven until G5.
+  visibly every frame, so recomputing them is correct. Wide cones are where it
+  pays: gate 5 cut work 2.9× beyond dependency regions at ε = 1%. Slow global
+  changes (moving sun) are still untested.
 - **3D projection cost**: projecting a triangle or node into 8×8 bins costs more
   than a 2D interval, so gate 1's speedup will shrink in 3D. Re-measure in M1.
 - **GPU mask layout**: WGSL has no 64-bit integers without native-only features;

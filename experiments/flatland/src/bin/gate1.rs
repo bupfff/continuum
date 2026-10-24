@@ -103,6 +103,9 @@ fn main() -> std::io::Result<()> {
         methods::exact(c, occ, &mut scratch)
     });
     let mask = render("Mask cone, 64 bins", &scene, |c, _| methods::mask(c, occ));
+    let coverage = render("Mask cone, 64 bins, fractional edges", &scene, |c, _| {
+        methods::coverage(c, occ)
+    });
     let fixed64 = render("64 rays, fixed (one per bin)", &scene, |c, _| {
         methods::rays(c, occ, 64, None)
     });
@@ -162,6 +165,7 @@ fn main() -> std::io::Result<()> {
     };
     row(&exact, None);
     row(&mask, None);
+    row(&coverage, None);
     row(&fixed64, None);
     for (a, b) in &jittered_runs {
         row(a, Some(rel_rmse(&a.fluence, &b.fluence)));
@@ -204,7 +208,7 @@ fn main() -> std::io::Result<()> {
     .unwrap();
     writeln!(report, "| Method | Aligned slats: bias | Aligned slats: RMSE | Offset slats: bias | Offset slats: RMSE |").unwrap();
     writeln!(report, "|---|---|---|---|---|").unwrap();
-    for r in [&mask, &transmittance, &layered] {
+    for r in [&mask, &coverage, &transmittance, &layered] {
         let (ab, ar) = region_error(&r.fluence, ref_f, aligned.0, aligned.1);
         let (ob, or) = region_error(&r.fluence, ref_f, offset.0, offset.1);
         writeln!(

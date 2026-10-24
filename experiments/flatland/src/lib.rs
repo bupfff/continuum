@@ -5,6 +5,7 @@ pub mod anim;
 pub mod bounds;
 pub mod geom;
 pub mod img;
+pub mod incremental;
 pub mod methods;
 pub mod rng;
 pub mod scene;
