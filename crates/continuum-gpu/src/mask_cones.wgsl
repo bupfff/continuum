@@ -151,7 +151,7 @@ fn clip_line2(p: Poly2, normal: vec2<f32>, offset: f32) -> Poly2 {
 }
 
 // Adds an edge's signed swept area to the cells it crosses (accumulation rasterizer).
-fn draw_edge(acc: ptr<function, array<f32, 68>>, q0: vec2<f32>, q1: vec2<f32>) {
+fn draw_edge(acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, q0: vec2<f32>, q1: vec2<f32>) {
     if (abs(q0.y - q1.y) <= 1.1920929e-7) { return; }
     var dir = 1.0;
     var p0 = q0;
@@ -162,6 +162,9 @@ fn draw_edge(acc: ptr<function, array<f32, 68>>, q0: vec2<f32>, q1: vec2<f32>) {
     let y_end = min(u32(ceil(p1.y)), GRID);
     for (var y = u32(p0.y); y < y_end; y++) {
         let row = y * GRID;
+        // Every write this row lands in cells row .. row + GRID + 1.
+        (*span).x = min((*span).x, row);
+        (*span).y = max((*span).y, row + GRID + 1u);
         let dy = min(f32(y + 1u), p1.y) - max(f32(y), p0.y);
         // Clamp: stepping along an edge on the grid boundary can drift a hair
         // outside it, and floor(-1e-9) = -1 would credit the row to the wrong cell.
@@ -201,16 +204,29 @@ fn draw_edge(acc: ptr<function, array<f32, 68>>, q0: vec2<f32>, q1: vec2<f32>) {
     }
 }
 
-fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
+fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
     var p: Poly3;
     p.v[0] = v0;
     p.v[1] = v1;
     p.v[2] = v2;
     p.n = 3u;
-    p = clip_plane3(p, c.far_normal, c.far_offset);
-    for (var i = 0u; i < p.n; i++) { p.v[i] = to_local(c, p.v[i]); }
+    // Clip only when needed: with every vertex inside, clipping returns the same
+    // polygon, so skipping it changes nothing.
+    let f0 = c.far_offset - dot(c.far_normal, v0);
+    let f1 = c.far_offset - dot(c.far_normal, v1);
+    let f2 = c.far_offset - dot(c.far_normal, v2);
+    if (f0 < 0.0 || f1 < 0.0 || f2 < 0.0) {
+        p = clip_plane3(p, c.far_normal, c.far_offset);
+    }
+    var all_near_ok = true;
+    for (var i = 0u; i < p.n; i++) {
+        p.v[i] = to_local(c, p.v[i]);
+        if (p.v[i].z < NEAR) { all_near_ok = false; }
+    }
     // Keep z >= NEAR, i.e. dot(-z, x) <= -NEAR.
-    p = clip_plane3(p, vec3<f32>(0.0, 0.0, -1.0), -NEAR);
+    if (!all_near_ok) {
+        p = clip_plane3(p, vec3<f32>(0.0, 0.0, -1.0), -NEAR);
+    }
     if (p.n < 3u) { return false; }
     let su = f32(GRID) / (c.window.z - c.window.x);
     let sv = f32(GRID) / (c.window.w - c.window.y);
@@ -220,10 +236,16 @@ fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, v0: vec3<f32>, v1: vec
         q.v[i] = vec2<f32>((p.v[i].x / p.v[i].z - c.window.x) * su, (p.v[i].y / p.v[i].z - c.window.y) * sv);
     }
     let g = f32(GRID);
-    q = clip_line2(q, vec2<f32>(-1.0, 0.0), 0.0); // x >= 0
-    q = clip_line2(q, vec2<f32>(1.0, 0.0), g);    // x <= g
-    q = clip_line2(q, vec2<f32>(0.0, -1.0), 0.0); // y >= 0
-    q = clip_line2(q, vec2<f32>(0.0, 1.0), g);    // y <= g
+    var inside = true;
+    for (var i = 0u; i < q.n; i++) {
+        if (any(q.v[i] < vec2<f32>(0.0)) || any(q.v[i] > vec2<f32>(g))) { inside = false; }
+    }
+    if (!inside) {
+        q = clip_line2(q, vec2<f32>(-1.0, 0.0), 0.0); // x >= 0
+        q = clip_line2(q, vec2<f32>(1.0, 0.0), g);    // x <= g
+        q = clip_line2(q, vec2<f32>(0.0, -1.0), 0.0); // y >= 0
+        q = clip_line2(q, vec2<f32>(0.0, 1.0), g);    // y <= g
+    }
     if (light.counts.y == 3u) {
         debug[debug_cursor] = f32(q.n);
         for (var i = 0u; i < q.n; i++) {
@@ -236,17 +258,19 @@ fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, v0: vec3<f32>, v1: vec
     for (var i = 0u; i < q.n; i++) {
         let a = clamp(q.v[i], vec2<f32>(0.0), vec2<f32>(g));
         let b = clamp(q.v[(i + 1u) % q.n], vec2<f32>(0.0), vec2<f32>(g));
-        draw_edge(acc, a, b);
+        draw_edge(acc, span, a, b);
     }
     return true;
 }
 
 // Rasterizes one mesh's front-facing triangles into a fresh accumulation buffer
 // and combines the resulting per-bin coverage into `cov` by max.
-fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, i: u32) {
+fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32) {
     let range = meshes[m];
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
+    // Cells written by this mesh's edges; the running sum is zero outside them.
+    var span = vec2<u32>(68u, 0u);
     var touched = false;
     for (var t = range.x; t < range.x + range.y; t++) {
         let v0 = tris[3u * t].xyz;
@@ -254,17 +278,21 @@ fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, i: u32
         let v2 = tris[3u * t + 2u].xyz;
         if (dot(cross(v1 - v0, v2 - v0), c.apex - v0) <= 0.0) { continue; }
         if (!may_touch(c, v0, v1, v2)) { continue; }
-        if (rasterize(c, &acc, v0, v1, v2)) { touched = true; }
+        if (rasterize(c, &acc, &span, v0, v1, v2)) { touched = true; }
     }
     if (light.counts.y == 2u) {
         for (var b = 0u; b < 64u; b++) { debug[i * BINS + b] = acc[b]; }
     }
     if (touched) {
         var running = 0.0;
-        for (var b = 0u; b < BINS; b++) {
+        for (var b = span.x; b < min(span.y, BINS); b++) {
             running += acc[b];
             let covered = abs(running);
-            if (covered > 1e-6) { (*cov)[b] = max((*cov)[b], min(covered, 1.0)); }
+            if (covered > 1e-6) {
+                let before = (*cov)[b];
+                (*cov)[b] = max(before, min(covered, 1.0));
+                if (before < 1.0 && (*cov)[b] >= 1.0) { (*full)++; }
+            }
         }
     }
 }
@@ -296,22 +324,10 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     c.far_normal = forward;
     c.far_offset = dot(forward, apex) + dist * (1.0 - 1e-5);
 
-    var weights: array<f32, 64>;
-    for (var b = 0u; b < BINS; b++) {
-        let col = f32(b % GRID);
-        let row = f32(b / GRID);
-        let g = f32(GRID);
-        let d0 = direction(c, col / g, row / g);
-        let d1 = direction(c, (col + 1.0) / g, row / g);
-        let d2 = direction(c, (col + 1.0) / g, (row + 1.0) / g);
-        let d3 = direction(c, col / g, (row + 1.0) / g);
-        weights[b] = abs(0.5 * (lambert_edge(normal, d0, d1) + lambert_edge(normal, d1, d2)
-            + lambert_edge(normal, d2, d3) + lambert_edge(normal, d3, d0)));
-    }
-
     // Explicit zeroing: don't rely on loop-scoped `var`s being re-initialized.
     var cov: array<f32, 64>;
     for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+    var full = 0u;
     if (light.counts.z == 1u) {
         var stack: array<u32, 32>;
         var sp = 1u;
@@ -322,8 +338,10 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
             if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                    add_mesh_coverage(c, items[k], &cov, i);
+                    add_mesh_coverage(c, items[k], &cov, &full, i);
                 }
+                // Every bin fully covered: nothing further can change the result.
+                if (full == BINS) { break; }
             } else {
                 stack[sp] = node.info.x;
                 stack[sp + 1u] = node.info.x + 1u;
@@ -332,12 +350,24 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
         }
     } else {
         for (var m = 0u; m < light.counts.x; m++) {
-            add_mesh_coverage(c, m, &cov, i);
+            add_mesh_coverage(c, m, &cov, &full, i);
+            if (full == BINS) { break; }
         }
     }
+    // Bin weights (projected solid angle, Lambert) computed only now, as they are
+    // summed, so no per-thread weights array is needed.
     var visible = 0.0;
     for (var b = 0u; b < BINS; b++) {
-        visible += (1.0 - cov[b]) * weights[b];
+        let col = f32(b % GRID);
+        let row = f32(b / GRID);
+        let g = f32(GRID);
+        let d0 = direction(c, col / g, row / g);
+        let d1 = direction(c, (col + 1.0) / g, row / g);
+        let d2 = direction(c, (col + 1.0) / g, (row + 1.0) / g);
+        let d3 = direction(c, col / g, (row + 1.0) / g);
+        let weight = abs(0.5 * (lambert_edge(normal, d0, d1) + lambert_edge(normal, d1, d2)
+            + lambert_edge(normal, d2, d3) + lambert_edge(normal, d3, d0)));
+        visible += (1.0 - cov[b]) * weight;
     }
     if (light.counts.y == 1u) {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }
