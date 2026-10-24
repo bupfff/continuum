@@ -14,7 +14,8 @@ struct Light {
     corner: vec4<f32>,
     edge_u: vec4<f32>,
     edge_v: vec4<f32>,
-    // x: mesh count; y: 1 to write per-bin coverage to `debug`
+    // x: mesh count; y: 1 to write per-bin coverage to `debug`;
+    // z: 1 to traverse the mesh hierarchy instead of testing every mesh
     counts: vec4<u32>,
 };
 
@@ -30,6 +31,17 @@ struct Receiver {
 @group(0) @binding(3) var<storage, read> meshes: array<vec2<u32>>;
 @group(0) @binding(4) var<storage, read_write> result: array<f32>;
 @group(0) @binding(5) var<storage, read_write> debug: array<f32>;
+
+// Mesh-level hierarchy: nodes hold bounds; `info.y > 0` marks a leaf whose meshes
+// are `items[info.x .. info.x + info.y]`; interior nodes' children are at
+// `info.x` and `info.x + 1`.
+struct Node {
+    lo: vec4<f32>,
+    hi: vec4<f32>,
+    info: vec4<u32>,
+};
+@group(0) @binding(9) var<storage, read> nodes: array<Node>;
+@group(0) @binding(10) var<storage, read> items: array<u32>;
 
 // Debug mode 3: clipped polygons are appended to `debug` from this offset.
 var<private> debug_cursor: u32 = 0u;
@@ -83,6 +95,26 @@ fn may_touch(c: Cone, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
     if (p0.y - w.y * p0.z < 0.0 && p1.y - w.y * p1.z < 0.0 && p2.y - w.y * p2.z < 0.0) { return false; }
     if (w.w * p0.z - p0.y < 0.0 && w.w * p1.z - p1.y < 0.0 && w.w * p2.z - p2.y < 0.0) { return false; }
     return true;
+}
+
+fn may_touch_box(c: Cone, lo: vec3<f32>, hi: vec3<f32>) -> bool {
+    var far_out = true;
+    var near_out = true;
+    var out_u0 = true;
+    var out_u1 = true;
+    var out_v0 = true;
+    var out_v1 = true;
+    for (var k = 0u; k < 8u; k++) {
+        let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
+        if (c.far_offset - dot(c.far_normal, corner) >= 0.0) { far_out = false; }
+        let p = to_local(c, corner);
+        if (p.z >= NEAR) { near_out = false; }
+        if (p.x - c.window.x * p.z >= 0.0) { out_u0 = false; }
+        if (c.window.z * p.z - p.x >= 0.0) { out_u1 = false; }
+        if (p.y - c.window.y * p.z >= 0.0) { out_v0 = false; }
+        if (c.window.w * p.z - p.y >= 0.0) { out_v1 = false; }
+    }
+    return !(far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1);
 }
 
 struct Poly3 { v: array<vec3<f32>, 10>, n: u32 };
@@ -209,6 +241,34 @@ fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, v0: vec3<f32>, v1: vec
     return true;
 }
 
+// Rasterizes one mesh's front-facing triangles into a fresh accumulation buffer
+// and combines the resulting per-bin coverage into `cov` by max.
+fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, i: u32) {
+    let range = meshes[m];
+    var acc: array<f32, 68>;
+    for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
+    var touched = false;
+    for (var t = range.x; t < range.x + range.y; t++) {
+        let v0 = tris[3u * t].xyz;
+        let v1 = tris[3u * t + 1u].xyz;
+        let v2 = tris[3u * t + 2u].xyz;
+        if (dot(cross(v1 - v0, v2 - v0), c.apex - v0) <= 0.0) { continue; }
+        if (!may_touch(c, v0, v1, v2)) { continue; }
+        if (rasterize(c, &acc, v0, v1, v2)) { touched = true; }
+    }
+    if (light.counts.y == 2u) {
+        for (var b = 0u; b < 64u; b++) { debug[i * BINS + b] = acc[b]; }
+    }
+    if (touched) {
+        var running = 0.0;
+        for (var b = 0u; b < BINS; b++) {
+            running += acc[b];
+            let covered = abs(running);
+            if (covered > 1e-6) { (*cov)[b] = max((*cov)[b], min(covered, 1.0)); }
+        }
+    }
+}
+
 // Irradiance per unit radiance at `apex` (surface normal `normal`) from the
 // light, through a mask cone. `i` only selects where debug output goes.
 fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
@@ -252,29 +312,27 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     // Explicit zeroing: don't rely on loop-scoped `var`s being re-initialized.
     var cov: array<f32, 64>;
     for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
-    var acc: array<f32, 68>;
-    for (var m = 0u; m < light.counts.x; m++) {
-        let range = meshes[m];
-        for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
-        var touched = false;
-        for (var t = range.x; t < range.x + range.y; t++) {
-            let v0 = tris[3u * t].xyz;
-            let v1 = tris[3u * t + 1u].xyz;
-            let v2 = tris[3u * t + 2u].xyz;
-            if (dot(cross(v1 - v0, v2 - v0), apex - v0) <= 0.0) { continue; }
-            if (!may_touch(c, v0, v1, v2)) { continue; }
-            if (rasterize(c, &acc, v0, v1, v2)) { touched = true; }
-        }
-        if (light.counts.y == 2u) {
-            for (var b = 0u; b < 64u; b++) { debug[i * BINS + b] = acc[b]; }
-        }
-        if (touched) {
-            var running = 0.0;
-            for (var b = 0u; b < BINS; b++) {
-                running += acc[b];
-                let covered = abs(running);
-                if (covered > 1e-6) { cov[b] = max(cov[b], min(covered, 1.0)); }
+    if (light.counts.z == 1u) {
+        var stack: array<u32, 32>;
+        var sp = 1u;
+        stack[0] = 0u;
+        while (sp > 0u) {
+            sp--;
+            let node = nodes[stack[sp]];
+            if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
+            if (node.info.y > 0u) {
+                for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                    add_mesh_coverage(c, items[k], &cov, i);
+                }
+            } else {
+                stack[sp] = node.info.x;
+                stack[sp + 1u] = node.info.x + 1u;
+                sp += 2u;
             }
+        }
+    } else {
+        for (var m = 0u; m < light.counts.x; m++) {
+            add_mesh_coverage(c, m, &cov, i);
         }
     }
     var visible = 0.0;
@@ -325,6 +383,29 @@ fn ray_triangle(o: vec3<f32>, d: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: ve
     return dot(e2, q) * inv;
 }
 
+struct Hit {
+    distance: f32,
+    mesh: u32,
+    normal: vec3<f32>,
+};
+
+fn nearest_in_mesh(eye: vec3<f32>, dir: vec3<f32>, m: u32, best: Hit) -> Hit {
+    var hit = best;
+    let range = meshes[m];
+    for (var t = range.x; t < range.x + range.y; t++) {
+        let v0 = tris[3u * t].xyz;
+        let v1 = tris[3u * t + 1u].xyz;
+        let v2 = tris[3u * t + 2u].xyz;
+        let d = ray_triangle(eye, dir, v0, v1, v2);
+        // Ties (coplanar faces of different meshes) go to the lower mesh index,
+        // so the result does not depend on traversal order.
+        if (d > 0.0 && (d < hit.distance || (d == hit.distance && m < hit.mesh))) {
+            hit = Hit(d, m, normalize(cross(v1 - v0, v2 - v0)));
+        }
+    }
+    return hit;
+}
+
 @compute @workgroup_size(8, 8)
 fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u32(camera.params.x);
@@ -335,23 +416,39 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sy = (1.0 - (f32(gid.y) + 0.5) / camera.params.y * 2.0) * camera.params.z;
     let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
     let eye = camera.eye.xyz;
-    var best = 3.4e38;
-    var hit_mesh = 0xffffffffu;
-    var hit_normal = vec3<f32>(0.0);
-    for (var m = 0u; m < light.counts.x; m++) {
-        let range = meshes[m];
-        for (var t = range.x; t < range.x + range.y; t++) {
-            let v0 = tris[3u * t].xyz;
-            let v1 = tris[3u * t + 1u].xyz;
-            let v2 = tris[3u * t + 2u].xyz;
-            let d = ray_triangle(eye, dir, v0, v1, v2);
-            if (d > 0.0 && d < best) {
-                best = d;
-                hit_mesh = m;
-                hit_normal = normalize(cross(v1 - v0, v2 - v0));
+    var hit = Hit(3.4e38, 0xffffffffu, vec3<f32>(0.0));
+    if (light.counts.z == 1u) {
+        let inv = 1.0 / dir;
+        var stack: array<u32, 32>;
+        var sp = 1u;
+        stack[0] = 0u;
+        while (sp > 0u) {
+            sp--;
+            let node = nodes[stack[sp]];
+            // Slab test against the node's box, closer than the best hit so far.
+            let t0 = (node.lo.xyz - eye) * inv;
+            let t1 = (node.hi.xyz - eye) * inv;
+            let near = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
+            let far = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+            if (far < max(near, 0.0) || near > hit.distance) { continue; }
+            if (node.info.y > 0u) {
+                for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                    hit = nearest_in_mesh(eye, dir, items[k], hit);
+                }
+            } else {
+                stack[sp] = node.info.x;
+                stack[sp + 1u] = node.info.x + 1u;
+                sp += 2u;
             }
         }
+    } else {
+        for (var m = 0u; m < light.counts.x; m++) {
+            hit = nearest_in_mesh(eye, dir, m, hit);
+        }
     }
+    let best = hit.distance;
+    let hit_mesh = hit.mesh;
+    var hit_normal = hit.normal;
     let pixel = gid.y * w + gid.x;
     if (hit_mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
     if (dot(hit_normal, dir) > 0.0) { hit_normal = -hit_normal; }

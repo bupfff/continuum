@@ -41,6 +41,7 @@ fn main() -> std::io::Result<()> {
             &scene.room.meshes,
             &scene.albedo,
             scene.radiance,
+            false,
             5,
         )
     };

@@ -131,6 +131,7 @@ impl MaskConeKernel {
         meshes: &[Vec<Tri>],
         albedo: &[Vec3],
         radiance: f32,
+        hierarchy: bool,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
@@ -153,9 +154,10 @@ impl MaskConeKernel {
             corner: v4(light.corner),
             edge_u: v4(light.edge_u),
             edge_v: v4(light.edge_v),
-            counts: [meshes.len() as u32, 0, 0, 0],
+            counts: [meshes.len() as u32, 0, hierarchy as u32, 0],
         };
         let (tris, ranges) = flatten(meshes);
+        let (nodes, items) = mesh_hierarchy(meshes);
         let albedo4: Vec<[f32; 4]> = albedo.iter().map(|&a| v4(a)).collect();
         let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
             self.device
@@ -188,6 +190,16 @@ impl MaskConeKernel {
         let albedo_buf = init(
             "albedo",
             bytemuck::cast_slice(&albedo4),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let nodes_buf = init(
+            "nodes",
+            bytemuck::cast_slice(&nodes),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let items_buf = init(
+            "items",
+            bytemuck::cast_slice(&items),
             wgpu::BufferUsages::STORAGE,
         );
         let size = (width * height) as u64 * 16;
@@ -241,6 +253,14 @@ impl MaskConeKernel {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: albedo_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: nodes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: items_buf.as_entire_binding(),
                 },
             ],
         });
@@ -369,6 +389,17 @@ impl MaskConeKernel {
             bytemuck::cast_slice(&ranges),
             wgpu::BufferUsages::STORAGE,
         );
+        let (nodes, items) = mesh_hierarchy(meshes);
+        let nodes_buf = init(
+            "nodes",
+            bytemuck::cast_slice(&nodes),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let items_buf = init(
+            "items",
+            bytemuck::cast_slice(&items),
+            wgpu::BufferUsages::STORAGE,
+        );
         let size = (receivers.len() * 4) as u64;
         let result_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("result"),
@@ -416,6 +447,14 @@ impl MaskConeKernel {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: debug_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: nodes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: items_buf.as_entire_binding(),
                 },
             ],
         });
@@ -480,4 +519,78 @@ fn flatten(meshes: &[Vec<Tri>]) -> (Vec<[f32; 4]>, Vec<[u32; 2]>) {
         ranges.push([0, 0]);
     }
     (tris, ranges)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct NodeGpu {
+    lo: [f32; 4],
+    hi: [f32; 4],
+    /// Leaf: `[first item, item count, 0, 0]`; interior: `[left child, 0, 0, 0]`
+    /// with the right child at `left + 1`.
+    info: [u32; 4],
+}
+
+/// A bounding volume hierarchy over meshes (median splits on the longest
+/// centroid axis, at most two meshes per leaf), flattened for the GPU: nodes and
+/// the mesh indices their leaves refer to.
+fn mesh_hierarchy(meshes: &[Vec<Tri>]) -> (Vec<NodeGpu>, Vec<u32>) {
+    let bounds: Vec<(Vec3, Vec3)> = meshes
+        .iter()
+        .map(|m| {
+            m.iter().flatten().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), &p| (lo.min(p), hi.max(p)),
+            )
+        })
+        .collect();
+    let mut items: Vec<u32> = (0..meshes.len() as u32).collect();
+    let mut nodes = vec![NodeGpu::zeroed()];
+    fn split(
+        nodes: &mut Vec<NodeGpu>,
+        node: usize,
+        items: &mut [u32],
+        start: usize,
+        bounds: &[(Vec3, Vec3)],
+    ) {
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let (mut clo, mut chi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for &m in items.iter() {
+            let (a, b) = bounds[m as usize];
+            (lo, hi) = (lo.min(a), hi.max(b));
+            let c = (a + b) * 0.5;
+            (clo, chi) = (clo.min(c), chi.max(c));
+        }
+        nodes[node].lo = [lo.x, lo.y, lo.z, 0.0];
+        nodes[node].hi = [hi.x, hi.y, hi.z, 0.0];
+        if items.len() <= 2 {
+            nodes[node].info = [start as u32, items.len() as u32, 0, 0];
+            return;
+        }
+        let e = chi - clo;
+        let axis = if e.x >= e.y && e.x >= e.z {
+            0
+        } else if e.y >= e.z {
+            1
+        } else {
+            2
+        };
+        let mid = items.len() / 2;
+        let key = |m: &u32| bounds[*m as usize].0[axis] + bounds[*m as usize].1[axis];
+        items.select_nth_unstable_by(mid, |a, b| key(a).total_cmp(&key(b)));
+        let left = nodes.len();
+        nodes.push(NodeGpu::zeroed());
+        nodes.push(NodeGpu::zeroed());
+        nodes[node].info = [left as u32, 0, 0, 0];
+        let (l, r) = items.split_at_mut(mid);
+        split(nodes, left, l, start, bounds);
+        split(nodes, left + 1, r, start + mid, bounds);
+    }
+    if items.is_empty() {
+        items.push(0);
+        nodes[0].info = [0, 0, 0, 0];
+    } else {
+        split(&mut nodes, 0, &mut items, 0, &bounds);
+    }
+    (nodes, items)
 }
