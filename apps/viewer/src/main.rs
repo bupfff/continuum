@@ -207,7 +207,7 @@ struct Gpu {
 
 /// The lit scene with its caches, or the instanced field (per-pixel cones).
 enum Renderer {
-    Live(LiveRenderer),
+    Live(Box<LiveRenderer>),
     Field(InstancedRenderer),
 }
 
@@ -371,7 +371,7 @@ impl App {
             config,
             device,
             queue,
-            renderer: Renderer::Live(renderer),
+            renderer: Renderer::Live(Box::new(renderer)),
         }
     }
 
