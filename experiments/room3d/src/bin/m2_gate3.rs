@@ -62,8 +62,10 @@ fn main() -> std::io::Result<()> {
     }
     let raw = std::fs::read(&reference_path)?;
     let reference: Vec<f32> = raw
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
     let peak = reference.iter().copied().fold(0.0, f32::max);
     let max_diff = pixels
