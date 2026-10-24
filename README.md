@@ -21,6 +21,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 cargo test --release
 cargo run --release -p flatland --bin gate1
 cargo run --release -p flatland --bin ledger
+cargo run --release -p flatland --bin gate4
 cargo run --release -p flatland --bin gate5
 cargo run --release -p flatland --bin gate6
 cargo run --release -p flatland --bin gate6b

@@ -253,3 +253,21 @@ pub fn bounce() -> Scenario {
     s.exposure = 2.0;
     s
 }
+
+/// Worst case for wide cones: the sky scenario with every occluder drifting
+/// every frame, so nothing is static.
+pub fn sky_everything_moves() -> Scenario {
+    let mut s = everything_moves();
+    s.name = "Worst case: everything moves under the sky";
+    s.slug = "sky_worst_case";
+    s.frames = 180;
+    s.lights = Vec::new();
+    s.sky = Some(Sky {
+        sectors: 8,
+        radiance: Box::new(|_| 1.0),
+    });
+    s.phases = vec![("All occluders move", 1..180)];
+    s.key_frames = [30, 90, 150];
+    s.exposure = 0.12;
+    s
+}
