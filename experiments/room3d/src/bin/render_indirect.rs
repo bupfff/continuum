@@ -25,13 +25,15 @@ fn main() -> std::io::Result<()> {
         corner: l.corner,
         edge_u: l.edge_u,
         edge_v: l.edge_v,
+        one_sided: false,
     };
     let camera = Camera {
         eye: scene.eye,
         target: scene.target,
         vertical_fov_degrees: scene.vertical_fov_degrees,
     };
-    let mut lightmap = Lightmap::boxes(&scene.room.meshes, 0.005, |m| m < first).with_probes(0.04);
+    let mut lightmap =
+        Lightmap::from_meshes(&scene.room.meshes, 0.005, |m| m < first).with_probes(0.04);
     kernel.bake(&mut lightmap, light, &scene.room.meshes);
     let renderer = LiveRenderer::new(
         &kernel,

@@ -42,6 +42,7 @@ fn main() -> std::io::Result<()> {
             corner: l.corner,
             edge_u: l.edge_u,
             edge_v: l.edge_v,
+            one_sided: false,
         },
         &scene.room.meshes,
         &scene.albedo,

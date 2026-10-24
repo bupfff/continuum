@@ -16,7 +16,8 @@ struct Light {
     edge_v: vec4<f32>,
     // x: mesh count; y: 1 to write per-bin coverage to `debug`; z: 0 to test
     // every triangle, 1 to traverse the mesh hierarchy, 2 to also traverse each
-    // mesh's triangle hierarchy
+    // mesh's triangle hierarchy; w: 1 if the light is one-sided (it emits only
+    // toward edge_u × edge_v and camera rays see its front)
     counts: vec4<u32>,
 };
 
@@ -340,6 +341,8 @@ fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: 
 // light, through a mask cone. `i` only selects where debug output goes.
 fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     var forward = normalize(cross(light.edge_u.xyz, light.edge_v.xyz));
+    // Behind a one-sided light: no direct light.
+    if (light.counts.w == 1u && dot(forward, apex - light.corner.xyz) <= 0.0) { return 0.0; }
     if (dot(forward, light.corner.xyz - apex) < 0.0) { forward = -forward; }
     let dist = dot(forward, light.corner.xyz - apex);
     if (dist <= 1e-6) { return 0.0; }
@@ -556,6 +559,49 @@ fn primary_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
     return hit;
 }
 
+// Barycentric coordinates of `p` (on the triangle's plane) in triangle `t`.
+fn barycentric(t: u32, p: vec3<f32>) -> vec3<f32> {
+    let v0 = tris[3u * t].xyz;
+    let e1 = tris[3u * t + 1u].xyz - v0;
+    let e2 = tris[3u * t + 2u].xyz - v0;
+    let d = p - v0;
+    let d11 = dot(e1, e1);
+    let d12 = dot(e1, e2);
+    let d22 = dot(e2, e2);
+    let denom = d11 * d22 - d12 * d12;
+    let s = (d22 * dot(d, e1) - d12 * dot(d, e2)) / denom;
+    let u = (d11 * dot(d, e2) - d12 * dot(d, e1)) / denom;
+    return vec3<f32>(1.0 - s - u, s, u);
+}
+
+// Interpolated shading normal at `p` on triangle `t`, on the side `toward` points to.
+fn shading_normal(t: u32, p: vec3<f32>, toward: vec3<f32>) -> vec3<f32> {
+    let b = barycentric(t, p);
+    var n = normalize(normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z);
+    let v0 = tris[3u * t].xyz;
+    let geometric = cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0);
+    // Seen from behind (back face): flip, like the geometric normal.
+    if (dot(geometric, toward) < 0.0) { n = -n; }
+    return n;
+}
+
+// Distance along a camera ray to the front of a one-sided light (or 3.4e38).
+fn light_distance(eye: vec3<f32>, dir: vec3<f32>) -> f32 {
+    if (light.counts.w != 1u) { return 3.4e38; }
+    let u = light.edge_u.xyz;
+    let v = light.edge_v.xyz;
+    let n = cross(u, v);
+    let facing = dot(dir, n);
+    if (facing >= 0.0) { return 3.4e38; }
+    let t = dot(light.corner.xyz - eye, n) / facing;
+    if (t <= 0.0) { return 3.4e38; }
+    let q = eye + dir * t - light.corner.xyz;
+    let s = dot(q, u) / dot(u, u);
+    let r = dot(q, v) / dot(v, v);
+    if (s < 0.0 || s > 1.0 || r < 0.0 || r > 1.0) { return 3.4e38; }
+    return t;
+}
+
 // Direct irradiance at a hit through a mask cone (0 if the surface faces away).
 fn hit_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
     let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
@@ -564,6 +610,8 @@ fn hit_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
     }
     return 0.0;
 }
+
+@group(0) @binding(24) var<storage, read> normals: array<vec4<f32>>;
 
 @compute @workgroup_size(8, 8)
 fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -574,45 +622,52 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eye = camera.eye.xyz;
     let hit = primary_hit(eye, dir);
     let pixel = gid.y * w + gid.x;
+    if (light_distance(eye, dir) < hit.distance) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
-    let point = eye + dir * hit.distance + hit.normal * 1e-4;
-    let irradiance = hit_irradiance(pixel, point, hit.normal);
+    let surface = eye + dir * hit.distance;
+    let point = surface + hit.normal * 1e-4;
+    let irradiance = hit_irradiance(pixel, point, shading_normal(hit.tri, surface, -dir));
     let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
     colors[pixel] = vec4<f32>(c, 1.0);
 }
 
 // --- World-space lighting cache: lightmap texels on static faces. ---
 
-// A rectangular face with an `nu × nv` texel grid starting at texel `info.x`,
-// stored as 8×8 blocks of 64 consecutive texels, `info.w` blocks per row, and
-// a coarser `pu × pv` grid of indirect-light probes (row-major).
+// A chart: a rectangle in a surface's parameter space with an `nu × nv` texel
+// grid starting at texel `info.x`, stored as 8×8 blocks of 64 consecutive
+// texels, `info.w` blocks per row, and a coarser `pu × pv` grid of
+// indirect-light probes (row-major).
 struct Face {
-    origin: vec4<f32>,
-    u: vec4<f32>,
-    v: vec4<f32>,
     // x: first texel, y: nu, z: nv, w: blocks per row
     info: vec4<u32>,
     // x: first probe, y: pu, z: pv (0: no probes), w: mesh
     probes: vec4<u32>,
 };
 
-// Face of each triangle, or 0xffffffff for dynamic geometry (shaded per pixel).
+// Chart of each triangle, or 0xffffffff for dynamic geometry (shaded per pixel).
 @group(0) @binding(11) var<storage, read> tri_face: array<u32>;
 @group(0) @binding(12) var<storage, read> faces: array<Face>;
 @group(0) @binding(13) var<storage, read> texels: array<f32>;
+// Chart coordinates of each triangle's vertices, three per triangle.
+@group(0) @binding(23) var<storage, read> tri_uv: array<vec2<f32>>;
+
+// Chart coordinates of point `p` on triangle `t`.
+fn chart_uv(t: u32, p: vec3<f32>) -> vec2<f32> {
+    let b = barycentric(t, p);
+    return tri_uv[3u * t] * b.x + tri_uv[3u * t + 1u] * b.y + tri_uv[3u * t + 2u] * b.z;
+}
 
 fn texel(face: Face, i: u32, j: u32) -> f32 {
     return texels[face.info.x + ((j / 8u) * face.info.w + i / 8u) * 64u + (j % 8u) * 8u + (i % 8u)];
 }
 
-// Bilinear lookup of cached irradiance at a point on a face (texel centers at
-// half-integer grid coordinates, clamped at the edges).
-fn lookup(face: Face, point: vec3<f32>) -> f32 {
-    let d = point - face.origin.xyz;
+// Bilinear lookup of cached irradiance at chart coordinates `uv` (texel centers
+// at half-integer grid coordinates, clamped at the edges).
+fn lookup(face: Face, uv: vec2<f32>) -> f32 {
     let nu = face.info.y;
     let nv = face.info.z;
-    let s = clamp(dot(d, face.u.xyz) / dot(face.u.xyz, face.u.xyz) * f32(nu) - 0.5, 0.0, f32(nu - 1u));
-    let t = clamp(dot(d, face.v.xyz) / dot(face.v.xyz, face.v.xyz) * f32(nv) - 0.5, 0.0, f32(nv - 1u));
+    let s = clamp(uv.x * f32(nu) - 0.5, 0.0, f32(nu - 1u));
+    let t = clamp(uv.y * f32(nv) - 0.5, 0.0, f32(nv - 1u));
     let i0 = u32(s);
     let j0 = u32(t);
     let i1 = min(i0 + 1u, nu - 1u);
@@ -633,14 +688,17 @@ fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eye = camera.eye.xyz;
     let hit = primary_hit(eye, dir);
     let pixel = gid.y * w + gid.x;
+    if (light_distance(eye, dir) < hit.distance) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
-    let point = eye + dir * hit.distance + hit.normal * 1e-4;
+    let surface = eye + dir * hit.distance;
     let f = tri_face[hit.tri];
     var irradiance: vec3<f32>;
     if (f == 0xffffffffu) {
-        irradiance = vec3<f32>(hit_irradiance(pixel, point, hit.normal));
+        let point = surface + hit.normal * 1e-4;
+        irradiance = vec3<f32>(hit_irradiance(pixel, point, shading_normal(hit.tri, surface, -dir)));
     } else {
-        irradiance = lookup(faces[f], point) + indirect_lookup(faces[f], point);
+        let uv = chart_uv(hit.tri, surface);
+        irradiance = lookup(faces[f], uv) + indirect_lookup(faces[f], uv);
     }
     let c = albedo[hit.mesh].xyz * irradiance * (camera.params.w / 3.14159265);
     colors[pixel] = vec4<f32>(c, 1.0);
@@ -811,7 +869,7 @@ fn bin_radiance(origin: vec3<f32>, dir: vec3<f32>, g: vec2<u32>) -> vec4<f32> {
     if (g.x == NO_HIT || g.x == BLACK) { return vec4<f32>(0.0); }
     if ((g.x & BACK) != 0u) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
     let face = faces[tri_face[g.x]];
-    let e = lookup(face, origin + dir * bitcast<f32>(g.y));
+    let e = lookup(face, chart_uv(g.x, origin + dir * bitcast<f32>(g.y)));
     return vec4<f32>(albedo[face.probes.w].xyz * (e / 3.14159265), 0.0);
 }
 
@@ -868,14 +926,14 @@ fn probe_at(face: Face, i: u32, j: u32) -> vec4<f32> {
     return probe_out[face.probes.x + j * face.probes.y + i];
 }
 
-// Bilinear lookup of probe irradiance on a face, skipping invalid probes.
-fn indirect_lookup(face: Face, point: vec3<f32>) -> vec3<f32> {
+// Bilinear lookup of probe irradiance at chart coordinates `uv`, skipping
+// invalid probes.
+fn indirect_lookup(face: Face, uv: vec2<f32>) -> vec3<f32> {
     let pu = face.probes.y;
     let pv = face.probes.z;
     if (pu == 0u) { return vec3<f32>(0.0); }
-    let d = point - face.origin.xyz;
-    let s = clamp(dot(d, face.u.xyz) / dot(face.u.xyz, face.u.xyz) * f32(pu) - 0.5, 0.0, f32(pu - 1u));
-    let t = clamp(dot(d, face.v.xyz) / dot(face.v.xyz, face.v.xyz) * f32(pv) - 0.5, 0.0, f32(pv - 1u));
+    let s = clamp(uv.x * f32(pu) - 0.5, 0.0, f32(pu - 1u));
+    let t = clamp(uv.y * f32(pv) - 0.5, 0.0, f32(pv - 1u));
     let i0 = u32(s);
     let j0 = u32(t);
     let i1 = min(i0 + 1u, pu - 1u);

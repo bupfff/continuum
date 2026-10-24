@@ -89,12 +89,22 @@ impl Surface {
     /// smooth.
     pub fn parametric(nu: usize, nv: usize, f: impl Fn(f32, f32) -> Vec3) -> Surface {
         let p = |i: usize, j: usize| f(i as f32 / nu as f32, j as f32 / nv as f32);
-        let grid: Vec<Vec<Vec3>> = (0..=nu).map(|i| (0..=nv).map(|j| p(i, j)).collect()).collect();
+        let grid: Vec<Vec<Vec3>> = (0..=nu)
+            .map(|i| (0..=nv).map(|j| p(i, j)).collect())
+            .collect();
         let along_u = (0..=nv)
-            .map(|j| (0..nu).map(|i| (grid[i + 1][j] - grid[i][j]).length()).sum::<f32>())
+            .map(|j| {
+                (0..nu)
+                    .map(|i| (grid[i + 1][j] - grid[i][j]).length())
+                    .sum::<f32>()
+            })
             .fold(0.0, f32::max);
         let along_v = (0..=nu)
-            .map(|i| (0..nv).map(|j| (grid[i][j + 1] - grid[i][j]).length()).sum::<f32>())
+            .map(|i| {
+                (0..nv)
+                    .map(|j| (grid[i][j + 1] - grid[i][j]).length())
+                    .sum::<f32>()
+            })
             .fold(0.0, f32::max);
         let mut s = Surface {
             charts: vec![Vec2::new(along_u, along_v)],

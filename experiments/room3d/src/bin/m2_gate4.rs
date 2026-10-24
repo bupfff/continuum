@@ -39,6 +39,7 @@ fn main() -> std::io::Result<()> {
         corner: l.corner,
         edge_u: l.edge_u,
         edge_v: l.edge_v,
+        one_sided: false,
     };
     let camera = Camera {
         eye: scene.eye,
@@ -47,7 +48,7 @@ fn main() -> std::io::Result<()> {
     };
     let (w, h) = (1920u32, 1080u32);
 
-    let mut lightmap = Lightmap::boxes(&scene.room.meshes, TEXEL, |_| true);
+    let mut lightmap = Lightmap::from_meshes(&scene.room.meshes, TEXEL, |_| true);
     let bake = kernel.bake(&mut lightmap, light, &scene.room.meshes);
     let (cached, t_cached) = kernel.render_cached(
         camera,

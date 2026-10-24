@@ -49,6 +49,7 @@ fn main() -> std::io::Result<()> {
         corner: room.light.corner,
         edge_u: room.light.edge_u,
         edge_v: room.light.edge_v,
+        one_sided: false,
     };
     let (gpu, gpu_time) = kernel.irradiance(&receivers, light, &room.meshes, 5);
 

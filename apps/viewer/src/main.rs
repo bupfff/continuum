@@ -142,11 +142,12 @@ impl App {
             corner: l.corner,
             edge_u: l.edge_u,
             edge_v: l.edge_v,
+            one_sided: false,
         };
         let kernel =
             MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
-        let mut lightmap =
-            Lightmap::boxes(&scene.room.meshes, TEXEL, |m| m < first_mover).with_probes(PROBES);
+        let mut lightmap = Lightmap::from_meshes(&scene.room.meshes, TEXEL, |m| m < first_mover)
+            .with_probes(PROBES);
         let bake = kernel.bake(&mut lightmap, light, &scene.room.meshes);
         println!(
             "{}: baked {} texels in {:.1} ms; rendering at {}×{}.",
