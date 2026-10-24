@@ -8,7 +8,8 @@
 use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
-use continuum::glam::Vec3;
+use continuum::glam::{DVec3, Mat3, Vec3};
+use continuum::mesh::Surface;
 use wgpu::util::DeviceExt;
 
 pub use wgpu;
@@ -68,7 +69,7 @@ pub use hierarchy::Hierarchy;
 pub use lightmap::{BLOCK, BLOCK_PLANES, Lightmap, hemicube_weights};
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 
-use hierarchy::{flatten, mesh_hierarchy};
+use hierarchy::{Placement, flatten, flatten_instanced, mesh_hierarchy, object_hierarchy};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -126,7 +127,7 @@ impl RectLight {
 
 /// Bindings the `render` entry point uses (render_frame filters the scene's
 /// buffers to these when a lightmap provides more).
-const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29];
+const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30];
 
 impl MaskConeKernel {
     /// `None` if no GPU adapter is available.
@@ -317,6 +318,94 @@ impl MaskConeKernel {
         self.render_frame(&self.cached_pipeline, &frame, Some(lightmap), runs)
     }
 
+    /// Per-pixel mask cones over an instanced scene: shared geometry placed many
+    /// times. Instance positions (f64) are uploaded relative to `origin`; the
+    /// camera and light are given relative to `origin` too. Returns linear RGB,
+    /// the fastest of `runs` executions, and the scene's GPU memory in bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_instanced(
+        &self,
+        camera: Camera,
+        width: u32,
+        height: u32,
+        light: RectLight,
+        scene: &InstancedScene,
+        origin: DVec3,
+        radiance: f32,
+        runs: usize,
+    ) -> (Vec<[f32; 3]>, Duration, u64) {
+        let geometries: Vec<Vec<Tri>> = scene
+            .geometries
+            .iter()
+            .map(|g| g.triangles.clone())
+            .collect();
+        let placements: Vec<Placement> = scene
+            .instances
+            .iter()
+            .map(|i| Placement {
+                geometry: i.geometry,
+                rotation: i.rotation,
+                scale: i.scale,
+                translation: (i.position - origin).as_vec3(),
+            })
+            .collect();
+        let (flat, xforms, bounds) = flatten_instanced(&geometries, &placements);
+        let (nodes, items) = object_hierarchy(&bounds, |_| true);
+        let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+        let normals: Vec<[f32; 4]> = scene
+            .geometries
+            .iter()
+            .flat_map(|g| g.normals.iter().flatten().map(|&n| v4(n)))
+            .chain(std::iter::once([0.0; 4]))
+            .collect();
+        let albedo: Vec<[f32; 4]> = scene.instances.iter().map(|i| v4(i.albedo)).collect();
+        let uniform = light.uniform(
+            scene.instances.len(),
+            0,
+            Hierarchy::Triangles,
+            self.prefilter.get(),
+        );
+        let storage = |label: &str, contents: &[u8]| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
+        };
+        let buffers = vec![
+            (
+                0,
+                uniform_buffer(&self.device, "light", bytemuck::bytes_of(&uniform)),
+            ),
+            (2, storage("tris", bytemuck::cast_slice(&flat.tris))),
+            (3, storage("objects", bytemuck::cast_slice(&flat.ranges))),
+            (5, storage("debug", &[0; 256])),
+            (8, storage("albedo", bytemuck::cast_slice(&albedo))),
+            (9, storage("object nodes", bytemuck::cast_slice(&nodes))),
+            (10, storage("object items", bytemuck::cast_slice(&items))),
+            (24, storage("normals", bytemuck::cast_slice(&normals))),
+            (
+                25,
+                storage("triangle nodes", bytemuck::cast_slice(&flat.blas)),
+            ),
+            (
+                26,
+                storage("triangle items", bytemuck::cast_slice(&flat.blas_items)),
+            ),
+            (
+                29,
+                storage("node coverage", bytemuck::cast_slice(&flat.blas_cov)),
+            ),
+            (30, storage("transforms", bytemuck::cast_slice(&xforms))),
+        ];
+        let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
+        let cam = camera_uniform(camera, width, height, radiance);
+        let (pixels, time) =
+            self.render_buffers(&self.render_pipeline, cam, width, height, buffers, runs);
+        (pixels, time, bytes)
+    }
+
     /// Bakes a lightmap: one mask cone per texel (through the hierarchy).
     /// Returns the bake time.
     pub fn bake(&self, lightmap: &mut Lightmap, light: RectLight, meshes: &[Vec<Tri>]) -> Duration {
@@ -332,24 +421,23 @@ impl MaskConeKernel {
         lightmap: Option<&Lightmap>,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
-        let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let (camera, width, height) = (frame.camera, frame.width, frame.height);
-        let forward = (camera.target - camera.eye).normalize();
-        let right = forward.cross(Vec3::Z).normalize();
-        let up = right.cross(forward);
-        let cam = CameraUniform {
-            eye: v4(camera.eye),
-            forward: v4(forward),
-            right: v4(right),
-            up: v4(up),
-            params: [
-                width as f32,
-                height as f32,
-                (camera.vertical_fov_degrees.to_radians() * 0.5).tan(),
-                frame.radiance,
-            ],
-        };
-        let mut buffers = self.scene_buffers(frame, lightmap);
+        let (width, height) = (frame.width, frame.height);
+        let cam = camera_uniform(frame.camera, width, height, frame.radiance);
+        let buffers = self.scene_buffers(frame, lightmap);
+        self.render_buffers(pipeline, cam, width, height, buffers, runs)
+    }
+
+    /// Runs a render pipeline over prepared scene buffers; returns linear RGB
+    /// and the fastest of `runs` executions.
+    fn render_buffers(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        cam: CameraUniform,
+        width: u32,
+        height: u32,
+        mut buffers: Vec<(u32, wgpu::Buffer)>,
+        runs: usize,
+    ) -> (Vec<[f32; 3]>, Duration) {
         buffers.push((
             6,
             uniform_buffer(&self.device, "camera", bytemuck::bytes_of(&cam)),
@@ -469,6 +557,8 @@ impl MaskConeKernel {
                 29,
                 storage("node coverage", bytemuck::cast_slice(&flat.blas_cov)),
             ),
+            // No transforms: every object's triangles are in world space.
+            (30, storage("transforms", &[0; 64])),
             (5, storage("debug", &[0; 256])),
             (8, storage("albedo", bytemuck::cast_slice(&albedo4))),
             (9, storage("nodes", bytemuck::cast_slice(&nodes))),
@@ -634,6 +724,7 @@ impl MaskConeKernel {
             bytemuck::cast_slice(&flat.blas_cov),
             wgpu::BufferUsages::STORAGE,
         );
+        let xforms_buf = init("transforms", &[0; 64], wgpu::BufferUsages::STORAGE);
         let (nodes, items) = mesh_hierarchy(meshes);
         let nodes_buf = init(
             "nodes",
@@ -713,6 +804,10 @@ impl MaskConeKernel {
                     binding: 29,
                     resource: blas_cov_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 30,
+                    resource: xforms_buf.as_entire_binding(),
+                },
             ],
         });
         let groups = receivers.len().div_ceil(64) as u32;
@@ -756,6 +851,46 @@ impl MaskConeKernel {
             best,
         )
     }
+}
+
+fn camera_uniform(camera: Camera, width: u32, height: u32, radiance: f32) -> CameraUniform {
+    let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+    let forward = (camera.target - camera.eye).normalize();
+    let right = forward.cross(Vec3::Z).normalize();
+    let up = right.cross(forward);
+    CameraUniform {
+        eye: v4(camera.eye),
+        forward: v4(forward),
+        right: v4(right),
+        up: v4(up),
+        params: [
+            width as f32,
+            height as f32,
+            (camera.vertical_fov_degrees.to_radians() * 0.5).tan(),
+            radiance,
+        ],
+    }
+}
+
+/// Shared geometry placed many times (instancing), in a world that may be far
+/// larger than f32 positions can resolve: positions are f64 and are uploaded
+/// relative to a render origin.
+pub struct InstancedScene {
+    /// Unique geometries, each with per-vertex shading normals.
+    pub geometries: Vec<Surface>,
+    pub instances: Vec<Instance>,
+}
+
+/// One placement of a geometry: `world = scale · rotation · p + position`.
+#[derive(Clone, Copy, Debug)]
+pub struct Instance {
+    pub geometry: usize,
+    /// Orthonormal.
+    pub rotation: Mat3,
+    pub scale: f32,
+    /// World position (f64).
+    pub position: DVec3,
+    pub albedo: Vec3,
 }
 
 fn uniform_buffer(device: &wgpu::Device, label: &str, contents: &[u8]) -> wgpu::Buffer {

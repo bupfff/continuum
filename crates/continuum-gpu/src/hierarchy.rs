@@ -2,7 +2,7 @@
 //! mesh's triangles.
 
 use bytemuck::{Pod, Zeroable};
-use continuum::glam::Vec3;
+use continuum::glam::{Mat3, Vec3};
 
 use crate::Tri;
 
@@ -11,7 +11,8 @@ use crate::Tri;
 pub(crate) struct Flat {
     /// Triangles as `vec4` vertices, three per triangle.
     pub tris: Vec<[f32; 4]>,
-    /// Per mesh: `[first triangle, count, triangle hierarchy root (or NONE), 0]`.
+    /// Per object: `[first triangle, count, triangle hierarchy root (or NONE),
+    /// transform (or NONE: the triangles are in world space)]`.
     pub ranges: Vec<[u32; 4]>,
     /// Every mesh's triangle hierarchy: its root first, then its subtree.
     pub blas: Vec<NodeGpu>,
@@ -45,7 +46,7 @@ pub(crate) fn flatten(meshes: &[Vec<Tri>]) -> Flat {
             flat.blas_cov.extend(cov);
             root
         };
-        flat.ranges.push([first, mesh.len() as u32, root, 0]);
+        flat.ranges.push([first, mesh.len() as u32, root, NONE]);
         for t in mesh {
             flat.tris.extend(t.iter().map(|v| [v.x, v.y, v.z, 0.0]));
         }
@@ -54,7 +55,7 @@ pub(crate) fn flatten(meshes: &[Vec<Tri>]) -> Flat {
         flat.tris.extend([[0.0; 4]; 3]);
     }
     if flat.ranges.is_empty() {
-        flat.ranges.push([0, 0, NONE, 0]);
+        flat.ranges.push([0, 0, NONE, NONE]);
     }
     if flat.blas.is_empty() {
         flat.blas.push(NodeGpu::zeroed());
@@ -144,7 +145,16 @@ pub(crate) fn mesh_hierarchy_of(
     keep: impl Fn(usize) -> bool,
 ) -> (Vec<NodeGpu>, Vec<u32>) {
     let bounds: Vec<(Vec3, Vec3)> = meshes.iter().map(|m| padded(mesh_bounds(m))).collect();
-    let mut items: Vec<u32> = (0..meshes.len() as u32)
+    object_hierarchy(&bounds, keep)
+}
+
+/// A hierarchy over objects with the given (padded) world bounds, at most two
+/// per leaf, over the objects `keep` selects (indices stay global).
+pub(crate) fn object_hierarchy(
+    bounds: &[(Vec3, Vec3)],
+    keep: impl Fn(usize) -> bool,
+) -> (Vec<NodeGpu>, Vec<u32>) {
+    let mut items: Vec<u32> = (0..bounds.len() as u32)
         .filter(|&m| keep(m as usize))
         .collect();
     let mut nodes = vec![NodeGpu::zeroed()];
@@ -155,9 +165,67 @@ pub(crate) fn mesh_hierarchy_of(
         items.push(0);
         nodes[0].info = [0, 1, 0, 0];
     } else {
-        split(&mut nodes, 0, &mut items, 0, &bounds, 2, 0, 0);
+        split(&mut nodes, 0, &mut items, 0, bounds, 2, 0, 0);
     }
     (nodes, items)
+}
+
+/// A copy of a geometry placed in the world: `world = scale · rotation · p +
+/// translation`, with `rotation` orthonormal and `translation` relative to the
+/// render origin.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Placement {
+    pub geometry: usize,
+    pub rotation: Mat3,
+    pub scale: f32,
+    pub translation: Vec3,
+}
+
+/// Objects placing shared geometry, flattened: each geometry's triangles and
+/// hierarchy once, and per object a range pointing at them with a transform
+/// (`[row 0, row 1, row 2]` of the rotation with the translation in `w`, then
+/// `[scale, 1 / scale, 0, 0]`). Also returns each object's padded world bounds.
+pub(crate) fn flatten_instanced(
+    geometries: &[Vec<Tri>],
+    objects: &[Placement],
+) -> (Flat, Vec<[f32; 4]>, Vec<(Vec3, Vec3)>) {
+    let mut flat = flatten(geometries);
+    let ranges = std::mem::take(&mut flat.ranges);
+    let local: Vec<(Vec3, Vec3)> = geometries.iter().map(|g| mesh_bounds(g)).collect();
+    let mut transforms = Vec::with_capacity(4 * objects.len().max(1));
+    let mut bounds = Vec::with_capacity(objects.len());
+    for (k, o) in objects.iter().enumerate() {
+        let [first, count, root, _] = ranges[o.geometry];
+        flat.ranges.push([first, count, root, k as u32]);
+        let r = o.rotation.transpose();
+        for (row, t) in [
+            (r.x_axis, o.translation.x),
+            (r.y_axis, o.translation.y),
+            (r.z_axis, o.translation.z),
+        ] {
+            transforms.push([row.x, row.y, row.z, t]);
+        }
+        transforms.push([o.scale, 1.0 / o.scale, 0.0, 0.0]);
+        let (lo, hi) = local[o.geometry];
+        let (mut wlo, mut whi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for c in 0..8 {
+            let p = Vec3::new(
+                if c & 1 == 0 { lo.x } else { hi.x },
+                if c & 2 == 0 { lo.y } else { hi.y },
+                if c & 4 == 0 { lo.z } else { hi.z },
+            );
+            let w = o.rotation * p * o.scale + o.translation;
+            (wlo, whi) = (wlo.min(w), whi.max(w));
+        }
+        bounds.push(padded((wlo, whi)));
+    }
+    if flat.ranges.is_empty() {
+        flat.ranges.push([0, 0, NONE, NONE]);
+    }
+    if transforms.is_empty() {
+        transforms.extend([[0.0; 4]; 4]);
+    }
+    (flat, transforms, bounds)
 }
 
 /// One mesh's triangle hierarchy (at most [`LEAF_TRIANGLES`] per leaf): nodes

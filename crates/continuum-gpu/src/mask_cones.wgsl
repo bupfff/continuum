@@ -31,9 +31,41 @@ struct Receiver {
 @group(0) @binding(0) var<uniform> light: Light;
 @group(0) @binding(1) var<storage, read> receivers: array<Receiver>;
 @group(0) @binding(2) var<storage, read> tris: array<vec4<f32>>;
-// x: first triangle, y: triangle count, z: root of the mesh's triangle
-// hierarchy in `blas` (NONE for an empty mesh)
+// Per object: x: first triangle, y: triangle count, z: root of the triangle
+// hierarchy in `blas` (NONE for an empty mesh), w: transform in `xforms` (NONE:
+// the triangles are already in world space). Objects with transforms share
+// geometry (instancing).
 @group(0) @binding(3) var<storage, read> meshes: array<vec4<u32>>;
+// Per transform: rows 0-2 of the rotation with the translation in w, then
+// (scale, 1 / scale, 0, 0): world = scale · rotation · p + translation, with
+// positions relative to the render origin.
+@group(0) @binding(30) var<storage, read> xforms: array<vec4<f32>>;
+
+fn rotate_to_object(x: u32, d: vec3<f32>) -> vec3<f32> {
+    return xforms[4u * x].xyz * d.x + xforms[4u * x + 1u].xyz * d.y + xforms[4u * x + 2u].xyz * d.z;
+}
+
+fn rotate_to_world(x: u32, d: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(xforms[4u * x].xyz, d), dot(xforms[4u * x + 1u].xyz, d), dot(xforms[4u * x + 2u].xyz, d));
+}
+
+fn translation(x: u32) -> vec3<f32> {
+    return vec3<f32>(xforms[4u * x].w, xforms[4u * x + 1u].w, xforms[4u * x + 2u].w);
+}
+
+// A world point in the space of object `m` (unchanged without a transform).
+fn point_to_object(m: u32, p: vec3<f32>) -> vec3<f32> {
+    let x = meshes[m].w;
+    if (x == NONE) { return p; }
+    return rotate_to_object(x, p - translation(x)) * xforms[4u * x + 3u].y;
+}
+
+// A world direction or normal in the space of object `m`, as a unit vector.
+fn normal_to_world(m: u32, n: vec3<f32>) -> vec3<f32> {
+    let x = meshes[m].w;
+    if (x == NONE) { return n; }
+    return rotate_to_world(x, n);
+}
 @group(0) @binding(4) var<storage, read_write> result: array<f32>;
 @group(0) @binding(5) var<storage, read_write> debug: array<f32>;
 
@@ -390,7 +422,14 @@ fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
     let v0 = tris[3u * t].xyz;
     let v1 = tris[3u * t + 1u].xyz;
     let v2 = tris[3u * t + 2u].xyz;
-    if (dot(cross(v1 - v0, v2 - v0), c.apex - v0) <= 0.0) { return false; }
+    let n = cross(v1 - v0, v2 - v0);
+    if (dot(n, c.apex - v0) <= 0.0) { return false; }
+    // A triangle facing the apex can only block directions going into it. If
+    // every corner direction of the window points away from its plane, it
+    // cannot touch the cone. (This also keeps a receiver's own huge supporting
+    // triangle, nearly coplanar with the apex, out of f32 clipping.)
+    if (dot(n, direction(c, 0.0, 0.0)) >= 0.0 && dot(n, direction(c, 1.0, 0.0)) >= 0.0
+        && dot(n, direction(c, 0.0, 1.0)) >= 0.0 && dot(n, direction(c, 1.0, 1.0)) >= 0.0) { return false; }
     if (!may_touch(c, v0, v1, v2)) { return false; }
     return rasterize(c, acc, span, v0, v1, v2);
 }
@@ -398,8 +437,25 @@ fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
 // Rasterizes one mesh's front-facing triangles into a fresh accumulation buffer
 // and combines the resulting per-bin coverage into `cov` by max. Triangle
 // hierarchy traversal uses `stack` from `base` up.
-fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32,
+// The cone in the space of object `m`. Rotation and uniform scale preserve the
+// cone's shape, so its window and bins are unchanged.
+fn cone_to_object(c: Cone, m: u32) -> Cone {
+    let x = meshes[m].w;
+    if (x == NONE) { return c; }
+    var o: Cone;
+    o.apex = point_to_object(m, c.apex);
+    o.right = rotate_to_object(x, c.right);
+    o.up = rotate_to_object(x, c.up);
+    o.forward = rotate_to_object(x, c.forward);
+    o.window = c.window;
+    o.far_normal = rotate_to_object(x, c.far_normal);
+    o.far_offset = (c.far_offset - dot(c.far_normal, translation(x))) * xforms[4u * x + 3u].y;
+    return o;
+}
+
+fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32,
                      stack: ptr<function, array<u32, STACK>>, base: u32) {
+    let c = cone_to_object(world_cone, m);
     let range = meshes[m];
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
@@ -608,10 +664,18 @@ struct Hit {
     normal: vec3<f32>,
 };
 
+// Camera rays see front faces only (meshes are closed, and the showcase's room
+// shell faces inward). Without this, a ray grazing a silhouette can hit the
+// back of the adjacent face within the edge tolerance, which the lighting
+// cache, whose texels lie on front faces, shades as unlit. Probe rays keep back
+// faces: they flag them to detect probes inside geometry.
+var<private> cull_back: bool = false;
+
 fn hit_triangle(eye: vec3<f32>, dir: vec3<f32>, m: u32, t: u32, best: Hit) -> Hit {
     let v0 = tris[3u * t].xyz;
     let v1 = tris[3u * t + 1u].xyz;
     let v2 = tris[3u * t + 2u].xyz;
+    if (cull_back && dot(cross(v1 - v0, v2 - v0), dir) > 0.0) { return best; }
     let d = ray_triangle(eye, dir, v0, v1, v2);
     // Ties (coplanar faces, shared edges) go to the lower mesh, then the lower
     // triangle, so the result does not depend on traversal order.
@@ -633,10 +697,17 @@ fn ray_box(eye: vec3<f32>, inv: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, limit: 
 
 // The nearest hit in mesh `m`, if nearer than `best`. Triangle hierarchy
 // traversal uses `stack` from `base` up.
-fn nearest_in_mesh(eye: vec3<f32>, dir: vec3<f32>, m: u32, best: Hit,
+fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit,
                    stack: ptr<function, array<u32, STACK>>, base: u32) -> Hit {
     var hit = best;
     let range = meshes[m];
+    // In the object's space with the same ray parameter: distances stay world distances.
+    var eye = world_eye;
+    var dir = world_dir;
+    if (range.w != NONE) {
+        eye = point_to_object(m, world_eye);
+        dir = rotate_to_object(range.w, world_dir) * xforms[4u * range.w + 3u].y;
+    }
     if (light.counts.z == 2u) {
         if (range.z == NONE) { return hit; }
         let inv = 1.0 / dir;
@@ -660,6 +731,9 @@ fn nearest_in_mesh(eye: vec3<f32>, dir: vec3<f32>, m: u32, best: Hit,
         for (var t = range.x; t < range.x + range.y; t++) {
             hit = hit_triangle(eye, dir, m, t, hit);
         }
+    }
+    if (range.w != NONE && hit.mesh == m && best.mesh != m) {
+        hit.normal = normalize(rotate_to_world(range.w, hit.normal));
     }
     return hit;
 }
@@ -703,8 +777,10 @@ fn primary_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
     return hit;
 }
 
-// Barycentric coordinates of `p` (on the triangle's plane) in triangle `t`.
-fn barycentric(t: u32, p: vec3<f32>) -> vec3<f32> {
+// Barycentric coordinates of world point `p` (on the triangle's plane) in
+// triangle `t` of object `m`.
+fn barycentric(m: u32, t: u32, world_p: vec3<f32>) -> vec3<f32> {
+    let p = point_to_object(m, world_p);
     let v0 = tris[3u * t].xyz;
     let e1 = tris[3u * t + 1u].xyz - v0;
     let e2 = tris[3u * t + 2u].xyz - v0;
@@ -718,15 +794,22 @@ fn barycentric(t: u32, p: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(1.0 - s - u, s, u);
 }
 
-// Interpolated shading normal at `p` on triangle `t`, on the side `toward` points to.
-fn shading_normal(t: u32, p: vec3<f32>, toward: vec3<f32>) -> vec3<f32> {
-    let b = barycentric(t, p);
-    var n = normalize(normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z);
+// Interpolated shading normal (world space) at world point `p` on triangle `t`
+// of object `m`, on the side `toward` points to.
+fn shading_normal(m: u32, t: u32, p: vec3<f32>, toward: vec3<f32>) -> vec3<f32> {
+    let b = barycentric(m, t, p);
+    var n = normalize(normal_to_world(m, normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z));
     let v0 = tris[3u * t].xyz;
-    let geometric = cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0);
+    let geometric = normal_to_world(m, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
     // Seen from behind (back face): flip, like the geometric normal.
     if (dot(geometric, toward) < 0.0) { n = -n; }
     return n;
+}
+
+// How far to lift a point off a surface hit at `distance` from the ray's origin:
+// 0.1 mm, or more far away, where f32 positions are coarser.
+fn surface_offset(distance: f32) -> f32 {
+    return max(1e-4, 2e-6 * distance);
 }
 
 // Distance along a camera ray to the front of a one-sided light (or 3.4e38).
@@ -764,13 +847,14 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= w || gid.y >= h) { return; }
     let dir = camera_dir(gid);
     let eye = camera.eye.xyz;
+    cull_back = true;
     let hit = primary_hit(eye, dir);
     let pixel = gid.y * w + gid.x;
     if (light_distance(eye, dir) < hit.distance) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
     let surface = eye + dir * hit.distance;
-    let point = surface + hit.normal * 1e-4;
-    let irradiance = hit_irradiance(pixel, point, shading_normal(hit.tri, surface, -dir));
+    let point = surface + hit.normal * surface_offset(hit.distance);
+    let irradiance = hit_irradiance(pixel, point, shading_normal(hit.mesh, hit.tri, surface, -dir));
     let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
     colors[pixel] = vec4<f32>(c, 1.0);
 }
@@ -798,8 +882,8 @@ const DYNAMIC: u32 = 0x80000000u;
 @group(0) @binding(23) var<storage, read> tri_uv: array<vec2<f32>>;
 
 // Chart coordinates of point `p` on triangle `t`.
-fn chart_uv(t: u32, p: vec3<f32>) -> vec2<f32> {
-    let b = barycentric(t, p);
+fn chart_uv(m: u32, t: u32, p: vec3<f32>) -> vec2<f32> {
+    let b = barycentric(m, t, p);
     return tri_uv[3u * t] * b.x + tri_uv[3u * t + 1u] * b.y + tri_uv[3u * t + 2u] * b.z;
 }
 
@@ -832,17 +916,18 @@ fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= w || gid.y >= h) { return; }
     let dir = camera_dir(gid);
     let eye = camera.eye.xyz;
+    cull_back = true;
     let hit = primary_hit(eye, dir);
     let pixel = gid.y * w + gid.x;
     if (light_distance(eye, dir) < hit.distance) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
     let surface = eye + dir * hit.distance;
     let f = tri_face[hit.tri];
-    let uv = chart_uv(hit.tri, surface);
+    let uv = chart_uv(hit.mesh, hit.tri, surface);
     var irradiance: vec3<f32>;
     if ((f & DYNAMIC) != 0u) {
-        let point = surface + hit.normal * 1e-4;
-        irradiance = vec3<f32>(hit_irradiance(pixel, point, shading_normal(hit.tri, surface, -dir)))
+        let point = surface + hit.normal * surface_offset(hit.distance);
+        irradiance = vec3<f32>(hit_irradiance(pixel, point, shading_normal(hit.mesh, hit.tri, surface, -dir)))
             + indirect_lookup(faces[f & ~DYNAMIC], uv);
     } else {
         irradiance = lookup(faces[f], uv) + indirect_lookup(faces[f], uv);
@@ -1078,7 +1163,7 @@ fn bin_radiance(origin: vec3<f32>, dir: vec3<f32>, g: vec2<u32>) -> vec4<f32> {
     if (g.x == NO_HIT || g.x == BLACK) { return vec4<f32>(0.0); }
     if ((g.x & BACK) != 0u) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
     let face = faces[tri_face[g.x]];
-    let e = lookup(face, chart_uv(g.x, origin + dir * bitcast<f32>(g.y)));
+    let e = lookup(face, chart_uv(face.probes.w, g.x, origin + dir * bitcast<f32>(g.y)));
     return vec4<f32>(albedo[face.probes.w].xyz * (e / 3.14159265), 0.0);
 }
 

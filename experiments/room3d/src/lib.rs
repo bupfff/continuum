@@ -2,6 +2,7 @@
 //! receivers, lit by a rectangular area light.
 
 pub mod cycles;
+pub mod field;
 pub mod showcase;
 
 use continuum::bvh::Bvh;
