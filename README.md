@@ -39,14 +39,27 @@ cargo run --release -p viewer -- --scene field --scale 2
 
 This is a 2 km plain with 1,000,000 instanced copies of a 9,800-triangle
 boulder: about ten billion triangles in 152 MB of GPU memory. It is lit by a
-sun-sized light, with per-pixel mask cones and no caches.
+sun-sized light through a view-dependent lighting cache (M4 gate 8):
+
+- Pages of texels are allocated on the surfaces you look at, coarser with
+  distance.
+- They are baked with mask cones, at most 20,000 per frame, and kept while
+  they stay in view.
+- Shading a warm view costs 2–3 ms.
+
+Flags:
 
 - `--boulders N` changes the count.
-- `--scale N` renders at 1/N of the window. On an M4 MacBook Air, `--scale 2`
-  runs at about 21 ms per frame in a 1280×720 window.
+- `--scale N` renders at 1/N of the window.
+- `--no-cache` lights every pixel with its own mask cone every frame, as
+  before.
 
-At full resolution, camera rays dominate (M4 gates 2–5), and the far field
-aliases. Cone-based primary visibility is the planned fix for both.
+Not yet smooth. With hardware rays and a million instances, wgpu spends about
+16 ms of CPU time per frame in `queue.submit` (see `docs/results/m4-gate8.md`),
+whatever the resolution. Busy frames, while new surfaces come into view, also
+pay for baking and the page manager. The far field aliases (one ray per
+pixel). Fixing the overhead is the next gate; pixel-footprint cones are
+planned for the aliasing.
 
 ![A million boulders](docs/images/m4-gate2-million-boulders.png)
 

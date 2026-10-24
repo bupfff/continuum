@@ -52,6 +52,11 @@ pub struct MaskConeKernel {
     hardware_rays: std::cell::Cell<bool>,
     shade_pipeline: wgpu::ComputePipeline,
     shade_cached_pipeline: wgpu::ComputePipeline,
+    /// The view-dependent lighting cache's passes.
+    vc_update_pipeline: wgpu::ComputePipeline,
+    vc_bake_pipeline: wgpu::ComputePipeline,
+    vc_fill_pipeline: wgpu::ComputePipeline,
+    vc_shade_pipeline: wgpu::ComputePipeline,
     prefilter: std::cell::Cell<f32>,
     nearest_first: std::cell::Cell<bool>,
     profile_stage: std::cell::Cell<u32>,
@@ -76,11 +81,13 @@ mod hw;
 mod instanced;
 mod lightmap;
 mod live;
+mod vcache;
 
 pub use hierarchy::Hierarchy;
-pub use instanced::InstancedRenderer;
+pub use instanced::{FrameProfile, InstancedRenderer};
 pub use lightmap::{BLOCK, BLOCK_PLANES, Lightmap, hemicube_weights};
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
+pub use vcache::{CacheOptions, CacheStats};
 
 use hierarchy::{Placement, flatten, flatten_instanced, mesh_hierarchy, object_hierarchy};
 
@@ -169,6 +176,18 @@ const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31];
 
 /// Bindings the hardware `hw_visibility` pass uses (32: the acceleration structure).
 pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[0, 3, 6, 31, 32];
+
+/// Bindings of the lighting cache's passes.
+pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
+pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 37, 38, 41, 43,
+];
+pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41];
+pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
+    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42,
+];
+/// The compute `visibility` pass's bindings, for other modules.
+pub(crate) const COMPUTE_VISIBILITY_BINDINGS: &[u32] = VISIBILITY_BINDINGS;
 
 /// What Continuum asks of a device: the adapter's limits, and ray queries (an
 /// experimental wgpu feature, used only for camera rays, with the compute path
@@ -276,6 +295,10 @@ impl MaskConeKernel {
         let visibility_pipeline = entry("visibility");
         let shade_pipeline = entry("shade");
         let shade_cached_pipeline = entry("shade_cached_pass");
+        let vc_update_pipeline = entry("vc_update");
+        let vc_bake_pipeline = entry("vc_bake");
+        let vc_fill_pipeline = entry("vc_fill");
+        let vc_shade_pipeline = entry("vc_shade");
         let hw_visibility_pipeline = device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
@@ -316,6 +339,10 @@ impl MaskConeKernel {
             hw_visibility_pipeline,
             shade_pipeline,
             shade_cached_pipeline,
+            vc_update_pipeline,
+            vc_bake_pipeline,
+            vc_fill_pipeline,
+            vc_shade_pipeline,
             prefilter: std::cell::Cell::new(0.0),
             nearest_first: std::cell::Cell::new(true),
             profile_stage: std::cell::Cell::new(0),

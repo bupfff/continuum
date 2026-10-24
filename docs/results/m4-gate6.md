@@ -24,6 +24,14 @@ implementing): 1,000,000 boulders, per-pixel prefiltered cones, best of 5.
 **Verdict: FAIL on all three.** 1.31% RMSE (99.77% of pixels close), 0.9× the
 speed, and 67–270 ms per 720p frame.
 
+> **Correction (M4 gate 8).** The hardware-ray times here include about 15–18
+> ms of CPU time inside wgpu's `queue.submit`. wgpu-core 30.0.1 walks a list
+> with one entry per TLAS instance (a million) on every submission that uses
+> the TLAS. On the GPU, hardware camera rays at 720p take 4.5–6.6 ms. The
+> verdict stands, since frames were dominated by per-pixel cones. But "hardware
+> rays are no faster" describes wgpu's overhead at a million instances, not
+> the ray hardware. See `m4-gate8.md`.
+
 ## Results
 
 Apple M4 (MacBook Air, on battery). Reproduce with

@@ -11,8 +11,9 @@
 //! Scenes: `--scene showcase` (the default: a gallery with a sculpture,
 //! columns and an arch), `--scene room` (the M2 test room), or `--scene field`
 //! (a million instanced boulders, about ten billion triangles, lit by a sun
-//! with per-pixel mask cones; `--boulders N` to change the count, `--scale N`
-//! to render at 1/N of the window).
+//! through a view-dependent lighting cache baked as you look around;
+//! `--boulders N` to change the count, `--scale N` to render at 1/N of the
+//! window, `--no-cache` for a mask cone per pixel every frame).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path, P to pause moving objects,
@@ -26,7 +27,9 @@ use std::time::Instant;
 use continuum::glam::{DVec3, Vec3};
 use continuum::mesh::Surface;
 use continuum_gpu::wgpu;
-use continuum_gpu::{Camera, InstancedRenderer, Lightmap, LiveRenderer, MaskConeKernel, RectLight};
+use continuum_gpu::{
+    CacheOptions, Camera, InstancedRenderer, Lightmap, LiveRenderer, MaskConeKernel, RectLight,
+};
 use room3d::field::Field;
 use room3d::showcase::{self, PATH_FRAMES, Showcase};
 use room3d::{movers, render_scene};
@@ -53,10 +56,13 @@ struct World {
     speed: f32,
     start: (Vec3, Vec3),
     showcase: Option<Showcase>,
-    /// The instanced boulder field: rendered per pixel, no caches.
+    /// The instanced boulder field.
     field: Option<Field>,
     /// Window pixels per rendered pixel (field scene only).
     scale: u32,
+    /// Light the field through the view-dependent lighting cache (otherwise a
+    /// mask cone per pixel every frame).
+    cache: bool,
 }
 
 impl World {
@@ -78,6 +84,7 @@ impl World {
             showcase: Some(scene),
             field: None,
             scale: 1,
+            cache: true,
         }
     }
 
@@ -100,6 +107,7 @@ impl World {
             showcase: None,
             field: Some(field),
             scale: 1,
+            cache: true,
         }
     }
 
@@ -132,6 +140,7 @@ impl World {
             showcase: None,
             field: None,
             scale: 1,
+            cache: true,
         }
     }
 
@@ -227,7 +236,7 @@ impl Renderer {
         }
     }
 
-    fn frame(&self, camera: Camera, view: &wgpu::TextureView) {
+    fn frame(&mut self, camera: Camera, view: &wgpu::TextureView) {
         match self {
             Renderer::Live(r) => r.frame(camera, camera.vertical_fov_degrees, view),
             Renderer::Field(r) => r.frame(camera, view),
@@ -301,24 +310,44 @@ impl App {
             kernel.set_prefilter(1.0);
             let start = Instant::now();
             let origin = field.origin_near_camera();
-            let renderer = InstancedRenderer::new(
-                &kernel,
-                format,
-                config.width,
-                config.height,
-                world.scale,
-                world.light,
-                &field.scene,
-                origin,
-                field.radiance,
-            );
+            let renderer = if world.cache {
+                InstancedRenderer::with_cache(
+                    &kernel,
+                    format,
+                    config.width,
+                    config.height,
+                    world.scale,
+                    world.light,
+                    &field.scene,
+                    origin,
+                    field.radiance,
+                    CacheOptions::default(),
+                )
+            } else {
+                InstancedRenderer::new(
+                    &kernel,
+                    format,
+                    config.width,
+                    config.height,
+                    world.scale,
+                    world.light,
+                    &field.scene,
+                    origin,
+                    field.radiance,
+                )
+            };
             renderer.wait();
             println!(
-                "{} (field scene): {} boulders, {} triangles, {:.0} MB on the GPU, ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
+                "{} (field scene): {} boulders, {} triangles, {:.0} MB on the GPU ({}), ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
                 kernel.adapter_name,
                 field.boulders(),
                 field.triangles(),
-                renderer.scene_bytes() as f64 / 1e6,
+                (renderer.scene_bytes() + renderer.cache_bytes()) as f64 / 1e6,
+                if world.cache {
+                    "with the lighting cache"
+                } else {
+                    "a cone per pixel"
+                },
                 start.elapsed().as_secs_f64(),
                 config.width,
                 config.height,
@@ -585,6 +614,7 @@ fn main() {
     };
     let mut world = world;
     world.scale = arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1);
+    world.cache = !std::env::args().any(|a| a == "--no-cache");
     let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
     let camera = FlyCamera::looking_at(world.start.0, world.start.1);
     let mut app = App {

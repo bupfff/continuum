@@ -1419,3 +1419,316 @@ fn indirect_lookup(face: Face, uv: vec2<f32>) -> vec3<f32> {
     if (total <= 1e-6) { return vec3<f32>(0.0); }
     return (c00.xyz * w00 + c10.xyz * w10 + c01.xyz * w01 + c11.xyz * w11) / total;
 }
+
+// --- View-dependent lighting cache, for instanced scenes. ---
+//
+// Pages of 8×8 texels, stored 9×9 (a one-texel border on the high side, so a
+// bilinear lookup stays inside one page), on each object's charts at
+// power-of-two resolutions: texels at mip m are the base size × 2^m × the
+// object's scale. A page table maps (object, chart | mip << 16, page x | page y
+// << 16) to a slot of the pool. The shading pass reports pages it lacked, a
+// CPU page manager allocates them and lists their texels, and the bake passes
+// compute those texels with mask cones. A texel is placed on the surface
+// through its chart's cell grid, shared by every object with that geometry.
+
+struct VChart {
+    // Object-space size along u and v.
+    size: vec2<f32>,
+    grid: vec2<u32>,
+    // First cell in `cells`.
+    first_cell: u32,
+    pad: u32,
+};
+
+struct VcParams {
+    // x: page table mask, y: frame, z: request tile size (pixels), w: request tiles per row
+    counts: vec4<u32>,
+    // x: texels to bake, y: pages baked, z: page table updates, w: 0
+    jobs: vec4<u32>,
+    // x: 1 / base texel size, y: radians per pixel (camera), z: pixels per texel, w: 0
+    params: vec4<f32>,
+};
+
+const PAGE: u32 = 8u;
+const PAGE_STRIDE: u32 = 9u;
+const PAGE_TEXELS: u32 = 81u;
+const EMPTY_KEY: u32 = 0xffffffffu;
+
+@group(0) @binding(33) var<storage, read> vcharts: array<VChart>;
+// Per chart cell: up to two triangles (NONE if absent).
+@group(0) @binding(34) var<storage, read> cells: array<vec2<u32>>;
+// Chart of each geometry triangle.
+@group(0) @binding(35) var<storage, read> tri_vchart: array<u32>;
+// Open addressing with linear probing: three key words, then the slot. x is
+// EMPTY_KEY for a free entry (0xfffffffe for a removed one).
+@group(0) @binding(36) var<storage, read_write> page_table: array<vec4<u32>>;
+@group(0) @binding(37) var<storage, read_write> pool: array<f32>;
+// Pages baked this frame: key words, then the slot.
+@group(0) @binding(38) var<storage, read> bake_list: array<vec4<u32>>;
+// Per request tile: the key of a page its sample pixel lacked, w = 1 (all zero
+// if none).
+@group(0) @binding(39) var<storage, read_write> requests: array<vec4<u32>>;
+// Per slot: the last frame a pixel read it (or it was baked).
+@group(0) @binding(40) var<storage, read_write> slot_used: array<u32>;
+@group(0) @binding(41) var<uniform> vc: VcParams;
+// x: pixels shaded without any resident page (unshadowed fallback).
+@group(0) @binding(42) var<storage, read_write> vc_stats: array<atomic<u32>, 4>;
+// Texels to bake: entry in `bake_list`, and the texel's index in the 9×9 page.
+@group(0) @binding(43) var<storage, read> bake_jobs: array<vec2<u32>>;
+// Page table writes: (entry index, 0, 0, 0), then the entry.
+@group(0) @binding(44) var<storage, read> table_updates: array<vec4<u32>>;
+
+fn vc_hash(k: vec3<u32>) -> u32 {
+    var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
+    h ^= h >> 15u;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12u;
+    return h;
+}
+
+fn vc_find(k: vec3<u32>) -> u32 {
+    let mask = vc.counts.x;
+    var i = vc_hash(k) & mask;
+    for (var probe = 0u; probe < 64u; probe++) {
+        let e = page_table[i];
+        if (e.x == EMPTY_KEY) { return NONE; }
+        if (e.x == k.x && e.y == k.y && e.z == k.z) { return e.w; }
+        i = (i + 1u) & mask;
+    }
+    return NONE;
+}
+
+fn object_scale(m: u32) -> f32 {
+    let x = meshes[m].w;
+    if (x == NONE) { return 1.0; }
+    return xforms[4u * x + 3u].x;
+}
+
+// Texels along u and v of chart `c` on object `m` at `mip`. Products only (no
+// division), so the CPU page manager computes the same grid.
+fn vc_grid(c: u32, m: u32, mip: u32) -> vec2<u32> {
+    let size = vcharts[c].size * object_scale(m);
+    return max(vec2<u32>(ceil(size * ldexp(vc.params.x, -i32(mip)))), vec2<u32>(1u));
+}
+
+// The coarsest mip of chart `c` on object `m`: the first with one texel.
+fn vc_top_mip(c: u32, m: u32) -> u32 {
+    let ratio = max(vcharts[c].size.x, vcharts[c].size.y) * object_scale(m) * vc.params.x;
+    var top = 0u;
+    if (ratio > 1.0) { top = min(u32(ceil(log2(ratio))), 30u); }
+    // log2 is approximate: settle on the exact first mip.
+    if (top > 0u && all(vc_grid(c, m, top - 1u) == vec2<u32>(1u))) { top -= 1u; }
+    if (any(vc_grid(c, m, top) != vec2<u32>(1u))) { top += 1u; }
+    return top;
+}
+
+// The mip whose texels span about `vc.params.z` pixels at `distance`.
+fn vc_mip(distance: f32) -> u32 {
+    let ratio = distance * vc.params.y * vc.params.z * vc.params.x;
+    if (ratio <= 1.0) { return 0u; }
+    return min(u32(round(log2(ratio))), 30u);
+}
+
+// The page holding the texels around chart coordinates `uv`, with the
+// bilinear lookup's texel (within the page) and fraction.
+struct PageRef {
+    key: vec3<u32>,
+    base: vec2<u32>,
+    frac: vec2<f32>,
+    coarsest: bool,
+};
+
+fn vc_page(m: u32, c: u32, uv: vec2<f32>, mip: u32) -> PageRef {
+    let n = vc_grid(c, m, mip);
+    let t = clamp(uv * vec2<f32>(n) - vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(n - vec2<u32>(1u)));
+    let base = vec2<u32>(floor(t));
+    let page = base / PAGE;
+    var r: PageRef;
+    r.key = vec3<u32>(m, c | (mip << 16u), page.x | (page.y << 16u));
+    r.base = base - page * PAGE;
+    r.frac = t - floor(t);
+    r.coarsest = n.x == 1u && n.y == 1u;
+    return r;
+}
+
+fn vc_bilinear(slot: u32, r: PageRef) -> f32 {
+    let o = slot * PAGE_TEXELS + r.base.y * PAGE_STRIDE + r.base.x;
+    let a = mix(pool[o], pool[o + 1u], r.frac.x);
+    let b = mix(pool[o + PAGE_STRIDE], pool[o + PAGE_STRIDE + 1u], r.frac.x);
+    return mix(a, b, r.frac.y);
+}
+
+// Barycentric coordinates of chart coordinates `uv` in geometry triangle `t`.
+fn uv_barycentric(t: u32, uv: vec2<f32>) -> vec3<f32> {
+    let a = tri_uv[3u * t];
+    let e1 = tri_uv[3u * t + 1u] - a;
+    let e2 = tri_uv[3u * t + 2u] - a;
+    let d = uv - a;
+    let det = e1.x * e2.y - e1.y * e2.x;
+    if (abs(det) < 1e-30) { return vec3<f32>(-1.0); }
+    let s = (d.x * e2.y - d.y * e2.x) / det;
+    let u = (e1.x * d.y - e1.y * d.x) / det;
+    return vec3<f32>(1.0 - s - u, s, u);
+}
+
+// Direct irradiance at texel `texel` of chart `c` on object `m` (grid `n`): the
+// texel's center placed on the surface through the chart's cells (the nearest
+// point of the cell's most nearly containing triangle), then a mask cone.
+fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> f32 {
+    let ch = vcharts[c];
+    let uv = (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n);
+    let cell = min(vec2<u32>(uv * vec2<f32>(ch.grid)), ch.grid - vec2<u32>(1u));
+    let pair = cells[ch.first_cell + cell.y * ch.grid.x + cell.x];
+    var best_t = NONE;
+    var best_b = vec3<f32>(0.0);
+    var best_score = -3.4e38;
+    for (var q = 0u; q < 2u; q++) {
+        let t = select(pair.x, pair.y, q == 1u);
+        if (t == NONE) { continue; }
+        let b = uv_barycentric(t, uv);
+        let score = min(b.x, min(b.y, b.z));
+        if (score > best_score) {
+            best_score = score;
+            best_t = t;
+            best_b = b;
+        }
+    }
+    if (best_t == NONE) { return 0.0; }
+    let b0 = clamp(best_b, vec3<f32>(0.0), vec3<f32>(1.0));
+    let b = b0 / max(b0.x + b0.y + b0.z, 1e-20);
+    let t = best_t;
+    let p = tris[3u * t].xyz * b.x + tris[3u * t + 1u].xyz * b.y + tris[3u * t + 2u].xyz * b.z;
+    let nrm = normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z;
+    var pw = p;
+    var nw = normalize(nrm);
+    let x = meshes[m].w;
+    if (x != NONE) {
+        pw = rotate_to_world(x, p) * xforms[4u * x + 3u].x + translation(x);
+        nw = normalize(rotate_to_world(x, nrm));
+    }
+    let geometric = normal_to_world(m, cross(tris[3u * t + 1u].xyz - tris[3u * t].xyz, tris[3u * t + 2u].xyz - tris[3u * t].xyz));
+    let apex = pw + normalize(geometric) * surface_offset(length(pw));
+    return hit_irradiance(0u, apex, nw);
+}
+
+@compute @workgroup_size(64)
+fn vc_update(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= vc.jobs.z) { return; }
+    page_table[table_updates[2u * i].x] = table_updates[2u * i + 1u];
+}
+
+// One thread per listed texel. The list may include a texel just outside the
+// chart's grid (the CPU's grid can differ by rounding); it is skipped here and
+// filled by `vc_fill`.
+@compute @workgroup_size(64)
+fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let j = gid.x;
+    if (j >= vc.jobs.x) { return; }
+    let job = bake_jobs[j];
+    let e = bake_list[job.x];
+    let m = e.x;
+    let c = e.y & 0xffffu;
+    let mip = e.y >> 16u;
+    let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
+    let n = vc_grid(c, m, mip);
+    let texel = page * PAGE + vec2<u32>(job.y % PAGE_STRIDE, job.y / PAGE_STRIDE);
+    if (texel.x < n.x && texel.y < n.y) {
+        pool[e.w * PAGE_TEXELS + job.y] = vc_texel(m, c, n, texel);
+    }
+}
+
+// One thread per baked page: the border beyond the chart's grid copies the
+// nearest texel inside it (clamped lookups), and the page is marked used.
+@compute @workgroup_size(64)
+fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = gid.x;
+    if (p >= vc.jobs.y) { return; }
+    let e = bake_list[p];
+    let c = e.y & 0xffffu;
+    let mip = e.y >> 16u;
+    let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
+    let n = vc_grid(c, e.x, mip);
+    let o = e.w * PAGE_TEXELS;
+    for (var k = 0u; k < PAGE_TEXELS; k++) {
+        let texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
+        if (texel.x >= n.x || texel.y >= n.y) {
+            let inside = min(texel, n - vec2<u32>(1u)) - page * PAGE;
+            pool[o + k] = pool[o + inside.y * PAGE_STRIDE + inside.x];
+        }
+    }
+    slot_used[e.w] = vc.counts.y;
+}
+
+var<workgroup> fallback_count: atomic<u32>;
+
+// Shading from the cache, reading the visibility buffer: the page of the
+// wanted mip, or failing that the finest coarser one resident, or failing
+// that unshadowed light. One pixel per request tile (a different one each
+// frame) reports the wanted page if it was missing.
+@compute @workgroup_size(8, 8)
+fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    let in_bounds = gid.x < w && gid.y < h;
+    let tile = vc.counts.z;
+    let sample = (vc.counts.y * 7u) % (tile * tile);
+    let is_sample = in_bounds && gid.x % tile == sample % tile && gid.y % tile == sample / tile;
+    var request = vec4<u32>(0u);
+    var fell_back = false;
+    if (in_bounds) {
+        let dir = camera_dir(gid);
+        let pixel = gid.y * w + gid.x;
+        let hit = recorded_hit(pixel, dir);
+        var color = vec3<f32>(0.0);
+        if (vis[pixel].w == 1u) {
+            color = vec3<f32>(camera.params.w);
+        } else if (hit.mesh != NONE) {
+            let surface = camera.eye.xyz + dir * hit.distance;
+            let c = tri_vchart[hit.tri];
+            let uv = chart_uv(hit.mesh, hit.tri, surface);
+            let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
+            var irradiance = 0.0;
+            var found = false;
+            var mip = wanted;
+            loop {
+                let r = vc_page(hit.mesh, c, uv, mip);
+                let slot = vc_find(r.key);
+                if (slot != NONE) {
+                    slot_used[slot] = vc.counts.y;
+                    irradiance = vc_bilinear(slot, r);
+                    found = true;
+                    break;
+                }
+                if (mip == wanted) { request = vec4<u32>(r.key, 1u); }
+                if (r.coarsest || mip >= 30u) { break; }
+                mip += 1u;
+            }
+            if (!found) {
+                fell_back = true;
+                let point = surface + hit.normal * surface_offset(hit.distance);
+                let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
+                let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
+                let lc = light_cone(point);
+                if (lc.ok && dot(normal, to_light) > 0.0) {
+                    var cov: array<f32, 64>;
+                    for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+                    irradiance = cone_visible(lc.c, normal, &cov);
+                }
+            }
+            color = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
+        }
+        colors[pixel] = vec4<f32>(color, 1.0);
+    }
+    if (is_sample) {
+        requests[(gid.y / tile) * vc.counts.w + gid.x / tile] = request;
+    }
+    if (fell_back) { atomicAdd(&fallback_count, 1u); }
+    workgroupBarrier();
+    if (li == 0u) {
+        let count = atomicLoad(&fallback_count);
+        if (count > 0u) { atomicAdd(&vc_stats[0], count); }
+    }
+}
