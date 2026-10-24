@@ -23,6 +23,9 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "continuum"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "crc32fast"
@@ -62,6 +65,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -92,6 +101,14 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "room3d"
+version = "0.1.0"
+dependencies = [
+ "continuum",
+ "flatland",
 ]
 
 [[package]]

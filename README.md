@@ -12,7 +12,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 ## Layout
 
 - `crates/continuum`: the library (so far the binary and continuous direction masks and the error ledger).
-- `experiments/flatland`: 2D experiments that test the core bets.
+- `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
+- `experiments/room3d`: 3D experiments on triangle scenes (milestone M1).
 - `docs/`: design document and experiment results.
 
 ## Running
@@ -26,6 +27,7 @@ cargo run --release -p flatland --bin gate5
 cargo run --release -p flatland --bin gate6
 cargo run --release -p flatland --bin gate6b
 cargo run --release -p flatland --bin gate7
+cargo run --release -p room3d --bin m1_gate1
 ```
 
 Each run prints a results table and writes images to `experiments/flatland/out/`:

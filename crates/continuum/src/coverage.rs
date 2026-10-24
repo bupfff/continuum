@@ -56,6 +56,12 @@ impl CoverageMask {
         }
     }
 
+    /// Adds an occluder covering `fraction` of one bin (used by 3D cones, which
+    /// compute per-bin areas directly). Combines with what is there by max.
+    pub fn add_bin(&mut self, bin: usize, fraction: f32) {
+        self.cover(bin, fraction);
+    }
+
     fn cover(&mut self, bin: usize, fraction: f32) {
         if fraction >= 1.0 {
             self.full |= ConeMask::range(bin as u32, bin as u32);
@@ -92,6 +98,17 @@ impl CoverageMask {
             open += (x1.min((bin + 1) as f32) - x0.max(bin as f32)).max(0.0);
         }
         open / n
+    }
+
+    /// Unblocked weight: each bin's weight times its uncovered fraction.
+    pub fn visible_weighted(&self, weights: &[f32; BINS]) -> f32 {
+        let mut visible = 0.0;
+        for (bin, (&covered, &w)) in self.partial.iter().zip(weights).enumerate() {
+            if self.full.0 & (1 << bin) == 0 {
+                visible += (1.0 - covered) * w;
+            }
+        }
+        visible
     }
 
     /// Fraction of the cone that is unblocked, in `[0, 1]`.

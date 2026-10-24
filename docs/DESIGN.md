@@ -160,7 +160,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | Milestone | Content | Gate |
 |---|---|---|
 | M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (**failed** on one configuration: geometric charging 0.90–0.95× a full recompute, projected charging 1.84–1.96×, `docs/results/flatland-gate4.md`); G5 magnitude deferral pays off for wide cones with continuous visibility (**passed on attempt 2: 34% of ε = 0 work**, `docs/results/flatland-gate5.md`); G6 one-bounce GI with charges that propagate through surfaces (**failed**: best implementable charges 66.9% vs ≤ 50%, zero violations; an oracle with exact charges reaches 27.4%, so the gap is charge tightness, `docs/results/flatland-gate6.md`); G6b exact incremental indirect via cone G-buffers (**passed: bit-exact, 7.4× faster than a full recompute**, `docs/results/flatland-gate6b.md`); G7 moving light, the ledger's own job (**failed narrowly**: 25.1% of cones recomputed vs ≤ 25% at a realistic sun speed, zero violations; exact invalidation needs 100%, `docs/results/flatland-gate7.md`) |
-| M1 3D CPU reference | 3D mask cones over a BVH, reference path tracer, scene import | G1 repeated in 3D with 8×8 bins; agreement with Cycles/Mitsuba |
+| M1 3D CPU reference | 3D mask cones over a BVH, reference path tracer, scene import | G1 repeated in 3D with 8×8 bins (**passed on attempt 2**: lower error than 64 jittered rays at 0.22× their cost, no flicker, `docs/results/m1-gate1.md`); agreement with Cycles/Mitsuba |
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | Frame time at 1080p on M4 Air; image-diffed in CI |
 | M3 prefiltered hierarchy | Directional coverage per node, detail to roughness | Zoom and flythrough with no shimmer; flat cost |
 | M4 direct light + ledger on GPU | Area lights, cone shadows, ledger | G2/G3 on GPU; light switch with no lag |
@@ -218,8 +218,12 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
   visibly every frame, so recomputing them is correct. Wide cones are where it
   pays: gate 5 cut work 2.9× beyond dependency regions at ε = 1%. Slow global
   changes (moving sun) are still untested.
-- **3D projection cost**: projecting a triangle or node into 8×8 bins costs more
-  than a 2D interval, so gate 1's speedup will shrink in 3D. Re-measure in M1.
+- **3D projection cost**: resolved for triangles by an accumulation rasterizer
+  (exact per-bin area, M1 gate 1: 1.1 µs per receiver for about 28 candidate
+  triangles). Open: projecting hierarchy nodes (prefiltered coverage), and
+  culling cost without a BVH (15 µs per receiver in M1 gate 1).
+- **Bins shared by separate meshes**: max-combining under-counts their union,
+  which leaks light (the dominant error in M1 gate 1).
 - **GPU mask layout**: WGSL has no 64-bit integers without native-only features;
   options are 32-bin masks (one bin per lane at subgroup size 32) or `vec2<u32>`.
   Subgroup ops need wgpu's subgroup feature on every target.

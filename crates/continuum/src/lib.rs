@@ -6,10 +6,12 @@
 //! they could have changed by more than a chosen bound.
 //! See `docs/DESIGN.md` for the full design.
 
+pub mod cone3;
 pub mod coverage;
 pub mod ledger;
 pub mod mask;
 
 pub use coverage::CoverageMask;
+pub use glam;
 pub use ledger::Ledger;
 pub use mask::ConeMask;
