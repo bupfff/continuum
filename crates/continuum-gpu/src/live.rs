@@ -79,6 +79,9 @@ pub const MAX_MOVING: usize = 16;
 /// `r × r/2` on each side (768 bins per probe).
 pub const PROBE_RESOLUTION: u32 = 16;
 
+/// A moved mesh: its index, new triangles, and new normals if they changed.
+type MeshChange<'a> = (usize, &'a [Tri], Option<&'a [[Vec3; 3]]>);
+
 /// What [`LiveRenderer`] keeps to move dynamic meshes.
 struct Motion {
     meshes: Vec<Vec<Tri>>,
@@ -461,7 +464,7 @@ impl LiveRenderer {
             .collect();
         let cov_size = slots.max(1) as u64 * 64 * 64 * 4;
         assert!(
-            cov_size <= device.limits().max_storage_buffer_binding_size as u64,
+            cov_size <= device.limits().max_storage_buffer_binding_size,
             "static coverage cache ({cov_size} bytes) exceeds the device's storage buffer limit"
         );
         let static_cov = device.create_buffer(&wgpu::BufferDescriptor {
@@ -642,7 +645,7 @@ impl LiveRenderer {
         self.update(&changes);
     }
 
-    fn update(&mut self, changes: &[(usize, &[Tri], Option<&[[Vec3; 3]]>)]) {
+    fn update(&mut self, changes: &[MeshChange]) {
         let m = &mut self.motion;
         let mut boxes = Vec::new();
         for &(mesh, tris, normals) in changes {
