@@ -23,7 +23,8 @@ struct LightUniform {
     edge_u: [f32; 4],
     edge_v: [f32; 4],
     counts: [u32; 4],
-    /// `[prefilter threshold in bins (0: exact), 0, 0, 0]`
+    /// `[prefilter threshold in bins (0: exact), 1 for nearest-first ray
+    /// traversal, 0, 0]`
     params: [f32; 4],
 }
 
@@ -46,6 +47,7 @@ pub struct MaskConeKernel {
     probe_gather_pipeline: wgpu::ComputePipeline,
     bake_static_pipeline: wgpu::ComputePipeline,
     prefilter: std::cell::Cell<f32>,
+    nearest_first: std::cell::Cell<bool>,
     pub adapter_name: String,
 }
 
@@ -108,6 +110,7 @@ impl RectLight {
         debug_mode: u32,
         hierarchy: Hierarchy,
         prefilter: f32,
+        nearest_first: bool,
     ) -> LightUniform {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         LightUniform {
@@ -120,7 +123,7 @@ impl RectLight {
                 hierarchy as u32,
                 self.one_sided as u32,
             ],
-            params: [prefilter, 0.0, 0.0, 0.0],
+            params: [prefilter, nearest_first as u32 as f32, 0.0, 0.0],
         }
     }
 }
@@ -184,6 +187,7 @@ impl MaskConeKernel {
             probe_gather_pipeline,
             bake_static_pipeline,
             prefilter: std::cell::Cell::new(0.0),
+            nearest_first: std::cell::Cell::new(true),
             adapter_name,
         }
     }
@@ -202,6 +206,12 @@ impl MaskConeKernel {
 
     pub fn prefilter(&self) -> f32 {
         self.prefilter.get()
+    }
+
+    /// Ray traversal order: nearest child first (the default), or a fixed child
+    /// order (as before M4 gate 3). Results are the same; only speed differs.
+    pub fn set_nearest_first(&self, on: bool) {
+        self.nearest_first.set(on);
     }
 
     /// Irradiance per unit radiance at each receiver `(point, normal)`, and the
@@ -364,6 +374,7 @@ impl MaskConeKernel {
             0,
             Hierarchy::Triangles,
             self.prefilter.get(),
+            self.nearest_first.get(),
         );
         let storage = |label: &str, contents: &[u8]| {
             self.device
@@ -521,10 +532,13 @@ impl MaskConeKernel {
         lightmap: Option<&Lightmap>,
     ) -> Vec<(u32, wgpu::Buffer)> {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let uniform =
-            frame
-                .light
-                .uniform(frame.meshes.len(), 0, frame.hierarchy, self.prefilter.get());
+        let uniform = frame.light.uniform(
+            frame.meshes.len(),
+            0,
+            frame.hierarchy,
+            self.prefilter.get(),
+            self.nearest_first.get(),
+        );
         let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
         let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
@@ -672,7 +686,13 @@ impl MaskConeKernel {
     ) -> (Vec<f32>, Vec<f32>, Duration) {
         let debug = debug_mode != 0;
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let uniform = light.uniform(meshes.len(), debug_mode, hierarchy, self.prefilter.get());
+        let uniform = light.uniform(
+            meshes.len(),
+            debug_mode,
+            hierarchy,
+            self.prefilter.get(),
+            self.nearest_first.get(),
+        );
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()
             .map(|&(p, n)| ReceiverGpu {

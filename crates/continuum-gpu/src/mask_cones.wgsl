@@ -19,7 +19,8 @@ struct Light {
     // mesh's triangle hierarchy; w: 1 if the light is one-sided (it emits only
     // toward edge_u × edge_v and camera rays see its front)
     counts: vec4<u32>,
-    // x: prefilter threshold in bins (0: exact; see `try_splat`)
+    // x: prefilter threshold in bins (0: exact; see `try_splat`); y: 1 for
+    // nearest-first ray traversal, 0 for a fixed child order
     params: vec4<f32>,
 };
 
@@ -688,11 +689,50 @@ fn hit_triangle(eye: vec3<f32>, dir: vec3<f32>, m: u32, t: u32, best: Hit) -> Hi
 
 // Slab test of a ray against a box: whether it may hold a hit nearer than `limit`.
 fn ray_box(eye: vec3<f32>, inv: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, limit: f32) -> bool {
+    return ray_box_entry(eye, inv, lo, hi, limit) >= 0.0;
+}
+
+// Where a ray enters a box (0 if it starts inside), or -1 if it misses it or
+// enters beyond `limit`.
+fn ray_box_entry(eye: vec3<f32>, inv: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, limit: f32) -> f32 {
     let t0 = (lo - eye) * inv;
     let t1 = (hi - eye) * inv;
     let near = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
     let far = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-    return !(far < max(near, 0.0) || near > limit);
+    if (far < max(near, 0.0) || near > limit) { return -1.0; }
+    return max(near, 0.0);
+}
+
+// Pushes the children of an interior node for ray traversal: nearest first
+// (the one the ray enters first is popped first, and a child the ray misses is
+// skipped), or both in a fixed order.
+fn push_children(eye: vec3<f32>, inv: vec3<f32>, left: u32, lo_l: vec3<f32>, hi_l: vec3<f32>,
+                 lo_r: vec3<f32>, hi_r: vec3<f32>, limit: f32,
+                 stack: ptr<function, array<u32, STACK>>, sp: ptr<function, u32>) {
+    if (light.params.y < 0.5) {
+        (*stack)[*sp] = left;
+        (*stack)[*sp + 1u] = left + 1u;
+        *sp += 2u;
+        return;
+    }
+    let tl = ray_box_entry(eye, inv, lo_l, hi_l, limit);
+    let tr = ray_box_entry(eye, inv, lo_r, hi_r, limit);
+    if (tl >= 0.0 && tr >= 0.0) {
+        if (tl <= tr) {
+            (*stack)[*sp] = left + 1u;
+            (*stack)[*sp + 1u] = left;
+        } else {
+            (*stack)[*sp] = left;
+            (*stack)[*sp + 1u] = left + 1u;
+        }
+        *sp += 2u;
+    } else if (tl >= 0.0) {
+        (*stack)[*sp] = left;
+        *sp += 1u;
+    } else if (tr >= 0.0) {
+        (*stack)[*sp] = left + 1u;
+        *sp += 1u;
+    }
 }
 
 // The nearest hit in mesh `m`, if nearer than `best`. Triangle hierarchy
@@ -722,9 +762,9 @@ fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit
                     hit = hit_triangle(eye, dir, m, blas_items[k], hit);
                 }
             } else {
-                (*stack)[sp] = node.info.x;
-                (*stack)[sp + 1u] = node.info.x + 1u;
-                sp += 2u;
+                let l = blas[node.info.x];
+                let r = blas[node.info.x + 1u];
+                push_children(eye, inv, node.info.x, l.lo.xyz, l.hi.xyz, r.lo.xyz, r.hi.xyz, hit.distance, stack, &sp);
             }
         }
     } else {
@@ -763,9 +803,9 @@ fn primary_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
                     hit = nearest_in_mesh(eye, dir, items[k], hit, &stack, sp);
                 }
             } else {
-                stack[sp] = node.info.x;
-                stack[sp + 1u] = node.info.x + 1u;
-                sp += 2u;
+                let l = nodes[node.info.x];
+                let r = nodes[node.info.x + 1u];
+                push_children(eye, inv, node.info.x, l.lo.xyz, l.hi.xyz, r.lo.xyz, r.hi.xyz, hit.distance, &stack, &sp);
             }
         }
     } else {
