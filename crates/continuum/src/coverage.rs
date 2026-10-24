@@ -68,6 +68,32 @@ impl CoverageMask {
         self.full.is_full()
     }
 
+    /// Bins fully covered so far.
+    pub fn full_bins(&self) -> ConeMask {
+        self.full
+    }
+
+    /// Length of `[t0, t1]` (normalized) that falls outside fully covered bins.
+    ///
+    /// A fully covered bin stays fully covered whatever else moves, so when this
+    /// mask holds static occluders, only open length can change visibility: it
+    /// bounds what a moving occluder's edge sweep can do (occlusion-aware charging).
+    pub fn open_length(&self, t0: f32, t1: f32) -> f32 {
+        let n = BINS as f32;
+        let (a, b) = if t0 <= t1 { (t0, t1) } else { (t1, t0) };
+        let (x0, x1) = ((a * n).clamp(0.0, n), (b * n).clamp(0.0, n));
+        if x1 <= x0 {
+            return 0.0;
+        }
+        let first = (x0.floor() as usize).min(BINS - 1);
+        let last = (x1.ceil() as usize).saturating_sub(1).min(BINS - 1);
+        let mut open = 0.0;
+        for bin in (first..=last).filter(|&bin| self.full.0 & (1 << bin) == 0) {
+            open += (x1.min((bin + 1) as f32) - x0.max(bin as f32)).max(0.0);
+        }
+        open / n
+    }
+
     /// Fraction of the cone that is unblocked, in `[0, 1]`.
     pub fn visible_fraction(&self) -> f32 {
         let mut visible = 0.0;
@@ -151,6 +177,17 @@ mod tests {
             let bound = (a1 - a0).abs() + (b1 - b0).abs();
             assert!(change <= bound + 1e-5, "change {change} > bound {bound}");
         }
+    }
+
+    #[test]
+    fn open_length_skips_fully_covered_bins() {
+        let mut m = CoverageMask::EMPTY;
+        assert!((m.open_length(0.1, 0.3) - 0.2).abs() < 1e-6);
+        m.add_interval(0.0, 0.5); // bins 0..32 full
+        assert!((m.open_length(0.25, 0.75) - 0.25).abs() < 1e-6);
+        assert!(m.open_length(0.1, 0.4).abs() < 1e-6);
+        m.add_interval(0.5, 0.505); // a partial bin stays open
+        assert!((m.open_length(0.5, 0.52) - 0.02).abs() < 1e-6);
     }
 
     #[test]

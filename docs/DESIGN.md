@@ -142,9 +142,13 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
   everything recomputes and the edge disappears. Flatland: geometric bounds used
   0.2–8% of the certified bound; projected charges about 6% and halved the work.
   Remaining sources: per-tile charges, accumulation over oscillating motion.
-- **Continuous static cache**: continuous recomputes currently re-project every
-  static occluder; caching static coverage costs 264 bytes per cone on the CPU.
-  Needed for continuous masks to win on wall-clock, not just on work.
+- **Static coverage memory**: continuous recomputes reuse cached static
+  coverage (264 bytes per cone on the CPU), which made continuous masks the
+  fastest configuration in gate 5. A GPU layout needs something far smaller
+  (quantized partials, or partials only for edge bins).
+- **Charging cost vs recompute cost**: projected charges do 3× less recompute
+  work than geometric bounds but cost more time in 2D, where a recompute is
+  cheap. The 3D ratio decides which to use; measure in M1.
 - **Direction-dependent radiance**: charging max(gained, lost) relies on uniform
   radiance across the cone; real GI needs gained + lost weighted by radiance
   differences (up to 2× looser). Test in G6.

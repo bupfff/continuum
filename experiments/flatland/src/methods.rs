@@ -56,15 +56,20 @@ pub fn mask_bits(cone: &Cone, occluders: &[Segment]) -> ConeMask {
 /// One mask cone with fractional edge bins (continuous visibility).
 pub fn coverage(cone: &Cone, occluders: &[Segment]) -> f32 {
     let mut m = CoverageMask::EMPTY;
+    add_coverage(&mut m, cone, occluders);
+    m.visible_fraction()
+}
+
+/// Adds `occluders` to a coverage mask, stopping once it is full.
+pub fn add_coverage(m: &mut CoverageMask, cone: &Cone, occluders: &[Segment]) {
     for s in occluders {
+        if m.is_full() {
+            return;
+        }
         if let Some((a, b)) = cone.project(s) {
             m.add_interval(a, b);
-            if m.is_full() {
-                break;
-            }
         }
     }
-    m.visible_fraction()
 }
 
 /// Multiplies per-occluder transmittance, which assumes every occluder is

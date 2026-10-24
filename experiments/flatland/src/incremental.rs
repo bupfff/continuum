@@ -163,10 +163,12 @@ pub struct Precomputed {
     pub visibility: Visibility,
     pub targets: usize,
     pub threads: usize,
-    statics: Vec<Segment>,
     cones: Vec<Option<Cone>>,
     /// Binary only: static occluders' masks, reused by recomputes.
     static_masks: Vec<ConeMask>,
+    /// Continuous only: static occluders' coverage, reused by recomputes
+    /// (264 bytes per cone on the CPU).
+    static_coverage: Vec<CoverageMask>,
     tile_boxes: Vec<Aabb>,
     /// Hull of a tile and its targets: contains every receiver's cone in the tile.
     frustums: Vec<Vec<Vec2>>,
@@ -188,15 +190,30 @@ impl Precomputed {
             Cone::toward(p, targets[k / pixels].at(p))
         });
         let statics = s.statics.clone();
-        let static_visible: Vec<f32> = par_map(cones.len(), threads, 256, |k| {
-            cones[k].map_or(0.0, |c| visibility.visible_fraction(&c, &statics))
-        });
         let static_masks = match visibility {
             Visibility::Binary => par_map(cones.len(), threads, 256, |k| {
                 cones[k].map_or(ConeMask::FULL, |c| methods::mask_bits(&c, &statics))
             }),
             Visibility::Continuous => Vec::new(),
         };
+        let static_coverage = match visibility {
+            Visibility::Binary => Vec::new(),
+            Visibility::Continuous => par_map(cones.len(), threads, 256, |k| {
+                let mut m = CoverageMask::EMPTY;
+                if let Some(c) = cones[k] {
+                    methods::add_coverage(&mut m, &c, &statics);
+                } else {
+                    m.add_interval(0.0, 1.0);
+                }
+                m
+            }),
+        };
+        let static_visible: Vec<f32> = (0..cones.len())
+            .map(|k| match visibility {
+                Visibility::Binary => static_masks[k].visible_fraction(),
+                Visibility::Continuous => static_coverage[k].visible_fraction(),
+            })
+            .collect();
         let tile_boxes: Vec<Aabb> = (0..grid.tiles())
             .map(|t| {
                 Aabb::of(
@@ -212,9 +229,9 @@ impl Precomputed {
             visibility,
             targets: targets.len(),
             threads,
-            statics,
             cones,
             static_masks,
+            static_coverage,
             tile_boxes,
             frustums: Vec::new(),
             frustum_boxes: Vec::new(),
@@ -266,27 +283,26 @@ impl Precomputed {
                 }
             }
             Visibility::Continuous => {
-                let mut m = CoverageMask::EMPTY;
-                for s in self.statics.iter().chain(movers) {
-                    if let Some((a, b)) = cone.project(s) {
-                        m.add_interval(a, b);
-                        if m.is_full() {
-                            break;
-                        }
-                    }
+                let mut m = self.static_coverage[k];
+                if m.is_full() {
+                    return 0.0;
                 }
+                methods::add_coverage(&mut m, &cone, movers);
                 cone.angle * m.visible_fraction()
             }
         }
     }
 
-    /// Worst-case change in cone `k`'s visible angle when one occluder moves from
-    /// `old` to `new` with everything else fixed: the larger of the coverage it
-    /// gains and loses, in the estimator's own units (whole bins for binary masks,
-    /// where bins the statics already block cannot change).
-    fn coverage_change(&self, k: usize, old: &Segment, new: &Segment) -> f32 {
+    /// How much coverage cone `k` gains and loses (in radians) when one occluder
+    /// moves from `old` to `new` with everything else fixed. Bins the statics
+    /// already block fully cannot change, so they are left out (occlusion-aware).
+    ///
+    /// When everything visible through the cone has the same radiance, the
+    /// visible angle changes by at most the larger of the two; when radiance
+    /// varies by direction, by at most their sum times the radiance range.
+    fn coverage_change(&self, k: usize, old: &Segment, new: &Segment) -> (f32, f32) {
         let Some(cone) = self.cones[k] else {
-            return 0.0;
+            return (0.0, 0.0);
         };
         let (a, b) = (cone.project(old), cone.project(new));
         match self.visibility {
@@ -295,17 +311,20 @@ impl Precomputed {
                     |i: Option<(f32, f32)>| i.map_or(0, |(x, y)| ConeMask::from_interval(x, y).0);
                 let (ma, mb) = (mask(a), mask(b));
                 let free = !self.static_masks[k].0;
-                let gained = (mb & !ma & free).count_ones();
-                let lost = (ma & !mb & free).count_ones();
-                gained.max(lost) as f32 * cone.angle / ConeMask::BINS as f32
+                let bin = cone.angle / ConeMask::BINS as f32;
+                let gained = (mb & !ma & free).count_ones() as f32 * bin;
+                let lost = (ma & !mb & free).count_ones() as f32 * bin;
+                (gained, lost)
             }
             Visibility::Continuous => {
-                let len = |i: Option<(f32, f32)>| i.map_or(0.0, |(x, y)| y - x);
-                let overlap = match (a, b) {
-                    (Some(a), Some(b)) => (a.1.min(b.1) - a.0.max(b.0)).max(0.0),
-                    _ => 0.0,
+                let statics = &self.static_coverage[k];
+                let open = |x: Option<(f32, f32)>, y: Option<(f32, f32)>| -> f32 {
+                    difference(x, y)
+                        .iter()
+                        .map(|&(lo, hi)| statics.open_length(lo, hi))
+                        .sum()
                 };
-                (len(a) - overlap).max(len(b) - overlap) * cone.angle
+                (open(b, a) * cone.angle, open(a, b) * cone.angle)
             }
         }
     }
@@ -345,6 +364,19 @@ impl Precomputed {
                     .sum()
             })
             .collect()
+    }
+}
+
+/// `x \ y` for intervals, as up to two pieces (empty pieces have zero length).
+fn difference(x: Option<(f32, f32)>, y: Option<(f32, f32)>) -> [(f32, f32); 2] {
+    match (x, y) {
+        (None, _) => [(0.0, 0.0); 2],
+        (Some(x), None) => [x, (0.0, 0.0)],
+        (Some(x), Some(y)) => {
+            let left = (x.0, x.1.min(y.0));
+            let right = (x.0.max(y.1), x.1);
+            [left, right].map(|(lo, hi)| (lo, hi.max(lo)))
+        }
     }
 }
 
@@ -489,7 +521,11 @@ impl Incremental {
                 let charge = if charging == Charging::Projected {
                     pre.grid
                         .tile_pixels(t)
-                        .map(|px| pre.coverage_change(q * pixels + px, &h.prev, &h.now))
+                        .map(|px| {
+                            let (gained, lost) =
+                                pre.coverage_change(q * pixels + px, &h.prev, &h.now);
+                            gained.max(lost)
+                        })
                         .fold(0.0, f32::max)
                         .min(geometric)
                 } else {
@@ -577,7 +613,7 @@ pub struct RunConfig {
     pub epsilons: Vec<f32>,
     /// Indices into `epsilons` whose runs get an image sheet.
     pub sheets: Vec<usize>,
-    /// Also time (and check) a full recompute that reuses static masks. Binary only.
+    /// Also time (and check) a full recompute that reuses cached static coverage.
     pub time_static_cache: bool,
 }
 

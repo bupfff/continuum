@@ -82,3 +82,36 @@ recomputed only 4.5% of cones (6.7× faster than a full recompute).
 - **Bounds are still loose.** Actual error used about 6% of the certified bound.
 - 2D, CPU, a single sky term; the charging dependency chain of one-bounce GI
   (a surface's light changes, so everything that sees it is charged) is not yet tested.
+
+## Update: continuous static cache and occlusion-aware charges
+
+Same scenario, same criterion. Two changes:
+
+- Continuous recomputes now start from cached static coverage (264 bytes per
+  cone) and project only the movers, as binary recomputes already did.
+- Projected charges skip bins the statics already block fully
+  (`CoverageMask::open_length`), so a mover hidden behind static geometry
+  costs nothing. This is the occlusion-aware invalidation from the design.
+
+| Configuration | Work at ε = 1% vs ε = 0 | Cones recomputed at ε = 1% | ms/frame at ε = 1% | Speedup vs full recompute |
+|---|---|---|---|---|
+| Binary, geometric bounds | 92.5% | 26.5% | 0.50 | 8.0× |
+| Continuous, geometric bounds | 59.5% | 18.0% | 0.64 | 9.1× |
+| Binary, projected charges | 53.3% | 8.6% | 0.63 | 6.4× |
+| Continuous, projected charges | **25.4%** | 6.3% | 0.84 | 7.0× |
+
+Full recompute: 5.9 ms/frame (continuous) and 4.0 ms/frame (binary); a full
+recompute that only reuses static coverage, with no ledger: 1.36 and 0.54 ms.
+Zero violations everywhere, and cached-static recomputes match the reference
+bit for bit (asserted every frame).
+
+Takeaways:
+
+- **Continuous masks now win on wall-clock too** (9.1× vs 8.0× for binary), on
+  top of being more accurate.
+- **Occlusion-aware charges tightened the bound** (bound use 6.2% → 10.9%) and
+  cut the ledger's work from 34.0% to 25.4% of ε = 0.
+- **Work vs time trade-off:** projected charges recompute 3× fewer cones than
+  geometric bounds, but in 2D a recompute is now so cheap (statics cached, 3
+  movers) that charging costs more than it saves. Which wins in 3D depends on
+  the recompute-to-projection cost ratio there; both stay in the engine.

@@ -110,7 +110,7 @@ fn main() -> std::io::Result<()> {
             threads,
             epsilons: EPSILONS.to_vec(),
             sheets: vec![HEADLINE],
-            time_static_cache: false,
+            time_static_cache: true,
         };
         let r = incremental::run(&s, &cfg);
         let title = format!("{}, {}, {}", s.name, vis.name(), charging.name());
