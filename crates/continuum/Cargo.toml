@@ -1,0 +1,7 @@
+[package]
+name = "continuum"
+description = "Certified incremental cone rendering."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

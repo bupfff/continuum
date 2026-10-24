@@ -1,0 +1,10 @@
+[package]
+name = "flatland"
+description = "2D experiments that test Continuum's core bets before any GPU work."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+continuum = { path = "../../crates/continuum" }
+png = "0.17"
