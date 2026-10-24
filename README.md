@@ -35,7 +35,13 @@ cargo run --release -p room3d --bin m1_gate3
 cargo run --release -p room3d --bin m1_gate4
 cargo run --release -p room3d --bin render
 cargo run --release -p room3d --bin m2_gate1
+cargo run --release -p room3d --bin render_gpu
 ```
+
+![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)
+
+The same scene rendered on the GPU at 1080p (Apple M4, 189 ms, brute force with
+no hierarchy yet; see `docs/results/m2-gpu-render.md`).
 
 ![First 3D render](docs/images/m1-first-render.png)
 

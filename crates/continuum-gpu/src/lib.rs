@@ -32,7 +32,26 @@ pub struct MaskConeKernel {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
+    render_pipeline: wgpu::ComputePipeline,
     pub adapter_name: String,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CameraUniform {
+    eye: [f32; 4],
+    forward: [f32; 4],
+    right: [f32; 4],
+    up: [f32; 4],
+    params: [f32; 4],
+}
+
+/// A pinhole camera looking from `eye` toward `target`, with `+Z` up.
+#[derive(Clone, Copy, Debug)]
+pub struct Camera {
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub vertical_fov_degrees: f32,
 }
 
 /// A rectangular light: a corner and two perpendicular edges.
@@ -63,18 +82,23 @@ impl MaskConeKernel {
             label: Some("mask_cones"),
             source: wgpu::ShaderSource::Wgsl(include_str!("mask_cones.wgsl").into()),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("mask_cones"),
-            layout: None,
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let entry = |name: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: None,
+                module: &module,
+                entry_point: Some(name),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let pipeline = entry("main");
+        let render_pipeline = entry("render");
         Some(MaskConeKernel {
             device,
             queue,
             pipeline,
+            render_pipeline,
             adapter_name,
         })
     }
@@ -91,6 +115,164 @@ impl MaskConeKernel {
     ) -> (Vec<f32>, Duration) {
         let (values, _, best) = self.run(receivers, light, meshes, runs, 0);
         (values, best)
+    }
+
+    /// Renders a `width × height` view: each pixel's ray finds the nearest
+    /// triangle, and a mask cone gives that point's direct irradiance from the
+    /// light. Returns linear RGB (albedo per mesh × radiance × irradiance / π)
+    /// and the fastest of `runs` GPU executions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(
+        &self,
+        camera: Camera,
+        width: u32,
+        height: u32,
+        light: RectLight,
+        meshes: &[Vec<Tri>],
+        albedo: &[Vec3],
+        radiance: f32,
+        runs: usize,
+    ) -> (Vec<[f32; 3]>, Duration) {
+        let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+        let forward = (camera.target - camera.eye).normalize();
+        let right = forward.cross(Vec3::Z).normalize();
+        let up = right.cross(forward);
+        let cam = CameraUniform {
+            eye: v4(camera.eye),
+            forward: v4(forward),
+            right: v4(right),
+            up: v4(up),
+            params: [
+                width as f32,
+                height as f32,
+                (camera.vertical_fov_degrees.to_radians() * 0.5).tan(),
+                radiance,
+            ],
+        };
+        let uniform = LightUniform {
+            corner: v4(light.corner),
+            edge_u: v4(light.edge_u),
+            edge_v: v4(light.edge_v),
+            counts: [meshes.len() as u32, 0, 0, 0],
+        };
+        let (tris, ranges) = flatten(meshes);
+        let albedo4: Vec<[f32; 4]> = albedo.iter().map(|&a| v4(a)).collect();
+        let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage,
+                })
+        };
+        let light_buf = init(
+            "light",
+            bytemuck::bytes_of(&uniform),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let camera_buf = init(
+            "camera",
+            bytemuck::bytes_of(&cam),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let tris_buf = init(
+            "tris",
+            bytemuck::cast_slice(&tris),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let meshes_buf = init(
+            "meshes",
+            bytemuck::cast_slice(&ranges),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let albedo_buf = init(
+            "albedo",
+            bytemuck::cast_slice(&albedo4),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let size = (width * height) as u64 * 16;
+        let storage = |label: &str, size: u64, usage: wgpu::BufferUsages| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let colors_buf = storage(
+            "colors",
+            size,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let debug_buf = storage("debug", 256, wgpu::BufferUsages::STORAGE);
+        let staging = storage(
+            "staging",
+            size,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("render"),
+            layout: &self.render_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: light_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tris_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: meshes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: debug_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: colors_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: albedo_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut best = Duration::MAX;
+        for _ in 0..runs.max(1) {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.render_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+            }
+            let start = Instant::now();
+            self.queue.submit([encoder.finish()]);
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("GPU poll failed");
+            best = best.min(start.elapsed());
+        }
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&colors_buf, 0, &staging, 0, size);
+        self.queue.submit([encoder.finish()]);
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| ());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let rgba =
+            bytemuck::cast_slice::<u8, [f32; 4]>(&slice.get_mapped_range().expect("mapped colors"))
+                .to_vec();
+        staging.unmap();
+        (rgba.iter().map(|c| [c[0], c[1], c[2]]).collect(), best)
     }
 
     /// Per-bin coverage (64 per receiver) as the kernel computed it, for debugging.
@@ -158,21 +340,7 @@ impl MaskConeKernel {
                 normal: v4(n),
             })
             .collect();
-        let mut tris: Vec<[f32; 4]> = Vec::new();
-        let mut ranges: Vec<[u32; 2]> = Vec::new();
-        for mesh in meshes {
-            ranges.push([(tris.len() / 3) as u32, mesh.len() as u32]);
-            for t in mesh {
-                tris.extend(t.iter().map(|&v| v4(v)));
-            }
-        }
-        // Bindings may not be empty; the mesh count keeps padding unread.
-        if tris.is_empty() {
-            tris.extend([[0.0; 4]; 3]);
-        }
-        if ranges.is_empty() {
-            ranges.push([0, 0]);
-        }
+        let (tris, ranges) = flatten(meshes);
         let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -292,4 +460,24 @@ impl MaskConeKernel {
             best,
         )
     }
+}
+
+/// Triangles as `vec4` vertices (three per triangle) and per-mesh `[first, count]`
+/// ranges. Bindings may not be empty, so empty inputs get unread padding.
+fn flatten(meshes: &[Vec<Tri>]) -> (Vec<[f32; 4]>, Vec<[u32; 2]>) {
+    let mut tris: Vec<[f32; 4]> = Vec::new();
+    let mut ranges: Vec<[u32; 2]> = Vec::new();
+    for mesh in meshes {
+        ranges.push([(tris.len() / 3) as u32, mesh.len() as u32]);
+        for t in mesh {
+            tris.extend(t.iter().map(|v| [v.x, v.y, v.z, 0.0]));
+        }
+    }
+    if tris.is_empty() {
+        tris.extend([[0.0; 4]; 3]);
+    }
+    if ranges.is_empty() {
+        ranges.push([0, 0]);
+    }
+    (tris, ranges)
 }

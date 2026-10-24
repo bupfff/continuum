@@ -209,17 +209,13 @@ fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, v0: vec3<f32>, v1: vec
     return true;
 }
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= arrayLength(&receivers)) { return; }
-    let apex = receivers[i].point.xyz;
-    let normal = receivers[i].normal.xyz;
-
+// Irradiance per unit radiance at `apex` (surface normal `normal`) from the
+// light, through a mask cone. `i` only selects where debug output goes.
+fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     var forward = normalize(cross(light.edge_u.xyz, light.edge_v.xyz));
     if (dot(forward, light.corner.xyz - apex) < 0.0) { forward = -forward; }
     let dist = dot(forward, light.corner.xyz - apex);
-    if (dist <= 1e-6) { result[i] = 0.0; return; }
+    if (dist <= 1e-6) { return 0.0; }
     let right = normalize(light.edge_u.xyz);
     let up = cross(forward, right);
     let rel = light.corner.xyz - apex;
@@ -285,8 +281,86 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var b = 0u; b < BINS; b++) {
         visible += (1.0 - cov[b]) * weights[b];
     }
-    result[i] = visible;
     if (light.counts.y == 1u) {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }
     }
+    return visible;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= arrayLength(&receivers)) { return; }
+    result[i] = cone_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz);
+}
+
+// --- Camera rendering: ray cast to the nearest triangle, then a mask cone. ---
+
+struct Camera {
+    eye: vec4<f32>,
+    forward: vec4<f32>,
+    right: vec4<f32>,
+    up: vec4<f32>,
+    // x: width, y: height (pixels); z: tan(half vertical fov); w: radiance
+    params: vec4<f32>,
+};
+
+@group(0) @binding(6) var<uniform> camera: Camera;
+@group(0) @binding(7) var<storage, read_write> colors: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> albedo: array<vec4<f32>>;
+
+fn ray_triangle(o: vec3<f32>, d: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> f32 {
+    let e1 = v1 - v0;
+    let e2 = v2 - v0;
+    let p = cross(d, e2);
+    let det = dot(e1, p);
+    if (abs(det) < 1e-12) { return -1.0; }
+    let inv = 1.0 / det;
+    let s = o - v0;
+    let u = dot(s, p) * inv;
+    if (u < 0.0 || u > 1.0) { return -1.0; }
+    let q = cross(s, e1);
+    let v = dot(d, q) * inv;
+    if (v < 0.0 || u + v > 1.0) { return -1.0; }
+    return dot(e2, q) * inv;
+}
+
+@compute @workgroup_size(8, 8)
+fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let aspect = camera.params.x / camera.params.y;
+    let sx = ((f32(gid.x) + 0.5) / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
+    let sy = (1.0 - (f32(gid.y) + 0.5) / camera.params.y * 2.0) * camera.params.z;
+    let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+    let eye = camera.eye.xyz;
+    var best = 3.4e38;
+    var hit_mesh = 0xffffffffu;
+    var hit_normal = vec3<f32>(0.0);
+    for (var m = 0u; m < light.counts.x; m++) {
+        let range = meshes[m];
+        for (var t = range.x; t < range.x + range.y; t++) {
+            let v0 = tris[3u * t].xyz;
+            let v1 = tris[3u * t + 1u].xyz;
+            let v2 = tris[3u * t + 2u].xyz;
+            let d = ray_triangle(eye, dir, v0, v1, v2);
+            if (d > 0.0 && d < best) {
+                best = d;
+                hit_mesh = m;
+                hit_normal = normalize(cross(v1 - v0, v2 - v0));
+            }
+        }
+    }
+    let pixel = gid.y * w + gid.x;
+    if (hit_mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
+    if (dot(hit_normal, dir) > 0.0) { hit_normal = -hit_normal; }
+    let point = eye + dir * best + hit_normal * 1e-4;
+    let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
+    var irradiance = 0.0;
+    if (dot(hit_normal, to_light) > 0.0) {
+        irradiance = cone_irradiance(pixel, point, hit_normal);
+    }
+    let c = albedo[hit_mesh].xyz * (camera.params.w * irradiance / 3.14159265);
+    colors[pixel] = vec4<f32>(c, 1.0);
 }

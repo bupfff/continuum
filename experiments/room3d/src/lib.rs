@@ -274,3 +274,137 @@ pub fn stratified(
         .collect();
     cells.into_iter()
 }
+
+/// The render scene: the gate 1 room plus a floor and two walls, an albedo per
+/// mesh, and the camera used for `render` and `render_gpu`.
+pub struct RenderScene {
+    pub room: Room,
+    pub albedo: Vec<Vec3>,
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub vertical_fov_degrees: f32,
+    pub radiance: f32,
+}
+
+pub fn render_scene() -> RenderScene {
+    let mut room = gate1();
+    let props = room.meshes.len();
+    // Floor and two walls for context (they never sit between a surface and the light).
+    room.meshes.push(box_mesh(
+        Vec3::new(-0.5, -0.5, -0.02),
+        Vec3::new(1.5, 1.5, 0.0),
+    ));
+    room.meshes.push(box_mesh(
+        Vec3::new(-0.5, 1.0, 0.0),
+        Vec3::new(1.5, 1.02, 1.2),
+    ));
+    room.meshes.push(box_mesh(
+        Vec3::new(-0.02, -0.5, 0.0),
+        Vec3::new(0.0, 1.5, 1.2),
+    ));
+    let albedo = (0..room.meshes.len())
+        .map(|m| match m {
+            m if m < 32 => Vec3::new(0.55, 0.42, 0.30), // slats: wood
+            32 => Vec3::new(0.62, 0.48, 0.34),          // table top
+            33 => Vec3::new(0.25, 0.42, 0.70),          // cube
+            m if m == props => Vec3::new(0.72, 0.72, 0.70), // floor
+            _ => Vec3::new(0.78, 0.74, 0.68),           // walls
+        })
+        .collect();
+    RenderScene {
+        room,
+        albedo,
+        eye: Vec3::new(1.05, -0.55, 0.95),
+        target: Vec3::new(0.45, 0.55, 0.18),
+        vertical_fov_degrees: 50.0,
+        radiance: 9.0,
+    }
+}
+
+/// A camera ray's nearest surface hit, nudged off the surface.
+pub struct Hit {
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub albedo: Vec3,
+}
+
+impl RenderScene {
+    /// Nearest hit for every pixel of a `width × height` view (brute force).
+    pub fn primary_hits(&self, width: usize, height: usize, threads: usize) -> Vec<Option<Hit>> {
+        let tris: Vec<(usize, Tri)> = self
+            .room
+            .meshes
+            .iter()
+            .enumerate()
+            .flat_map(|(m, mesh)| mesh.iter().map(move |&t| (m, t)))
+            .collect();
+        let forward = (self.target - self.eye).normalize();
+        let right = forward.cross(Vec3::Z).normalize();
+        let up = right.cross(forward);
+        let half = (self.vertical_fov_degrees.to_radians() * 0.5).tan();
+        flatland::incremental::par_map(width * height, threads, 256, |px| {
+            let (x, y) = (px % width, px / width);
+            let sx =
+                ((x as f32 + 0.5) / width as f32 * 2.0 - 1.0) * half * width as f32 / height as f32;
+            let sy = (1.0 - (y as f32 + 0.5) / height as f32 * 2.0) * half;
+            let dir = (forward + right * sx + up * sy).normalize();
+            let (mut best, mut hit) = (f32::MAX, None);
+            for (m, t) in &tris {
+                if let Some(d) = ray_triangle(self.eye, dir, t)
+                    && d < best
+                {
+                    best = d;
+                    hit = Some((*m, *t));
+                }
+            }
+            let (m, t) = hit?;
+            let mut normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize();
+            if normal.dot(dir) > 0.0 {
+                normal = -normal;
+            }
+            Some(Hit {
+                point: self.eye + dir * best + normal * 1e-4,
+                normal,
+                albedo: self.albedo[m],
+            })
+        })
+    }
+
+    /// The cone from a hit toward the light, if the surface faces the light.
+    pub fn light_cone(&self, h: &Hit) -> Option<PyramidCone> {
+        let l = &self.room.light;
+        let to_light = l.corner + (l.edge_u + l.edge_v) * 0.5 - h.point;
+        if h.normal.dot(to_light) <= 0.0 {
+            return None;
+        }
+        PyramidCone::toward_rect_light(h.point, l.corner, l.edge_u, l.edge_v, h.normal)
+    }
+
+    /// Diffuse reflected radiance for a given irradiance per unit light radiance.
+    pub fn shade(&self, h: &Hit, irradiance: f32) -> Vec3 {
+        h.albedo * (self.radiance * irradiance / std::f32::consts::PI)
+    }
+
+    /// Every pixel shaded with a mask cone toward the light.
+    pub fn masked(&self, bvh: &Bvh, hits: &[Option<Hit>], threads: usize) -> Vec<Vec3> {
+        flatland::incremental::par_map(hits.len(), threads, 256, |px| {
+            let Some(h) = &hits[px] else {
+                return Vec3::ZERO;
+            };
+            let Some(cone) = self.light_cone(h) else {
+                return Vec3::ZERO;
+            };
+            let mut m = continuum::CoverageMask::EMPTY;
+            for (_, tris) in bvh.candidates(&cone).0 {
+                cone.add_mesh(&mut m, &tris);
+            }
+            self.shade(h, cone.visible(&m))
+        })
+    }
+}
+
+/// Reinhard tone curve plus display gamma.
+pub fn to_rgb(c: Vec3) -> [u8; 3] {
+    c.to_array()
+        .map(|v| ((v / (v + 0.6)).powf(1.0 / 2.2) * 255.0).round() as u8)
+}
