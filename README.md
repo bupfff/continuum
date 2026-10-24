@@ -28,6 +28,7 @@ cargo run --release -p flatland --bin gate6
 cargo run --release -p flatland --bin gate6b
 cargo run --release -p flatland --bin gate7
 cargo run --release -p room3d --bin m1_gate1
+cargo run --release -p room3d --bin m1_gate2
 ```
 
 Each run prints a results table and writes images to `experiments/flatland/out/`:

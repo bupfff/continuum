@@ -1,8 +1,10 @@
 //! Shared pieces for the 3D experiments: scenes of box meshes over a floor of
 //! receivers, lit by a rectangular area light.
 
-use continuum::cone3::{PyramidCone, box_mesh, ray_triangle};
+use continuum::bvh::Bvh;
+use continuum::cone3::{PyramidCone, box_mesh, ray_triangle, sphere_mesh};
 use continuum::glam::Vec3;
+use flatland::rng::Pcg32;
 
 pub type Tri = [Vec3; 3];
 
@@ -77,6 +79,34 @@ pub fn gate1() -> Room {
     }
 }
 
+/// Gate 1 plus a finely tessellated sphere (about 40,000 triangles).
+pub fn with_sphere() -> Room {
+    let mut room = gate1();
+    room.meshes
+        .push(sphere_mesh(Vec3::new(0.3, 0.72, 0.45), 0.08, 200, 100));
+    room
+}
+
+/// Gate 1 plus 3,000 small boxes scattered between the floor and the fences.
+pub fn with_rubble() -> Room {
+    let mut room = gate1();
+    let mut rng = Pcg32::new(42, 7);
+    for _ in 0..3000 {
+        let p = Vec3::new(
+            0.05 + 0.9 * rng.next_f32(),
+            0.05 + 0.9 * rng.next_f32(),
+            0.35 + 0.15 * rng.next_f32(),
+        );
+        let s = Vec3::new(
+            0.01 + 0.01 * rng.next_f32(),
+            0.01 + 0.01 * rng.next_f32(),
+            0.01 + 0.01 * rng.next_f32(),
+        );
+        room.meshes.push(box_mesh(p, p + s));
+    }
+    room
+}
+
 /// A receiver's cone toward the light and the triangles that may touch it,
 /// grouped by mesh (the culling a hierarchy would do, shared by every method).
 pub struct Receiver {
@@ -103,6 +133,34 @@ impl Receiver {
             cone,
             candidates,
         })
+    }
+
+    /// Like [`Receiver::new`], but culling with a hierarchy instead of testing
+    /// every triangle. Returns the receiver and the number of nodes visited.
+    pub fn with_bvh(room: &Room, bvh: &Bvh, point: Vec3) -> Option<(Receiver, usize)> {
+        let l = &room.light;
+        let cone = PyramidCone::toward_rect_light(point, l.corner, l.edge_u, l.edge_v, Vec3::Z)?;
+        let (candidates, visited) = bvh.candidates(&cone);
+        Some((
+            Receiver {
+                point,
+                cone,
+                candidates,
+            },
+            visited,
+        ))
+    }
+
+    /// Irradiance per unit radiance through the mask cone.
+    pub fn masked(&self) -> f32 {
+        let mut m = continuum::CoverageMask::EMPTY;
+        for (_, tris) in &self.candidates {
+            self.cone.add_mesh(&mut m, tris);
+            if m.is_full() {
+                break;
+            }
+        }
+        self.cone.visible(&m)
     }
 
     /// Irradiance per unit radiance from area samples at `(s, t)` on the light,

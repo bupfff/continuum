@@ -252,12 +252,40 @@ impl PyramidCone {
     /// Whether any part of a triangle could fall inside this cone's slab and window
     /// (a cheap conservative test before [`Self::add_mesh`]).
     pub fn may_touch(&self, tri: &[Vec3; 3]) -> bool {
-        let local: Vec<Vec3> = tri.iter().map(|&p| self.to_local(p)).collect();
+        if tri.iter().all(|&p| self.far.signed_distance(p) < 0.0) {
+            return false;
+        }
+        let local = tri.map(|p| self.to_local(p));
         if local.iter().all(|p| p.z < self.near) {
             return false;
         }
         let [u0, v0, u1, v1] = self.window;
         // Outside one of the four side planes of the pyramid for all vertices?
+        let outside = |f: &dyn Fn(Vec3) -> f32| local.iter().all(|&p| f(p) < 0.0);
+        !(outside(&|p| p.x - u0 * p.z)
+            || outside(&|p| u1 * p.z - p.x)
+            || outside(&|p| p.y - v0 * p.z)
+            || outside(&|p| v1 * p.z - p.y))
+    }
+
+    /// Whether any part of an axis-aligned box could fall inside this cone's slab
+    /// and window (conservative, for hierarchy traversal).
+    pub fn may_touch_box(&self, min: Vec3, max: Vec3) -> bool {
+        let corners: [Vec3; 8] = std::array::from_fn(|i| {
+            Vec3::new(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            )
+        });
+        if corners.iter().all(|&c| self.far.signed_distance(c) < 0.0) {
+            return false;
+        }
+        let local = corners.map(|c| self.to_local(c));
+        if local.iter().all(|p| p.z < self.near) {
+            return false;
+        }
+        let [u0, v0, u1, v1] = self.window;
         let outside = |f: &dyn Fn(Vec3) -> f32| local.iter().all(|&p| f(p) < 0.0);
         !(outside(&|p| p.x - u0 * p.z)
             || outside(&|p| u1 * p.z - p.x)
@@ -359,6 +387,31 @@ pub fn ray_triangle(origin: Vec3, dir: Vec3, tri: &[Vec3; 3]) -> Option<f32> {
     }
     let t = e2.dot(q) * inv;
     (t > 0.0).then_some(t)
+}
+
+/// A UV sphere as outward-facing triangles (`segments` around, `rings` from pole to pole).
+pub fn sphere_mesh(center: Vec3, radius: f32, segments: usize, rings: usize) -> Vec<[Vec3; 3]> {
+    use std::f32::consts::{PI, TAU};
+    let at = |s: usize, r: usize| {
+        let (theta, phi) = (
+            TAU * s as f32 / segments as f32,
+            PI * r as f32 / rings as f32,
+        );
+        center + Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos()) * radius
+    };
+    let mut tris = Vec::new();
+    for r in 0..rings {
+        for s in 0..segments {
+            let (a, b, c, d) = (at(s, r), at(s + 1, r), at(s + 1, r + 1), at(s, r + 1));
+            if r > 0 {
+                tris.push([a, d, b]);
+            }
+            if r + 1 < rings {
+                tris.push([b, d, c]);
+            }
+        }
+    }
+    tris
 }
 
 /// An axis-aligned box as 12 outward-facing triangles.
