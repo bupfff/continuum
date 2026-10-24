@@ -136,6 +136,9 @@ impl RectLight {
 /// buffers to these when a lightmap provides more).
 const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30];
 
+/// Which of the scene's bindings a pipeline uses.
+type KeepBinding = Box<dyn Fn(u32) -> bool>;
+
 /// Bindings the `visibility` pass uses.
 const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31];
 
@@ -498,8 +501,7 @@ impl MaskConeKernel {
         // Single pass, or a visibility pass then a shading pass; each pipeline
         // gets exactly the bindings it uses.
         let split = self.split.get();
-        let passes: Vec<(&wgpu::ComputePipeline, Box<dyn Fn(u32) -> bool>)> = match (cached, split)
-        {
+        let passes: Vec<(&wgpu::ComputePipeline, KeepBinding)> = match (cached, split) {
             (false, false) => vec![(
                 &self.render_pipeline,
                 Box::new(|b| RENDER_BINDINGS.contains(&b)),
