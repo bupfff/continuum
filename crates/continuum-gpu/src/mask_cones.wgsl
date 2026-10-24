@@ -19,8 +19,11 @@ struct Light {
     // mesh's triangle hierarchy; w: 1 if the light is one-sided (it emits only
     // toward edge_u × edge_v and camera rays see its front)
     counts: vec4<u32>,
-    // x: prefilter threshold in bins (0: exact; see `try_splat`); y: 1 for
-    // nearest-first ray traversal, 0 for a fixed child order
+    // x: prefilter threshold in bins (0: exact; see `node_cone_test`); y: 1 for
+    // nearest-first ray traversal, 0 for a fixed child order; z: profiling
+    // stage, cutting cones short to time their parts (0: off, 1: no cone,
+    // 2: setup and weights only, 3: plus the object hierarchy, 4: plus triangle
+    // hierarchies but no rasterization)
     params: vec4<f32>,
 };
 
@@ -395,28 +398,44 @@ fn hull8(pts: array<vec2<f32>, 8>) -> Poly2 {
     return out;
 }
 
-// If node `n` (box lo..hi) lies between the cone's near and far planes and
-// projects to at most `light.params.x` bins, splats it into `acc`: its
-// projected box weighted by the fraction of that box its front-facing
-// triangles cover seen from the apex. Returns 0 if not splatted (descend), 1
-// if splatted with nothing to draw, 2 if drawn.
-fn try_splat(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, n: u32, lo: vec3<f32>, hi: vec3<f32>) -> u32 {
+// A cone against hierarchy node `n` (box lo..hi), projecting the box's corners
+// once for both questions: may the box touch the cone, and (with prefiltering)
+// is it small enough to splat? Returns 0 if the box cannot touch the cone, 1
+// if it was splatted with nothing to draw, 2 if splatted and drawn, 3 if the
+// cone must descend into it.
+fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, n: u32, lo: vec3<f32>, hi: vec3<f32>) -> u32 {
     let g = f32(GRID);
     var pts: array<vec2<f32>, 8>;
     var mn = vec2<f32>(3.4e38);
     var mx = vec2<f32>(-3.4e38);
+    var far_out = true;
+    var near_out = true;
+    var out_u0 = true;
+    var out_u1 = true;
+    var out_v0 = true;
+    var out_v1 = true;
+    // Splattable: every corner between the near and far planes.
+    var inside = light.params.x > 0.0;
     for (var k = 0u; k < 8u; k++) {
         let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
-        if (c.far_offset - dot(c.far_normal, corner) < 0.0) { return 0u; }
+        let in_far = c.far_offset - dot(c.far_normal, corner) >= 0.0;
+        if (in_far) { far_out = false; } else { inside = false; }
         let p = to_local(c, corner);
-        if (p.z < NEAR) { return 0u; }
-        let q = vec2<f32>((p.x / p.z - c.window.x) / (c.window.z - c.window.x) * g,
-                          (p.y / p.z - c.window.y) / (c.window.w - c.window.y) * g);
-        pts[k] = q;
-        mn = min(mn, q);
-        mx = max(mx, q);
+        if (p.z >= NEAR) { near_out = false; } else { inside = false; }
+        if (p.x - c.window.x * p.z >= 0.0) { out_u0 = false; }
+        if (c.window.z * p.z - p.x >= 0.0) { out_u1 = false; }
+        if (p.y - c.window.y * p.z >= 0.0) { out_v0 = false; }
+        if (c.window.w * p.z - p.y >= 0.0) { out_v1 = false; }
+        if (inside) {
+            let q = vec2<f32>((p.x / p.z - c.window.x) / (c.window.z - c.window.x) * g,
+                              (p.y / p.z - c.window.y) / (c.window.w - c.window.y) * g);
+            pts[k] = q;
+            mn = min(mn, q);
+            mx = max(mx, q);
+        }
     }
-    if (max(mx.x - mn.x, mx.y - mn.y) > light.params.x) { return 0u; }
+    if (far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1) { return 0u; }
+    if (!inside || max(mx.x - mn.x, mx.y - mn.y) > light.params.x) { return 3u; }
     if (mx.x <= 0.0 || mx.y <= 0.0 || mn.x >= g || mn.y >= g) { return 1u; }
     let e = hi - lo;
     let v = normalize(c.apex - (lo + hi) * 0.5);
@@ -440,6 +459,7 @@ fn try_splat(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, ve
 
 // Rasterizes triangle `t` into `acc` if it faces the apex and may touch the cone.
 fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, t: u32) -> bool {
+    if (u32(light.params.z) == 4u) { return false; }
     let v0 = tris[3u * t].xyz;
     let v1 = tris[3u * t + 1u].xyz;
     let v2 = tris[3u * t + 2u].xyz;
@@ -475,6 +495,7 @@ fn cone_to_object(c: Cone, m: u32) -> Cone {
 }
 
 fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32, base: u32) {
+    if (u32(light.params.z) == 3u) { return; }
     let c = cone_to_object(world_cone, m);
     let range = meshes[m];
     var acc: array<f32, 68>;
@@ -490,12 +511,9 @@ fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>
                 sp--;
                 let n = stack_get(sp);
                 let node = blas[n];
-                if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
-                if (light.params.x > 0.0) {
-                    let splat = try_splat(c, &acc, &span, n, node.lo.xyz, node.hi.xyz);
-                    if (splat == 2u) { touched = true; }
-                    if (splat != 0u) { continue; }
-                }
+                let test = node_cone_test(c, &acc, &span, n, node.lo.xyz, node.hi.xyz);
+                if (test == 2u) { touched = true; }
+                if (test != 3u) { continue; }
                 if (node.info.y > 0u) {
                     for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
                         if (cover_triangle(c, &acc, &span, blas_items[k])) { touched = true; }
@@ -598,19 +616,40 @@ fn scene_coverage(c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr
 // Irradiance through the uncovered part of the cone. Bin weights (projected
 // solid angle, Lambert) are computed only now, as they are summed, so no
 // per-thread weights array is needed.
+fn bin_weight(c: Cone, normal: vec3<f32>, b: u32) -> f32 {
+    let col = f32(b % GRID);
+    let row = f32(b / GRID);
+    let g = f32(GRID);
+    let d0 = direction(c, col / g, row / g);
+    let d1 = direction(c, (col + 1.0) / g, row / g);
+    let d2 = direction(c, (col + 1.0) / g, (row + 1.0) / g);
+    let d3 = direction(c, col / g, (row + 1.0) / g);
+    return abs(0.5 * (lambert_edge(normal, d0, d1) + lambert_edge(normal, d1, d2)
+        + lambert_edge(normal, d2, d3) + lambert_edge(normal, d3, d0)));
+}
+
 fn cone_visible(c: Cone, normal: vec3<f32>, cov: ptr<function, array<f32, 64>>) -> f32 {
+    // With the whole window above the receiver's horizon, every bin's weight is
+    // positive and the bins' weights add up to the window's: the visible part
+    // is the window's weight (one quad) minus the weights of the bins with
+    // coverage, so an open cone needs one quad instead of 64.
+    let d00 = direction(c, 0.0, 0.0);
+    let d10 = direction(c, 1.0, 0.0);
+    let d11 = direction(c, 1.0, 1.0);
+    let d01 = direction(c, 0.0, 1.0);
+    if (dot(normal, d00) > 0.0 && dot(normal, d10) > 0.0 && dot(normal, d11) > 0.0 && dot(normal, d01) > 0.0) {
+        var blocked = 0.0;
+        for (var b = 0u; b < BINS; b++) {
+            let covered = (*cov)[b];
+            if (covered > 0.0) { blocked += covered * bin_weight(c, normal, b); }
+        }
+        let total = abs(0.5 * (lambert_edge(normal, d00, d10) + lambert_edge(normal, d10, d11)
+            + lambert_edge(normal, d11, d01) + lambert_edge(normal, d01, d00)));
+        return max(total - blocked, 0.0);
+    }
     var visible = 0.0;
     for (var b = 0u; b < BINS; b++) {
-        let col = f32(b % GRID);
-        let row = f32(b / GRID);
-        let g = f32(GRID);
-        let d0 = direction(c, col / g, row / g);
-        let d1 = direction(c, (col + 1.0) / g, row / g);
-        let d2 = direction(c, (col + 1.0) / g, (row + 1.0) / g);
-        let d3 = direction(c, col / g, (row + 1.0) / g);
-        let weight = abs(0.5 * (lambert_edge(normal, d0, d1) + lambert_edge(normal, d1, d2)
-            + lambert_edge(normal, d2, d3) + lambert_edge(normal, d3, d0)));
-        visible += (1.0 - (*cov)[b]) * weight;
+        visible += (1.0 - (*cov)[b]) * bin_weight(c, normal, b);
     }
     return visible;
 }
@@ -618,13 +657,15 @@ fn cone_visible(c: Cone, normal: vec3<f32>, cov: ptr<function, array<f32, 64>>) 
 // Irradiance per unit radiance at `apex` (surface normal `normal`) from the
 // light, through a mask cone. `i` only selects where debug output goes.
 fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let stage = u32(light.params.z);
+    if (stage == 1u) { return 0.0; }
     let lc = light_cone(apex);
     if (!lc.ok) { return 0.0; }
     // Explicit zeroing: don't rely on loop-scoped `var`s being re-initialized.
     var cov: array<f32, 64>;
     for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
     var full = 0u;
-    scene_coverage(lc.c, i, &cov, &full);
+    if (stage != 2u) { scene_coverage(lc.c, i, &cov, &full); }
     let visible = cone_visible(lc.c, normal, &cov);
     if (light.counts.y == 1u) {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }

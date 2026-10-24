@@ -54,6 +54,7 @@ pub struct MaskConeKernel {
     shade_cached_pipeline: wgpu::ComputePipeline,
     prefilter: std::cell::Cell<f32>,
     nearest_first: std::cell::Cell<bool>,
+    profile_stage: std::cell::Cell<u32>,
     split: std::cell::Cell<bool>,
     pub adapter_name: String,
 }
@@ -130,6 +131,7 @@ impl RectLight {
         hierarchy: Hierarchy,
         prefilter: f32,
         nearest_first: bool,
+        profile_stage: u32,
     ) -> LightUniform {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         LightUniform {
@@ -142,7 +144,12 @@ impl RectLight {
                 hierarchy as u32,
                 self.one_sided as u32,
             ],
-            params: [prefilter, nearest_first as u32 as f32, 0.0, 0.0],
+            params: [
+                prefilter,
+                nearest_first as u32 as f32,
+                profile_stage as f32,
+                0.0,
+            ],
         }
     }
 }
@@ -311,6 +318,7 @@ impl MaskConeKernel {
             shade_cached_pipeline,
             prefilter: std::cell::Cell::new(0.0),
             nearest_first: std::cell::Cell::new(true),
+            profile_stage: std::cell::Cell::new(0),
             split: std::cell::Cell::new(false),
             adapter_name,
         }
@@ -348,6 +356,14 @@ impl MaskConeKernel {
     /// [`InstancedRenderer`]s set up after the call.
     pub fn set_hardware_rays(&self, on: bool) {
         self.hardware_rays.set(on && self.has_hardware_rays());
+    }
+
+    /// Debugging: cut cones short to time their stages (0: off, 1: no cone,
+    /// 2: setup and weights only, 3: plus the object hierarchy, 4: plus triangle
+    /// hierarchies but no rasterization). Results are wrong unless 0.
+    #[doc(hidden)]
+    pub fn set_profile_stage(&self, stage: u32) {
+        self.profile_stage.set(stage);
     }
 
     pub(crate) fn uses_hardware_rays(&self) -> bool {
@@ -547,6 +563,7 @@ impl MaskConeKernel {
             Hierarchy::Triangles,
             self.prefilter.get(),
             self.nearest_first.get(),
+            self.profile_stage.get(),
         );
         let storage = |label: &str, contents: &[u8]| {
             self.device
@@ -792,6 +809,7 @@ impl MaskConeKernel {
             frame.hierarchy,
             self.prefilter.get(),
             self.nearest_first.get(),
+            self.profile_stage.get(),
         );
         let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
@@ -946,6 +964,7 @@ impl MaskConeKernel {
             hierarchy,
             self.prefilter.get(),
             self.nearest_first.get(),
+            self.profile_stage.get(),
         );
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()
