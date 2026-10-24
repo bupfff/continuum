@@ -47,6 +47,9 @@ pub struct MaskConeKernel {
     probe_gather_pipeline: wgpu::ComputePipeline,
     bake_static_pipeline: wgpu::ComputePipeline,
     visibility_pipeline: wgpu::ComputePipeline,
+    /// Camera rays through hardware ray queries, if the device has them.
+    hw_visibility_pipeline: Option<wgpu::ComputePipeline>,
+    hardware_rays: std::cell::Cell<bool>,
     shade_pipeline: wgpu::ComputePipeline,
     shade_cached_pipeline: wgpu::ComputePipeline,
     prefilter: std::cell::Cell<f32>,
@@ -68,6 +71,7 @@ struct Frame<'a> {
 }
 
 mod hierarchy;
+mod hw;
 mod instanced;
 mod lightmap;
 mod live;
@@ -156,6 +160,36 @@ type KeepBinding = Box<dyn Fn(u32) -> bool>;
 /// Bindings the `visibility` pass uses.
 const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31];
 
+/// Bindings the hardware `hw_visibility` pass uses (32: the acceleration structure).
+pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[0, 3, 6, 31, 32];
+
+/// What Continuum asks of a device: the adapter's limits, and ray queries (an
+/// experimental wgpu feature, used only for camera rays, with the compute path
+/// as fallback) where the adapter supports them.
+pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    let ray_query = adapter
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    wgpu::DeviceDescriptor {
+        label: Some("continuum"),
+        required_features: if ray_query {
+            wgpu::Features::EXPERIMENTAL_RAY_QUERY
+        } else {
+            wgpu::Features::empty()
+        },
+        required_limits: adapter.limits(),
+        experimental_features: if ray_query {
+            // SAFETY: wgpu's experimental ray queries are opted into knowingly;
+            // they are used for camera rays only, and can be turned off
+            // (`set_hardware_rays`).
+            unsafe { wgpu::ExperimentalFeatures::enabled() }
+        } else {
+            wgpu::ExperimentalFeatures::disabled()
+        },
+        ..Default::default()
+    }
+}
+
 impl MaskConeKernel {
     /// `None` if no GPU adapter is available.
     pub fn new() -> Option<Self> {
@@ -166,12 +200,8 @@ impl MaskConeKernel {
         }))
         .ok()?;
         let adapter_name = adapter.get_info().name;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("continuum"),
-            required_limits: adapter.limits(),
-            ..Default::default()
-        }))
-        .ok()?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&device_descriptor(&adapter))).ok()?;
         Some(Self::with_device(device, queue, adapter_name))
     }
 
@@ -209,7 +239,7 @@ impl MaskConeKernel {
         }
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mask_cones"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: wgpu::ShaderSource::Wgsl(source.clone().into()),
         });
         let constants = [(
             "WORKGROUP_STACKS",
@@ -239,6 +269,30 @@ impl MaskConeKernel {
         let visibility_pipeline = entry("visibility");
         let shade_pipeline = entry("shade");
         let shade_cached_pipeline = entry("shade_cached_pass");
+        let hw_visibility_pipeline = device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            .then(|| {
+                let hw_source = format!(
+                    "enable wgpu_ray_query;\n{source}\n{}",
+                    include_str!("hw_visibility.wgsl")
+                );
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("hw_visibility"),
+                    source: wgpu::ShaderSource::Wgsl(hw_source.into()),
+                });
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("hw_visibility"),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some("hw_visibility"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
+            });
         MaskConeKernel {
             device,
             queue,
@@ -251,6 +305,8 @@ impl MaskConeKernel {
             probe_gather_pipeline,
             bake_static_pipeline,
             visibility_pipeline,
+            hardware_rays: std::cell::Cell::new(hw_visibility_pipeline.is_some()),
+            hw_visibility_pipeline,
             shade_pipeline,
             shade_cached_pipeline,
             prefilter: std::cell::Cell::new(0.0),
@@ -280,6 +336,22 @@ impl MaskConeKernel {
     /// order (as before M4 gate 3). Results are the same; only speed differs.
     pub fn set_nearest_first(&self, on: bool) {
         self.nearest_first.set(on);
+    }
+
+    /// Whether this kernel can cast camera rays with hardware ray queries.
+    pub fn has_hardware_rays(&self) -> bool {
+        self.hw_visibility_pipeline.is_some()
+    }
+
+    /// Camera rays for instanced scenes through hardware ray queries (the
+    /// default where available) or the compute hierarchy. Applies to renders and
+    /// [`InstancedRenderer`]s set up after the call.
+    pub fn set_hardware_rays(&self, on: bool) {
+        self.hardware_rays.set(on && self.has_hardware_rays());
+    }
+
+    pub(crate) fn uses_hardware_rays(&self) -> bool {
+        self.hardware_rays.get() && self.hw_visibility_pipeline.is_some()
     }
 
     /// Camera frames as a visibility pass then a shading pass, or as one pass
@@ -422,7 +494,18 @@ impl MaskConeKernel {
         let buffers = self.instanced_buffers(light, scene, origin);
         let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
         let cam = camera_uniform(camera, width, height, radiance);
-        let (pixels, time) = self.render_buffers(false, cam, width, height, buffers, runs);
+        let hw_scene = self
+            .uses_hardware_rays()
+            .then(|| self.hw_scene(scene, origin));
+        let (pixels, time) = self.render_buffers_with(
+            false,
+            cam,
+            width,
+            height,
+            buffers,
+            hw_scene.as_ref().map(|h| &h.tlas),
+            runs,
+        );
         (pixels, time, bytes)
     }
 
@@ -502,6 +585,26 @@ impl MaskConeKernel {
         buffers
     }
 
+    /// Hardware acceleration structures for an instanced scene.
+    pub(crate) fn hw_scene(&self, scene: &InstancedScene, origin: DVec3) -> hw::HwScene {
+        let geometries: Vec<Vec<Tri>> = scene
+            .geometries
+            .iter()
+            .map(|g| g.triangles.clone())
+            .collect();
+        let placements: Vec<Placement> = scene
+            .instances
+            .iter()
+            .map(|i| Placement {
+                geometry: i.geometry,
+                rotation: i.rotation,
+                scale: i.scale,
+                translation: (i.position - origin).as_vec3(),
+            })
+            .collect();
+        hw::build(&self.device, &self.queue, &geometries, &placements)
+    }
+
     /// Bakes a lightmap: one mask cone per texel (through the hierarchy).
     /// Returns the bake time.
     pub fn bake(&self, lightmap: &mut Lightmap, light: RectLight, meshes: &[Vec<Tri>]) -> Duration {
@@ -531,7 +634,23 @@ impl MaskConeKernel {
         cam: CameraUniform,
         width: u32,
         height: u32,
+        buffers: Vec<(u32, wgpu::Buffer)>,
+        runs: usize,
+    ) -> (Vec<[f32; 3]>, Duration) {
+        self.render_buffers_with(cached, cam, width, height, buffers, None, runs)
+    }
+
+    /// [`Self::render_buffers`], with camera rays through hardware ray queries
+    /// when `tlas` is given.
+    #[allow(clippy::too_many_arguments)]
+    fn render_buffers_with(
+        &self,
+        cached: bool,
+        cam: CameraUniform,
+        width: u32,
+        height: u32,
         mut buffers: Vec<(u32, wgpu::Buffer)>,
+        tlas: Option<&wgpu::Tlas>,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
         buffers.push((
@@ -563,7 +682,18 @@ impl MaskConeKernel {
         // Single pass, or a visibility pass then a shading pass; each pipeline
         // gets exactly the bindings it uses.
         let split = self.split.get();
-        let passes: Vec<(&wgpu::ComputePipeline, KeepBinding)> = match (cached, split) {
+        let hw = tlas.is_some() && self.hw_visibility_pipeline.is_some();
+        let passes: Vec<(&wgpu::ComputePipeline, KeepBinding)> = match (cached, split || hw) {
+            (false, true) if hw => vec![
+                (
+                    self.hw_visibility_pipeline.as_ref().unwrap(),
+                    Box::new(|b| HW_VISIBILITY_BINDINGS.contains(&b)),
+                ),
+                (
+                    &self.shade_pipeline,
+                    Box::new(|b| b == 31 || RENDER_BINDINGS.contains(&b)),
+                ),
+            ],
             (false, false) => vec![(
                 &self.render_pipeline,
                 Box::new(|b| RENDER_BINDINGS.contains(&b)),
@@ -590,7 +720,7 @@ impl MaskConeKernel {
         let groups: Vec<(&wgpu::ComputePipeline, wgpu::BindGroup)> = passes
             .iter()
             .map(|(pipeline, keep)| {
-                let entries: Vec<wgpu::BindGroupEntry> = buffers
+                let mut entries: Vec<wgpu::BindGroupEntry> = buffers
                     .iter()
                     .filter(|(binding, _)| keep(*binding))
                     .map(|(binding, buffer)| wgpu::BindGroupEntry {
@@ -598,6 +728,14 @@ impl MaskConeKernel {
                         resource: buffer.as_entire_binding(),
                     })
                     .collect();
+                if let Some(tlas) = tlas
+                    && keep(32)
+                {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 32,
+                        resource: tlas.as_binding(),
+                    });
+                }
                 let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("render"),
                     layout: &pipeline.get_bind_group_layout(0),

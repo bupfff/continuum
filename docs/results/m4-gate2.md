@@ -71,6 +71,12 @@ rerun.
 
 ## Why (2) failed
 
+**Correction (M4 gate 6):** the diagnostic below was wrong. Its "sun turned
+away" light had both edges reversed, which leaves the emitting side unchanged,
+so the "rays only" column measured full frames. Measured correctly, sun cones
+dominate (at 720p standing: rays 7.9 ms, cones 41 ms; from 150 m up: rays 21.5
+ms, cones 231 ms). See `m4-gate6.md`. The original text follows for the record.
+
 Measured after the gate by running the same frames with the sun turned away,
 so that no cones run:
 

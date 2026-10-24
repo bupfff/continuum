@@ -271,12 +271,9 @@ impl App {
             ..Default::default()
         }))
         .expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("viewer"),
-            required_limits: adapter.limits(),
-            ..Default::default()
-        }))
-        .expect("device");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&continuum_gpu::device_descriptor(&adapter)))
+                .expect("device");
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -317,7 +314,7 @@ impl App {
             );
             renderer.wait();
             println!(
-                "{} (field scene): {} boulders, {} triangles, {:.0} MB on the GPU, ready in {:.1} s; window {}×{}, rendering at 1/{} scale.",
+                "{} (field scene): {} boulders, {} triangles, {:.0} MB on the GPU, ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
                 kernel.adapter_name,
                 field.boulders(),
                 field.triangles(),
@@ -325,7 +322,12 @@ impl App {
                 start.elapsed().as_secs_f64(),
                 config.width,
                 config.height,
-                world.scale
+                world.scale,
+                if renderer.hardware_rays() {
+                    "hardware"
+                } else {
+                    "compute"
+                }
             );
             return Gpu {
                 window,

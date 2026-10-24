@@ -39,6 +39,12 @@ Max difference between split and single pass: **0.0** on both.
 
 ## Why it failed
 
+**Correction (M4 gate 6):** the diagnostic below was wrong. Its "light facing
+away" had both edges reversed, which keeps the emitting side, so "rays only"
+measured full frames. The measured result stands (the split was slower), but
+the conclusion that ray traversal limits the frame does not: sun cones do (see
+`m4-gate6.md`). The original text follows for the record.
+
 A diagnostic timed rays alone, using a light that faces away so no cone runs:
 
 | Boulders | Order of passes | Full frame | Rays only |
