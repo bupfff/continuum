@@ -110,18 +110,33 @@ impl Bvh {
     /// Triangles that may touch `cone`, grouped by mesh (sorted by mesh id), as
     /// `(mesh, triangles)` pairs. Also returns how many nodes were visited.
     pub fn candidates(&self, cone: &PyramidCone) -> (Vec<(usize, Vec<Tri>)>, usize) {
-        let mut found: Vec<(u32, Tri)> = Vec::new();
+        let (found, visited) = self.collect(
+            |min, max| cone.may_touch_box(min, max),
+            |t| cone.may_touch(t),
+        );
+        (group_by_mesh(found), visited)
+    }
+
+    /// Every `(mesh, triangle)` whose node boxes pass `node_test` and which passes
+    /// `tri_test`, plus how many nodes were visited. For custom culling volumes,
+    /// such as a frustum enclosing a whole tile of cones.
+    pub fn collect(
+        &self,
+        node_test: impl Fn(Vec3, Vec3) -> bool,
+        tri_test: impl Fn(&Tri) -> bool,
+    ) -> (Vec<(u32, Tri)>, usize) {
+        let mut found = Vec::new();
         let mut stack = vec![0usize];
         let mut visited = 0;
         while let Some(i) = stack.pop() {
             visited += 1;
             let n = self.nodes[i];
-            if !cone.may_touch_box(n.min, n.max) {
+            if !node_test(n.min, n.max) {
                 continue;
             }
             if n.count > 0 {
                 for t in n.start as usize..(n.start + n.count) as usize {
-                    if cone.may_touch(&self.tris[t]) {
+                    if tri_test(&self.tris[t]) {
                         found.push((self.mesh_of[t], self.tris[t]));
                     }
                 }
@@ -130,16 +145,21 @@ impl Bvh {
                 stack.push(n.start as usize + 1);
             }
         }
-        found.sort_by_key(|f| f.0);
-        let mut grouped: Vec<(usize, Vec<Tri>)> = Vec::new();
-        for (m, t) in found {
-            match grouped.last_mut() {
-                Some((last, tris)) if *last == m as usize => tris.push(t),
-                _ => grouped.push((m as usize, vec![t])),
-            }
-        }
-        (grouped, visited)
+        (found, visited)
     }
+}
+
+/// Groups `(mesh, triangle)` pairs by mesh, sorted by mesh id.
+pub fn group_by_mesh(mut found: Vec<(u32, Tri)>) -> Vec<(usize, Vec<Tri>)> {
+    found.sort_by_key(|f| f.0);
+    let mut grouped: Vec<(usize, Vec<Tri>)> = Vec::new();
+    for (m, t) in found {
+        match grouped.last_mut() {
+            Some((last, tris)) if *last == m as usize => tris.push(t),
+            _ => grouped.push((m as usize, vec![t])),
+        }
+    }
+    grouped
 }
 
 #[cfg(test)]

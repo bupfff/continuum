@@ -107,6 +107,59 @@ pub fn with_rubble() -> Room {
     room
 }
 
+/// A convex volume enclosing every receiver cone of a floor tile: the
+/// prismatoid between the tile (a rectangle on the floor) and the light (a
+/// rectangle parallel to it). Its planes are kept as `normal · p <= offset`.
+pub struct TileFrustum {
+    planes: Vec<(Vec3, f32)>,
+}
+
+impl TileFrustum {
+    /// `tile` is `[x0, y0, x1, y1]` on the floor; the light must be horizontal and
+    /// axis-aligned, as in these scenes.
+    pub fn new(tile: [f32; 4], light: &RectLight) -> TileFrustum {
+        let [tx0, ty0, tx1, ty1] = tile;
+        let (a, b) = (light.corner, light.corner + light.edge_u + light.edge_v);
+        let (lx0, ly0, lx1, ly1, h) = (a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y), a.z);
+        // Each side face joins a tile edge at z = 0 to the light's matching edge at z = h.
+        let side = |t: f32, l: f32, axis: Vec3, sign: f32| {
+            // sign · (axis·p − (t + (l − t) z / h)) <= 0
+            let n = (axis - Vec3::Z * ((l - t) / h)) * sign;
+            (n, sign * t)
+        };
+        let planes = vec![
+            side(tx0, lx0, Vec3::X, -1.0),
+            side(tx1, lx1, Vec3::X, 1.0),
+            side(ty0, ly0, Vec3::Y, -1.0),
+            side(ty1, ly1, Vec3::Y, 1.0),
+            (-Vec3::Z, 0.0),
+            (Vec3::Z, h),
+        ];
+        TileFrustum { planes }
+    }
+
+    fn outside_one_plane(&self, points: &[Vec3]) -> bool {
+        self.planes
+            .iter()
+            .any(|&(n, o)| points.iter().all(|&p| n.dot(p) > o))
+    }
+
+    pub fn may_touch_box(&self, min: Vec3, max: Vec3) -> bool {
+        let corners: [Vec3; 8] = std::array::from_fn(|i| {
+            Vec3::new(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            )
+        });
+        !self.outside_one_plane(&corners)
+    }
+
+    pub fn may_touch(&self, tri: &Tri) -> bool {
+        !self.outside_one_plane(tri)
+    }
+}
+
 /// A receiver's cone toward the light and the triangles that may touch it,
 /// grouped by mesh (the culling a hierarchy would do, shared by every method).
 pub struct Receiver {
@@ -149,6 +202,23 @@ impl Receiver {
             },
             visited,
         ))
+    }
+
+    /// Like [`Receiver::with_bvh`], but filtering a tile's shared candidates
+    /// instead of walking the hierarchy.
+    pub fn from_tile(room: &Room, tile_candidates: &[(u32, Tri)], point: Vec3) -> Option<Receiver> {
+        let l = &room.light;
+        let cone = PyramidCone::toward_rect_light(point, l.corner, l.edge_u, l.edge_v, Vec3::Z)?;
+        let mine: Vec<(u32, Tri)> = tile_candidates
+            .iter()
+            .filter(|(_, t)| cone.may_touch(t))
+            .copied()
+            .collect();
+        Some(Receiver {
+            point,
+            cone,
+            candidates: continuum::bvh::group_by_mesh(mine),
+        })
     }
 
     /// Irradiance per unit radiance through the mask cone.
