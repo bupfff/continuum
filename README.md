@@ -11,7 +11,9 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 
 ## Layout
 
-- `crates/continuum`: the library (so far the binary and continuous direction masks and the error ledger).
+- `crates/continuum`: the library: direction masks (binary and continuous), the
+  error ledger, 3D pyramid cones with exact per-bin rasterization, and a BVH.
+- `crates/continuum-gpu`: wgpu compute backend (mask cones in WGSL).
 - `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
 - `experiments/room3d`: 3D experiments on triangle scenes (milestone M1).
 - `docs/`: design document and experiment results.
@@ -32,6 +34,7 @@ cargo run --release -p room3d --bin m1_gate2
 cargo run --release -p room3d --bin m1_gate3
 cargo run --release -p room3d --bin m1_gate4
 cargo run --release -p room3d --bin render
+cargo run --release -p room3d --bin m2_gate1
 ```
 
 ![First 3D render](docs/images/m1-first-render.png)

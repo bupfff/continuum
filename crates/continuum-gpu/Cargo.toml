@@ -1,0 +1,11 @@
+[package]
+name = "continuum-gpu"
+description = "GPU (wgpu compute) backend for Continuum."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+continuum = { path = "../continuum" }
+pollster = "1.0.1"
+wgpu = "30.0.1"

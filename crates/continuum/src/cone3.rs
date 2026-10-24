@@ -65,7 +65,8 @@ pub fn projected_solid_angle(n: Vec3, verts: &[Vec3]) -> f32 {
         let g = a.cross(b);
         let len = g.length();
         if len > 1e-12 {
-            sum += a.dot(b).clamp(-1.0, 1.0).acos() * n.dot(g / len);
+            // atan2 rather than acos(dot): stable for the tiny angles of far, small bins.
+            sum += len.atan2(a.dot(b)) * n.dot(g / len);
         }
     }
     (0.5 * sum).abs()
@@ -142,7 +143,9 @@ fn draw_edge(buf: &mut Accumulator, p0: Vec2, p1: Vec2) {
     for y in (p0.y as usize)..y_end {
         let row = y * GRID;
         let dy = ((y + 1) as f32).min(p1.y) - (y as f32).max(p0.y);
-        let x_next = x + dxdy * dy;
+        // Clamp: stepping along an edge on the grid boundary can drift a hair
+        // outside it, and floor(-1e-9) = -1 would credit the row to the wrong cell.
+        let x_next = (x + dxdy * dy).clamp(0.0, GRID as f32);
         let d = dy * dir;
         let (x0, x1) = if x < x_next { (x, x_next) } else { (x_next, x) };
         let x0_floor = x0.floor();
@@ -325,6 +328,20 @@ impl PyramidCone {
                 }
             }
         }
+    }
+
+    /// The raw accumulation buffer for one mesh's front-facing triangles (for
+    /// comparing implementations, e.g. the GPU port).
+    #[doc(hidden)]
+    pub fn debug_accumulator(&self, triangles: &[[Vec3; 3]]) -> [f32; BINS + 4] {
+        let mut buf: Accumulator = [0.0; BINS + 4];
+        for tri in triangles {
+            let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+            if normal.dot(self.apex - tri[0]) > 0.0 {
+                self.rasterize(&mut buf, tri);
+            }
+        }
+        buf
     }
 
     /// Clips a triangle to the cone's slab and window and draws its projection
