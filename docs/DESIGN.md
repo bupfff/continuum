@@ -94,6 +94,37 @@ smaller than its footprint, so cost is bounded by screen size, not scene size.
 Builds on Lacewell et al. 2008, Bako et al. 2022, Weier et al. 2023; ours is
 non-neural, fitted for mask cones, and portable. Not a novelty claim.
 
+## 3.5 What the 2D phase (M0) taught us
+
+Status after the flatland gates (2026-10-24). Full results are in `docs/results/`.
+
+| Gate | Question | Result |
+|---|---|---|
+| G1 | Mask cones vs rays | Pass: same answer as 64 rays at about 1/18 the cost; continuous masks 7.7× more accurate |
+| G2 | Ledger soundness | Pass: zero violations in every run, including forced-deferral stress tests |
+| G3 | Work skipped, typical scene | Pass: 87.7%, output identical to a full recompute |
+| G4 | Worst case ≤ conventional | Fail: geometric charging fine (0.90–0.95×), projected charging 1.96× |
+| G5 | Deferral for wide cones | Pass on attempt 2: 25.4% of exact-invalidation work |
+| G6 | One-bounce GI, bounded charges | Fail: 66.9% (oracle with exact charges: 27.4%) |
+| G6b | One-bounce GI, cone G-buffers | Pass: bit-exact, 7.4× faster |
+| G7 | Moving light | Fail, narrowly: 25.1% vs ≤ 25% (exact invalidation needs 100%) |
+
+Synthesis:
+
+1. **Most of the speed comes from exact incremental work**: caching what static
+   geometry contributes per cone (static masks, static coverage, cone
+   G-buffers) and applying dynamic changes exactly to only the cones they can
+   reach. That is where 17×, 9× and 7.4× results came from, with zero error.
+2. **The ledger's own value is in what exact updates cannot reach cheaply**:
+   slow changes (gate 5: a further 2.9× beyond exact invalidation), moving
+   lights (gate 7: 4× less work than exact invalidation), and frame-budget
+   pressure. It has never produced a soundness violation.
+3. **Bounds are loose** (actual error is typically 5–10% of the certified
+   bound), and **charging must never cost more than recomputing** (gate 4).
+4. Refined one-sentence paradigm: *cache per cone what cannot change, apply
+   what changed exactly where that is cheap, and certify with a bound what you
+   choose not to recompute.*
+
 ## 4. Design rules
 
 1. **Worst case parity, typical case win.** The everything-moving fallback must
