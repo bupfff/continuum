@@ -2,7 +2,7 @@
 //! frame's time goes on the 1,000,000-boulder field, and how far the cached
 //! and the per-pixel images are from a supersampled reference (4×4 exact
 //! cones per pixel, box filtered: the pixel's area, not its center).
-//! `cargo run --release -p room3d --bin vcache_profile -- [--boulders N] [--compute] [--size W H]`
+//! `cargo run --release -p room3d --bin vcache_profile -- [--boulders N] [--compute] [--size W H] [--budget N]`
 
 use std::time::Duration;
 
@@ -37,6 +37,15 @@ fn main() {
             .unwrap_or(default)
     };
     let (w, h) = (dim(1, 1280), dim(2, 720));
+    let budget = args
+        .iter()
+        .position(|a| a == "--budget")
+        .and_then(|i| args.get(i + 1)?.parse().ok())
+        .unwrap_or(CacheOptions::default().bake_budget);
+    let options = CacheOptions {
+        bake_budget: budget,
+        ..Default::default()
+    };
     let kernel = MaskConeKernel::new().expect("GPU");
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     let field = Field::new(count, DVec3::ZERO);
@@ -95,7 +104,7 @@ fn main() {
             &field.scene,
             origin,
             field.radiance,
-            CacheOptions::default(),
+            options,
         );
         // A frame with a full bake budget: the second from an empty cache.
         r.frame(camera, &target);
