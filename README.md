@@ -24,8 +24,12 @@ Direct light from the area light is baked into a world-space lighting cache
 (one mask cone per texel) at startup; each frame is a camera ray per pixel plus
 a cache lookup. Three boxes move through the room. Each frame re-bakes exactly
 the cache blocks they can reach, so their soft shadows match a full re-bake
-(M2 gate 5). On an M4 MacBook Air it runs at about 7.5 ms per frame at
-2560×1440. Lighting is direct only for now, so shadows are black.
+(M2 gate 5). Probes on static surfaces add one bounce of indirect light: each
+caches which static surface it sees in 768 directions, and re-gathers their
+radiance every frame (M2 gate 6). On an M4 MacBook Air it runs at about 10.8 ms
+per frame at 2560×1440.
+
+![Direct light only (left) and with one bounce (right)](docs/images/m2-direct-vs-indirect.png)
 
 ## Layout
 
@@ -60,6 +64,8 @@ cargo run --release -p room3d --bin m2_gate3 -- capture   # once, before kernel 
 cargo run --release -p room3d --bin m2_gate3
 cargo run --release -p room3d --bin m2_gate4
 cargo run --release -p room3d --bin m2_gate5
+cargo run --release -p room3d --bin m2_gate6
+cargo run --release -p room3d --bin render_indirect   # side-by-side image
 ```
 
 ![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)

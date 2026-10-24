@@ -43,3 +43,11 @@ Apple M4 (MacBook Air), best of 5. Reproduce with
   not about the hierarchy.
 - Next (M2 gate 3, fixed before running): 960×540 in at most 16.7 ms on the M4
   Air, with output within 1e-5 of this kernel.
+
+## Rerun after padding hierarchy boxes (gate 6)
+
+M2 gate 6 found that hierarchy box tests could reject a triangle the exact ray
+test hits, for rays grazing a box face. Boxes are now padded by 1e-5 of the
+scene's scale. Rerun on 2026-10-24: output still identical to brute force (max
+difference 0); render scene at 1080p 180.3 ms brute force vs 96.5 ms with the
+hierarchy (1.9×); 3,000 boxes 4.3×. The verdict is unchanged (FAIL, under 3×).

@@ -39,6 +39,8 @@ pub struct MaskConeKernel {
     cached_pipeline: wgpu::ComputePipeline,
     mark_pipeline: wgpu::ComputePipeline,
     rebake_pipeline: wgpu::ComputePipeline,
+    probe_build_pipeline: wgpu::ComputePipeline,
+    probe_gather_pipeline: wgpu::ComputePipeline,
     pub adapter_name: String,
 }
 
@@ -62,6 +64,8 @@ struct FaceGpu {
     v: [f32; 4],
     /// `[first texel, nu, nv, blocks per row]`
     info: [u32; 4],
+    /// `[first probe, pu, pv, mesh]` (`pu = 0`: no probes)
+    probes: [u32; 4],
 }
 
 /// A world-space lighting cache: a texel grid on every face of every static box
@@ -82,6 +86,11 @@ pub struct Lightmap {
     pub irradiance: Vec<f32>,
     /// Bounds of each block's real texels (their receiver points).
     pub blocks: Vec<(Vec3, Vec3)>,
+    /// Indirect-light probes `(point, normal)`, row-major per face (see [`Self::with_probes`]).
+    pub probes: Vec<(Vec3, Vec3)>,
+    /// Indirect irradiance per probe per unit light radiance (RGB, then 1 if
+    /// valid), for renders outside [`LiveRenderer`]; empty for none.
+    pub indirect: Vec<[f32; 4]>,
 }
 
 /// Texels per block side; a block is `BLOCK × BLOCK` consecutive texels.
@@ -101,6 +110,8 @@ impl Lightmap {
             receivers: Vec::new(),
             irradiance: Vec::new(),
             blocks: Vec::new(),
+            probes: Vec::new(),
+            indirect: Vec::new(),
         };
         for (m, mesh) in meshes.iter().enumerate() {
             if !is_static(m) {
@@ -123,6 +134,7 @@ impl Lightmap {
                     u: [u.x, u.y, u.z, 0.0],
                     v: [v.x, v.y, v.z, 0.0],
                     info: [lm.receivers.len() as u32, nu, nv, nbu],
+                    probes: [0, 0, 0, m as u32],
                 });
                 for bj in 0..nbv {
                     for bi in 0..nbu {
@@ -151,6 +163,32 @@ impl Lightmap {
 
     pub fn texels(&self) -> usize {
         self.receivers.len()
+    }
+
+    /// Adds indirect-light probes about `spacing` apart on every face, at cell
+    /// centers nudged off the face like texels.
+    pub fn with_probes(mut self, spacing: f32) -> Self {
+        for face in &mut self.faces {
+            let q0 = Vec3::from_slice(&face.origin[..3]);
+            let (u, v) = (
+                Vec3::from_slice(&face.u[..3]),
+                Vec3::from_slice(&face.v[..3]),
+            );
+            let pu = ((u.length() / spacing).ceil() as u32).clamp(1, 1024);
+            let pv = ((v.length() / spacing).ceil() as u32).clamp(1, 1024);
+            let normal = u.cross(v).normalize();
+            face.probes = [self.probes.len() as u32, pu, pv, face.probes[3]];
+            for j in 0..pv {
+                for i in 0..pu {
+                    let p = q0
+                        + u * ((i as f32 + 0.5) / pu as f32)
+                        + v * ((j as f32 + 0.5) / pv as f32)
+                        + normal * 1e-4;
+                    self.probes.push((p, normal));
+                }
+            }
+        }
+        self
     }
 
     /// For each block, [`BLOCK_PLANES`] planes `[n.x, n.y, n.z, w]` (inside:
@@ -231,6 +269,46 @@ impl Lightmap {
 /// Planes per block in [`Lightmap::block_planes`].
 pub const BLOCK_PLANES: usize = 16;
 
+/// Bins of a hemicube around a probe's normal with `r × r` bins on the top face
+/// and `r × r/2` on each side face, in the kernel's order: the projected solid
+/// angle of each (they sum to π).
+pub fn hemicube_weights(r: u32) -> Vec<f32> {
+    assert!(r.is_multiple_of(2), "hemicube resolution must be even");
+    let g = r as f32;
+    let at = |i: u32, j: u32, di: f32, dj: f32| {
+        (
+            -1.0 + 2.0 * (i as f32 + di) / g,
+            -1.0 + 2.0 * (j as f32 + dj) / g,
+            2.0 * (j as f32 + dj) / g,
+        )
+    };
+    let mut weights = Vec::with_capacity(3 * (r * r) as usize);
+    for bin in 0..r * r {
+        let (i, j) = (bin % r, bin / r);
+        let quad = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(di, dj)| {
+            let (x, y, _) = at(i, j, di, dj);
+            Vec3::new(x, y, 1.0)
+        });
+        weights.push(continuum::cone3::projected_solid_angle(Vec3::Z, &quad));
+    }
+    for side in 0..4 {
+        for k in 0..r * r / 2 {
+            let (i, j) = (k % r, k / r);
+            let quad = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(di, dj)| {
+                let (a, _, z) = at(i, j, di, dj);
+                match side {
+                    0 => Vec3::new(1.0, a, z),
+                    1 => Vec3::new(-1.0, a, z),
+                    2 => Vec3::new(a, 1.0, z),
+                    _ => Vec3::new(a, -1.0, z),
+                }
+            });
+            weights.push(continuum::cone3::projected_solid_angle(Vec3::Z, &quad));
+        }
+    }
+    weights
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
@@ -297,6 +375,8 @@ impl MaskConeKernel {
         let cached_pipeline = entry("render_cached");
         let mark_pipeline = entry("mark_blocks");
         let rebake_pipeline = entry("rebake");
+        let probe_build_pipeline = entry("probe_build");
+        let probe_gather_pipeline = entry("probe_gather");
         MaskConeKernel {
             device,
             queue,
@@ -305,6 +385,8 @@ impl MaskConeKernel {
             cached_pipeline,
             mark_pipeline,
             rebake_pipeline,
+            probe_build_pipeline,
+            probe_gather_pipeline,
             adapter_name,
         }
     }
@@ -552,9 +634,22 @@ impl MaskConeKernel {
             } else {
                 &lm.faces
             };
+            let indirect: &[[f32; 4]] =
+                if lm.indirect.len() == lm.probes.len() && !lm.probes.is_empty() {
+                    &lm.indirect
+                } else if lm.probes.is_empty() {
+                    &[[0.0; 4]]
+                } else {
+                    // Probes without values yet: all invalid, so lookups add nothing.
+                    &vec![[0.0; 4]; lm.probes.len()]
+                };
             buffers.push((11, storage("tri_face", bytemuck::cast_slice(&lm.tri_face))));
             buffers.push((12, storage("faces", bytemuck::cast_slice(faces))));
             buffers.push((13, storage("texels", bytemuck::cast_slice(texels))));
+            buffers.push((
+                21,
+                storage("probe irradiance", bytemuck::cast_slice(indirect)),
+            ));
         }
         buffers
     }
@@ -800,16 +895,18 @@ struct NodeGpu {
 /// centroid axis, at most two meshes per leaf), flattened for the GPU: nodes and
 /// the mesh indices their leaves refer to.
 fn mesh_hierarchy(meshes: &[Vec<Tri>]) -> (Vec<NodeGpu>, Vec<u32>) {
-    let bounds: Vec<(Vec3, Vec3)> = meshes
-        .iter()
-        .map(|m| {
-            m.iter().flatten().fold(
-                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                |(lo, hi), &p| (lo.min(p), hi.max(p)),
-            )
-        })
+    mesh_hierarchy_of(meshes, |_| true)
+}
+
+/// [`mesh_hierarchy`] over only the meshes `keep` selects (indices stay global).
+fn mesh_hierarchy_of(
+    meshes: &[Vec<Tri>],
+    keep: impl Fn(usize) -> bool,
+) -> (Vec<NodeGpu>, Vec<u32>) {
+    let bounds: Vec<(Vec3, Vec3)> = meshes.iter().map(|m| padded(mesh_bounds(m))).collect();
+    let mut items: Vec<u32> = (0..meshes.len() as u32)
+        .filter(|&m| keep(m as usize))
         .collect();
-    let mut items: Vec<u32> = (0..meshes.len() as u32).collect();
     let mut nodes = vec![NodeGpu::zeroed()];
     fn split(
         nodes: &mut Vec<NodeGpu>,
@@ -852,8 +949,11 @@ fn mesh_hierarchy(meshes: &[Vec<Tri>]) -> (Vec<NodeGpu>, Vec<u32>) {
         split(nodes, left + 1, r, start + mid, bounds);
     }
     if items.is_empty() {
+        // A leaf holding mesh 0, which must then have no triangles: true when
+        // there are no meshes (`flatten` pads an empty range). Callers never
+        // traverse a hierarchy that filtered every mesh out.
         items.push(0);
-        nodes[0].info = [0, 0, 0, 0];
+        nodes[0].info = [0, 1, 0, 0];
     } else {
         split(&mut nodes, 0, &mut items, 0, &bounds);
     }
@@ -882,6 +982,11 @@ struct DisplayDims {
 /// Meshes without lightmap texels are dynamic: they are shaded per pixel and can
 /// move ([`Self::update_meshes`]), which re-bakes on the GPU exactly the lightmap
 /// blocks they can affect.
+///
+/// If the lightmap has probes ([`Lightmap::with_probes`]), static surfaces also
+/// get one bounce of indirect light: each probe caches a hemicube G-buffer of
+/// static geometry once, and gathers bounce radiance from the lightmap after
+/// every update, with moving meshes composited as black occluders.
 pub struct LiveRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -889,6 +994,7 @@ pub struct LiveRenderer {
     display: wgpu::RenderPipeline,
     mark: wgpu::ComputePipeline,
     rebake: wgpu::ComputePipeline,
+    gather: wgpu::ComputePipeline,
     scene: Vec<(u32, wgpu::Buffer)>,
     camera_buf: wgpu::Buffer,
     dims_buf: wgpu::Buffer,
@@ -896,11 +1002,36 @@ pub struct LiveRenderer {
     compute_bind: wgpu::BindGroup,
     display_bind: wgpu::BindGroup,
     motion: Motion,
+    indirect: Option<Indirect>,
     width: u32,
     height: u32,
     radiance: f32,
     srgb: bool,
 }
+
+/// Indirect-light probes on the GPU (see `probe_gather` in the kernel).
+struct Indirect {
+    probes: u32,
+    points: wgpu::Buffer,
+    gbuffer: wgpu::Buffer,
+    params: wgpu::Buffer,
+    gather_bind: wgpu::BindGroup,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ProbeParams {
+    counts: [u32; 4],
+    moving: [[u32; 4]; MAX_MOVING],
+    bounds: [[f32; 4]; 2 * MAX_MOVING],
+}
+
+/// Dynamic meshes a [`LiveRenderer`] with probes supports.
+pub const MAX_MOVING: usize = 16;
+
+/// Hemicube resolution of live probes: `r × r` bins on the top face and
+/// `r × r/2` on each side (768 bins per probe).
+pub const PROBE_RESOLUTION: u32 = 16;
 
 /// What [`LiveRenderer`] keeps to move dynamic meshes.
 struct Motion {
@@ -931,6 +1062,15 @@ fn mesh_bounds(mesh: &[Tri]) -> (Vec3, Vec3) {
         (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
         |(lo, hi), &p| (lo.min(p), hi.max(p)),
     )
+}
+
+/// Bounds grown by a margin well above float rounding, so box tests that cull
+/// rays or cones never reject a triangle the exact test would hit. (Box meshes lie
+/// exactly on their bounds, so a ray grazing a face can otherwise pass the
+/// triangle test and fail the box test, depending on how boxes are grouped.)
+fn padded((lo, hi): (Vec3, Vec3)) -> (Vec3, Vec3) {
+    let pad = 1e-5 * lo.abs().max(hi.abs()).max_element().max(1.0);
+    (lo - pad, hi + pad)
 }
 
 fn binding(scene: &[(u32, wgpu::Buffer)], b: u32) -> &wgpu::Buffer {
@@ -1033,6 +1173,8 @@ impl LiveRenderer {
             height,
         );
         let motion = Self::motion(kernel, &scene, light, meshes, lightmap);
+        let indirect = (!lightmap.probes.is_empty())
+            .then(|| Self::indirect(kernel, &scene, &motion, lightmap));
         LiveRenderer {
             device,
             queue: kernel.queue.clone(),
@@ -1040,6 +1182,7 @@ impl LiveRenderer {
             display,
             mark: kernel.mark_pipeline.clone(),
             rebake: kernel.rebake_pipeline.clone(),
+            gather: kernel.probe_gather_pipeline.clone(),
             scene,
             camera_buf,
             dims_buf,
@@ -1047,11 +1190,159 @@ impl LiveRenderer {
             compute_bind,
             display_bind,
             motion,
+            indirect,
             width,
             height,
             radiance,
             srgb: target_format.is_srgb(),
         }
+    }
+
+    /// Uploads the probes, builds their G-buffers from static geometry, and
+    /// runs the first gather.
+    fn indirect(
+        kernel: &MaskConeKernel,
+        scene: &[(u32, wgpu::Buffer)],
+        motion: &Motion,
+        lightmap: &Lightmap,
+    ) -> Indirect {
+        let device = &kernel.device;
+        let probes = lightmap.probes.len() as u32;
+        assert!(
+            probes <= device.limits().max_compute_workgroups_per_dimension,
+            "too many probes for one gather dispatch"
+        );
+        let r = PROBE_RESOLUTION;
+        let bins = 3 * r * r;
+        let storage = |label: &str, contents: &[u8]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+        };
+        let points: Vec<ReceiverGpu> = lightmap
+            .probes
+            .iter()
+            .map(|&(p, n)| ReceiverGpu {
+                point: [p.x, p.y, p.z, 0.0],
+                normal: [n.x, n.y, n.z, 0.0],
+            })
+            .collect();
+        let points = storage("probe points", bytemuck::cast_slice(&points));
+        let gbuffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe G-buffers"),
+            size: probes as u64 * bins as u64 * 8,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let weights = storage("bin weights", bytemuck::cast_slice(&hemicube_weights(r)));
+        let params = uniform_buffer(
+            device,
+            "probe params",
+            bytemuck::bytes_of(&Self::probe_params(motion, probes, r, 0)),
+        );
+        // The G-buffer holds static geometry only: trace through a hierarchy of
+        // the static meshes.
+        let (nodes, items) = mesh_hierarchy_of(&motion.meshes, |m| !motion.dynamic[m]);
+        let nodes = storage("static nodes", bytemuck::cast_slice(&nodes));
+        let items = storage("static items", bytemuck::cast_slice(&items));
+        let s = |b| binding(scene, b);
+        let build_bind = bind_group(
+            device,
+            "probe build",
+            &kernel.probe_build_pipeline,
+            &[
+                (0, s(0)),
+                (2, s(2)),
+                (3, s(3)),
+                (9, &nodes),
+                (10, &items),
+                (11, s(11)),
+                (18, &points),
+                (19, &gbuffer),
+                (22, &params),
+            ],
+        );
+        let gather_bind =
+            Self::gather_bind(kernel, scene, &points, &gbuffer, &weights, s(21), &params);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&kernel.probe_build_pipeline);
+            pass.set_bind_group(0, &build_bind, &[]);
+            pass.dispatch_workgroups(bins / 64, probes, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&kernel.probe_gather_pipeline);
+            pass.set_bind_group(0, &gather_bind, &[]);
+            pass.dispatch_workgroups(probes, 1, 1);
+        }
+        kernel.queue.submit([encoder.finish()]);
+        Indirect {
+            probes,
+            points,
+            gbuffer,
+            params,
+            gather_bind,
+        }
+    }
+
+    fn gather_bind(
+        kernel: &MaskConeKernel,
+        scene: &[(u32, wgpu::Buffer)],
+        points: &wgpu::Buffer,
+        gbuffer: &wgpu::Buffer,
+        weights: &wgpu::Buffer,
+        out: &wgpu::Buffer,
+        params: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        let s = |b| binding(scene, b);
+        bind_group(
+            &kernel.device,
+            "probe gather",
+            &kernel.probe_gather_pipeline,
+            &[
+                (0, s(0)),
+                (2, s(2)),
+                (3, s(3)),
+                (8, s(8)),
+                (9, s(9)),
+                (10, s(10)),
+                (11, s(11)),
+                (12, s(12)),
+                (13, s(13)),
+                (18, points),
+                (19, gbuffer),
+                (20, weights),
+                (21, out),
+                (22, params),
+            ],
+        )
+    }
+
+    /// Gather parameters: every dynamic mesh with its current bounds.
+    fn probe_params(motion: &Motion, probes: u32, resolution: u32, mode: u32) -> ProbeParams {
+        let mut params = ProbeParams::zeroed();
+        let mut k = 0;
+        if mode == 0 {
+            for (m, mesh) in motion.meshes.iter().enumerate() {
+                if motion.dynamic[m] && !mesh.is_empty() {
+                    assert!(
+                        k < MAX_MOVING,
+                        "at most {MAX_MOVING} dynamic meshes with probes"
+                    );
+                    let (lo, hi) = padded(motion.bounds[m]);
+                    params.moving[k] = [m as u32, 0, 0, 0];
+                    params.bounds[2 * k] = [lo.x, lo.y, lo.z, 0.0];
+                    params.bounds[2 * k + 1] = [hi.x, hi.y, hi.z, 0.0];
+                    k += 1;
+                }
+            }
+        }
+        params.counts = [probes, resolution, mode, k as u32];
+        params
     }
 
     fn motion(
@@ -1275,7 +1566,84 @@ impl LiveRenderer {
             pass.set_bind_group(0, &m.rebake_bind, &[]);
             pass.dispatch_workgroups_indirect(&m.args, 0);
         }
+        if let Some(ind) = &self.indirect {
+            let params = Self::probe_params(&self.motion, ind.probes, PROBE_RESOLUTION, 0);
+            self.queue
+                .write_buffer(&ind.params, 0, bytemuck::bytes_of(&params));
+            self.encode_gather(&mut encoder);
+        }
         self.queue.submit([encoder.finish()]);
+    }
+
+    fn encode_gather(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(ind) = &self.indirect {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.gather);
+            pass.set_bind_group(0, &ind.gather_bind, &[]);
+            pass.dispatch_workgroups(ind.probes, 1, 1);
+        }
+    }
+
+    /// Runs the probe gather alone (it also runs in every [`Self::update_meshes`]
+    /// that moves something); for timing.
+    pub fn regather(&self) {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.encode_gather(&mut encoder);
+        self.queue.submit([encoder.finish()]);
+    }
+
+    /// Probe count (0 without indirect light).
+    pub fn probes(&self) -> u32 {
+        self.indirect.as_ref().map_or(0, |i| i.probes)
+    }
+
+    /// The probes' current indirect irradiance (RGB, then 1 if valid).
+    pub fn read_probes(&self) -> Vec<[f32; 4]> {
+        let n = self.probes() as usize;
+        bytemuck::cast_slice::<u8, [f32; 4]>(&self.read(binding(&self.scene, 21)))[..n].to_vec()
+    }
+
+    /// Indirect irradiance per probe recomputed from scratch, for verification:
+    /// every bin of a `resolution` hemicube is traced through the current scene
+    /// (static and moving meshes; moving ones black) instead of read from the
+    /// cached G-buffer. With [`PROBE_RESOLUTION`] it must equal [`Self::read_probes`].
+    pub fn probes_from_scratch(&self, kernel: &MaskConeKernel, resolution: u32) -> Vec<[f32; 4]> {
+        let ind = self.indirect.as_ref().expect("no probes");
+        let device = &self.device;
+        let weights = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bin weights"),
+            contents: bytemuck::cast_slice(&hemicube_weights(resolution)),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let params = uniform_buffer(
+            device,
+            "probe params",
+            bytemuck::bytes_of(&Self::probe_params(&self.motion, ind.probes, resolution, 1)),
+        );
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe irradiance"),
+            size: ind.probes as u64 * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let bind = Self::gather_bind(
+            kernel,
+            &self.scene,
+            &ind.points,
+            &ind.gbuffer,
+            &weights,
+            &out,
+            &params,
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.gather);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(ind.probes, 1, 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        bytemuck::cast_slice::<u8, [f32; 4]>(&self.read(&out)).to_vec()
     }
 
     /// Renders one frame from `camera` into `target` and submits it.
@@ -1370,5 +1738,23 @@ impl LiveRenderer {
         let bytes = slice.get_mapped_range().expect("mapped readback").to_vec();
         staging.unmap();
         bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hemicube_weights_cover_the_hemisphere() {
+        for r in [2, 8, 16, 64] {
+            let w = hemicube_weights(r);
+            assert_eq!(w.len(), 3 * (r * r) as usize);
+            let total: f32 = w.iter().sum();
+            assert!(
+                (total - std::f32::consts::PI).abs() < 1e-4,
+                "r = {r}: {total}"
+            );
+        }
     }
 }

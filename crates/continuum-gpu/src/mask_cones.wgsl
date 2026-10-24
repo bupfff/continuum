@@ -510,13 +510,16 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>) {
 // --- World-space lighting cache: lightmap texels on static faces. ---
 
 // A rectangular face with an `nu × nv` texel grid starting at texel `info.x`,
-// stored as 8×8 blocks of 64 consecutive texels, `info.w` blocks per row.
+// stored as 8×8 blocks of 64 consecutive texels, `info.w` blocks per row, and
+// a coarser `pu × pv` grid of indirect-light probes (row-major).
 struct Face {
     origin: vec4<f32>,
     u: vec4<f32>,
     v: vec4<f32>,
     // x: first texel, y: nu, z: nv, w: blocks per row
     info: vec4<u32>,
+    // x: first probe, y: pu, z: pv (0: no probes), w: mesh
+    probes: vec4<u32>,
 };
 
 // Face of each triangle, or 0xffffffff for dynamic geometry (shaded per pixel).
@@ -559,13 +562,13 @@ fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
     let point = eye + dir * hit.distance + hit.normal * 1e-4;
     let f = tri_face[hit.tri];
-    var irradiance: f32;
+    var irradiance: vec3<f32>;
     if (f == 0xffffffffu) {
-        irradiance = hit_irradiance(pixel, point, hit.normal);
+        irradiance = vec3<f32>(hit_irradiance(pixel, point, hit.normal));
     } else {
-        irradiance = lookup(faces[f], point);
+        irradiance = lookup(faces[f], point) + indirect_lookup(faces[f], point);
     }
-    let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
+    let c = albedo[hit.mesh].xyz * irradiance * (camera.params.w / 3.14159265);
     colors[pixel] = vec4<f32>(c, 1.0);
 }
 
@@ -621,4 +624,202 @@ fn mark_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn rebake(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let i = dirty[wg.x] * 64u + li;
     result[i] = hit_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz);
+}
+
+// --- Indirect light: probes with cone G-buffers. ---
+//
+// Probes sit on a coarse grid on every static face. Each caches a hemicube
+// G-buffer: for each bin (R×R on the top face, R×R/2 on each side face), the
+// nearest static triangle along the bin's center direction and its distance.
+// Static geometry does not change, so the G-buffer is built once. Each frame a
+// probe gathers bounce radiance: per bin, the hit surface's albedo times its
+// cached direct irradiance (the lightmap, which tracks moving shadows exactly),
+// with moving meshes composited on top by depth as black occluders.
+
+const NO_HIT: u32 = 0xffffffffu;
+const BLACK: u32 = 0xfffffffeu;
+const BACK: u32 = 0x80000000u;
+
+struct ProbeParams {
+    // x: probes; y: R, bins per hemicube face side; z: mode (0: cached
+    // G-buffer with moving meshes composited; 1: trace every bin through the
+    // bound hierarchy, moving meshes black); w: moving meshes
+    counts: vec4<u32>,
+    // Moving mesh k is `moving[k].x`, with bounds `bounds[2k] .. bounds[2k + 1]`.
+    moving: array<vec4<u32>, 16>,
+    bounds: array<vec4<f32>, 32>,
+};
+
+@group(0) @binding(18) var<storage, read> probe_points: array<Receiver>;
+// Per probe and bin: triangle (BACK set if its back faces the probe), NO_HIT
+// or BLACK; and the distance's bits.
+@group(0) @binding(19) var<storage, read_write> gbuffer: array<vec2<u32>>;
+@group(0) @binding(20) var<storage, read> bin_weights: array<f32>;
+// Per probe: indirect irradiance per unit light radiance (RGB), and 1 if valid.
+@group(0) @binding(21) var<storage, read_write> probe_out: array<vec4<f32>>;
+@group(0) @binding(22) var<uniform> probe_params: ProbeParams;
+
+fn bins_per_probe() -> u32 {
+    let r = probe_params.counts.y;
+    return 3u * r * r;
+}
+
+// A bin's center direction in the probe's frame (z along the normal), not normalized.
+fn bin_local(bin: u32, r: u32) -> vec3<f32> {
+    let g = f32(r);
+    if (bin < r * r) {
+        return vec3<f32>(-1.0 + (2.0 * f32(bin % r) + 1.0) / g, -1.0 + (2.0 * f32(bin / r) + 1.0) / g, 1.0);
+    }
+    let half = r * r / 2u;
+    let side = (bin - r * r) / half;
+    let k = (bin - r * r) % half;
+    let a = -1.0 + (2.0 * f32(k % r) + 1.0) / g;
+    let z = (2.0 * f32(k / r) + 1.0) / g;
+    switch side {
+        case 0u: { return vec3<f32>(1.0, a, z); }
+        case 1u: { return vec3<f32>(-1.0, a, z); }
+        case 2u: { return vec3<f32>(a, 1.0, z); }
+        default: { return vec3<f32>(a, -1.0, z); }
+    }
+}
+
+fn bin_world(n: vec3<f32>, local: vec3<f32>) -> vec3<f32> {
+    var a = vec3<f32>(0.0, 0.0, 1.0);
+    if (abs(n.z) > 0.9) { a = vec3<f32>(1.0, 0.0, 0.0); }
+    let t = normalize(cross(n, a));
+    let b = cross(n, t);
+    return t * local.x + b * local.y + n * local.z;
+}
+
+// The nearest surface along a probe ray through the bound hierarchy, encoded as
+// a G-buffer entry. Hits on moving meshes are BLACK.
+fn trace_bin(origin: vec3<f32>, dir: vec3<f32>) -> vec2<u32> {
+    let hit = primary_hit(origin, dir);
+    if (hit.mesh == 0xffffffffu) { return vec2<u32>(NO_HIT, 0u); }
+    if (tri_face[hit.tri] == 0xffffffffu) { return vec2<u32>(BLACK, bitcast<u32>(hit.distance)); }
+    let v0 = tris[3u * hit.tri].xyz;
+    let v1 = tris[3u * hit.tri + 1u].xyz;
+    let v2 = tris[3u * hit.tri + 2u].xyz;
+    var code = hit.tri;
+    if (dot(cross(v1 - v0, v2 - v0), dir) > 0.0) { code |= BACK; }
+    return vec2<u32>(code, bitcast<u32>(hit.distance));
+}
+
+// A cached static entry with the moving meshes composited by depth: BLACK if
+// one is nearer (same tie rule as tracing the whole scene).
+fn composite(origin: vec3<f32>, dir: vec3<f32>, g: vec2<u32>) -> vec2<u32> {
+    var best = Hit(3.4e38, 0xffffffffu, 0xffffffffu, vec3<f32>(0.0));
+    if (g.x != NO_HIT) {
+        best.distance = bitcast<f32>(g.y);
+        best.mesh = faces[tri_face[g.x & ~BACK]].probes.w;
+    }
+    let inv = 1.0 / dir;
+    var blocked = false;
+    for (var k = 0u; k < probe_params.counts.w; k++) {
+        let lo = probe_params.bounds[2u * k].xyz;
+        let hi = probe_params.bounds[2u * k + 1u].xyz;
+        let t0 = (lo - origin) * inv;
+        let t1 = (hi - origin) * inv;
+        let near = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
+        let far = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+        if (far < max(near, 0.0) || near > best.distance) { continue; }
+        let m = probe_params.moving[k].x;
+        let hit = nearest_in_mesh(origin, dir, m, best);
+        if (hit.mesh == m) {
+            best = hit;
+            blocked = true;
+        }
+    }
+    if (blocked) { return vec2<u32>(BLACK, bitcast<u32>(best.distance)); }
+    return g;
+}
+
+// Bounce radiance per unit light radiance (RGB) from a G-buffer entry; w is 1
+// for a back face (its radiance is unknown and taken as zero).
+fn bin_radiance(origin: vec3<f32>, dir: vec3<f32>, g: vec2<u32>) -> vec4<f32> {
+    if (g.x == NO_HIT || g.x == BLACK) { return vec4<f32>(0.0); }
+    if ((g.x & BACK) != 0u) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+    let face = faces[tri_face[g.x]];
+    let e = lookup(face, origin + dir * bitcast<f32>(g.y));
+    return vec4<f32>(albedo[face.probes.w].xyz * (e / 3.14159265), 0.0);
+}
+
+// One invocation per (bin, probe): dispatched as (bins / 64, probes).
+@compute @workgroup_size(64)
+fn probe_build(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let bins = bins_per_probe();
+    let p = gid.y;
+    if (gid.x >= bins || p >= probe_params.counts.x) { return; }
+    let r = probe_points[p];
+    let dir = bin_world(r.normal.xyz, bin_local(gid.x, probe_params.counts.y));
+    gbuffer[p * bins + gid.x] = trace_bin(r.point.xyz, dir);
+}
+
+var<workgroup> partial: array<vec4<f32>, 64>;
+
+// One workgroup per probe: each invocation sums every 64th bin, then a fixed
+// tree reduction, so the sum order never depends on scheduling.
+@compute @workgroup_size(64)
+fn probe_gather(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let p = wg.x;
+    let bins = bins_per_probe();
+    var sum = vec4<f32>(0.0);
+    if (p < probe_params.counts.x) {
+        let r = probe_points[p];
+        let origin = r.point.xyz;
+        for (var b = li; b < bins; b += 64u) {
+            let dir = bin_world(r.normal.xyz, bin_local(b, probe_params.counts.y));
+            var g: vec2<u32>;
+            if (probe_params.counts.z == 0u) {
+                g = composite(origin, dir, gbuffer[p * bins + b]);
+            } else {
+                g = trace_bin(origin, dir);
+            }
+            sum += bin_weights[b] * bin_radiance(origin, dir, g);
+        }
+    }
+    partial[li] = sum;
+    workgroupBarrier();
+    for (var s = 32u; s > 0u; s >>= 1u) {
+        if (li < s) { partial[li] += partial[li + s]; }
+        workgroupBarrier();
+    }
+    if (li == 0u && p < probe_params.counts.x) {
+        let total = partial[0];
+        // A probe that sees mostly back faces sits inside geometry; lookups skip it.
+        var valid = 0.0;
+        if (total.w < 0.1 * 3.14159265) { valid = 1.0; }
+        probe_out[p] = vec4<f32>(total.xyz, valid);
+    }
+}
+
+fn probe_at(face: Face, i: u32, j: u32) -> vec4<f32> {
+    return probe_out[face.probes.x + j * face.probes.y + i];
+}
+
+// Bilinear lookup of probe irradiance on a face, skipping invalid probes.
+fn indirect_lookup(face: Face, point: vec3<f32>) -> vec3<f32> {
+    let pu = face.probes.y;
+    let pv = face.probes.z;
+    if (pu == 0u) { return vec3<f32>(0.0); }
+    let d = point - face.origin.xyz;
+    let s = clamp(dot(d, face.u.xyz) / dot(face.u.xyz, face.u.xyz) * f32(pu) - 0.5, 0.0, f32(pu - 1u));
+    let t = clamp(dot(d, face.v.xyz) / dot(face.v.xyz, face.v.xyz) * f32(pv) - 0.5, 0.0, f32(pv - 1u));
+    let i0 = u32(s);
+    let j0 = u32(t);
+    let i1 = min(i0 + 1u, pu - 1u);
+    let j1 = min(j0 + 1u, pv - 1u);
+    let fs = s - f32(i0);
+    let ft = t - f32(j0);
+    let c00 = probe_at(face, i0, j0);
+    let c10 = probe_at(face, i1, j0);
+    let c01 = probe_at(face, i0, j1);
+    let c11 = probe_at(face, i1, j1);
+    let w00 = (1.0 - fs) * (1.0 - ft) * c00.w;
+    let w10 = fs * (1.0 - ft) * c10.w;
+    let w01 = (1.0 - fs) * ft * c01.w;
+    let w11 = fs * ft * c11.w;
+    let total = w00 + w10 + w01 + w11;
+    if (total <= 1e-6) { return vec3<f32>(0.0); }
+    return (c00.xyz * w00 + c10.xyz * w10 + c01.xyz * w01 + c11.xyz * w11) / total;
 }

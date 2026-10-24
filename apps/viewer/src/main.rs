@@ -4,7 +4,8 @@
 //! (one mask cone per texel) at startup; each frame is a camera ray per pixel
 //! plus a cache lookup, on the GPU. Three boxes move through the room: they are
 //! shaded per pixel, and each frame re-bakes exactly the cache blocks they can
-//! reach, so their soft shadows stay exact.
+//! reach, so their soft shadows stay exact. Probes on static surfaces add one
+//! bounce of indirect light, gathered each frame through cached G-buffers.
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, P to pause the boxes, V to toggle vsync, Esc to quit.
@@ -26,6 +27,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 const TEXEL: f32 = 0.005;
+/// Spacing of indirect-light probes.
+const PROBES: f32 = 0.04;
 const FOV: f32 = 60.0;
 
 struct FlyCamera {
@@ -142,7 +145,8 @@ impl App {
         };
         let kernel =
             MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
-        let mut lightmap = Lightmap::boxes(&scene.room.meshes, TEXEL, |m| m < first_mover);
+        let mut lightmap =
+            Lightmap::boxes(&scene.room.meshes, TEXEL, |m| m < first_mover).with_probes(PROBES);
         let bake = kernel.bake(&mut lightmap, light, &scene.room.meshes);
         println!(
             "{}: baked {} texels in {:.1} ms; rendering at {}×{}.",
