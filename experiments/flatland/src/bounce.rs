@@ -6,12 +6,19 @@
 //! gathers, through each cone, the radiance of the nearest surface in every
 //! direction.
 //!
-//! The gather here is an exact 2D angular sweep, not a mask: a binned gather with
-//! partial coverage is order-dependent when bins hold several partial surfaces,
-//! which would break the ledger's charge bounds. A depth-correct mask gather is a
-//! 3D design question (see `docs/DESIGN.md`); this gate tests the ledger.
+//! Two gathers are provided:
+//!
+//! - [`gather`]: an exact 2D angular sweep (gate 6). A binned gather with partial
+//!   coverage is order-dependent when bins hold several partial surfaces, which
+//!   would break the ledger's charge bounds.
+//! - [`binned_gather`] over a [`StaticLayer`] (gate 6b): a cone G-buffer. Each
+//!   bin caches the nearest static surface at its center direction and its
+//!   depth; black movers are composited on top by depth. Movers and radiance
+//!   changes then become exact, cheap updates instead of bounds.
 
 use std::f32::consts::PI;
+
+use continuum::ConeMask;
 
 use crate::geom::{Cone, Segment, Vec2, ray_distance};
 use crate::methods;
@@ -127,6 +134,93 @@ pub fn gather(cone: &Cone, surfaces: &[Surface], radiance: &[f32]) -> [f32; LIGH
     out
 }
 
+const BINS: usize = ConeMask::BINS as usize;
+/// A bin that sees no static surface.
+pub const NO_SURFACE: u16 = u16::MAX;
+
+/// A cone G-buffer: per bin, the nearest static patch along the bin's center
+/// direction and its distance. 384 bytes per cone.
+#[derive(Clone, Copy, Debug)]
+pub struct StaticLayer {
+    pub id: [u16; BINS],
+    pub depth: [f32; BINS],
+}
+
+/// Bins whose center directions fall inside `[a, b]` (normalized positions).
+fn center_bins(a: f32, b: f32) -> std::ops::Range<usize> {
+    let n = BINS as f32;
+    let lo = (a * n - 0.5).ceil().max(0.0) as usize;
+    let hi = ((b * n - 0.5).floor() + 1.0).clamp(0.0, n) as usize;
+    lo..hi.max(lo)
+}
+
+fn bin_direction(cone: &Cone, bin: usize) -> Vec2 {
+    cone.direction((bin as f32 + 0.5) / BINS as f32)
+}
+
+/// Builds the static layer of one cone: the nearest patch at every bin center.
+pub fn static_layer(cone: &Cone, patches: &[Segment]) -> StaticLayer {
+    let mut layer = StaticLayer {
+        id: [NO_SURFACE; BINS],
+        depth: [f32::INFINITY; BINS],
+    };
+    let dirs: [Vec2; BINS] = std::array::from_fn(|bin| bin_direction(cone, bin));
+    for (j, patch) in patches.iter().enumerate() {
+        let Some((a, b)) = cone.project(patch) else {
+            continue;
+        };
+        for bin in center_bins(a, b) {
+            if let Some(d) = ray_distance(cone.apex, dirs[bin], patch)
+                && d < layer.depth[bin]
+            {
+                layer.depth[bin] = d;
+                layer.id[bin] = j as u16;
+            }
+        }
+    }
+    layer
+}
+
+/// Radiance-weighted angle per light through one cone, sampled at bin centers:
+/// the static layer's patch in each bin unless a (black) mover is nearer.
+pub fn binned_gather(
+    cone: &Cone,
+    layer: &StaticLayer,
+    patches: &[Segment],
+    movers: &[Segment],
+    radiance: &[f32],
+) -> [f32; LIGHTS] {
+    let mut blocked = 0u64;
+    for m in movers {
+        let Some((a, b)) = cone.project(m) else {
+            continue;
+        };
+        for bin in center_bins(a, b) {
+            if layer.id[bin] == NO_SURFACE || blocked & (1 << bin) != 0 {
+                continue;
+            }
+            if let Some(d) = ray_distance(cone.apex, bin_direction(cone, bin), m)
+                && d < layer.depth[bin]
+            {
+                blocked |= 1 << bin;
+            }
+        }
+    }
+    let bin_angle = cone.angle / BINS as f32;
+    let mut out = [0.0; LIGHTS];
+    for bin in 0..BINS {
+        let id = layer.id[bin];
+        if id == NO_SURFACE || blocked & (1 << bin) != 0 {
+            continue;
+        }
+        let side = side_of(&patches[id as usize], cone.apex);
+        for (l, o) in out.iter_mut().enumerate() {
+            *o += bin_angle * radiance[radiance_index(id as usize, side, l)];
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +311,64 @@ mod tests {
         for l in 0..LIGHTS {
             assert!((b[l] - 2.0 * a[l]).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn binned_gather_approximates_the_sweep() {
+        let (surfaces, radiance) = surfaces();
+        let patches: Vec<Segment> = surfaces
+            .iter()
+            .filter(|s| s.patch.is_some())
+            .map(|s| s.segment)
+            .collect();
+        let movers: Vec<Segment> = surfaces
+            .iter()
+            .filter(|s| s.patch.is_none())
+            .map(|s| s.segment)
+            .collect();
+        let (mut err, mut total) = (0.0, 0.0);
+        for p in [v2(0.3, 0.55), v2(0.5, 0.2), v2(0.82, 0.8), v2(0.05, 0.5)] {
+            for target in sky_targets(8) {
+                let cone = Cone::toward(p, target.at(p)).unwrap();
+                let exact = gather(&cone, &surfaces, &radiance);
+                let binned = binned_gather(
+                    &cone,
+                    &static_layer(&cone, &patches),
+                    &patches,
+                    &movers,
+                    &radiance,
+                );
+                for l in 0..LIGHTS {
+                    err += (exact[l] - binned[l]).abs();
+                    total += exact[l];
+                }
+            }
+        }
+        assert!(
+            err / total < 0.03,
+            "binned gather off by {:.2}%",
+            100.0 * err / total
+        );
+    }
+
+    #[test]
+    fn a_mover_in_front_blacks_out_its_bins() {
+        let wall = [seg(0.0, 0.8, 1.0, 0.8)];
+        let radiance = vec![1.0; 2 * LIGHTS];
+        let p = v2(0.5, 0.2);
+        let cone = Cone::toward(p, seg(0.2, 0.9, 0.8, 0.9)).unwrap();
+        let layer = static_layer(&cone, &wall);
+        let open = binned_gather(&cone, &layer, &wall, &[], &radiance)[0];
+        let covered = binned_gather(&cone, &layer, &wall, &[seg(0.3, 0.5, 0.7, 0.5)], &radiance)[0];
+        let behind = binned_gather(
+            &cone,
+            &layer,
+            &wall,
+            &[seg(0.3, 0.85, 0.7, 0.85)],
+            &radiance,
+        )[0];
+        assert!(covered < open * 0.5);
+        assert_eq!(behind, open);
     }
 
     #[test]
