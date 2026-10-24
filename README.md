@@ -31,6 +31,25 @@ Controls:
 The title bar shows the frame rate. `--scene room` opens the M2 test room
 instead.
 
+### The million-boulder field
+
+```bash
+cargo run --release -p viewer -- --scene field --scale 2
+```
+
+This is a 2 km plain with 1,000,000 instanced copies of a 9,800-triangle
+boulder: about ten billion triangles in 152 MB of GPU memory. It is lit by a
+sun-sized light, with per-pixel mask cones and no caches.
+
+- `--boulders N` changes the count.
+- `--scale N` renders at 1/N of the window. On an M4 MacBook Air, `--scale 2`
+  runs at about 21 ms per frame in a 1280×720 window.
+
+At full resolution, camera rays dominate (M4 gates 2–5), and the far field
+aliases. Cone-based primary visibility is the planned fix for both.
+
+![A million boulders](docs/images/m4-gate2-million-boulders.png)
+
 How it renders:
 
 - Direct light from the area light is baked at startup into a world-space
@@ -110,6 +129,12 @@ cargo run --release -p room3d --bin m3_gate1
 cargo run --release -p room3d --bin m3_gate2
 cargo run --release -p room3d --bin m3_gate3           # needs Blender
 cargo run --release -p room3d --bin render_showcase    # three frames of the path
+cargo run --release -p room3d --bin m4_gate1
+cargo run --release -p room3d --bin m4_gate2
+cargo run --release -p room3d --bin m4_gate3
+cargo run --release -p room3d --bin m4_gate4
+cargo run --release -p room3d --bin m4_gate5
+cargo run --release -p room3d --bin render_field -- 1000000 1920 1080
 ```
 
 ![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)

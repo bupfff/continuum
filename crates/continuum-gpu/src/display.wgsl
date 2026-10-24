@@ -3,8 +3,10 @@
 // offline images (Reinhard, then display gamma, done by the sRGB target or here).
 
 struct Dims {
+    // The rendered image's size.
     size: vec2<u32>,
-    // x: 1 if the target is not sRGB and gamma must be applied here
+    // x: 1 if the target is not sRGB and gamma must be applied here; y: the
+    // render scale (window pixels per rendered pixel; 0 means 1)
     flags: vec2<u32>,
 };
 
@@ -19,7 +21,7 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = min(vec2<u32>(pos.xy), dims.size - vec2<u32>(1u));
+    let p = min(vec2<u32>(pos.xy) / max(dims.flags.y, 1u), dims.size - vec2<u32>(1u));
     let c = colors[p.y * dims.size.x + p.x].rgb;
     var t = c / (c + vec3<f32>(0.6));
     if (dims.flags.x == 1u) {

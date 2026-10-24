@@ -17,9 +17,88 @@ use continuum::mesh::Surface;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct DisplayDims {
-    size: [u32; 2],
-    flags: [u32; 2],
+pub(crate) struct DisplayDims {
+    pub size: [u32; 2],
+    pub flags: [u32; 2],
+}
+
+/// The pass that tonemaps the colors buffer into a surface texture.
+pub(crate) fn display_pipeline(
+    device: &wgpu::Device,
+    target_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("display"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("display.wgsl").into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("display"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(target_format.into())],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+pub(crate) fn display_bind(
+    device: &wgpu::Device,
+    display: &wgpu::RenderPipeline,
+    colors: &wgpu::Buffer,
+    dims: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("display"),
+        layout: &display.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: colors.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: dims.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+/// Records the display pass into `target`.
+pub(crate) fn encode_display(
+    encoder: &mut wgpu::CommandEncoder,
+    display: &wgpu::RenderPipeline,
+    bind: &wgpu::BindGroup,
+    target: &wgpu::TextureView,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("display"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_pipeline(display);
+    pass.set_bind_group(0, bind, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 /// Persistent GPU state for interactive rendering with a lighting cache. The

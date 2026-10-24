@@ -9,7 +9,10 @@
 //! objects are traced from scratch).
 //!
 //! Scenes: `--scene showcase` (the default: a gallery with a sculpture,
-//! columns and an arch) or `--scene room` (the M2 test room).
+//! columns and an arch), `--scene room` (the M2 test room), or `--scene field`
+//! (a million instanced boulders, about ten billion triangles, lit by a sun
+//! with per-pixel mask cones; `--boulders N` to change the count, `--scale N`
+//! to render at 1/N of the window).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path, P to pause moving objects,
@@ -20,10 +23,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use continuum::glam::Vec3;
+use continuum::glam::{DVec3, Vec3};
 use continuum::mesh::Surface;
 use continuum_gpu::wgpu;
-use continuum_gpu::{Camera, Lightmap, LiveRenderer, MaskConeKernel, RectLight};
+use continuum_gpu::{Camera, InstancedRenderer, Lightmap, LiveRenderer, MaskConeKernel, RectLight};
+use room3d::field::Field;
 use room3d::showcase::{self, PATH_FRAMES, Showcase};
 use room3d::{movers, render_scene};
 use winit::application::ApplicationHandler;
@@ -49,6 +53,10 @@ struct World {
     speed: f32,
     start: (Vec3, Vec3),
     showcase: Option<Showcase>,
+    /// The instanced boulder field: rendered per pixel, no caches.
+    field: Option<Field>,
+    /// Window pixels per rendered pixel (field scene only).
+    scale: u32,
 }
 
 impl World {
@@ -68,6 +76,30 @@ impl World {
             speed: 1.2,
             start: (camera.eye, camera.target),
             showcase: Some(scene),
+            field: None,
+            scale: 1,
+        }
+    }
+
+    fn field(boulders: usize) -> World {
+        let field = Field::new(boulders, DVec3::ZERO);
+        let origin = field.origin_near_camera();
+        let (camera, light) = field.relative(origin);
+        World {
+            name: "field",
+            surfaces: Vec::new(),
+            albedo: Vec::new(),
+            light,
+            radiance: field.radiance,
+            first_mover: 0,
+            texel: 0.0,
+            probes: 0.0,
+            fov: field.vertical_fov_degrees,
+            speed: 5.0,
+            start: (camera.eye, camera.target),
+            showcase: None,
+            field: Some(field),
+            scale: 1,
         }
     }
 
@@ -98,11 +130,16 @@ impl World {
             speed: 0.5,
             start: (scene.eye, scene.target),
             showcase: None,
+            field: None,
+            scale: 1,
         }
     }
 
     /// The moving surfaces at `time` (60 Hz frames), with their mesh indices.
     fn movers(&mut self, time: f32) -> Vec<(usize, Surface)> {
+        if self.field.is_some() {
+            return Vec::new();
+        }
         let first = self.first_mover;
         let moved: Vec<Surface> = match &mut self.showcase {
             Some(scene) => {
@@ -165,7 +202,37 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    renderer: LiveRenderer,
+    renderer: Renderer,
+}
+
+/// The lit scene with its caches, or the instanced field (per-pixel cones).
+enum Renderer {
+    Live(LiveRenderer),
+    Field(InstancedRenderer),
+}
+
+impl Renderer {
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            Renderer::Live(r) => r.resize(width, height),
+            Renderer::Field(r) => r.resize(width, height),
+        }
+    }
+
+    fn update_surfaces(&mut self, changes: &[(usize, &Surface)]) {
+        if let Renderer::Live(r) = self
+            && !changes.is_empty()
+        {
+            r.update_surfaces(changes);
+        }
+    }
+
+    fn frame(&self, camera: Camera, view: &wgpu::TextureView) {
+        match self {
+            Renderer::Live(r) => r.frame(camera, camera.vertical_fov_degrees, view),
+            Renderer::Field(r) => r.frame(camera, view),
+        }
+    }
 }
 
 struct App {
@@ -233,6 +300,42 @@ impl App {
 
         let kernel =
             MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
+        if let Some(field) = &world.field {
+            kernel.set_prefilter(1.0);
+            let start = Instant::now();
+            let origin = field.origin_near_camera();
+            let renderer = InstancedRenderer::new(
+                &kernel,
+                format,
+                config.width,
+                config.height,
+                world.scale,
+                world.light,
+                &field.scene,
+                origin,
+                field.radiance,
+            );
+            renderer.wait();
+            println!(
+                "{} (field scene): {} boulders, {} triangles, {:.0} MB on the GPU, ready in {:.1} s; window {}×{}, rendering at 1/{} scale.",
+                kernel.adapter_name,
+                field.boulders(),
+                field.triangles(),
+                renderer.scene_bytes() as f64 / 1e6,
+                start.elapsed().as_secs_f64(),
+                config.width,
+                config.height,
+                world.scale
+            );
+            return Gpu {
+                window,
+                surface,
+                config,
+                device,
+                queue,
+                renderer: Renderer::Field(renderer),
+            };
+        }
         let meshes: Vec<_> = world.surfaces.iter().map(|s| s.triangles.clone()).collect();
         let first_mover = world.first_mover;
         let mut lightmap = Lightmap::new(&world.surfaces, world.texel, |m| m < first_mover)
@@ -268,7 +371,7 @@ impl App {
             config,
             device,
             queue,
-            renderer,
+            renderer: Renderer::Live(renderer),
         }
     }
 
@@ -412,7 +515,7 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = texture.texture.create_view(&Default::default());
-                gpu.renderer.frame(self.camera.camera(fov), fov, &view);
+                gpu.renderer.frame(self.camera.camera(fov), &view);
                 gpu.queue.present(texture);
 
                 self.frame_times.push(dt * 1000.0);
@@ -468,11 +571,18 @@ fn main() {
     let world = match arg("--scene").as_deref() {
         None | Some("showcase") => World::showcase(),
         Some("room") => World::room(),
+        Some("field") => World::field(
+            arg("--boulders")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(1_000_000),
+        ),
         Some(other) => {
-            eprintln!("Unknown scene {other:?}: use showcase or room.");
+            eprintln!("Unknown scene {other:?}: use showcase, room or field.");
             std::process::exit(2);
         }
     };
+    let mut world = world;
+    world.scale = arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1);
     let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
     let camera = FlyCamera::looking_at(world.start.0, world.start.1);
     let mut app = App {

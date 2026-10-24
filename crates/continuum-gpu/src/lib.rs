@@ -68,10 +68,12 @@ struct Frame<'a> {
 }
 
 mod hierarchy;
+mod instanced;
 mod lightmap;
 mod live;
 
 pub use hierarchy::Hierarchy;
+pub use instanced::InstancedRenderer;
 pub use lightmap::{BLOCK, BLOCK_PLANES, Lightmap, hemicube_weights};
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 
@@ -144,6 +146,9 @@ impl RectLight {
 /// Bindings the `render` entry point uses (render_frame filters the scene's
 /// buffers to these when a lightmap provides more).
 const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30];
+
+/// The same list, for other modules.
+pub(crate) const RECT_LIGHT_BINDINGS: &[u32] = RENDER_BINDINGS;
 
 /// Which of the scene's bindings a pipeline uses.
 type KeepBinding = Box<dyn Fn(u32) -> bool>;
@@ -414,6 +419,20 @@ impl MaskConeKernel {
         radiance: f32,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration, u64) {
+        let buffers = self.instanced_buffers(light, scene, origin);
+        let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
+        let cam = camera_uniform(camera, width, height, radiance);
+        let (pixels, time) = self.render_buffers(false, cam, width, height, buffers, runs);
+        (pixels, time, bytes)
+    }
+
+    /// Scene buffers for an instanced scene, by binding (see `render_instanced`).
+    pub(crate) fn instanced_buffers(
+        &self,
+        light: RectLight,
+        scene: &InstancedScene,
+        origin: DVec3,
+    ) -> Vec<(u32, wgpu::Buffer)> {
         let geometries: Vec<Vec<Tri>> = scene
             .geometries
             .iter()
@@ -480,10 +499,7 @@ impl MaskConeKernel {
             ),
             (30, storage("transforms", bytemuck::cast_slice(&xforms))),
         ];
-        let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
-        let cam = camera_uniform(camera, width, height, radiance);
-        let (pixels, time) = self.render_buffers(false, cam, width, height, buffers, runs);
-        (pixels, time, bytes)
+        buffers
     }
 
     /// Bakes a lightmap: one mask cone per texel (through the hierarchy).
