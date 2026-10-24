@@ -31,7 +31,14 @@ cargo run --release -p room3d --bin m1_gate1
 cargo run --release -p room3d --bin m1_gate2
 cargo run --release -p room3d --bin m1_gate3
 cargo run --release -p room3d --bin m1_gate4
+cargo run --release -p room3d --bin render
 ```
+
+![First 3D render](docs/images/m1-first-render.png)
+
+First 3D render (direct light only, CPU, 480×360). Left: mask cones,
+deterministic and noise-free. Right: 16 jittered light samples per pixel at
+about the same cost. Shadows are black because there is no indirect light yet.
 
 Each run prints a results table and writes images to `experiments/flatland/out/`:
 
