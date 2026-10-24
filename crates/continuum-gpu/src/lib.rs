@@ -41,6 +41,7 @@ pub struct MaskConeKernel {
     rebake_pipeline: wgpu::ComputePipeline,
     probe_build_pipeline: wgpu::ComputePipeline,
     probe_gather_pipeline: wgpu::ComputePipeline,
+    bake_static_pipeline: wgpu::ComputePipeline,
     pub adapter_name: String,
 }
 
@@ -159,6 +160,7 @@ impl MaskConeKernel {
         let rebake_pipeline = entry("rebake");
         let probe_build_pipeline = entry("probe_build");
         let probe_gather_pipeline = entry("probe_gather");
+        let bake_static_pipeline = entry("bake_static");
         MaskConeKernel {
             device,
             queue,
@@ -169,6 +171,7 @@ impl MaskConeKernel {
             rebake_pipeline,
             probe_build_pipeline,
             probe_gather_pipeline,
+            bake_static_pipeline,
             adapter_name,
         }
     }

@@ -13,6 +13,7 @@ use crate::{
     Camera, CameraUniform, Frame, Hierarchy, MaskConeKernel, ReceiverGpu, RectLight, Tri,
     uniform_buffer,
 };
+use continuum::mesh::Surface;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -60,7 +61,6 @@ struct Indirect {
     probes: u32,
     points: wgpu::Buffer,
     gbuffer: wgpu::Buffer,
-    params: wgpu::Buffer,
     gather_bind: wgpu::BindGroup,
 }
 
@@ -86,8 +86,16 @@ struct Motion {
     bounds: Vec<(Vec3, Vec3)>,
     dynamic: Vec<bool>,
     blocks: u32,
+    probes: u32,
     uniform: wgpu::Buffer,
     args: wgpu::Buffer,
+    /// The moving meshes and their bounds (`ProbeParams`, mode 0), read by the
+    /// re-bake and the probe gather.
+    params: wgpu::Buffer,
+    /// A hierarchy of the static meshes only, for the static coverage cache and
+    /// probe G-buffers.
+    static_nodes: wgpu::Buffer,
+    static_items: wgpu::Buffer,
     mark_bind: wgpu::BindGroup,
     rebake_bind: wgpu::BindGroup,
 }
@@ -244,6 +252,7 @@ impl LiveRenderer {
         );
         let r = PROBE_RESOLUTION;
         let bins = 3 * r * r;
+        let params = &motion.params;
         let storage = |label: &str, contents: &[u8]| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
@@ -267,16 +276,9 @@ impl LiveRenderer {
             mapped_at_creation: false,
         });
         let weights = storage("bin weights", bytemuck::cast_slice(&hemicube_weights(r)));
-        let params = uniform_buffer(
-            device,
-            "probe params",
-            bytemuck::bytes_of(&Self::probe_params(motion, probes, r, 0)),
-        );
         // The G-buffer holds static geometry only: trace through a hierarchy of
         // the static meshes.
-        let (nodes, items) = mesh_hierarchy_of(&motion.meshes, |m| !motion.dynamic[m]);
-        let nodes = storage("static nodes", bytemuck::cast_slice(&nodes));
-        let items = storage("static items", bytemuck::cast_slice(&items));
+        let (nodes, items) = (&motion.static_nodes, &motion.static_items);
         let s = |b| binding(scene, b);
         let build_bind = bind_group(
             device,
@@ -286,18 +288,18 @@ impl LiveRenderer {
                 (0, s(0)),
                 (2, s(2)),
                 (3, s(3)),
-                (9, &nodes),
-                (10, &items),
+                (9, nodes),
+                (10, items),
                 (25, s(25)),
                 (26, s(26)),
                 (11, s(11)),
                 (18, &points),
                 (19, &gbuffer),
-                (22, &params),
+                (22, params),
             ],
         );
         let gather_bind =
-            Self::gather_bind(kernel, scene, &points, &gbuffer, &weights, s(21), &params);
+            Self::gather_bind(kernel, scene, &points, &gbuffer, &weights, s(21), params);
         let mut encoder = device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -316,7 +318,6 @@ impl LiveRenderer {
             probes,
             points,
             gbuffer,
-            params,
             gather_bind,
         }
     }
@@ -357,7 +358,7 @@ impl LiveRenderer {
         )
     }
 
-    /// Gather parameters: every dynamic mesh with its current bounds.
+    /// Re-bake and gather parameters: every dynamic mesh with its current bounds.
     fn probe_params(motion: &Motion, probes: u32, resolution: u32, mode: u32) -> ProbeParams {
         let mut params = ProbeParams::zeroed();
         let mut k = 0;
@@ -389,7 +390,7 @@ impl LiveRenderer {
     ) -> Motion {
         let device = &kernel.device;
         let ranges = flatten(meshes).ranges;
-        let dynamic = meshes
+        let dynamic: Vec<bool> = meshes
             .iter()
             .zip(&ranges)
             .map(|(mesh, r)| mesh.is_empty() || lightmap.tri_chart[r[0] as usize] == u32::MAX)
@@ -419,10 +420,10 @@ impl LiveRenderer {
             bytemuck::cast_slice(&receivers),
             wgpu::BufferUsages::empty(),
         );
-        let planes = lightmap.block_planes(light);
+        let planes_cpu = lightmap.block_planes(light);
         let planes = storage(
             "block planes",
-            bytemuck::cast_slice(&planes),
+            bytemuck::cast_slice(&planes_cpu),
             wgpu::BufferUsages::empty(),
         );
         let args = storage(
@@ -444,6 +445,53 @@ impl LiveRenderer {
             &kernel.mark_pipeline,
             &[(14, &uniform), (15, &planes), (16, &args), (17, &dirty)],
         );
+        // Static coverage cache: a slot per block that can receive direct light
+        // (the others have a plane that excludes everything).
+        let never = [0.0, 0.0, 0.0, -1.0];
+        let mut slots = 0u32;
+        let block_slot: Vec<u32> = (0..blocks as usize)
+            .map(|b| {
+                if lightmap.blocks.is_empty() || planes_cpu[b * crate::BLOCK_PLANES] == never {
+                    NONE
+                } else {
+                    slots += 1;
+                    slots - 1
+                }
+            })
+            .collect();
+        let cov_size = slots.max(1) as u64 * 64 * 64 * 4;
+        assert!(
+            cov_size <= device.limits().max_storage_buffer_binding_size as u64,
+            "static coverage cache ({cov_size} bytes) exceeds the device's storage buffer limit"
+        );
+        let static_cov = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("static coverage"),
+            size: cov_size,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let block_slot = storage(
+            "block slots",
+            bytemuck::cast_slice(&[block_slot, vec![NONE]].concat()),
+            wgpu::BufferUsages::empty(),
+        );
+        let (nodes, items) = mesh_hierarchy_of(meshes, |m| !dynamic[m]);
+        let static_nodes = storage(
+            "static nodes",
+            bytemuck::cast_slice(&nodes),
+            wgpu::BufferUsages::empty(),
+        );
+        let static_items = storage(
+            "static items",
+            bytemuck::cast_slice(&items),
+            wgpu::BufferUsages::empty(),
+        );
+        let probes = lightmap.probes.len() as u32;
+        let params = uniform_buffer(
+            device,
+            "dynamic meshes",
+            &[0; std::mem::size_of::<ProbeParams>()],
+        );
         let s = |b| binding(scene, b);
         let rebake_bind = bind_group(
             device,
@@ -456,24 +504,63 @@ impl LiveRenderer {
                 (3, s(3)),
                 (4, s(13)),
                 (5, s(5)),
-                (9, s(9)),
-                (10, s(10)),
                 (25, s(25)),
                 (26, s(26)),
                 (17, &dirty),
+                (22, &params),
+                (27, &static_cov),
+                (28, &block_slot),
             ],
         );
-        Motion {
+        let motion = Motion {
             meshes: meshes.to_vec(),
             ranges,
             bounds: meshes.iter().map(|m| mesh_bounds(m)).collect(),
             dynamic,
             blocks,
+            probes,
             uniform,
             args,
+            params,
+            static_nodes,
+            static_items,
             mark_bind,
             rebake_bind,
+        };
+        kernel.queue.write_buffer(
+            &motion.params,
+            0,
+            bytemuck::bytes_of(&Self::probe_params(&motion, probes, PROBE_RESOLUTION, 0)),
+        );
+        // Fill the static coverage cache once (the texels themselves were baked
+        // through the whole scene already).
+        let bake_bind = bind_group(
+            device,
+            "bake static",
+            &kernel.bake_static_pipeline,
+            &[
+                (0, s(0)),
+                (1, &receivers),
+                (2, s(2)),
+                (3, s(3)),
+                (5, s(5)),
+                (9, &motion.static_nodes),
+                (10, &motion.static_items),
+                (25, s(25)),
+                (26, s(26)),
+                (27, &static_cov),
+                (28, &block_slot),
+            ],
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&kernel.bake_static_pipeline);
+            pass.set_bind_group(0, &bake_bind, &[]);
+            pass.dispatch_workgroups(blocks, 1, 1);
         }
+        kernel.queue.submit([encoder.finish()]);
+        motion
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -538,10 +625,27 @@ impl LiveRenderer {
     /// the lightmap blocks whose cone volumes a changed mesh's swept bounds (old ∪
     /// new) reach. Submitted at once; the next frame sees the result.
     pub fn update_meshes(&mut self, changes: &[(usize, Vec<Tri>)]) {
+        let changes: Vec<_> = changes
+            .iter()
+            .map(|(m, tris)| (*m, tris.as_slice(), None))
+            .collect();
+        self.update(&changes);
+    }
+
+    /// [`Self::update_meshes`] for meshes that may also rotate: uploads their
+    /// shading normals too.
+    pub fn update_surfaces(&mut self, changes: &[(usize, &Surface)]) {
+        let changes: Vec<_> = changes
+            .iter()
+            .map(|(m, s)| (*m, s.triangles.as_slice(), Some(s.normals.as_slice())))
+            .collect();
+        self.update(&changes);
+    }
+
+    fn update(&mut self, changes: &[(usize, &[Tri], Option<&[[Vec3; 3]]>)]) {
         let m = &mut self.motion;
         let mut boxes = Vec::new();
-        for (mesh, tris) in changes {
-            let mesh = *mesh;
+        for &(mesh, tris, normals) in changes {
             assert!(
                 m.dynamic[mesh],
                 "mesh {mesh} has lightmap texels and cannot move"
@@ -553,6 +657,18 @@ impl LiveRenderer {
             );
             if *tris == m.meshes[mesh] {
                 continue;
+            }
+            if let Some(normals) = normals {
+                let normals: Vec<[f32; 4]> = normals
+                    .iter()
+                    .flatten()
+                    .map(|n| [n.x, n.y, n.z, 0.0])
+                    .collect();
+                self.queue.write_buffer(
+                    binding(&self.scene, 24),
+                    m.ranges[mesh][0] as u64 * 48,
+                    bytemuck::cast_slice(&normals),
+                );
             }
             let (old, new) = (m.bounds[mesh], mesh_bounds(tris));
             let (lo, hi) = (old.0.min(new.0), old.1.max(new.1));
@@ -583,7 +699,7 @@ impl LiveRenderer {
                     bytemuck::cast_slice(&items),
                 );
             }
-            m.meshes[mesh] = tris.clone();
+            m.meshes[mesh] = tris.to_vec();
             m.bounds[mesh] = new;
         }
         if boxes.is_empty() {
@@ -604,6 +720,9 @@ impl LiveRenderer {
         uniform.boxes[..boxes.len()].copy_from_slice(&boxes);
         self.queue
             .write_buffer(&m.uniform, 0, bytemuck::bytes_of(&uniform));
+        let params = Self::probe_params(m, m.probes, PROBE_RESOLUTION, 0);
+        self.queue
+            .write_buffer(&m.params, 0, bytemuck::bytes_of(&params));
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.clear_buffer(&m.args, 0, Some(4));
         {
@@ -618,12 +737,7 @@ impl LiveRenderer {
             pass.set_bind_group(0, &m.rebake_bind, &[]);
             pass.dispatch_workgroups_indirect(&m.args, 0);
         }
-        if let Some(ind) = &self.indirect {
-            let params = Self::probe_params(&self.motion, ind.probes, PROBE_RESOLUTION, 0);
-            self.queue
-                .write_buffer(&ind.params, 0, bytemuck::bytes_of(&params));
-            self.encode_gather(&mut encoder);
-        }
+        self.encode_gather(&mut encoder);
         self.queue.submit([encoder.finish()]);
     }
 

@@ -337,15 +337,21 @@ fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: 
     }
 }
 
-// Irradiance per unit radiance at `apex` (surface normal `normal`) from the
-// light, through a mask cone. `i` only selects where debug output goes.
-fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+// A cone from `apex` to the light, if the light can shine on it at all.
+struct LightCone {
+    c: Cone,
+    ok: bool,
+};
+
+fn light_cone(apex: vec3<f32>) -> LightCone {
+    var out: LightCone;
+    out.ok = false;
     var forward = normalize(cross(light.edge_u.xyz, light.edge_v.xyz));
     // Behind a one-sided light: no direct light.
-    if (light.counts.w == 1u && dot(forward, apex - light.corner.xyz) <= 0.0) { return 0.0; }
+    if (light.counts.w == 1u && dot(forward, apex - light.corner.xyz) <= 0.0) { return out; }
     if (dot(forward, light.corner.xyz - apex) < 0.0) { forward = -forward; }
     let dist = dot(forward, light.corner.xyz - apex);
-    if (dist <= 1e-6) { return 0.0; }
+    if (dist <= 1e-6) { return out; }
     let right = normalize(light.edge_u.xyz);
     let up = cross(forward, right);
     let rel = light.corner.xyz - apex;
@@ -357,19 +363,19 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
         lo = min(lo, uv);
         hi = max(hi, uv);
     }
-    var c: Cone;
-    c.apex = apex;
-    c.right = right;
-    c.up = up;
-    c.forward = forward;
-    c.window = vec4<f32>(lo, hi);
-    c.far_normal = forward;
-    c.far_offset = dot(forward, apex) + dist * (1.0 - 1e-5);
+    out.c.apex = apex;
+    out.c.right = right;
+    out.c.up = up;
+    out.c.forward = forward;
+    out.c.window = vec4<f32>(lo, hi);
+    out.c.far_normal = forward;
+    out.c.far_offset = dot(forward, apex) + dist * (1.0 - 1e-5);
+    out.ok = true;
+    return out;
+}
 
-    // Explicit zeroing: don't rely on loop-scoped `var`s being re-initialized.
-    var cov: array<f32, 64>;
-    for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
-    var full = 0u;
+// Adds the coverage of every mesh in the bound hierarchy (or every mesh) to `cov`.
+fn scene_coverage(c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) {
     var stack: array<u32, STACK>;
     if (light.counts.z >= 1u) {
         var sp = 1u;
@@ -380,10 +386,10 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
             if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                    add_mesh_coverage(c, items[k], &cov, &full, i, &stack, sp);
+                    add_mesh_coverage(c, items[k], cov, full, i, &stack, sp);
                 }
                 // Every bin fully covered: nothing further can change the result.
-                if (full == BINS) { break; }
+                if (*full == BINS) { break; }
             } else {
                 stack[sp] = node.info.x;
                 stack[sp + 1u] = node.info.x + 1u;
@@ -392,12 +398,16 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
         }
     } else {
         for (var m = 0u; m < light.counts.x; m++) {
-            add_mesh_coverage(c, m, &cov, &full, i, &stack, 0u);
-            if (full == BINS) { break; }
+            add_mesh_coverage(c, m, cov, full, i, &stack, 0u);
+            if (*full == BINS) { break; }
         }
     }
-    // Bin weights (projected solid angle, Lambert) computed only now, as they are
-    // summed, so no per-thread weights array is needed.
+}
+
+// Irradiance through the uncovered part of the cone. Bin weights (projected
+// solid angle, Lambert) are computed only now, as they are summed, so no
+// per-thread weights array is needed.
+fn cone_visible(c: Cone, normal: vec3<f32>, cov: ptr<function, array<f32, 64>>) -> f32 {
     var visible = 0.0;
     for (var b = 0u; b < BINS; b++) {
         let col = f32(b % GRID);
@@ -409,8 +419,22 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
         let d3 = direction(c, col / g, (row + 1.0) / g);
         let weight = abs(0.5 * (lambert_edge(normal, d0, d1) + lambert_edge(normal, d1, d2)
             + lambert_edge(normal, d2, d3) + lambert_edge(normal, d3, d0)));
-        visible += (1.0 - cov[b]) * weight;
+        visible += (1.0 - (*cov)[b]) * weight;
     }
+    return visible;
+}
+
+// Irradiance per unit radiance at `apex` (surface normal `normal`) from the
+// light, through a mask cone. `i` only selects where debug output goes.
+fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let lc = light_cone(apex);
+    if (!lc.ok) { return 0.0; }
+    // Explicit zeroing: don't rely on loop-scoped `var`s being re-initialized.
+    var cov: array<f32, 64>;
+    for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+    var full = 0u;
+    scene_coverage(lc.c, i, &cov, &full);
+    let visible = cone_visible(lc.c, normal, &cov);
     if (light.counts.y == 1u) {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }
     }
@@ -750,12 +774,71 @@ fn mark_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
+// --- Static coverage cache: each texel of a block that can receive direct
+// light keeps the per-bin coverage of static meshes in its cone (built once,
+// through a hierarchy of static meshes), so a re-bake only adds the moving
+// meshes. Coverage combines by max, which does not depend on order, so this
+// equals tracing the whole scene.
+
+// Per texel slot: 64 bins of static coverage.
+@group(0) @binding(27) var<storage, read_write> static_cov: array<f32>;
+// Per block: its slot (in blocks of 64 texels), or NONE if it never receives
+// direct light.
+@group(0) @binding(28) var<storage, read> block_slot: array<u32>;
+
+// One workgroup per block, one invocation per texel; the bound hierarchy holds
+// the static meshes only.
+@compute @workgroup_size(64)
+fn bake_static(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let slot = block_slot[wg.x];
+    if (slot == NONE) { return; }
+    let i = wg.x * 64u + li;
+    let r = receivers[i];
+    var cov: array<f32, 64>;
+    for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+    let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - r.point.xyz;
+    if (dot(r.normal.xyz, to_light) > 0.0) {
+        let lc = light_cone(r.point.xyz);
+        if (lc.ok) {
+            var full = 0u;
+            scene_coverage(lc.c, i, &cov, &full);
+        }
+    }
+    let base = (slot * 64u + li) * BINS;
+    for (var b = 0u; b < BINS; b++) { static_cov[base + b] = cov[b]; }
+}
+
+// Direct irradiance at texel `li` of a block from its cached static coverage
+// plus the moving meshes: equal to `hit_irradiance` through the whole scene.
+fn cached_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>, slot: u32, li: u32) -> f32 {
+    if (slot == NONE) { return 0.0; }
+    let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - apex;
+    if (dot(normal, to_light) <= 0.0) { return 0.0; }
+    let lc = light_cone(apex);
+    if (!lc.ok) { return 0.0; }
+    var cov: array<f32, 64>;
+    var full = 0u;
+    let base = (slot * 64u + li) * BINS;
+    for (var b = 0u; b < BINS; b++) {
+        cov[b] = static_cov[base + b];
+        if (cov[b] >= 1.0) { full++; }
+    }
+    var stack: array<u32, STACK>;
+    for (var k = 0u; k < probe_params.counts.w; k++) {
+        if (full == BINS) { break; }
+        if (!may_touch_box(lc.c, probe_params.bounds[2u * k].xyz, probe_params.bounds[2u * k + 1u].xyz)) { continue; }
+        add_mesh_coverage(lc.c, probe_params.moving[k].x, &cov, &full, i, &stack, 0u);
+    }
+    return cone_visible(lc.c, normal, &cov);
+}
+
 // One workgroup per marked block, one invocation per texel; `result` is the
 // lightmap's texel buffer and `receivers` its texels.
 @compute @workgroup_size(64)
 fn rebake(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    let i = dirty[wg.x] * 64u + li;
-    result[i] = hit_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz);
+    let block = dirty[wg.x];
+    let i = block * 64u + li;
+    result[i] = cached_irradiance(i, receivers[i].point.xyz, receivers[i].normal.xyz, block_slot[block], li);
 }
 
 // --- Indirect light: probes with cone G-buffers. ---
