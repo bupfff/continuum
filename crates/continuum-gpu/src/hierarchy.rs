@@ -18,6 +18,9 @@ pub(crate) struct Flat {
     /// Triangle indices referenced by `blas` leaves; mesh `m`'s are at the same
     /// offsets as its triangles.
     pub blas_items: Vec<u32>,
+    /// [`COVERAGE_SAMPLES`] per `blas` node: the projected area of its
+    /// front-facing triangles seen from each of the 26 cube directions.
+    pub blas_cov: Vec<f32>,
 }
 
 pub(crate) const NONE: u32 = u32::MAX;
@@ -28,6 +31,7 @@ pub(crate) fn flatten(meshes: &[Vec<Tri>]) -> Flat {
         ranges: Vec::new(),
         blas: Vec::new(),
         blas_items: Vec::new(),
+        blas_cov: Vec::new(),
     };
     for mesh in meshes {
         let first = (flat.tris.len() / 3) as u32;
@@ -35,9 +39,10 @@ pub(crate) fn flatten(meshes: &[Vec<Tri>]) -> Flat {
             NONE
         } else {
             let root = flat.blas.len() as u32;
-            let (nodes, items) = triangle_hierarchy(mesh, root, first);
+            let (nodes, items, cov) = triangle_hierarchy(mesh, root, first);
             flat.blas.extend(nodes);
             flat.blas_items.extend(items);
+            flat.blas_cov.extend(cov);
             root
         };
         flat.ranges.push([first, mesh.len() as u32, root, 0]);
@@ -54,6 +59,7 @@ pub(crate) fn flatten(meshes: &[Vec<Tri>]) -> Flat {
     if flat.blas.is_empty() {
         flat.blas.push(NodeGpu::zeroed());
         flat.blas_items.push(0);
+        flat.blas_cov.extend([0.0; COVERAGE_SAMPLES]);
     }
     flat
 }
@@ -155,9 +161,13 @@ pub(crate) fn mesh_hierarchy_of(
 }
 
 /// One mesh's triangle hierarchy (at most [`LEAF_TRIANGLES`] per leaf): nodes
-/// numbered from `root`, and triangle indices numbered from `first`, stored at
-/// item positions from `first`.
-pub(crate) fn triangle_hierarchy(mesh: &[Tri], root: u32, first: u32) -> (Vec<NodeGpu>, Vec<u32>) {
+/// numbered from `root`, triangle indices numbered from `first` (stored at item
+/// positions from `first`), and each node's coverage samples.
+pub(crate) fn triangle_hierarchy(
+    mesh: &[Tri],
+    root: u32,
+    first: u32,
+) -> (Vec<NodeGpu>, Vec<u32>, Vec<f32>) {
     let bounds: Vec<(Vec3, Vec3)> = mesh.iter().map(|t| padded(mesh_bounds(&[*t]))).collect();
     let mut items: Vec<u32> = (0..mesh.len() as u32).collect();
     let mut nodes = vec![NodeGpu::zeroed()];
@@ -171,7 +181,48 @@ pub(crate) fn triangle_hierarchy(mesh: &[Tri], root: u32, first: u32) -> (Vec<No
         root,
         first,
     );
-    (nodes, items.iter().map(|&t| first + t).collect())
+    // Children always follow their parent, so a reverse sweep sees children first.
+    let dirs = coverage_directions();
+    let mut cov = vec![0.0f32; nodes.len() * COVERAGE_SAMPLES];
+    for n in (0..nodes.len()).rev() {
+        let [x, count, _, _] = nodes[n].info;
+        let (head, tail) = cov.split_at_mut((n + 1) * COVERAGE_SAMPLES);
+        let out = &mut head[n * COVERAGE_SAMPLES..];
+        if count > 0 {
+            let start = (x - first) as usize;
+            for &t in &items[start..start + count as usize] {
+                let t = mesh[t as usize];
+                let area_normal = (t[1] - t[0]).cross(t[2] - t[0]) * 0.5;
+                for (o, d) in out.iter_mut().zip(&dirs) {
+                    *o += area_normal.dot(*d).max(0.0);
+                }
+            }
+        } else {
+            let left = (x - root) as usize;
+            // Both children come after `n`, in `tail`.
+            let base = (left - n - 1) * COVERAGE_SAMPLES;
+            for k in 0..COVERAGE_SAMPLES {
+                out[k] = tail[base + k] + tail[base + COVERAGE_SAMPLES + k];
+            }
+        }
+    }
+    (nodes, items.iter().map(|&t| first + t).collect(), cov)
+}
+
+/// Coverage samples per triangle-hierarchy node: directions `(i, j, k)` with
+/// each of `i, j, k` in `{-1, 0, 1}`, at index `9(i+1) + 3(j+1) + (k+1)`
+/// (index 13, the zero vector, is unused).
+pub(crate) const COVERAGE_SAMPLES: usize = 27;
+
+fn coverage_directions() -> [Vec3; COVERAGE_SAMPLES] {
+    std::array::from_fn(|n| {
+        let d = Vec3::new(
+            (n / 9) as f32 - 1.0,
+            (n / 3 % 3) as f32 - 1.0,
+            (n % 3) as f32 - 1.0,
+        );
+        d.normalize_or_zero()
+    })
 }
 
 /// Triangles per leaf of a mesh's triangle hierarchy. A box test costs about

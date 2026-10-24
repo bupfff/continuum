@@ -22,6 +22,8 @@ struct LightUniform {
     edge_u: [f32; 4],
     edge_v: [f32; 4],
     counts: [u32; 4],
+    /// `[prefilter threshold in bins (0: exact), 0, 0, 0]`
+    params: [f32; 4],
 }
 
 #[repr(C)]
@@ -42,6 +44,7 @@ pub struct MaskConeKernel {
     probe_build_pipeline: wgpu::ComputePipeline,
     probe_gather_pipeline: wgpu::ComputePipeline,
     bake_static_pipeline: wgpu::ComputePipeline,
+    prefilter: std::cell::Cell<f32>,
     pub adapter_name: String,
 }
 
@@ -98,7 +101,13 @@ pub struct RectLight {
 }
 
 impl RectLight {
-    fn uniform(&self, meshes: usize, debug_mode: u32, hierarchy: Hierarchy) -> LightUniform {
+    fn uniform(
+        &self,
+        meshes: usize,
+        debug_mode: u32,
+        hierarchy: Hierarchy,
+        prefilter: f32,
+    ) -> LightUniform {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         LightUniform {
             corner: v4(self.corner),
@@ -110,13 +119,14 @@ impl RectLight {
                 hierarchy as u32,
                 self.one_sided as u32,
             ],
+            params: [prefilter, 0.0, 0.0, 0.0],
         }
     }
 }
 
 /// Bindings the `render` entry point uses (render_frame filters the scene's
 /// buffers to these when a lightmap provides more).
-const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26];
+const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29];
 
 impl MaskConeKernel {
     /// `None` if no GPU adapter is available.
@@ -172,12 +182,25 @@ impl MaskConeKernel {
             probe_build_pipeline,
             probe_gather_pipeline,
             bake_static_pipeline,
+            prefilter: std::cell::Cell::new(0.0),
             adapter_name,
         }
     }
 
     pub fn device(&self) -> &wgpu::Device {
         &self.device
+    }
+
+    /// Prefiltered cones: a cone stops descending a mesh's triangle hierarchy at
+    /// nodes that project to at most `bins` bins and splats their precomputed
+    /// coverage instead. 0 (the default) is exact. Applies to work set up after
+    /// the call, including [`LiveRenderer`]s created after it.
+    pub fn set_prefilter(&self, bins: f32) {
+        self.prefilter.set(bins.max(0.0));
+    }
+
+    pub fn prefilter(&self) -> f32 {
+        self.prefilter.get()
     }
 
     /// Irradiance per unit radiance at each receiver `(point, normal)`, and the
@@ -410,7 +433,10 @@ impl MaskConeKernel {
         lightmap: Option<&Lightmap>,
     ) -> Vec<(u32, wgpu::Buffer)> {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let uniform = frame.light.uniform(frame.meshes.len(), 0, frame.hierarchy);
+        let uniform =
+            frame
+                .light
+                .uniform(frame.meshes.len(), 0, frame.hierarchy, self.prefilter.get());
         let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
         let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
@@ -438,6 +464,10 @@ impl MaskConeKernel {
             (
                 26,
                 storage("triangle items", bytemuck::cast_slice(&flat.blas_items)),
+            ),
+            (
+                29,
+                storage("node coverage", bytemuck::cast_slice(&flat.blas_cov)),
             ),
             (5, storage("debug", &[0; 256])),
             (8, storage("albedo", bytemuck::cast_slice(&albedo4))),
@@ -552,7 +582,7 @@ impl MaskConeKernel {
     ) -> (Vec<f32>, Vec<f32>, Duration) {
         let debug = debug_mode != 0;
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let uniform = light.uniform(meshes.len(), debug_mode, hierarchy);
+        let uniform = light.uniform(meshes.len(), debug_mode, hierarchy, self.prefilter.get());
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()
             .map(|&(p, n)| ReceiverGpu {
@@ -597,6 +627,11 @@ impl MaskConeKernel {
         let blas_items_buf = init(
             "triangle items",
             bytemuck::cast_slice(&flat.blas_items),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let blas_cov_buf = init(
+            "node coverage",
+            bytemuck::cast_slice(&flat.blas_cov),
             wgpu::BufferUsages::STORAGE,
         );
         let (nodes, items) = mesh_hierarchy(meshes);
@@ -673,6 +708,10 @@ impl MaskConeKernel {
                 wgpu::BindGroupEntry {
                     binding: 26,
                     resource: blas_items_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 29,
+                    resource: blas_cov_buf.as_entire_binding(),
                 },
             ],
         });

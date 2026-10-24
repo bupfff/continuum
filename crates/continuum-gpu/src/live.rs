@@ -5,8 +5,8 @@ use continuum::glam::Vec3;
 use wgpu::util::DeviceExt;
 
 use crate::hierarchy::{
-    NONE, NodeGpu, flatten, mesh_bounds, mesh_hierarchy, mesh_hierarchy_of, padded,
-    triangle_hierarchy,
+    COVERAGE_SAMPLES, NONE, NodeGpu, flatten, mesh_bounds, mesh_hierarchy, mesh_hierarchy_of,
+    padded, triangle_hierarchy,
 };
 use crate::lightmap::{DYNAMIC, Lightmap, hemicube_weights};
 use crate::{
@@ -534,6 +534,7 @@ impl LiveRenderer {
                 (5, s(5)),
                 (25, s(25)),
                 (26, s(26)),
+                (29, s(29)),
                 (17, &dirty),
                 (22, &params),
                 (27, &static_cov),
@@ -579,6 +580,7 @@ impl LiveRenderer {
                 (10, &motion.static_items),
                 (25, s(25)),
                 (26, s(26)),
+                (29, s(29)),
                 (27, &static_cov),
                 (28, &block_slot),
             ],
@@ -719,11 +721,16 @@ impl LiveRenderer {
             // Same triangle count, so the same hierarchy shape and offsets.
             let [first, _, root, _] = m.ranges[mesh];
             if root != NONE {
-                let (nodes, items) = triangle_hierarchy(tris, root, first);
+                let (nodes, items, cov) = triangle_hierarchy(tris, root, first);
                 self.queue.write_buffer(
                     binding(&self.scene, 25),
                     root as u64 * std::mem::size_of::<NodeGpu>() as u64,
                     bytemuck::cast_slice(&nodes),
+                );
+                self.queue.write_buffer(
+                    binding(&self.scene, 29),
+                    root as u64 * (COVERAGE_SAMPLES * 4) as u64,
+                    bytemuck::cast_slice(&cov),
                 );
                 self.queue.write_buffer(
                     binding(&self.scene, 26),

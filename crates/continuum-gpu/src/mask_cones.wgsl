@@ -19,6 +19,8 @@ struct Light {
     // mesh's triangle hierarchy; w: 1 if the light is one-sided (it emits only
     // toward edge_u × edge_v and camera rays see its front)
     counts: vec4<u32>,
+    // x: prefilter threshold in bins (0: exact; see `try_splat`)
+    params: vec4<f32>,
 };
 
 struct Receiver {
@@ -49,6 +51,10 @@ struct Node {
 // info.x + info.y]`, which are triangle indices.
 @group(0) @binding(25) var<storage, read> blas: array<Node>;
 @group(0) @binding(26) var<storage, read> blas_items: array<u32>;
+// Per `blas` node, 27 samples: the projected area of its front-facing
+// triangles seen from direction (i, j, k), i, j, k in {-1, 0, 1}, at index
+// 9(i+1) + 3(j+1) + (k+1).
+@group(0) @binding(29) var<storage, read> blas_cov: array<f32>;
 
 const NONE: u32 = 0xffffffffu;
 // Traversal stack: the mesh hierarchy's entries, then (above them) the current
@@ -163,7 +169,7 @@ fn clip_line2(p: Poly2, normal: vec2<f32>, offset: f32) -> Poly2 {
 }
 
 // Adds an edge's signed swept area to the cells it crosses (accumulation rasterizer).
-fn draw_edge(acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, q0: vec2<f32>, q1: vec2<f32>) {
+fn draw_edge(acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, q0: vec2<f32>, q1: vec2<f32>, weight: f32) {
     if (abs(q0.y - q1.y) <= 1.1920929e-7) { return; }
     var dir = 1.0;
     var p0 = q0;
@@ -181,7 +187,7 @@ fn draw_edge(acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>,
         // Clamp: stepping along an edge on the grid boundary can drift a hair
         // outside it, and floor(-1e-9) = -1 would credit the row to the wrong cell.
         let x_next = clamp(x + dxdy * dy, 0.0, f32(GRID));
-        let d = dy * dir;
+        let d = dy * dir * weight;
         let x0 = min(x, x_next);
         let x1 = max(x, x_next);
         let x0_floor = floor(x0);
@@ -270,9 +276,113 @@ fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, ve
     for (var i = 0u; i < q.n; i++) {
         let a = clamp(q.v[i], vec2<f32>(0.0), vec2<f32>(g));
         let b = clamp(q.v[(i + 1u) % q.n], vec2<f32>(0.0), vec2<f32>(g));
-        draw_edge(acc, span, a, b);
+        draw_edge(acc, span, a, b, 1.0);
     }
     return true;
+}
+
+// --- Prefiltered cones: splat small hierarchy nodes instead of descending. ---
+
+fn cov_sample(n: u32, i: i32, j: i32, k: i32) -> f32 {
+    return blas_cov[n * 27u + u32(9 * (i + 1) + 3 * (j + 1) + (k + 1))];
+}
+
+// Projected area of node `n`'s front-facing triangles seen from direction `v`
+// (unit, pointing toward the viewer), interpolated bilinearly on the face of
+// the cube of sample directions that `v` points through.
+fn node_front_area(n: u32, v: vec3<f32>) -> f32 {
+    let a = abs(v);
+    var axis = 0u;
+    if (a.y > a.x && a.y >= a.z) { axis = 1u; } else if (a.z > a.x && a.z > a.y) { axis = 2u; }
+    var main: f32;
+    var s: f32;
+    var t: f32;
+    if (axis == 0u) { main = v.x; s = v.y / a.x; t = v.z / a.x; }
+    else if (axis == 1u) { main = v.y; s = v.x / a.y; t = v.z / a.y; }
+    else { main = v.z; s = v.x / a.z; t = v.y / a.z; }
+    let m = select(-1, 1, main >= 0.0);
+    let s0 = select(0, -1, s < 0.0);
+    let t0 = select(0, -1, t < 0.0);
+    let fs = s - f32(s0);
+    let ft = t - f32(t0);
+    var f: array<f32, 4>;
+    for (var c = 0; c < 4; c++) {
+        let gs = s0 + (c & 1);
+        let gt = t0 + (c >> 1);
+        if (axis == 0u) { f[c] = cov_sample(n, m, gs, gt); }
+        else if (axis == 1u) { f[c] = cov_sample(n, gs, m, gt); }
+        else { f[c] = cov_sample(n, gs, gt, m); }
+    }
+    return mix(mix(f[0], f[1], fs), mix(f[2], f[3], fs), ft);
+}
+
+// Clockwise convex hull of 8 points (the winding front-facing triangles have
+// in bin space, so splats add to them instead of cancelling).
+fn hull8(pts: array<vec2<f32>, 8>) -> Poly2 {
+    var start = 0u;
+    for (var k = 1u; k < 8u; k++) {
+        if (pts[k].x < pts[start].x || (pts[k].x == pts[start].x && pts[k].y < pts[start].y)) { start = k; }
+    }
+    var out: Poly2;
+    out.n = 0u;
+    var cur = start;
+    loop {
+        out.v[out.n] = pts[cur];
+        out.n++;
+        var next = (cur + 1u) % 8u;
+        for (var k = 0u; k < 8u; k++) {
+            let e = pts[next] - pts[cur];
+            let f = pts[k] - pts[cur];
+            let cr = e.x * f.y - e.y * f.x;
+            if (cr > 0.0 || (cr == 0.0 && dot(f, f) > dot(e, e))) { next = k; }
+        }
+        cur = next;
+        if (cur == start || out.n >= 8u) { break; }
+    }
+    return out;
+}
+
+// If node `n` (box lo..hi) lies between the cone's near and far planes and
+// projects to at most `light.params.x` bins, splats it into `acc`: its
+// projected box weighted by the fraction of that box its front-facing
+// triangles cover seen from the apex. Returns 0 if not splatted (descend), 1
+// if splatted with nothing to draw, 2 if drawn.
+fn try_splat(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, n: u32, lo: vec3<f32>, hi: vec3<f32>) -> u32 {
+    let g = f32(GRID);
+    var pts: array<vec2<f32>, 8>;
+    var mn = vec2<f32>(3.4e38);
+    var mx = vec2<f32>(-3.4e38);
+    for (var k = 0u; k < 8u; k++) {
+        let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
+        if (c.far_offset - dot(c.far_normal, corner) < 0.0) { return 0u; }
+        let p = to_local(c, corner);
+        if (p.z < NEAR) { return 0u; }
+        let q = vec2<f32>((p.x / p.z - c.window.x) / (c.window.z - c.window.x) * g,
+                          (p.y / p.z - c.window.y) / (c.window.w - c.window.y) * g);
+        pts[k] = q;
+        mn = min(mn, q);
+        mx = max(mx, q);
+    }
+    if (max(mx.x - mn.x, mx.y - mn.y) > light.params.x) { return 0u; }
+    if (mx.x <= 0.0 || mx.y <= 0.0 || mn.x >= g || mn.y >= g) { return 1u; }
+    let e = hi - lo;
+    let v = normalize(c.apex - (lo + hi) * 0.5);
+    let silhouette = abs(v.x) * e.y * e.z + abs(v.y) * e.x * e.z + abs(v.z) * e.x * e.y;
+    if (silhouette <= 1e-30) { return 1u; }
+    let alpha = node_front_area(n, v) / silhouette;
+    if (alpha <= 0.0) { return 1u; }
+    var q = hull8(pts);
+    q = clip_line2(q, vec2<f32>(-1.0, 0.0), 0.0);
+    q = clip_line2(q, vec2<f32>(1.0, 0.0), g);
+    q = clip_line2(q, vec2<f32>(0.0, -1.0), 0.0);
+    q = clip_line2(q, vec2<f32>(0.0, 1.0), g);
+    if (q.n < 3u) { return 1u; }
+    for (var i = 0u; i < q.n; i++) {
+        let a = clamp(q.v[i], vec2<f32>(0.0), vec2<f32>(g));
+        let b = clamp(q.v[(i + 1u) % q.n], vec2<f32>(0.0), vec2<f32>(g));
+        draw_edge(acc, span, a, b, alpha);
+    }
+    return 2u;
 }
 
 // Rasterizes triangle `t` into `acc` if it faces the apex and may touch the cone.
@@ -302,8 +412,14 @@ fn add_mesh_coverage(c: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: 
             (*stack)[base] = range.z;
             while (sp > base) {
                 sp--;
-                let node = blas[(*stack)[sp]];
+                let n = (*stack)[sp];
+                let node = blas[n];
                 if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
+                if (light.params.x > 0.0) {
+                    let splat = try_splat(c, &acc, &span, n, node.lo.xyz, node.hi.xyz);
+                    if (splat == 2u) { touched = true; }
+                    if (splat != 0u) { continue; }
+                }
                 if (node.info.y > 0u) {
                     for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
                         if (cover_triangle(c, &acc, &span, blas_items[k])) { touched = true; }
