@@ -208,7 +208,7 @@ struct Gpu {
 /// The lit scene with its caches, or the instanced field (per-pixel cones).
 enum Renderer {
     Live(Box<LiveRenderer>),
-    Field(InstancedRenderer),
+    Field(Box<InstancedRenderer>),
 }
 
 impl Renderer {
@@ -335,7 +335,7 @@ impl App {
                 config,
                 device,
                 queue,
-                renderer: Renderer::Field(renderer),
+                renderer: Renderer::Field(Box::new(renderer)),
             };
         }
         let meshes: Vec<_> = world.surfaces.iter().map(|s| s.triangles.clone()).collect();
