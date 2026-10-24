@@ -70,9 +70,9 @@ fn main() -> std::io::Result<()> {
     let peak = reference.iter().copied().fold(0.0, f32::max);
     let max_diff = pixels
         .iter()
-        .zip(reference.chunks_exact(3))
+        .zip(reference.as_chunks::<3>().0)
         .map(|(p, r)| {
-            (Vec3::from_array(*p) - Vec3::from_slice(r))
+            (Vec3::from_array(*p) - Vec3::from_array(*r))
                 .abs()
                 .max_element()
                 / peak
