@@ -25,5 +25,25 @@
 //!    light.
 //!
 //! Reported: memory, the worst frame, frames until warm.
+//!
+//! Details fixed before the first run (added with the cache's first commit,
+//! before any measurement):
+//! - Cache settings: base texel 5 mm (texels at mip m are 5 mm × 2^m × the
+//!   object's scale), mip chosen so a texel spans about 2 pixels (log2
+//!   rounded), one request per 4×4-pixel tile per frame, bake budget 20,000
+//!   cones per frame (all phases), pool of 2^19 pages.
+//! - Warm: a viewpoint is warm once 16 consecutive frames (every pixel of every
+//!   tile sampled once) report no missing page. Warm-up uses the same budget;
+//!   frames until warm are counted from an empty cache.
+//! - Speed statistic: the median of 30 warm frames, wall clock from the
+//!   frame's start until its request readback is mapped (the fastest is also
+//!   reported).
+//! - Reference: per-pixel exact cones (prefilter 0) through `render_instanced`
+//!   with the same ray mode as the cached render; relative RMSE = RMSE / mean
+//!   of the reference over all pixels and channels.
+//! - Flight: frame f of 600 at t = f / 599 has the eye 300·t m ahead of the
+//!   standing eye along the view's flat direction, at height 1.7 + 148.3·t m,
+//!   looking 45·t degrees down, from an empty cache. A pixel falls back when
+//!   no page of any mip is resident for it.
 
 fn main() {}

@@ -26,6 +26,11 @@ pub struct Surface {
     pub uv: Vec<[Vec2; 3]>,
     /// World-space size of each chart along u and v, which sets texel counts.
     pub charts: Vec<Vec2>,
+    /// Each chart's grid of cells: chart coordinates split into `x × y` equal
+    /// cells, each holding at most two triangles split along the cell's
+    /// diagonal from `(0, 0)` to `(1, 1)` (or one, for a lone triangle). Lets a
+    /// renderer find the triangle under any chart coordinate directly.
+    pub chart_grid: Vec<[u32; 2]>,
 }
 
 fn flat_normal(t: &Tri) -> Vec3 {
@@ -54,6 +59,7 @@ impl Surface {
             {
                 let (a, b, d) = (t[0], t[1], u[2]);
                 s.charts.push(Vec2::new((b - a).length(), (d - a).length()));
+                s.chart_grid.push([1, 1]);
                 for (tri, uv) in [
                     (t, [Vec2::ZERO, Vec2::X, Vec2::ONE]),
                     (u, [Vec2::ZERO, Vec2::ONE, Vec2::Y]),
@@ -67,6 +73,7 @@ impl Surface {
             } else {
                 s.charts
                     .push(Vec2::new((t[1] - t[0]).length(), (t[2] - t[0]).length()));
+                s.chart_grid.push([1, 1]);
                 s.triangles.push(t);
                 s.normals.push([n; 3]);
                 s.chart.push(chart);
@@ -108,6 +115,7 @@ impl Surface {
             .fold(0.0, f32::max);
         let mut s = Surface {
             charts: vec![Vec2::new(along_u, along_v)],
+            chart_grid: vec![[nu as u32, nv as u32]],
             ..Default::default()
         };
         let uv = |i: usize, j: usize| Vec2::new(i as f32 / nu as f32, j as f32 / nv as f32);
