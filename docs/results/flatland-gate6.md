@@ -1,6 +1,6 @@
 # Flatland gate 6: one-bounce indirect light with propagating charges
 
-Date: 2026-10-24 (overnight run). Question: does the ledger pay off for indirect
+Date: 2026-10-23 (overnight run). Question: does the ledger pay off for indirect
 light, where a change anywhere (a shadow sweeping a wall) must propagate to
 every cached gather that sees it?
 

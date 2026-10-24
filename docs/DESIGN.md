@@ -96,7 +96,7 @@ non-neural, fitted for mask cones, and portable. Not a novelty claim.
 
 ## 3.5 What the 2D phase (M0) taught us
 
-Status after the flatland gates (2026-10-24). Full results are in `docs/results/`.
+Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
 
 | Gate | Question | Result |
 |---|---|---|

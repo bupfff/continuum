@@ -1,6 +1,6 @@
 # Flatland gate 4: the worst case, everything moving
 
-Date: 2026-10-24 (overnight run). Design rule 1 says the incremental path must
+Date: 2026-10-23 (overnight run). Design rule 1 says the incremental path must
 never cost meaningfully more than a conventional full recompute, even when
 nothing can be reused.
 

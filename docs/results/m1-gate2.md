@@ -1,6 +1,6 @@
 # M1 gate 2: hierarchy culling and scaling
 
-Date: 2026-10-24 (overnight run). Each receiver's cone must find the triangles
+Date: 2026-10-23 (overnight run). Each receiver's cone must find the triangles
 that can touch it. Testing every triangle costs time linear in the scene; a
 bounding volume hierarchy (`continuum::bvh`) should not.
 

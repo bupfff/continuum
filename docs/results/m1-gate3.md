@@ -1,6 +1,6 @@
 # M1 gate 3: tile-shared hierarchy traversal
 
-Date: 2026-10-24 (overnight run). Gate 2 showed culling dominating per-receiver
+Date: 2026-10-23 (overnight run). Gate 2 showed culling dominating per-receiver
 cost. Neighboring receivers' cones are nearly identical, so an 8×8 tile of
 receivers walks the hierarchy once, with a frustum enclosing all 64 cones (the
 prismatoid between the tile and the light). Each receiver then filters the

@@ -1,6 +1,6 @@
 # M1 gate 1: mask cones vs rays in 3D
 
-Date: 2026-10-24 (overnight run). First milestone 1 result: does the 2D gate 1
+Date: 2026-10-23 (overnight run). First milestone 1 result: does the 2D gate 1
 win carry over to 3D, with 8×8 bins and triangle meshes?
 
 Pass criterion, fixed before the first run: the continuous mask cone (8×8 bins)

@@ -1,6 +1,6 @@
 # M1 gate 4: exact incremental direct light in 3D
 
-Date: 2026-10-24 (overnight run). The main mechanism from the 2D phase (cache
+Date: 2026-10-23 (overnight run). The main mechanism from the 2D phase (cache
 what static geometry contributes per cone; apply dynamic changes exactly, and
 only where they can reach), now on triangle meshes.
 

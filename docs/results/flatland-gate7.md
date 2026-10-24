@@ -1,6 +1,6 @@
 # Flatland gate 7: a moving light (the ledger's own job)
 
-Date: 2026-10-24 (overnight run). After gate 6b showed that exact updates beat
+Date: 2026-10-23 (overnight run). After gate 6b showed that exact updates beat
 bounds when they are cheap, this gate tests the case where they are not. When
 a light drifts (a sun on a day-night cycle), every cone toward it changes a
 little every frame, so exact invalidation must recompute 100% of cones every

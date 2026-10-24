@@ -1,6 +1,6 @@
 # Flatland gate 6b: exact incremental indirect light with cone G-buffers
 
-Date: 2026-10-24 (overnight run). Follow-up to gate 6, which found that bounds
+Date: 2026-10-23 (overnight run). Follow-up to gate 6, which found that bounds
 on how much indirect light can change were about 3× too loose.
 
 Question: can the changes in that scene be applied exactly and cheaply instead
