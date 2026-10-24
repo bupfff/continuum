@@ -16,11 +16,28 @@ pub(crate) struct ChartGpu {
     pub probes: [u32; 4],
 }
 
-/// A chart's triangles with their shading normals and chart coordinates.
+/// A chart's triangles (with their index in the mesh, shading normals and
+/// chart coordinates), the mesh, and whether it moves.
 struct ChartSource {
-    tris: Vec<(Tri, [Vec3; 3], [Vec2; 3])>,
+    tris: Vec<(Tri, [Vec3; 3], [Vec2; 3], usize)>,
     size: Vec2,
+    mesh: usize,
+    dynamic: bool,
 }
+
+/// A grid cell placed on a chart's surface: the point, its shading normal,
+/// and where it lies (index into the chart's triangles, barycentric coordinates).
+#[derive(Clone, Copy)]
+struct Placed {
+    point: Vec3,
+    normal: Vec3,
+    tri: usize,
+    bary: Vec3,
+}
+
+/// Flag in a triangle's chart index: the mesh moves, so it has no texels and is
+/// shaded per pixel (its chart may still hold probes).
+pub(crate) const DYNAMIC: u32 = 1 << 31;
 
 /// A world-space lighting cache over the static meshes of a scene. Every chart
 /// of a static [`Surface`] gets a grid of texels about `texel_size` apart, each
@@ -33,10 +50,9 @@ struct ChartSource {
 pub struct Lightmap {
     pub(crate) charts: Vec<ChartGpu>,
     sources: Vec<ChartSource>,
-    /// Chart of each triangle (global index), or `u32::MAX` for dynamic geometry.
+    /// Chart of each triangle (global index), with [`DYNAMIC`] set for moving meshes.
     pub(crate) tri_chart: Vec<u32>,
-    /// Chart coordinates of each triangle's vertices, three per triangle (zero
-    /// for dynamic geometry).
+    /// Chart coordinates of each triangle's vertices, three per triangle.
     pub(crate) tri_uv: Vec<[f32; 2]>,
     /// Shading normals of each triangle's vertices, three per triangle.
     pub(crate) tri_normals: Vec<[f32; 4]>,
@@ -48,8 +64,14 @@ pub struct Lightmap {
     /// Bounds of each block's texels (their receiver points).
     pub blocks: Vec<(Vec3, Vec3)>,
     /// Indirect-light probes `(point, normal)`, row-major per chart (see
-    /// [`Self::with_probes`]).
+    /// [`Self::with_probes`]): those on static charts first, then those on
+    /// moving meshes.
     pub probes: Vec<(Vec3, Vec3)>,
+    /// How many of `probes` are on static charts.
+    pub static_probes: usize,
+    /// For each probe on a moving mesh: the mesh, the triangle (index in the
+    /// mesh) and barycentric coordinates it sits at, to follow the mesh.
+    pub(crate) moving_probes: Vec<(usize, usize, Vec3)>,
     /// Indirect irradiance per probe per unit light radiance (RGB, then 1 if
     /// valid), for renders outside [`crate::LiveRenderer`]; empty for none.
     pub indirect: Vec<[f32; 4]>,
@@ -80,39 +102,50 @@ impl Lightmap {
             irradiance: Vec::new(),
             blocks: Vec::new(),
             probes: Vec::new(),
+            static_probes: 0,
+            moving_probes: Vec::new(),
             indirect: Vec::new(),
         };
+        // Charts of static meshes first, then of moving ones, so probes on
+        // static charts come first.
+        let mut chart_base = vec![0; surfaces.len()];
+        for pass_static in [true, false] {
+            for (m, s) in surfaces.iter().enumerate() {
+                if is_static(m) != pass_static {
+                    continue;
+                }
+                chart_base[m] = lm.charts.len();
+                for &size in &s.charts {
+                    lm.charts.push(ChartGpu {
+                        info: [0; 4],
+                        probes: [0, 0, 0, m as u32],
+                    });
+                    lm.sources.push(ChartSource {
+                        tris: Vec::new(),
+                        size,
+                        mesh: m,
+                        dynamic: !pass_static,
+                    });
+                }
+            }
+        }
         for (m, s) in surfaces.iter().enumerate() {
             lm.tri_normals
                 .extend(s.normals.iter().flatten().map(|n| [n.x, n.y, n.z, 0.0]));
-            if !is_static(m) {
-                lm.tri_chart
-                    .extend(std::iter::repeat_n(u32::MAX, s.triangles.len()));
-                lm.tri_uv
-                    .extend(std::iter::repeat_n([0.0; 2], 3 * s.triangles.len()));
-                continue;
-            }
-            let base = lm.charts.len();
-            for &size in &s.charts {
-                lm.charts.push(ChartGpu {
-                    info: [0; 4],
-                    probes: [0, 0, 0, m as u32],
-                });
-                lm.sources.push(ChartSource {
-                    tris: Vec::new(),
-                    size,
-                });
-            }
+            let flag = if is_static(m) { 0 } else { DYNAMIC };
             for k in 0..s.triangles.len() {
-                let chart = base + s.chart[k] as usize;
+                let chart = chart_base[m] + s.chart[k] as usize;
                 lm.sources[chart]
                     .tris
-                    .push((s.triangles[k], s.normals[k], s.uv[k]));
-                lm.tri_chart.push(chart as u32);
+                    .push((s.triangles[k], s.normals[k], s.uv[k], k));
+                lm.tri_chart.push(chart as u32 | flag);
                 lm.tri_uv.extend(s.uv[k].map(|uv| uv.to_array()));
             }
         }
         for (c, src) in lm.sources.iter().enumerate() {
+            if src.dynamic {
+                continue;
+            }
             let nu = ((src.size.x / texel_size).ceil() as u32).clamp(1, 1024);
             let nv = ((src.size.y / texel_size).ceil() as u32).clamp(1, 1024);
             let (nbu, nbv) = (nu.div_ceil(BLOCK), nv.div_ceil(BLOCK));
@@ -130,10 +163,10 @@ impl Lightmap {
                             .then(|| cells[(j * nu + i) as usize])
                             .flatten()
                         {
-                            Some((p, n)) => {
-                                let p = p + n * 1e-4;
+                            Some(c) => {
+                                let p = c.point + c.normal * 1e-4;
                                 (lo, hi) = (lo.min(p), hi.max(p));
-                                lm.receivers.push((p, n));
+                                lm.receivers.push((p, c.normal));
                             }
                             None => lm.receivers.push((pad, Vec3::ZERO)),
                         }
@@ -163,9 +196,28 @@ impl Lightmap {
         self.receivers.len()
     }
 
-    /// Adds indirect-light probes about `spacing` apart on every chart, at grid
-    /// cell centers placed on the surface like texels (a cell that lands on no
-    /// triangle takes the nearest point on one).
+    /// Texel index of grid cell `(i, j)` of chart `c`, if the chart has texels.
+    #[doc(hidden)]
+    pub fn texel_index(&self, c: usize, i: u32, j: u32) -> Option<usize> {
+        let [first, nu, nv, nbu] = self.charts[c].info;
+        (i < nu && j < nv).then(|| {
+            (first + ((j / BLOCK) * nbu + i / BLOCK) * 64 + (j % BLOCK) * BLOCK + i % BLOCK)
+                as usize
+        })
+    }
+
+    /// Chart count and each chart's texel grid size.
+    #[doc(hidden)]
+    pub fn chart_grids(&self) -> Vec<(u32, u32, u32)> {
+        self.charts
+            .iter()
+            .map(|c| (c.info[1], c.info[2], c.probes[3]))
+            .collect()
+    }
+
+    /// Adds indirect-light probes about `spacing` apart on every chart, static
+    /// and moving, at grid cell centers placed on the surface like texels (a
+    /// cell that lands on no triangle takes the nearest point on one).
     pub fn with_probes(mut self, spacing: f32) -> Self {
         for (c, src) in self.sources.iter().enumerate() {
             let pu = ((src.size.x / spacing).ceil() as u32).clamp(1, 1024);
@@ -177,13 +229,19 @@ impl Lightmap {
                     cell.get_or_insert(fallback.expect("every cell has a nearest triangle"));
                 }
             }
+            if !src.dynamic {
+                self.static_probes += cells.len();
+            }
             let mesh = self.charts[c].probes[3];
             self.charts[c].probes = [self.probes.len() as u32, pu, pv, mesh];
-            self.probes.extend(
-                cells
-                    .into_iter()
-                    .map(|cell| cell.map(|(p, n)| (p + n * 1e-4, n)).unwrap()),
-            );
+            for cell in cells.into_iter().map(Option::unwrap) {
+                self.probes
+                    .push((cell.point + cell.normal * 1e-4, cell.normal));
+                if src.dynamic {
+                    self.moving_probes
+                        .push((src.mesh, src.tris[cell.tri].3, cell.bary));
+                }
+            }
         }
         self
     }
@@ -274,11 +332,10 @@ impl Lightmap {
 /// gets that point and the interpolated shading normal; one within `reach`
 /// cells of a triangle gets the nearest point on the nearest triangle; the
 /// rest get `None`.
-fn place(src: &ChartSource, nu: u32, nv: u32, reach: f32) -> Vec<Option<(Vec3, Vec3)>> {
+fn place(src: &ChartSource, nu: u32, nv: u32, reach: f32) -> Vec<Option<Placed>> {
     let scale = Vec2::new(nu as f32, nv as f32);
-    let mut best: Vec<(f32, Option<(Vec3, Vec3)>)> =
-        vec![(f32::INFINITY, None); (nu * nv) as usize];
-    for (tri, normals, uv) in &src.tris {
+    let mut best: Vec<(f32, Option<Placed>)> = vec![(f32::INFINITY, None); (nu * nv) as usize];
+    for (k, (tri, normals, uv, _)) in src.tris.iter().enumerate() {
         let q = uv.map(|t| t * scale);
         if (q[1] - q[0]).perp_dot(q[2] - q[0]).abs() < 1e-12 {
             continue;
@@ -297,13 +354,21 @@ fn place(src: &ChartSource, nu: u32, nv: u32, reach: f32) -> Vec<Option<(Vec3, V
                 let (d, b) = closest_barycentric(Vec2::new(i as f32 + 0.5, j as f32 + 0.5), q);
                 let cell = &mut best[(j * nu + i) as usize];
                 if d <= reach && d < cell.0 {
-                    let p = tri[0] * b.x + tri[1] * b.y + tri[2] * b.z;
-                    let mut n = (normals[0] * b.x + normals[1] * b.y + normals[2] * b.z)
+                    let point = tri[0] * b.x + tri[1] * b.y + tri[2] * b.z;
+                    let mut normal = (normals[0] * b.x + normals[1] * b.y + normals[2] * b.z)
                         .normalize_or_zero();
-                    if n == Vec3::ZERO {
-                        n = geometric;
+                    if normal == Vec3::ZERO {
+                        normal = geometric;
                     }
-                    *cell = (d, Some((p, n)));
+                    *cell = (
+                        d,
+                        Some(Placed {
+                            point,
+                            normal,
+                            tri: k,
+                            bary: b,
+                        }),
+                    );
                 }
             }
         }

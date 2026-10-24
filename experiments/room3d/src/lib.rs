@@ -1,6 +1,8 @@
 //! Shared pieces for the 3D experiments: scenes of box meshes over a floor of
 //! receivers, lit by a rectangular area light.
 
+pub mod showcase;
+
 use continuum::bvh::Bvh;
 use continuum::cone3::{PyramidCone, box_mesh, ray_triangle, sphere_mesh};
 use continuum::glam::Vec3;

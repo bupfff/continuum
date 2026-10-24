@@ -8,7 +8,7 @@ use crate::hierarchy::{
     NONE, NodeGpu, flatten, mesh_bounds, mesh_hierarchy, mesh_hierarchy_of, padded,
     triangle_hierarchy,
 };
-use crate::lightmap::{Lightmap, hemicube_weights};
+use crate::lightmap::{DYNAMIC, Lightmap, hemicube_weights};
 use crate::{
     Camera, CameraUniform, Frame, Hierarchy, MaskConeKernel, ReceiverGpu, RectLight, Tri,
     uniform_buffer,
@@ -68,6 +68,8 @@ struct Indirect {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ProbeParams {
     counts: [u32; 4],
+    /// `[probes on static charts, 0, 0, 0]`
+    extra: [u32; 4],
     moving: [[u32; 4]; MAX_MOVING],
     bounds: [[f32; 4]; 2 * MAX_MOVING],
 }
@@ -90,6 +92,12 @@ struct Motion {
     dynamic: Vec<bool>,
     blocks: u32,
     probes: u32,
+    static_probes: u32,
+    /// Probes on moving meshes (they follow index `static_probes` on): mesh,
+    /// triangle in the mesh, barycentric coordinates.
+    moving_probes: Vec<(usize, usize, Vec3)>,
+    /// Current shading normals of each moving mesh.
+    normals: Vec<Vec<[Vec3; 3]>>,
     uniform: wgpu::Buffer,
     args: wgpu::Buffer,
     /// The moving meshes and their bounds (`ProbeParams`, mode 0), read by the
@@ -260,7 +268,7 @@ impl LiveRenderer {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents,
-                usage: wgpu::BufferUsages::STORAGE,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             })
         };
         let points: Vec<ReceiverGpu> = lightmap
@@ -272,9 +280,10 @@ impl LiveRenderer {
             })
             .collect();
         let points = storage("probe points", bytemuck::cast_slice(&points));
+        let static_probes = motion.static_probes;
         let gbuffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe G-buffers"),
-            size: probes as u64 * bins as u64 * 8,
+            size: static_probes.max(1) as u64 * bins as u64 * 8,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -308,7 +317,7 @@ impl LiveRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&kernel.probe_build_pipeline);
             pass.set_bind_group(0, &build_bind, &[]);
-            pass.dispatch_workgroups(bins / 64, probes, 1);
+            pass.dispatch_workgroups(bins / 64, static_probes, 1);
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -381,6 +390,7 @@ impl LiveRenderer {
             }
         }
         params.counts = [probes, resolution, mode, k as u32];
+        params.extra = [motion.static_probes, 0, 0, 0];
         params
     }
 
@@ -396,7 +406,7 @@ impl LiveRenderer {
         let dynamic: Vec<bool> = meshes
             .iter()
             .zip(&ranges)
-            .map(|(mesh, r)| mesh.is_empty() || lightmap.tri_chart[r[0] as usize] == u32::MAX)
+            .map(|(mesh, r)| mesh.is_empty() || lightmap.tri_chart[r[0] as usize] & DYNAMIC != 0)
             .collect();
         let blocks = lightmap.blocks.len() as u32;
         assert!(
@@ -490,6 +500,21 @@ impl LiveRenderer {
             wgpu::BufferUsages::empty(),
         );
         let probes = lightmap.probes.len() as u32;
+        let normals = meshes
+            .iter()
+            .zip(&ranges)
+            .zip(&dynamic)
+            .map(|((mesh, r), &d)| {
+                if !d {
+                    return Vec::new();
+                }
+                let first = 3 * r[0] as usize;
+                lightmap.tri_normals[first..first + 3 * mesh.len()]
+                    .chunks(3)
+                    .map(|n| [0, 1, 2].map(|k| Vec3::from_slice(&n[k][..3])))
+                    .collect()
+            })
+            .collect();
         let params = uniform_buffer(
             device,
             "dynamic meshes",
@@ -522,6 +547,9 @@ impl LiveRenderer {
             dynamic,
             blocks,
             probes,
+            static_probes: lightmap.static_probes as u32,
+            moving_probes: lightmap.moving_probes.clone(),
+            normals,
             uniform,
             args,
             params,
@@ -662,6 +690,7 @@ impl LiveRenderer {
                 continue;
             }
             if let Some(normals) = normals {
+                m.normals[mesh] = normals.to_vec();
                 let normals: Vec<[f32; 4]> = normals
                     .iter()
                     .flatten()
@@ -726,6 +755,29 @@ impl LiveRenderer {
         let params = Self::probe_params(m, m.probes, PROBE_RESOLUTION, 0);
         self.queue
             .write_buffer(&m.params, 0, bytemuck::bytes_of(&params));
+        // Probes on moving meshes follow them.
+        if let Some(ind) = &self.indirect
+            && !m.moving_probes.is_empty()
+        {
+            let points: Vec<ReceiverGpu> = m
+                .moving_probes
+                .iter()
+                .map(|&(mesh, t, b)| {
+                    let (tri, n) = (m.meshes[mesh][t], m.normals[mesh][t]);
+                    let normal = (n[0] * b.x + n[1] * b.y + n[2] * b.z).normalize();
+                    let p = tri[0] * b.x + tri[1] * b.y + tri[2] * b.z + normal * 1e-4;
+                    ReceiverGpu {
+                        point: [p.x, p.y, p.z, 0.0],
+                        normal: [normal.x, normal.y, normal.z, 0.0],
+                    }
+                })
+                .collect();
+            self.queue.write_buffer(
+                &ind.points,
+                m.static_probes as u64 * std::mem::size_of::<ReceiverGpu>() as u64,
+                bytemuck::cast_slice(&points),
+            );
+        }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.clear_buffer(&m.args, 0, Some(4));
         {

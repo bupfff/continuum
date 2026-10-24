@@ -464,6 +464,8 @@ struct Camera {
 @group(0) @binding(7) var<storage, read_write> colors: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read> albedo: array<vec4<f32>>;
 
+const EDGE_TOLERANCE: f32 = 1e-5;
+
 fn ray_triangle(o: vec3<f32>, d: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> f32 {
     let e1 = v1 - v0;
     let e2 = v2 - v0;
@@ -472,11 +474,13 @@ fn ray_triangle(o: vec3<f32>, d: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: ve
     if (abs(det) < 1e-12) { return -1.0; }
     let inv = 1.0 / det;
     let s = o - v0;
+    // A small tolerance on the edges keeps meshes watertight: in f32, a ray
+    // through a shared edge can otherwise miss both triangles.
     let u = dot(s, p) * inv;
-    if (u < 0.0 || u > 1.0) { return -1.0; }
+    if (u < -EDGE_TOLERANCE || u > 1.0 + EDGE_TOLERANCE) { return -1.0; }
     let q = cross(s, e1);
     let v = dot(d, q) * inv;
-    if (v < 0.0 || u + v > 1.0) { return -1.0; }
+    if (v < -EDGE_TOLERANCE || u + v > 1.0 + EDGE_TOLERANCE) { return -1.0; }
     return dot(e2, q) * inv;
 }
 
@@ -668,8 +672,10 @@ struct Face {
     probes: vec4<u32>,
 };
 
-// Chart of each triangle, or 0xffffffff for dynamic geometry (shaded per pixel).
+// Chart of each triangle, with DYNAMIC set for moving meshes (shaded per pixel;
+// their charts hold probes but no texels).
 @group(0) @binding(11) var<storage, read> tri_face: array<u32>;
+const DYNAMIC: u32 = 0x80000000u;
 @group(0) @binding(12) var<storage, read> faces: array<Face>;
 @group(0) @binding(13) var<storage, read> texels: array<f32>;
 // Chart coordinates of each triangle's vertices, three per triangle.
@@ -716,12 +722,13 @@ fn render_cached(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
     let surface = eye + dir * hit.distance;
     let f = tri_face[hit.tri];
+    let uv = chart_uv(hit.tri, surface);
     var irradiance: vec3<f32>;
-    if (f == 0xffffffffu) {
+    if ((f & DYNAMIC) != 0u) {
         let point = surface + hit.normal * 1e-4;
-        irradiance = vec3<f32>(hit_irradiance(pixel, point, shading_normal(hit.tri, surface, -dir)));
+        irradiance = vec3<f32>(hit_irradiance(pixel, point, shading_normal(hit.tri, surface, -dir)))
+            + indirect_lookup(faces[f & ~DYNAMIC], uv);
     } else {
-        let uv = chart_uv(hit.tri, surface);
         irradiance = lookup(faces[f], uv) + indirect_lookup(faces[f], uv);
     }
     let c = albedo[hit.mesh].xyz * irradiance * (camera.params.w / 3.14159265);
@@ -860,6 +867,9 @@ struct ProbeParams {
     // G-buffer with moving meshes composited; 1: trace every bin through the
     // bound hierarchy, moving meshes black); w: moving meshes
     counts: vec4<u32>,
+    // x: probes on static charts (the G-buffer's); those after it sit on moving
+    // meshes and are traced every gather
+    extra: vec4<u32>,
     // Moving mesh k is `moving[k].x`, with bounds `bounds[2k] .. bounds[2k + 1]`.
     moving: array<vec4<u32>, 16>,
     bounds: array<vec4<f32>, 32>,
@@ -911,7 +921,7 @@ fn bin_world(n: vec3<f32>, local: vec3<f32>) -> vec3<f32> {
 fn trace_bin(origin: vec3<f32>, dir: vec3<f32>) -> vec2<u32> {
     let hit = primary_hit(origin, dir);
     if (hit.mesh == 0xffffffffu) { return vec2<u32>(NO_HIT, 0u); }
-    if (tri_face[hit.tri] == 0xffffffffu) { return vec2<u32>(BLACK, bitcast<u32>(hit.distance)); }
+    if ((tri_face[hit.tri] & DYNAMIC) != 0u) { return vec2<u32>(BLACK, bitcast<u32>(hit.distance)); }
     let v0 = tris[3u * hit.tri].xyz;
     let v1 = tris[3u * hit.tri + 1u].xyz;
     let v2 = tris[3u * hit.tri + 2u].xyz;
@@ -982,7 +992,7 @@ fn probe_gather(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
         for (var b = li; b < bins; b += 64u) {
             let dir = bin_world(r.normal.xyz, bin_local(b, probe_params.counts.y));
             var g: vec2<u32>;
-            if (probe_params.counts.z == 0u) {
+            if (probe_params.counts.z == 0u && p < probe_params.extra.x) {
                 g = composite(origin, dir, gbuffer[p * bins + b]);
             } else {
                 g = trace_bin(origin, dir);

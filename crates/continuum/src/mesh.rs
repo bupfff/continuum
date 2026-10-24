@@ -148,6 +148,16 @@ impl Surface {
         }
     }
 
+    /// The same surface facing the other way: windings and normals reversed.
+    pub fn flipped(&self) -> Surface {
+        Surface {
+            triangles: self.triangles.iter().map(|t| [t[0], t[2], t[1]]).collect(),
+            normals: self.normals.iter().map(|n| [-n[0], -n[2], -n[1]]).collect(),
+            uv: self.uv.iter().map(|uv| [uv[0], uv[2], uv[1]]).collect(),
+            ..self.clone()
+        }
+    }
+
     /// Axis-aligned bounds of the triangles.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         self.triangles.iter().flatten().fold(
