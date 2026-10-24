@@ -22,6 +22,7 @@ cargo test --release
 cargo run --release -p flatland --bin gate1
 cargo run --release -p flatland --bin ledger
 cargo run --release -p flatland --bin gate5
+cargo run --release -p flatland --bin gate6
 ```
 
 Each run prints a results table and writes images to `experiments/flatland/out/`:
@@ -34,3 +35,5 @@ Each run prints a results table and writes images to `experiments/flatland/out/`
   bound and error columns have something to show.
 - `gate5_<visibility>_<charging>.png` (gate 5): the same four columns for the
   sky scenario at ε = 1%.
+- `gate6_bounce.png` (gate 6): the same four columns for one-bounce indirect
+  light (attempt 3 charges, ε = 1%).

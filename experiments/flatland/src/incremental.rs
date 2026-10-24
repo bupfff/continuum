@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use continuum::{ConeMask, CoverageMask, Ledger};
 
-use crate::anim::Scenario;
+use crate::anim::{Scenario, Target};
 use crate::bounds::{
     Aabb, Circle, convex_distance, convex_hull, convex_overlap, max_segment_angle,
 };
@@ -183,16 +183,24 @@ pub struct Precomputed {
 
 impl Precomputed {
     pub fn new(s: &Scenario, grid: Grid, visibility: Visibility, threads: usize) -> Self {
-        let targets = s.targets();
+        Self::with_targets(&s.targets(), &s.statics, grid, visibility, threads)
+    }
+
+    pub fn with_targets(
+        targets: &[Target],
+        statics: &[Segment],
+        grid: Grid,
+        visibility: Visibility,
+        threads: usize,
+    ) -> Self {
         let pixels = grid.pixels();
         let cones: Vec<Option<Cone>> = par_map(targets.len() * pixels, threads, 256, |k| {
             let p = grid.pixel_center(k % pixels);
             Cone::toward(p, targets[k / pixels].at(p))
         });
-        let statics = s.statics.clone();
         let static_masks = match visibility {
             Visibility::Binary => par_map(cones.len(), threads, 256, |k| {
-                cones[k].map_or(ConeMask::FULL, |c| methods::mask_bits(&c, &statics))
+                cones[k].map_or(ConeMask::FULL, |c| methods::mask_bits(&c, statics))
             }),
             Visibility::Continuous => Vec::new(),
         };
@@ -201,7 +209,7 @@ impl Precomputed {
             Visibility::Continuous => par_map(cones.len(), threads, 256, |k| {
                 let mut m = CoverageMask::EMPTY;
                 if let Some(c) = cones[k] {
-                    methods::add_coverage(&mut m, &c, &statics);
+                    methods::add_coverage(&mut m, &c, statics);
                 } else {
                     m.add_interval(0.0, 1.0);
                 }
@@ -329,6 +337,24 @@ impl Precomputed {
         }
     }
 
+    pub fn cone(&self, k: usize) -> Option<Cone> {
+        self.cones[k]
+    }
+
+    pub fn tile_box(&self, t: usize) -> &Aabb {
+        &self.tile_boxes[t]
+    }
+
+    /// Whether a convex region can touch any receiver's cone for key `k` (target, tile).
+    pub fn frustum_touches(&self, k: usize, region: &[Vec2], region_box: &Aabb) -> bool {
+        region_box.overlaps(&self.frustum_boxes[k]) && convex_overlap(&self.frustums[k], region)
+    }
+
+    /// Largest cone angle of any receiver for key `k` (target, tile).
+    pub fn theta_max(&self, k: usize) -> f32 {
+        self.theta_max[k]
+    }
+
     /// Conventional baseline: every cone against every occluder.
     pub fn full_recompute(&self, occluders: &[Segment]) -> Vec<f32> {
         par_map(self.cones.len(), self.threads, 256, |k| {
@@ -368,7 +394,7 @@ impl Precomputed {
 }
 
 /// `x \ y` for intervals, as up to two pieces (empty pieces have zero length).
-fn difference(x: Option<(f32, f32)>, y: Option<(f32, f32)>) -> [(f32, f32); 2] {
+pub fn difference(x: Option<(f32, f32)>, y: Option<(f32, f32)>) -> [(f32, f32); 2] {
     match (x, y) {
         (None, _) => [(0.0, 0.0); 2],
         (Some(x), None) => [x, (0.0, 0.0)],
@@ -382,13 +408,13 @@ fn difference(x: Option<(f32, f32)>, y: Option<(f32, f32)>) -> [(f32, f32); 2] {
 
 /// Conservative region a moving occluder can have touched during one frame step.
 pub struct MovedHull {
-    prev: Segment,
-    now: Segment,
-    hull: Vec<Vec2>,
-    bbox: Aabb,
-    circle: Circle,
+    pub prev: Segment,
+    pub now: Segment,
+    pub hull: Vec<Vec2>,
+    pub bbox: Aabb,
+    pub circle: Circle,
     /// Farthest either endpoint moved.
-    max_displacement: f32,
+    pub max_displacement: f32,
 }
 
 pub fn moved_hulls(prev: &[Segment], now: &[Segment]) -> Vec<MovedHull> {

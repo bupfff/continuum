@@ -169,6 +169,19 @@ impl Cone {
     }
 }
 
+/// Distance `t > 0` at which the ray `origin + t·dir` hits `s`, if it does.
+pub fn ray_distance(origin: Vec2, dir: Vec2, s: &Segment) -> Option<f32> {
+    let e = s.b - s.a;
+    let denom = dir.cross(e);
+    if denom.abs() < 1e-12 {
+        return None;
+    }
+    let w = s.a - origin;
+    let t = w.cross(e) / denom;
+    let u = w.cross(dir) / denom;
+    (t > 0.0 && (0.0..=1.0).contains(&u)).then_some(t)
+}
+
 /// Does the ray `origin + t·dir` hit `s` with `0 < t < max_t`?
 pub fn ray_hits(origin: Vec2, dir: Vec2, s: &Segment, max_t: f32) -> bool {
     let e = s.b - s.a;

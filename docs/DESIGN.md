@@ -118,7 +118,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 
 | Milestone | Content | Gate |
 |---|---|---|
-| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (preview: 1.1× faster); G5 magnitude deferral pays off for wide cones with continuous visibility (**passed on attempt 2: 34% of ε = 0 work**, `docs/results/flatland-gate5.md`); G6 (next) one-bounce GI with charges that propagate through surfaces |
+| M0 flatland (CPU, 2D) | Mask cones, ledger, worst case | G1 masks beat rays on error per cost (**passed**, `docs/results/flatland-gate1.md`); G2 ledger soundness: certified bound ≥ actual error, every pixel, every frame (**passed**, including forced-deferral stress runs); G3 ledger skips ≥ 80–90% of lighting work in typical animated scenes (**passed: 87.7%**, all from dependency regions, see `docs/results/flatland-gates2-3.md`); G4 everything-moving case costs no more than a conventional equivalent (preview: 1.1× faster); G5 magnitude deferral pays off for wide cones with continuous visibility (**passed on attempt 2: 34% of ε = 0 work**, `docs/results/flatland-gate5.md`); G6 one-bounce GI with charges that propagate through surfaces (**failed**: best implementable charges 66.9% vs ≤ 50%, zero violations; an oracle with exact charges reaches 27.4%, so the gap is charge tightness, `docs/results/flatland-gate6.md`) |
 | M1 3D CPU reference | 3D mask cones over a BVH, reference path tracer, scene import | G1 repeated in 3D with 8×8 bins; agreement with Cycles/Mitsuba |
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | Frame time at 1080p on M4 Air; image-diffed in CI |
 | M3 prefiltered hierarchy | Directional coverage per node, detail to roughness | Zoom and flythrough with no shimmer; flat cost |
@@ -149,9 +149,18 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 - **Charging cost vs recompute cost**: projected charges do 3× less recompute
   work than geometric bounds but cost more time in 2D, where a recompute is
   cheap. The 3D ratio decides which to use; measure in M1.
-- **Direction-dependent radiance**: charging max(gained, lost) relies on uniform
-  radiance across the cone; real GI needs gained + lost weighted by radiance
-  differences (up to 2× looser). Test in G6.
+- **Charges for indirect light are too loose** (gate 6): implementable charges
+  skip 73% of gathers at ε = 1%, while exact charges would skip 90%. Most
+  promising fix: cone G-buffers (per gather cone, the nearest static surface
+  and its depth per bin), which make black-mover and patch-radiance changes
+  exact incremental updates instead of bounds.
+- **Depth-correct mask gathers**: binned gathers with partial coverage depend on
+  processing order when several surfaces share a bin, which breaks charge
+  bounds. Flatland used an exact angular sweep; 3D needs a depth-correct
+  binned gather (per-bin depth layers, or a cone G-buffer).
+- **What ε is relative to**: per-pixel total brightness (perceptual) vs per-term
+  means. Gate 6 used 1% of indirect light, about 5× stricter than 1% of total.
+  Decide in the quality contract.
 - **Mask quantization**: 64 bins quantize penumbrae into 1/64 steps (faint
   banding in gate 1) and make visibility discontinuous, so any mover touching a
   cone costs at least one bin. That floor exceeded realistic ε, which is why the

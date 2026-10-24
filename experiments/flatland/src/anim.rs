@@ -71,14 +71,7 @@ impl Scenario {
             .map(|l| Target::Fixed(l.segment))
             .collect();
         if let Some(sky) = &self.sky {
-            targets.extend((0..sky.sectors).map(|k| {
-                let angle = |i: usize| i as f32 * TAU / sky.sectors as f32;
-                let dir = |a: f32| v2(a.cos(), a.sin()) * SKY_DISTANCE;
-                Target::Relative(Segment {
-                    a: dir(angle(k)),
-                    b: dir(angle(k + 1)),
-                })
-            }));
+            targets.extend(sky_targets(sky.sectors));
         }
         targets
     }
@@ -91,6 +84,20 @@ impl Scenario {
         }
         w
     }
+}
+
+/// The full circle of directions split into `sectors` equal wide cones.
+pub fn sky_targets(sectors: usize) -> Vec<Target> {
+    (0..sectors)
+        .map(|k| {
+            let angle = |i: usize| i as f32 * TAU / sectors as f32;
+            let dir = |a: f32| v2(a.cos(), a.sin()) * SKY_DISTANCE;
+            Target::Relative(Segment {
+                a: dir(angle(k)),
+                b: dir(angle(k + 1)),
+            })
+        })
+        .collect()
 }
 
 const LIGHT_B_ON: u32 = 60;
@@ -216,4 +223,33 @@ pub fn sky() -> Scenario {
         key_frames: [30, 90, 150],
         exposure: 0.12,
     }
+}
+
+/// The room movers with the walker raised to y = 0.33 and the door 0.003 off
+/// its hinge (about 3 cm at room scale), so no mover ever touches a static
+/// segment. The gather's tight charges assume movers pass in front of or behind
+/// surfaces, never through them; crossings are detected and charged
+/// conservatively, but this keeps the scene typical.
+fn bounce_movers(f: u32) -> Vec<Segment> {
+    let mut movers = room_movers(f);
+    // A small gap at the hinge, so the door never touches the wall it swings from.
+    let door = &mut movers[0];
+    door.a = door.a + (door.b - door.a).normalized() * 0.003;
+    let walker = &mut movers[1];
+    walker.a.y = 0.33;
+    walker.b.y = 0.33;
+    movers
+}
+
+/// One-bounce indirect light: static segments reflect (albedo 0.7, both sides),
+/// movers are black. Lights as in [`typical`]: B switches on at frame 60 and
+/// flickers from frame 150. Receivers gather indirect light through 8 sky-sector
+/// cones (see `sky_targets`); the lights here only light the surfaces.
+pub fn bounce() -> Scenario {
+    let mut s = typical();
+    s.name = "One-bounce indirect light";
+    s.slug = "bounce";
+    s.movers = Box::new(bounce_movers);
+    s.exposure = 2.0;
+    s
 }

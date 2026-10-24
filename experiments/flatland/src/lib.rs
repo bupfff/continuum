@@ -2,6 +2,7 @@
 //! `src/bin/`.
 
 pub mod anim;
+pub mod bounce;
 pub mod bounds;
 pub mod geom;
 pub mod img;
