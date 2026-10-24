@@ -53,7 +53,7 @@ struct Frame<'a> {
     meshes: &'a [Vec<Tri>],
     albedo: &'a [Vec3],
     radiance: f32,
-    hierarchy: bool,
+    hierarchy: Hierarchy,
 }
 
 #[repr(C)]
@@ -414,10 +414,10 @@ impl MaskConeKernel {
         receivers: &[(Vec3, Vec3)],
         light: RectLight,
         meshes: &[Vec<Tri>],
-        hierarchy: bool,
+        hierarchy: impl Into<Hierarchy>,
         runs: usize,
     ) -> (Vec<f32>, Duration) {
-        let (values, _, best) = self.run(receivers, light, meshes, runs, 0, hierarchy);
+        let (values, _, best) = self.run(receivers, light, meshes, runs, 0, hierarchy.into());
         (values, best)
     }
 
@@ -435,7 +435,7 @@ impl MaskConeKernel {
         meshes: &[Vec<Tri>],
         albedo: &[Vec3],
         radiance: f32,
-        hierarchy: bool,
+        hierarchy: impl Into<Hierarchy>,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
         let frame = Frame {
@@ -446,7 +446,7 @@ impl MaskConeKernel {
             meshes,
             albedo,
             radiance,
-            hierarchy,
+            hierarchy: hierarchy.into(),
         };
         self.render_frame(&self.render_pipeline, &frame, None, runs)
     }
@@ -475,7 +475,7 @@ impl MaskConeKernel {
             meshes,
             albedo,
             radiance,
-            hierarchy: true,
+            hierarchy: Hierarchy::Triangles,
         };
         self.render_frame(&self.cached_pipeline, &frame, Some(lightmap), runs)
     }
@@ -598,7 +598,7 @@ impl MaskConeKernel {
             edge_v: v4(frame.light.edge_v),
             counts: [frame.meshes.len() as u32, 0, frame.hierarchy as u32, 0],
         };
-        let (tris, ranges) = flatten(frame.meshes);
+        let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
         let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
         let storage = |label: &str, contents: &[u8]| {
@@ -616,8 +616,10 @@ impl MaskConeKernel {
                 0,
                 uniform_buffer(&self.device, "light", bytemuck::bytes_of(&uniform)),
             ),
-            (2, storage("tris", bytemuck::cast_slice(&tris))),
-            (3, storage("meshes", bytemuck::cast_slice(&ranges))),
+            (2, storage("tris", bytemuck::cast_slice(&flat.tris))),
+            (3, storage("meshes", bytemuck::cast_slice(&flat.ranges))),
+            (25, storage("triangle nodes", bytemuck::cast_slice(&flat.blas))),
+            (26, storage("triangle items", bytemuck::cast_slice(&flat.blas_items))),
             (5, storage("debug", &[0; 256])),
             (8, storage("albedo", bytemuck::cast_slice(&albedo4))),
             (9, storage("nodes", bytemuck::cast_slice(&nodes))),
@@ -661,7 +663,7 @@ impl MaskConeKernel {
         light: RectLight,
         meshes: &[Vec<Tri>],
     ) -> Vec<[f32; 64]> {
-        let (_, debug, _) = self.run(receivers, light, meshes, 1, 1, false);
+        let (_, debug, _) = self.run(receivers, light, meshes, 1, 1, Hierarchy::None);
         debug.chunks(64).map(|c| c.try_into().unwrap()).collect()
     }
 
@@ -674,7 +676,7 @@ impl MaskConeKernel {
         light: RectLight,
         meshes: &[Vec<Tri>],
     ) -> Vec<Vec<f32>> {
-        let (_, debug, _) = self.run(&[receiver], light, meshes, 1, 3, false);
+        let (_, debug, _) = self.run(&[receiver], light, meshes, 1, 3, Hierarchy::None);
         debug
             .as_chunks::<21>()
             .0
@@ -692,7 +694,7 @@ impl MaskConeKernel {
         light: RectLight,
         meshes: &[Vec<Tri>],
     ) -> Vec<[f32; 64]> {
-        let (_, debug, _) = self.run(receivers, light, meshes, 1, 2, false);
+        let (_, debug, _) = self.run(receivers, light, meshes, 1, 2, Hierarchy::None);
         debug.chunks(64).map(|c| c.try_into().unwrap()).collect()
     }
 
@@ -703,7 +705,7 @@ impl MaskConeKernel {
         meshes: &[Vec<Tri>],
         runs: usize,
         debug_mode: u32,
-        hierarchy: bool,
+        hierarchy: Hierarchy,
     ) -> (Vec<f32>, Vec<f32>, Duration) {
         let debug = debug_mode != 0;
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
@@ -720,7 +722,7 @@ impl MaskConeKernel {
                 normal: v4(n),
             })
             .collect();
-        let (tris, ranges) = flatten(meshes);
+        let flat = flatten(meshes);
         let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -741,12 +743,22 @@ impl MaskConeKernel {
         );
         let tris_buf = init(
             "tris",
-            bytemuck::cast_slice(&tris),
+            bytemuck::cast_slice(&flat.tris),
             wgpu::BufferUsages::STORAGE,
         );
         let meshes_buf = init(
             "meshes",
-            bytemuck::cast_slice(&ranges),
+            bytemuck::cast_slice(&flat.ranges),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let blas_buf = init(
+            "triangle nodes",
+            bytemuck::cast_slice(&flat.blas),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let blas_items_buf = init(
+            "triangle items",
+            bytemuck::cast_slice(&flat.blas_items),
             wgpu::BufferUsages::STORAGE,
         );
         let (nodes, items) = mesh_hierarchy(meshes);
@@ -816,6 +828,14 @@ impl MaskConeKernel {
                     binding: 10,
                     resource: items_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: blas_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 26,
+                    resource: blas_items_buf.as_entire_binding(),
+                },
             ],
         });
         let groups = receivers.len().div_ceil(64) as u32;
@@ -861,24 +881,56 @@ impl MaskConeKernel {
     }
 }
 
-/// Triangles as `vec4` vertices (three per triangle) and per-mesh `[first, count]`
-/// ranges. Bindings may not be empty, so empty inputs get unread padding.
-fn flatten(meshes: &[Vec<Tri>]) -> (Vec<[f32; 4]>, Vec<[u32; 2]>) {
-    let mut tris: Vec<[f32; 4]> = Vec::new();
-    let mut ranges: Vec<[u32; 2]> = Vec::new();
+/// Meshes flattened for the GPU. Bindings may not be empty, so empty inputs
+/// get unread padding.
+struct Flat {
+    /// Triangles as `vec4` vertices, three per triangle.
+    tris: Vec<[f32; 4]>,
+    /// Per mesh: `[first triangle, count, triangle hierarchy root (or NONE), 0]`.
+    ranges: Vec<[u32; 4]>,
+    /// Every mesh's triangle hierarchy: its root first, then its subtree.
+    blas: Vec<NodeGpu>,
+    /// Triangle indices referenced by `blas` leaves; mesh `m`'s are at the same
+    /// offsets as its triangles.
+    blas_items: Vec<u32>,
+}
+
+const NONE: u32 = u32::MAX;
+
+fn flatten(meshes: &[Vec<Tri>]) -> Flat {
+    let mut flat = Flat {
+        tris: Vec::new(),
+        ranges: Vec::new(),
+        blas: Vec::new(),
+        blas_items: Vec::new(),
+    };
     for mesh in meshes {
-        ranges.push([(tris.len() / 3) as u32, mesh.len() as u32]);
+        let first = (flat.tris.len() / 3) as u32;
+        let root = if mesh.is_empty() {
+            NONE
+        } else {
+            let root = flat.blas.len() as u32;
+            let (nodes, items) = triangle_hierarchy(mesh, root, first);
+            flat.blas.extend(nodes);
+            flat.blas_items.extend(items);
+            root
+        };
+        flat.ranges.push([first, mesh.len() as u32, root, 0]);
         for t in mesh {
-            tris.extend(t.iter().map(|v| [v.x, v.y, v.z, 0.0]));
+            flat.tris.extend(t.iter().map(|v| [v.x, v.y, v.z, 0.0]));
         }
     }
-    if tris.is_empty() {
-        tris.extend([[0.0; 4]; 3]);
+    if flat.tris.is_empty() {
+        flat.tris.extend([[0.0; 4]; 3]);
     }
-    if ranges.is_empty() {
-        ranges.push([0, 0]);
+    if flat.ranges.is_empty() {
+        flat.ranges.push([0, 0, NONE, 0]);
     }
-    (tris, ranges)
+    if flat.blas.is_empty() {
+        flat.blas.push(NodeGpu::zeroed());
+        flat.blas_items.push(0);
+    }
+    flat
 }
 
 #[repr(C)]
@@ -891,9 +943,57 @@ struct NodeGpu {
     info: [u32; 4],
 }
 
-/// A bounding volume hierarchy over meshes (median splits on the longest
-/// centroid axis, at most two meshes per leaf), flattened for the GPU: nodes and
-/// the mesh indices their leaves refer to.
+/// Median splits on the longest centroid axis over `items` (indices into
+/// `bounds`), writing `nodes[node]` and its subtree. Leaves hold at most `leaf`
+/// items, recorded as `[item_base + start, count]`; children as `node_base +
+/// index`. The tree's shape depends only on the item count.
+#[allow(clippy::too_many_arguments)]
+fn split(
+    nodes: &mut Vec<NodeGpu>,
+    node: usize,
+    items: &mut [u32],
+    start: usize,
+    bounds: &[(Vec3, Vec3)],
+    leaf: usize,
+    node_base: u32,
+    item_base: u32,
+) {
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    let (mut clo, mut chi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for &m in items.iter() {
+        let (a, b) = bounds[m as usize];
+        (lo, hi) = (lo.min(a), hi.max(b));
+        let c = (a + b) * 0.5;
+        (clo, chi) = (clo.min(c), chi.max(c));
+    }
+    nodes[node].lo = [lo.x, lo.y, lo.z, 0.0];
+    nodes[node].hi = [hi.x, hi.y, hi.z, 0.0];
+    if items.len() <= leaf {
+        nodes[node].info = [item_base + start as u32, items.len() as u32, 0, 0];
+        return;
+    }
+    let e = chi - clo;
+    let axis = if e.x >= e.y && e.x >= e.z {
+        0
+    } else if e.y >= e.z {
+        1
+    } else {
+        2
+    };
+    let mid = items.len() / 2;
+    let key = |m: &u32| bounds[*m as usize].0[axis] + bounds[*m as usize].1[axis];
+    items.select_nth_unstable_by(mid, |a, b| key(a).total_cmp(&key(b)));
+    let left = nodes.len();
+    nodes.push(NodeGpu::zeroed());
+    nodes.push(NodeGpu::zeroed());
+    nodes[node].info = [node_base + left as u32, 0, 0, 0];
+    let (l, r) = items.split_at_mut(mid);
+    split(nodes, left, l, start, bounds, leaf, node_base, item_base);
+    split(nodes, left + 1, r, start + mid, bounds, leaf, node_base, item_base);
+}
+
+/// A bounding volume hierarchy over meshes (at most two meshes per leaf),
+/// flattened for the GPU: nodes and the mesh indices their leaves refer to.
 fn mesh_hierarchy(meshes: &[Vec<Tri>]) -> (Vec<NodeGpu>, Vec<u32>) {
     mesh_hierarchy_of(meshes, |_| true)
 }
@@ -908,46 +1008,6 @@ fn mesh_hierarchy_of(
         .filter(|&m| keep(m as usize))
         .collect();
     let mut nodes = vec![NodeGpu::zeroed()];
-    fn split(
-        nodes: &mut Vec<NodeGpu>,
-        node: usize,
-        items: &mut [u32],
-        start: usize,
-        bounds: &[(Vec3, Vec3)],
-    ) {
-        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        let (mut clo, mut chi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for &m in items.iter() {
-            let (a, b) = bounds[m as usize];
-            (lo, hi) = (lo.min(a), hi.max(b));
-            let c = (a + b) * 0.5;
-            (clo, chi) = (clo.min(c), chi.max(c));
-        }
-        nodes[node].lo = [lo.x, lo.y, lo.z, 0.0];
-        nodes[node].hi = [hi.x, hi.y, hi.z, 0.0];
-        if items.len() <= 2 {
-            nodes[node].info = [start as u32, items.len() as u32, 0, 0];
-            return;
-        }
-        let e = chi - clo;
-        let axis = if e.x >= e.y && e.x >= e.z {
-            0
-        } else if e.y >= e.z {
-            1
-        } else {
-            2
-        };
-        let mid = items.len() / 2;
-        let key = |m: &u32| bounds[*m as usize].0[axis] + bounds[*m as usize].1[axis];
-        items.select_nth_unstable_by(mid, |a, b| key(a).total_cmp(&key(b)));
-        let left = nodes.len();
-        nodes.push(NodeGpu::zeroed());
-        nodes.push(NodeGpu::zeroed());
-        nodes[node].info = [left as u32, 0, 0, 0];
-        let (l, r) = items.split_at_mut(mid);
-        split(nodes, left, l, start, bounds);
-        split(nodes, left + 1, r, start + mid, bounds);
-    }
     if items.is_empty() {
         // A leaf holding mesh 0, which must then have no triangles: true when
         // there are no meshes (`flatten` pads an empty range). Callers never
@@ -955,9 +1015,42 @@ fn mesh_hierarchy_of(
         items.push(0);
         nodes[0].info = [0, 1, 0, 0];
     } else {
-        split(&mut nodes, 0, &mut items, 0, &bounds);
+        split(&mut nodes, 0, &mut items, 0, &bounds, 2, 0, 0);
     }
     (nodes, items)
+}
+
+/// One mesh's triangle hierarchy (at most [`LEAF_TRIANGLES`] per leaf): nodes
+/// numbered from `root`, and triangle indices numbered from `first`, stored at
+/// item positions from `first`.
+fn triangle_hierarchy(mesh: &[Tri], root: u32, first: u32) -> (Vec<NodeGpu>, Vec<u32>) {
+    let bounds: Vec<(Vec3, Vec3)> = mesh.iter().map(|t| padded(mesh_bounds(&[*t]))).collect();
+    let mut items: Vec<u32> = (0..mesh.len() as u32).collect();
+    let mut nodes = vec![NodeGpu::zeroed()];
+    split(&mut nodes, 0, &mut items, 0, &bounds, LEAF_TRIANGLES, root, first);
+    (nodes, items.iter().map(|&t| first + t).collect())
+}
+
+/// Triangles per leaf of a mesh's triangle hierarchy. A box test costs about
+/// three triangle tests, so small leaves only pay off for large meshes.
+const LEAF_TRIANGLES: usize = 8;
+
+/// How far rays and cones descend before testing triangles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hierarchy {
+    /// Test every triangle of every mesh.
+    None = 0,
+    /// Cull meshes through the mesh hierarchy, then test each touched mesh's
+    /// triangles one by one.
+    Meshes = 1,
+    /// Also cull triangles through each mesh's triangle hierarchy.
+    Triangles = 2,
+}
+
+impl From<bool> for Hierarchy {
+    fn from(on: bool) -> Self {
+        if on { Hierarchy::Triangles } else { Hierarchy::None }
+    }
 }
 
 fn uniform_buffer(device: &wgpu::Device, label: &str, contents: &[u8]) -> wgpu::Buffer {
@@ -1036,7 +1129,7 @@ pub const PROBE_RESOLUTION: u32 = 16;
 /// What [`LiveRenderer`] keeps to move dynamic meshes.
 struct Motion {
     meshes: Vec<Vec<Tri>>,
-    ranges: Vec<[u32; 2]>,
+    ranges: Vec<[u32; 4]>,
     bounds: Vec<(Vec3, Vec3)>,
     dynamic: Vec<bool>,
     blocks: u32,
@@ -1128,7 +1221,7 @@ impl LiveRenderer {
             meshes,
             albedo,
             radiance,
-            hierarchy: true,
+            hierarchy: Hierarchy::Triangles,
         };
         let scene = kernel.scene_buffers(&frame, Some(lightmap));
         let camera_buf = uniform_buffer(
@@ -1258,6 +1351,8 @@ impl LiveRenderer {
                 (3, s(3)),
                 (9, &nodes),
                 (10, &items),
+                (25, s(25)),
+                (26, s(26)),
                 (11, s(11)),
                 (18, &points),
                 (19, &gbuffer),
@@ -1310,6 +1405,8 @@ impl LiveRenderer {
                 (8, s(8)),
                 (9, s(9)),
                 (10, s(10)),
+                (25, s(25)),
+                (26, s(26)),
                 (11, s(11)),
                 (12, s(12)),
                 (13, s(13)),
@@ -1353,7 +1450,7 @@ impl LiveRenderer {
         lightmap: &Lightmap,
     ) -> Motion {
         let device = &kernel.device;
-        let (_, ranges) = flatten(meshes);
+        let ranges = flatten(meshes).ranges;
         let dynamic = meshes
             .iter()
             .zip(&ranges)
@@ -1423,6 +1520,8 @@ impl LiveRenderer {
                 (5, s(5)),
                 (9, s(9)),
                 (10, s(10)),
+                (25, s(25)),
+                (26, s(26)),
                 (17, &dirty),
             ],
         );
@@ -1531,6 +1630,21 @@ impl LiveRenderer {
                 m.ranges[mesh][0] as u64 * 48,
                 bytemuck::cast_slice(&vertices),
             );
+            // Same triangle count, so the same hierarchy shape and offsets.
+            let [first, _, root, _] = m.ranges[mesh];
+            if root != NONE {
+                let (nodes, items) = triangle_hierarchy(tris, root, first);
+                self.queue.write_buffer(
+                    binding(&self.scene, 25),
+                    root as u64 * std::mem::size_of::<NodeGpu>() as u64,
+                    bytemuck::cast_slice(&nodes),
+                );
+                self.queue.write_buffer(
+                    binding(&self.scene, 26),
+                    first as u64 * 4,
+                    bytemuck::cast_slice(&items),
+                );
+            }
             m.meshes[mesh] = tris.clone();
             m.bounds[mesh] = new;
         }

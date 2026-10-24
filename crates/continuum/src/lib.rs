@@ -11,6 +11,7 @@ pub mod cone3;
 pub mod coverage;
 pub mod ledger;
 pub mod mask;
+pub mod mesh;
 
 pub use coverage::CoverageMask;
 pub use glam;
