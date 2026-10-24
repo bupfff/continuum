@@ -153,6 +153,41 @@ Against the goal in §1, honestly:
   - UE5 leads on everything else: scene scale, materials, lights, GI bounces,
     anti-aliasing and upscaling, platforms and tooling.
 
+## 3.7 Road to v1 (2026-10-24)
+
+A **batch** below is the size of one long working session in this project's
+history: a few gates with their implementation and write-ups. These are
+estimates, and gates fail often, so treat them as ranges.
+
+**v0.1, experimental** (a library people can try on their own scenes): about
+11–15 batches.
+
+| # | Work | Why | Batches |
+|---|---|---|---|
+| 1 | View-dependent lighting cache: texels only on visible surfaces, coarser with distance, a per-frame bake budget, kept across frames, exact incremental updates for movers, instanced objects | Real-time at scale. M4 gate 7 shows per-pixel cones are the bottleneck; with lighting cached, the field from 150 m up costs about 19 ms at 720p | 2–3 |
+| 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes currently have black shadows | 2 |
+| 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes | 2–3 |
+| 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel | 2 |
+| 5 | Library API, Bevy plugin, examples, documentation | Something people can use | 2 |
+| 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement, untested so far | 1–2 |
+
+**v1.0, competitive in its niche** (a render library, not a full engine):
+another 20 or more batches.
+
+- Specular and glossy reflections (roughness cones) and PBR materials with
+  normal maps.
+- Multi-bounce GI.
+- Moving lights through the error ledger, the paradigm's invention (§3.1),
+  which is still unproven in 3D.
+- World streaming.
+- Deforming geometry (M8).
+- Performance tuning per GPU vendor.
+
+**Not planned to match UE5:** UE5 is a whole engine (editor, animation,
+physics, audio, networking, tooling). Continuum aims to be a render library
+whose lighting is exact, stable and incremental, used inside other engines
+(Bevy first).
+
 ## 4. Design rules
 
 1. **Worst case parity, typical case win.** The everything-moving fallback must
