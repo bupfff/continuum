@@ -9,3 +9,4 @@ publish = false
 continuum = { path = "../../crates/continuum" }
 flatland = { path = "../flatland" }
 continuum-gpu = { path = "../../crates/continuum-gpu" }
+pollster = "1.0.1"
