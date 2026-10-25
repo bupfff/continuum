@@ -260,13 +260,13 @@ pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[3, 6, 31, 32, 52];
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
 pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 37, 38, 41, 42, 43, 52,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 38, 41, 42, 46, 47, 49, 51,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51,
 ];
 pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
-    &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 49, 50, 51];
+    &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 54, 49, 50, 51];
 pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52,

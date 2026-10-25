@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/viewer", "crates/continuum", "crates/continuum-gpu", "experiments/flatland", "experiments/room3d"]
+members = ["apps/viewer", "crates/continuum", "crates/continuum-gltf", "crates/continuum-gpu", "experiments/flatland", "experiments/room3d"]
 
 [workspace.package]
 version = "0.1.0"

@@ -27,11 +27,15 @@ pub struct Surface {
     /// World-space size of each chart along u and v, which sets texel counts.
     pub charts: Vec<Vec2>,
     /// Each chart's grid of cells: chart coordinates split into `x × y` equal
-    /// cells, each holding at most two triangles split along the cell's
-    /// diagonal from `(0, 0)` to `(1, 1)` (or one, for a lone triangle). Lets a
-    /// renderer find the triangle under any chart coordinate directly.
+    /// cells, for finding the triangle under a chart coordinate. A renderer
+    /// lists in each cell the triangles whose chart coordinates' bounds meet
+    /// it: two for a parametric quad, a few for automatic charts.
     pub chart_grid: Vec<[u32; 2]>,
 }
+
+/// Charts of [`Surface::from_mesh`] hold triangles whose normals lie within
+/// this angle of their first triangle's.
+pub const CHART_ANGLE_DEGREES: f32 = 45.0;
 
 fn flat_normal(t: &Tri) -> Vec3 {
     (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero()
@@ -81,6 +85,117 @@ impl Surface {
                 i += 1;
             }
         }
+        s
+    }
+
+    /// A general triangle mesh (imported assets, M6) with automatic charts.
+    ///
+    /// - Charts grow from a seed triangle across shared edges, taking
+    ///   triangles whose normals lie within [`CHART_ANGLE_DEGREES`] of the
+    ///   seed's.
+    /// - Each chart is projected onto the plane facing the seed's normal, so
+    ///   no triangle flips, and chart coordinates stretch distances by at
+    ///   most 1 / cos 45°.
+    /// - Shading normals are `normals` where given (per triangle corner), or
+    ///   smooth normals merged by position.
+    ///
+    /// Degenerate triangles are dropped.
+    pub fn from_mesh(triangles: Vec<Tri>, normals: Option<Vec<[Vec3; 3]>>) -> Surface {
+        let keep: Vec<usize> = (0..triangles.len())
+            .filter(|&k| {
+                let t = triangles[k];
+                let scale = (t[1] - t[0]).length().max((t[2] - t[0]).length());
+                (t[1] - t[0]).cross(t[2] - t[0]).length() > 1e-6 * scale * scale
+            })
+            .collect();
+        let tris: Vec<Tri> = keep.iter().map(|&k| triangles[k]).collect();
+        let face: Vec<Vec3> = tris.iter().map(flat_normal).collect();
+        // Shared edges, by quantized position.
+        let key = |p: Vec3| {
+            let q = (p * 1e5).round();
+            (q.x as i64, q.y as i64, q.z as i64)
+        };
+        let mut edges: HashMap<((i64, i64, i64), (i64, i64, i64)), Vec<u32>> = HashMap::new();
+        for (k, t) in tris.iter().enumerate() {
+            for e in 0..3 {
+                let (a, b) = (key(t[e]), key(t[(e + 1) % 3]));
+                let edge = if a < b { (a, b) } else { (b, a) };
+                edges.entry(edge).or_default().push(k as u32);
+            }
+        }
+        let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); tris.len()];
+        for list in edges.values() {
+            for &a in list {
+                for &b in list {
+                    if a != b {
+                        neighbors[a as usize].push(b);
+                    }
+                }
+            }
+        }
+        let limit = CHART_ANGLE_DEGREES.to_radians().cos();
+        let mut chart_of = vec![u32::MAX; tris.len()];
+        let mut members: Vec<Vec<u32>> = Vec::new();
+        let mut axes: Vec<Vec3> = Vec::new();
+        for seed in 0..tris.len() {
+            if chart_of[seed] != u32::MAX {
+                continue;
+            }
+            let c = members.len() as u32;
+            let axis = face[seed];
+            chart_of[seed] = c;
+            let mut list = vec![seed as u32];
+            let mut next = 0;
+            while next < list.len() {
+                let t = list[next] as usize;
+                next += 1;
+                for &u in &neighbors[t] {
+                    let u = u as usize;
+                    if chart_of[u] == u32::MAX && face[u].dot(axis) >= limit {
+                        chart_of[u] = c;
+                        list.push(u as u32);
+                    }
+                }
+            }
+            members.push(list);
+            axes.push(axis);
+        }
+        let mut s = Surface {
+            triangles: tris.clone(),
+            chart: chart_of.clone(),
+            uv: vec![[Vec2::ZERO; 3]; tris.len()],
+            ..Default::default()
+        };
+        for (list, axis) in members.iter().zip(&axes) {
+            // A basis of the plane facing the axis, right-handed with it, so
+            // front faces keep their winding in chart coordinates.
+            let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+            let t = axis.cross(helper).normalize();
+            let b = axis.cross(t);
+            let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+            for &k in list {
+                for p in tris[k as usize] {
+                    let q = Vec2::new(p.dot(t), p.dot(b));
+                    lo = lo.min(q);
+                    hi = hi.max(q);
+                }
+            }
+            let size = (hi - lo).max(Vec2::splat(1e-6));
+            for &k in list {
+                s.uv[k as usize] = tris[k as usize].map(|p| (Vec2::new(p.dot(t), p.dot(b)) - lo) / size);
+            }
+            s.charts.push(size);
+            // About two triangles per cell.
+            let cells = (list.len() as f32 / 2.0).max(1.0);
+            let aspect = size.x / size.y;
+            let gx = (cells * aspect).sqrt().round().clamp(1.0, 512.0) as u32;
+            let gy = (cells / aspect).sqrt().round().clamp(1.0, 512.0) as u32;
+            s.chart_grid.push([gx, gy]);
+        }
+        s.normals = match normals {
+            Some(n) => keep.iter().map(|&k| n[k].map(|v| v.normalize_or_zero())).collect(),
+            None => smooth_normals(&s.triangles),
+        };
         s
     }
 
@@ -217,6 +332,34 @@ mod tests {
             }
             assert!(s.normals[k].iter().all(|n| (n.length() - 1.0).abs() < 1e-6));
         }
+    }
+
+    #[test]
+    fn automatic_charts_cover_a_sphere_without_flips() {
+        use std::f32::consts::{PI, TAU};
+        let sphere = Surface::parametric(48, 24, |u, v| {
+            let (theta, phi) = (TAU * u, PI * v);
+            Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), -phi.cos())
+        });
+        let s = Surface::from_mesh(sphere.triangles.clone(), None);
+        assert_eq!(s.triangles.len(), sphere.triangles.len());
+        let limit = CHART_ANGLE_DEGREES.to_radians().cos();
+        // Charts on a sphere: a handful, each within the angle of its seed.
+        assert!(s.charts.len() > 4 && s.charts.len() < 64, "{} charts", s.charts.len());
+        for (k, t) in s.triangles.iter().enumerate() {
+            let [a, b, c] = s.uv[k];
+            // Chart coordinates in [0, 1]², counter-clockwise like the
+            // triangle seen from outside (no flips).
+            for q in [a, b, c] {
+                assert!(q.min_element() >= -1e-5 && q.max_element() <= 1.0 + 1e-5);
+            }
+            assert!((b - a).perp_dot(c - a) > 0.0, "triangle {k} flipped");
+            // Within the chart angle of the chart's first triangle.
+            let first = s.chart.iter().position(|&x| x == s.chart[k]).unwrap();
+            assert!(flat_normal(t).dot(flat_normal(&s.triangles[first])) >= limit - 1e-5);
+        }
+        // Every chart has a cell grid.
+        assert_eq!(s.chart_grid.len(), s.charts.len());
     }
 
     #[test]

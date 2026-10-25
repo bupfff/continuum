@@ -44,7 +44,6 @@ const EVICT_AGE: u32 = 64;
 /// The adaptive bake budget's floor and starting point (cones per frame).
 const MIN_BUDGET: f32 = 1_000.0;
 const START_BUDGET: f32 = 8_000.0;
-const NONE: u32 = u32::MAX;
 /// Longest probe sequence the shader follows.
 const MAX_PROBE: usize = 64;
 /// Entries in the per-frame set of requested pages (a power of two, at least
@@ -93,9 +92,11 @@ pub struct CacheOptions {
     pub sky_sample_cost: u32,
     /// With a sky: the spacing (in each geometry's own units) of the grid on
     /// which its own sky occlusion is baked once, for all its instances (M5
-    /// gate 5). Sky texels then walk only the other objects. 0: off. A
-    /// geometry whose grid would exceed 1,024 texels along a chart walks
-    /// itself.
+    /// gate 5). Sky texels then walk only the other objects. 0: off. Only
+    /// geometries with several instances get masks; a geometry's spacing
+    /// grows so it holds at most 65,536 texels, and all of them so a scene
+    /// holds at most 2^20 (384 MB). A geometry whose grid would exceed 1,024
+    /// texels along a chart walks itself.
     pub self_spacing: f32,
 }
 
@@ -188,7 +189,9 @@ struct VcParams {
 /// scene (geometries in order).
 struct ChartTables {
     charts: Vec<VChartGpu>,
+    /// Per cell: first entry in `cell_tris`, and how many.
     cells: Vec<[u32; 2]>,
+    cell_tris: Vec<u32>,
     tri_chart: Vec<u32>,
     tri_uv: Vec<[f32; 2]>,
     /// First global chart of each geometry.
@@ -199,6 +202,7 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
     let mut t = ChartTables {
         charts: Vec::new(),
         cells: Vec::new(),
+        cell_tris: Vec::new(),
         tri_chart: Vec::new(),
         tri_uv: Vec::new(),
         first_chart: Vec::new(),
@@ -212,6 +216,7 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
         );
         let first_chart = t.charts.len() as u32;
         t.first_chart.push(first_chart);
+        let first_cell = t.cells.len();
         for (size, grid) in g.charts.iter().zip(&g.chart_grid) {
             t.charts.push(VChartGpu {
                 size: size.to_array(),
@@ -220,27 +225,41 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
                 pad: 0,
             });
             t.cells
-                .extend(std::iter::repeat_n([NONE; 2], (grid[0] * grid[1]) as usize));
+                .extend(std::iter::repeat_n([0, 0], (grid[0] * grid[1]) as usize));
         }
+        // Each triangle goes in every cell its chart coordinates' bounds
+        // meet, shrunk by a thousandth of a cell so a parametric quad's two
+        // triangles stay in their own cell.
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); t.cells.len() - first_cell];
         for (k, (uv, &chart)) in g.uv.iter().zip(&g.chart).enumerate() {
             let c = &t.charts[(first_chart + chart) as usize];
-            let center = (uv[0] + uv[1] + uv[2]) / 3.0;
-            let cx = ((center.x * c.grid[0] as f32) as u32).min(c.grid[0] - 1);
-            let cy = ((center.y * c.grid[1] as f32) as u32).min(c.grid[1] - 1);
-            let cell = &mut t.cells[(c.first_cell + cy * c.grid[0] + cx) as usize];
-            let free = cell
-                .iter()
-                .position(|&x| x == NONE)
-                .expect("more than two triangles in a chart cell");
-            cell[free] = first_tri + k as u32;
+            let grid = Vec2::new(c.grid[0] as f32, c.grid[1] as f32);
+            let lo = (uv[0].min(uv[1]).min(uv[2]) * grid + Vec2::splat(1e-3)).floor();
+            let hi = (uv[0].max(uv[1]).max(uv[2]) * grid - Vec2::splat(1e-3)).floor();
+            let clamp = |v: f32, n: u32| (v.max(0.0) as u32).min(n - 1);
+            let (x0, x1) = (clamp(lo.x, c.grid[0]), clamp(hi.x.max(lo.x), c.grid[0]));
+            let (y0, y1) = (clamp(lo.y, c.grid[1]), clamp(hi.y.max(lo.y), c.grid[1]));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let cell = c.first_cell as usize + (y * c.grid[0] + x) as usize - first_cell;
+                    lists[cell].push(first_tri + k as u32);
+                }
+            }
             t.tri_chart.push(first_chart + chart);
             t.tri_uv.extend(uv.iter().map(|v| v.to_array()));
+        }
+        for (cell, list) in lists.into_iter().enumerate() {
+            t.cells[first_cell + cell] = [t.cell_tris.len() as u32, list.len() as u32];
+            t.cell_tris.extend(list);
         }
         first_tri += g.triangles.len() as u32;
     }
     assert!(t.charts.len() < 1 << 16, "too many charts for page keys");
     if t.cells.is_empty() {
-        t.cells.push([NONE; 2]);
+        t.cells.push([0, 0]);
+    }
+    if t.cell_tris.is_empty() {
+        t.cell_tris.push(0);
     }
     if t.tri_chart.is_empty() {
         t.tri_chart.push(0);
@@ -258,6 +277,10 @@ struct SelfTables {
     count: u32,
 }
 
+/// The most own-mask texels per geometry, and in a scene (384 bytes each).
+const SELF_TEXELS_PER_GEOMETRY: u32 = 1 << 16;
+const SELF_TEXELS: u32 = 1 << 20;
+
 /// The most self texels along a chart; larger charts walk themselves.
 const SELF_GRID_MAX: u32 = 1024;
 
@@ -268,16 +291,54 @@ fn self_tables(scene: &InstancedScene, tables: &ChartTables, spacing: f32) -> Se
         count: 0,
     };
     if spacing > 0.0 {
-        for (g, &first) in tables.first_chart.iter().enumerate() {
-            let Some(m) = scene.instances.iter().position(|i| i.geometry == g) else {
-                continue;
-            };
+        // Masks pay where a geometry has several instances (M6): a unique
+        // object's texels walk it more cheaply than its whole surface is
+        // baked. Each geometry's spacing grows so it holds at most
+        // SELF_TEXELS_PER_GEOMETRY texels, and all spacings together so the
+        // scene holds at most SELF_TEXELS.
+        let mut instances = vec![0usize; tables.first_chart.len()];
+        let mut first_instance = vec![usize::MAX; tables.first_chart.len()];
+        for (k, i) in scene.instances.iter().enumerate() {
+            instances[i.geometry] += 1;
+            first_instance[i.geometry] = first_instance[i.geometry].min(k);
+        }
+        let charts_of = |g: usize| {
+            let first = tables.first_chart[g];
             let end = tables
                 .first_chart
                 .get(g + 1)
                 .copied()
                 .unwrap_or(tables.charts.len() as u32);
-            let grids: Vec<[u32; 2]> = (first..end)
+            first..end
+        };
+        let area = |g: usize| -> f32 {
+            charts_of(g)
+                .map(|c| {
+                    let size = tables.charts[c as usize].size;
+                    size[0] * size[1]
+                })
+                .sum()
+        };
+        let candidates: Vec<usize> = (0..tables.first_chart.len())
+            .filter(|&g| instances[g] >= 2)
+            .collect();
+        let mut spacings: Vec<f32> = candidates
+            .iter()
+            .map(|&g| spacing.max((area(g) / SELF_TEXELS_PER_GEOMETRY as f32).sqrt()))
+            .collect();
+        let total: f32 = candidates
+            .iter()
+            .zip(&spacings)
+            .map(|(&g, s)| area(g) / (s * s))
+            .sum();
+        if total > SELF_TEXELS as f32 {
+            let grow = (total / SELF_TEXELS as f32).sqrt();
+            for s in &mut spacings {
+                *s *= grow;
+            }
+        }
+        for (&g, &spacing) in candidates.iter().zip(&spacings) {
+            let grids: Vec<[u32; 2]> = charts_of(g)
                 .map(|c| {
                     let size = Vec2::from_array(tables.charts[c as usize].size);
                     let n = (size / spacing).ceil();
@@ -290,7 +351,8 @@ fn self_tables(scene: &InstancedScene, tables: &ChartTables, spacing: f32) -> Se
             {
                 continue;
             }
-            for (c, n) in (first..end).zip(grids) {
+            let m = first_instance[g];
+            for (c, n) in charts_of(g).zip(grids) {
                 own.charts[c as usize] = [own.texels.len() as u32, n[0], n[1], 1];
                 for y in 0..n[1] {
                     for x in 0..n[0] {
@@ -672,6 +734,14 @@ impl VirtualCache {
             (
                 34,
                 storage("chart cells", bytemuck::cast_slice(&tables.cells), copy_dst),
+            ),
+            (
+                54,
+                storage(
+                    "cell triangles",
+                    bytemuck::cast_slice(&tables.cell_tris),
+                    copy_dst,
+                ),
             ),
             (
                 35,
@@ -1351,8 +1421,9 @@ mod tests {
     fn every_triangle_of_a_parametric_chart_lands_in_its_cell() {
         let s = Surface::parametric(6, 4, |u, v| Vec3::new(u, v, (u * v).sin()));
         let t = chart_tables(std::slice::from_ref(&s));
-        let filled: usize = t.cells.iter().flatten().filter(|&&x| x != NONE).count();
+        let filled: usize = t.cells.iter().map(|c| c[1] as usize).sum();
         assert_eq!(filled, s.triangles.len());
+        assert!(t.cells.iter().all(|c| c[1] <= 2));
         assert_eq!(t.cells.len(), 24);
     }
 

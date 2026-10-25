@@ -2003,8 +2003,10 @@ const PAGE_TEXELS: u32 = 81u;
 const EMPTY_KEY: u32 = 0xffffffffu;
 
 @group(0) @binding(33) var<storage, read> vcharts: array<VChart>;
-// Per chart cell: up to two triangles (NONE if absent).
+// Per chart cell: its first entry in `cell_tris`, and how many: the triangles
+// whose chart coordinates' bounds meet the cell.
 @group(0) @binding(34) var<storage, read> cells: array<vec2<u32>>;
+@group(0) @binding(54) var<storage, read> cell_tris: array<u32>;
 // Chart of each geometry triangle.
 @group(0) @binding(35) var<storage, read> tri_vchart: array<u32>;
 // Open addressing with linear probing: three key words, then the slot. x is
@@ -2172,13 +2174,12 @@ fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
     let ch = vcharts[c];
     let uv = (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n);
     let cell = min(vec2<u32>(uv * vec2<f32>(ch.grid)), ch.grid - vec2<u32>(1u));
-    let pair = cells[ch.first_cell + cell.y * ch.grid.x + cell.x];
+    let list = cells[ch.first_cell + cell.y * ch.grid.x + cell.x];
     var best_t = NONE;
     var best_b = vec3<f32>(0.0);
     var best_score = -3.4e38;
-    for (var q = 0u; q < 2u; q++) {
-        let t = select(pair.x, pair.y, q == 1u);
-        if (t == NONE) { continue; }
+    for (var q = list.x; q < list.x + list.y; q++) {
+        let t = cell_tris[q];
         let b = uv_barycentric(t, uv);
         let score = min(b.x, min(b.y, b.z));
         if (score > best_score) {

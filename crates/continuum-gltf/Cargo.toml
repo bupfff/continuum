@@ -1,0 +1,10 @@
+[package]
+name = "continuum-gltf"
+description = "glTF import for Continuum: meshes, instances and materials as an instanced scene."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+continuum = { path = "../continuum" }
+continuum-gpu = { path = "../continuum-gpu" }
+gltf = { version = "1.4.1", features = ["KHR_lights_punctual"] }

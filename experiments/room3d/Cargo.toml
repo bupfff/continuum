@@ -9,4 +9,5 @@ publish = false
 continuum = { path = "../../crates/continuum" }
 flatland = { path = "../flatland" }
 continuum-gpu = { path = "../../crates/continuum-gpu" }
+continuum-gltf = { path = "../../crates/continuum-gltf" }
 pollster = "1.0.1"
