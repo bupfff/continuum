@@ -52,7 +52,24 @@ for g, path in enumerate(job["geometries"]):
     attr = nodes.new("ShaderNodeAttribute")
     attr.attribute_type = "INSTANCER"
     attr.attribute_name = "albedo"
-    mat.node_tree.links.new(attr.outputs["Color"], bsdf.inputs["Color"])
+    texture = (job.get("textures") or [None] * len(job["geometries"]))[g]
+    if texture:
+        # Base color: the image (sRGB, linear filtering, repeating) through
+        # the OBJ's texture coordinates, times the instance's albedo.
+        image = nodes.new("ShaderNodeTexImage")
+        image.image = bpy.data.images.load(texture)
+        image.image.colorspace_settings.name = "sRGB"
+        image.interpolation = "Linear"
+        image.extension = "REPEAT"
+        multiply = nodes.new("ShaderNodeMix")
+        multiply.data_type = "RGBA"
+        multiply.blend_type = "MULTIPLY"
+        multiply.inputs["Factor"].default_value = 1.0
+        mat.node_tree.links.new(image.outputs["Color"], multiply.inputs["A"])
+        mat.node_tree.links.new(attr.outputs["Color"], multiply.inputs["B"])
+        mat.node_tree.links.new(multiply.outputs["Result"], bsdf.inputs["Color"])
+    else:
+        mat.node_tree.links.new(attr.outputs["Color"], bsdf.inputs["Color"])
     mat.node_tree.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     source.data.materials.clear()
     source.data.materials.append(mat)

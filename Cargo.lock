@@ -305,6 +305,7 @@ dependencies = [
  "continuum",
  "continuum-gpu",
  "gltf",
+ "png 0.17.16",
 ]
 
 [[package]]
@@ -1626,6 +1627,7 @@ dependencies = [
  "continuum-gltf",
  "continuum-gpu",
  "flatland",
+ "png 0.17.16",
  "pollster",
 ]
 

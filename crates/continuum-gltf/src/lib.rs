@@ -81,6 +81,15 @@ struct Primitive {
     /// Its base color texture's index in the scene.
     texture: Option<u32>,
     albedo: Vec3,
+    /// The accessors it reads (positions, normals, texture coordinates,
+    /// indices) and its texture: primitives alike share a geometry.
+    key: (
+        usize,
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+        Option<u32>,
+    ),
     /// Its geometry's index, once built.
     geometry: usize,
 }
@@ -132,6 +141,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 continue;
             }
             let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+            let accessor = |s: gltf::Semantic| primitive.get(&s).map(|a| a.index());
             let Some(positions) = reader.read_positions() else {
                 stats.skipped_primitives += 1;
                 continue;
@@ -179,12 +189,20 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     corner_tex.push(k.map(|i| tc[i]));
                 }
             }
+            let tex_set = pbr.base_color_texture().map_or(0, |i| i.tex_coord());
             list.push(Primitive {
                 triangles,
                 normals: normals.is_some().then_some(corner_normals),
                 tex: texcoords.is_some().then_some(corner_tex),
                 texture,
                 albedo,
+                key: (
+                    accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
+                    accessor(gltf::Semantic::Normals),
+                    texture.and(accessor(gltf::Semantic::TexCoords(tex_set))),
+                    primitive.indices().map(|a| a.index()),
+                    texture,
+                ),
                 geometry: usize::MAX,
             });
         }
@@ -199,12 +217,27 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         textures,
         ..Default::default()
     };
+    let mut geometry_of: std::collections::HashMap<
+        (
+            usize,
+            Option<usize>,
+            Option<usize>,
+            Option<usize>,
+            Option<u32>,
+        ),
+        usize,
+    > = std::collections::HashMap::new();
     for list in &mut meshes {
         for p in list.iter_mut() {
             if p.triangles.is_empty() {
                 continue;
             }
+            if let Some(&g) = geometry_of.get(&p.key) {
+                p.geometry = g;
+                continue;
+            }
             p.geometry = scene.geometries.len();
+            geometry_of.insert(p.key, p.geometry);
             scene.geometries.push(Surface::from_mesh(
                 p.triangles.clone(),
                 p.normals.clone(),
@@ -351,4 +384,181 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
         position,
         albedo: p.albedo,
     });
+}
+
+/// Writes an instanced scene as binary glTF (`.glb`), the inverse of [`load`]
+/// (for tests and for comparison in other renderers).
+///
+/// - Each geometry's triangles are written once, unindexed, with normals and
+///   texture coordinates where it has them.
+/// - Instances sharing a geometry and an albedo share a mesh; each instance
+///   is a node with its matrix.
+/// - Textures are embedded as PNG.
+/// - Z-up becomes Y-up: (x, y, z) becomes (x, z, −y).
+pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
+    use std::collections::HashMap;
+    use std::fmt::Write as _;
+
+    let mut bin: Vec<u8> = Vec::new();
+    let mut views: Vec<String> = Vec::new();
+    let mut accessors: Vec<String> = Vec::new();
+    // Appends bytes as a buffer view (aligned to four), returning its index.
+    let mut view = |bin: &mut Vec<u8>, bytes: &[u8], target: Option<u32>| {
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let offset = bin.len();
+        bin.extend_from_slice(bytes);
+        let target = target.map_or(String::new(), |t| format!(r#","target":{t}"#));
+        views.push(format!(
+            r#"{{"buffer":0,"byteOffset":{offset},"byteLength":{}{target}}}"#,
+            bytes.len()
+        ));
+        views.len() - 1
+    };
+    let floats =
+        |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let y_up = |v: Vec3| [v.x, v.z, -v.y];
+    // Per geometry: accessors for positions, normals and texture coordinates.
+    let mut attributes: Vec<String> = Vec::new();
+    for g in &scene.geometries {
+        let positions: Vec<f32> = g
+            .triangles
+            .iter()
+            .flatten()
+            .flat_map(|&p| y_up(p))
+            .collect();
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in positions.chunks_exact(3) {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let count = 3 * g.triangles.len();
+        let v = view(&mut bin, &floats(&positions), Some(34962));
+        accessors.push(format!(
+            r#"{{"bufferView":{v},"componentType":5126,"count":{count},"type":"VEC3","min":[{:?},{:?},{:?}],"max":[{:?},{:?},{:?}]}}"#,
+            lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]
+        ));
+        let mut attr = format!(r#""POSITION":{}"#, accessors.len() - 1);
+        let normals: Vec<f32> = g.normals.iter().flatten().flat_map(|&n| y_up(n)).collect();
+        let v = view(&mut bin, &floats(&normals), Some(34962));
+        accessors.push(format!(
+            r#"{{"bufferView":{v},"componentType":5126,"count":{count},"type":"VEC3"}}"#
+        ));
+        write!(attr, r#","NORMAL":{}"#, accessors.len() - 1).unwrap();
+        if g.tex.len() == g.triangles.len() {
+            let tex: Vec<f32> = g.tex.iter().flatten().flat_map(|t| [t.x, t.y]).collect();
+            let v = view(&mut bin, &floats(&tex), Some(34962));
+            accessors.push(format!(
+                r#"{{"bufferView":{v},"componentType":5126,"count":{count},"type":"VEC2"}}"#
+            ));
+            write!(attr, r#","TEXCOORD_0":{}"#, accessors.len() - 1).unwrap();
+        }
+        attributes.push(attr);
+    }
+    // Textures as PNG.
+    let mut images: Vec<String> = Vec::new();
+    for t in &scene.textures {
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, t.width, t.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+            writer
+                .write_image_data(&t.rgba)
+                .map_err(std::io::Error::other)?;
+        }
+        let v = view(&mut bin, &png_bytes, None);
+        images.push(format!(r#"{{"bufferView":{v},"mimeType":"image/png"}}"#));
+    }
+    // Meshes per (geometry, albedo), materials per mesh, nodes per instance.
+    let mut meshes: Vec<String> = Vec::new();
+    let mut materials: Vec<String> = Vec::new();
+    let mut mesh_of: HashMap<(usize, [u32; 3]), usize> = HashMap::new();
+    let mut nodes: Vec<String> = Vec::new();
+    let (c, c_inv) = axes();
+    for i in &scene.instances {
+        let key = (i.geometry, i.albedo.to_array().map(f32::to_bits));
+        let mesh = *mesh_of.entry(key).or_insert_with(|| {
+            let texture = scene
+                .geometry_textures
+                .get(i.geometry)
+                .copied()
+                .flatten()
+                .filter(|_| scene.geometries[i.geometry].tex.len() == scene.geometries[i.geometry].triangles.len());
+            let base = texture.map_or(String::new(), |t| {
+                format!(r#","baseColorTexture":{{"index":{t}}}"#)
+            });
+            materials.push(format!(
+                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":0.0,"roughnessFactor":1.0{base}}}}}"#,
+                i.albedo.x, i.albedo.y, i.albedo.z
+            ));
+            meshes.push(format!(
+                r#"{{"primitives":[{{"attributes":{{{}}},"material":{}}}]}}"#,
+                attributes[i.geometry],
+                materials.len() - 1
+            ));
+            meshes.len() - 1
+        });
+        // From the rotation's columns, without a round trip through a
+        // quaternion.
+        let m = DMat4::from_cols(
+            (i.rotation.x_axis.as_dvec3() * i.scale as f64).extend(0.0),
+            (i.rotation.y_axis.as_dvec3() * i.scale as f64).extend(0.0),
+            (i.rotation.z_axis.as_dvec3() * i.scale as f64).extend(0.0),
+            i.position.extend(1.0),
+        );
+        let g = c_inv * m * c;
+        let values: Vec<String> = g
+            .to_cols_array()
+            .iter()
+            .map(|v| format!("{:?}", *v as f32))
+            .collect();
+        nodes.push(format!(
+            r#"{{"mesh":{mesh},"matrix":[{}]}}"#,
+            values.join(",")
+        ));
+    }
+    let node_list: Vec<String> = (0..nodes.len()).map(|k| k.to_string()).collect();
+    let textures: Vec<String> = (0..images.len())
+        .map(|k| format!(r#"{{"source":{k},"sampler":0}}"#))
+        .collect();
+    while bin.len() % 4 != 0 {
+        bin.push(0);
+    }
+    let mut json = format!(
+        r#"{{"asset":{{"version":"2.0","generator":"Continuum"}},"scene":0,"scenes":[{{"nodes":[{}]}}],"nodes":[{}],"meshes":[{}],"materials":[{}],"accessors":[{}],"bufferViews":[{}],"buffers":[{{"byteLength":{}}}]"#,
+        node_list.join(","),
+        nodes.join(","),
+        meshes.join(","),
+        materials.join(","),
+        accessors.join(","),
+        views.join(","),
+        bin.len()
+    );
+    if !images.is_empty() {
+        write!(
+            json,
+            r#","images":[{}],"textures":[{}],"samplers":[{{"magFilter":9729,"minFilter":9987,"wrapS":10497,"wrapT":10497}}]"#,
+            images.join(","),
+            textures.join(",")
+        )
+        .unwrap();
+    }
+    json.push('}');
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header {
+            magic: *b"glTF",
+            version: 2,
+            length: 0,
+        },
+        json: std::borrow::Cow::Owned(json.into_bytes()),
+        bin: Some(std::borrow::Cow::Owned(bin)),
+    };
+    let file = std::fs::File::create(path)?;
+    glb.to_writer(std::io::BufWriter::new(file))
+        .map_err(std::io::Error::other)
 }

@@ -8,3 +8,4 @@ edition.workspace = true
 continuum = { path = "../continuum" }
 continuum-gpu = { path = "../continuum-gpu" }
 gltf = { version = "1.4.1", features = ["KHR_lights_punctual"] }
+png = "0.17"

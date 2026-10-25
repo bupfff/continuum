@@ -5,6 +5,7 @@ pub mod cycles;
 pub mod field;
 pub mod outdoor;
 pub mod showcase;
+pub mod textured;
 
 use continuum::bvh::Bvh;
 use continuum::cone3::{PyramidCone, box_mesh, ray_triangle, sphere_mesh};

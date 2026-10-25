@@ -34,15 +34,36 @@ pub fn write_obj(surfaces: &[Surface], path: &Path) -> io::Result<()> {
                 writeln!(out, "vn {} {} {}", v.x, v.y, v.z).unwrap();
             }
         }
+        // Texture coordinates, with v flipped: glTF's origin is the image's
+        // top left, OBJ's (and Blender's) its bottom left.
+        let textured = s.tex.len() == s.triangles.len();
+        if textured {
+            for t in &s.tex {
+                for v in t {
+                    writeln!(out, "vt {} {}", v.x, 1.0 - v.y).unwrap();
+                }
+            }
+        }
         for _ in &s.triangles {
-            writeln!(
-                out,
-                "f {0}//{0} {1}//{1} {2}//{2}",
-                next,
-                next + 1,
-                next + 2
-            )
-            .unwrap();
+            if textured {
+                writeln!(
+                    out,
+                    "f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}",
+                    next,
+                    next + 1,
+                    next + 2
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "f {0}//{0} {1}//{1} {2}//{2}",
+                    next,
+                    next + 1,
+                    next + 2
+                )
+                .unwrap();
+            }
             next += 3;
         }
     }
@@ -190,12 +211,36 @@ pub fn render_instanced_lights(
     std::fs::create_dir_all(work)?;
     let mut geometries = Vec::new();
     for (g, surface) in scene.geometries.iter().enumerate() {
+        // Always rewritten: a file left from another scene in the same
+        // directory would otherwise stand in for this one's geometry.
         let path = work.join(format!("geometry_{g}.obj"));
-        if !path.exists() {
-            write_obj(std::slice::from_ref(surface), &path)?;
-        }
+        write_obj(std::slice::from_ref(surface), &path)?;
         geometries.push(format!("{:?}", path.to_string_lossy()));
     }
+    // Base color textures as PNG, and each geometry's (or null).
+    let mut texture_paths = Vec::new();
+    for (k, t) in scene.textures.iter().enumerate() {
+        let path = work.join(format!("texture_{k}.png"));
+        let file = std::fs::File::create(&path)?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), t.width, t.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut w| w.write_image_data(&t.rgba))
+            .map_err(io::Error::other)?;
+        texture_paths.push(format!("{:?}", path.to_string_lossy()));
+    }
+    let geometry_textures: Vec<String> = (0..scene.geometries.len())
+        .map(
+            |g| match scene.geometry_textures.get(g).copied().flatten() {
+                Some(t) if scene.geometries[g].tex.len() == scene.geometries[g].triangles.len() => {
+                    texture_paths[t as usize].clone()
+                }
+                _ => "null".to_string(),
+            },
+        )
+        .collect();
     let instances = work.join("instances.f32");
     let mut raw: Vec<f32> = Vec::with_capacity(scene.instances.len() * 17);
     for i in &scene.instances {
@@ -236,12 +281,13 @@ pub fn render_instanced_lights(
         work.join(format!("{tag}.f32")),
     );
     let job = format!(
-        r#"{{"geometries": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
   "width": {width}, "height": {height}, "samples": {samples}, "bounces": {bounces}, "seed": {seed}}}"#,
         geometries.join(", "),
+        geometry_textures.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),
