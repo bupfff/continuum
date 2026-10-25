@@ -25,7 +25,8 @@ struct Light {
     // 2: setup and weights only, 3: plus the object hierarchy, 4: plus triangle
     // hierarchies but no rasterization); w: sky flags: bit 1 to combine
     // coverage across meshes by the maximum (a diagnostic), bit 2 to walk
-    // geometry below the receiver's horizon too
+    // geometry below the receiver's horizon too, bit 4 for per-pixel sky
+    // faces in the hit object's frame
     params: vec4<f32>,
     // A uniform sky: radiance (linear RGB) over the whole sphere of directions,
     // lit through six cube-face mask cones per receiver (zero: no sky).
@@ -543,9 +544,13 @@ var<private> own_object: u32 = 0xffffffffu;
 // them needs it, and each acts only on the nodes its own walk would visit, in
 // the same order, so every result equals walking alone; but the subgroup no
 // longer runs 32 different walks one after another. Where the device has
-// subgroups, the kernel makes `packet_any` a subgroupAny; otherwise each
-// invocation is its own packet. Traversal loops leave only on uniform
-// conditions, so the invocations stay together.
+// subgroups, the kernel makes `packet_any` a subgroupAny in pipelines with
+// PACKETS; otherwise each invocation is its own packet. Traversal loops leave
+// only on uniform conditions, so the invocations stay together. Packets pay
+// where neighbouring invocations walk alike (pixels, M5 gate 5) and cost
+// where they do not (the view cache's bakes, whose texels can be far apart).
+override PACKETS: bool = true;
+
 fn packet_any(x: bool) -> bool {
     return x;
 }
@@ -793,7 +798,7 @@ fn scene_coverage_if(on: bool, c: Cone, i: u32, cov: ptr<function, array<f32, 64
             if (!packet_any(descend)) { continue; }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                    add_mesh_coverage_if(descend, c, items[k], cov, full, i, sp);
+                    add_mesh_coverage_if(descend && items[k] != skip_object, c, items[k], cov, full, i, sp);
                 }
             } else {
                 stack_set(sp, node.info.x);
@@ -805,7 +810,7 @@ fn scene_coverage_if(on: bool, c: Cone, i: u32, cov: ptr<function, array<f32, 64
         }
     } else {
         for (var m = 0u; m < light.counts.x; m++) {
-            add_mesh_coverage_if(on && *full < BINS, c, m, cov, full, i, 0u);
+            add_mesh_coverage_if(on && *full < BINS && m != skip_object, c, m, cov, full, i, 0u);
         }
     }
 }
@@ -981,56 +986,88 @@ fn sky_irradiance_if(on: bool, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     return total;
 }
 
-// Irradiance per unit sky radiance through cube face `f` alone (0 if the
-// face lies wholly below the horizon, or without `on`).
-fn sky_face_irradiance(on: bool, f: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
-    let stage = u32(light.params.z);
-    if (stage == 1u) { return 0.0; }
+// Sky faces in an object's frame (M5 gate 5): the transform whose rotation's
+// columns are the cube's axes, or NONE for world axes. A uniform sky's light
+// does not depend on the cube's orientation; an object's own sky occlusion,
+// seen through faces in its frame, is the same for all its instances.
+var<private> sky_frame: u32 = 0xffffffffu;
+// An object the walks skip (NONE: none): the receiver's own, when its
+// coverage comes from a precomputed mask.
+var<private> skip_object: u32 = 0xffffffffu;
+
+// Cube face `f` of the sky around `apex`, and whether any of its directions
+// lies above the horizon of `normal` (and `on`).
+struct SkyFace {
+    c: Cone,
+    above: bool,
+};
+
+fn sky_face(on: bool, f: u32, apex: vec3<f32>, normal: vec3<f32>) -> SkyFace {
     var scale = bitcast<f32>(light.objects.y);
     if (scale <= 0.0) { scale = 1.0; }
     prefilter_bins = light.params.x * scale;
-    {
-        let axis = f / 2u;
-        let sign = select(1.0, -1.0, (f & 1u) == 1u);
-        var forward = vec3<f32>(0.0);
-        forward[axis] = sign;
-        var right = vec3<f32>(0.0);
-        right[(axis + 1u) % 3u] = 1.0;
-        let up = cross(forward, right);
-        var c: Cone;
-        c.apex = apex;
-        c.right = right;
-        c.up = up;
-        c.forward = forward;
-        c.window = vec4<f32>(-1.0, -1.0, 1.0, 1.0);
-        c.far_normal = forward;
-        c.far_offset = dot(forward, apex) + SKY_FAR;
-        // params.w bit 2: walk geometry below the horizon too (as before M5
-        // gate 5).
-        if ((u32(light.params.w) & 2u) == 0u) { c.horizon = normal; }
-        // The face's directions are linear in the window, so its corners
-        // decide whether any lies above the horizon.
-        var above = false;
-        for (var k = 0u; k < 4u; k++) {
-            if (dot(normal, direction(c, f32(k & 1u), f32(k >> 1u))) > 0.0) { above = true; }
-        }
-        above = above && on;
-        var cov: array<f32, 64>;
-        for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
-        var full = 0u;
-        // params.w bit 1: combine by the maximum instead (a diagnostic).
-        independent_occluders = (u32(light.params.w) & 1u) == 0u;
-        if (stage != 2u) { scene_coverage_if(above, c, 0u, &cov, &full); }
-        independent_occluders = false;
-        if (!above) { return 0.0; }
-        var blocked = 0.0;
-        for (var b = 0u; b < BINS; b++) {
-            if (cov[b] > 0.0) {
-                blocked += cov[b] * clipped_bin_weight(c, normal, b);
-            }
-        }
-        return max(clipped_window_weight(c, normal) - blocked, 0.0);
+    let axis = f / 2u;
+    let sign = select(1.0, -1.0, (f & 1u) == 1u);
+    var forward = vec3<f32>(0.0);
+    forward[axis] = sign;
+    var right = vec3<f32>(0.0);
+    right[(axis + 1u) % 3u] = 1.0;
+    if (sky_frame != NONE) {
+        forward = rotate_to_world(sky_frame, forward);
+        right = rotate_to_world(sky_frame, right);
     }
+    var face: SkyFace;
+    face.c.apex = apex;
+    face.c.right = right;
+    face.c.up = cross(forward, right);
+    face.c.forward = forward;
+    face.c.window = vec4<f32>(-1.0, -1.0, 1.0, 1.0);
+    face.c.far_normal = forward;
+    face.c.far_offset = dot(forward, apex) + SKY_FAR;
+    // params.w bit 2: walk geometry below the horizon too (as before M5
+    // gate 5).
+    if ((u32(light.params.w) & 2u) == 0u) { face.c.horizon = normal; }
+    // The face's directions are linear in the window, so its corners decide
+    // whether any lies above the horizon.
+    var above = false;
+    for (var k = 0u; k < 4u; k++) {
+        if (dot(normal, direction(face.c, f32(k & 1u), f32(k >> 1u))) > 0.0) { above = true; }
+    }
+    face.above = above && on;
+    return face;
+}
+
+// The scene's coverage of a sky face (skipping `skip_object`), with meshes as
+// independent occluders.
+fn sky_face_coverage(face: SkyFace, cov: ptr<function, array<f32, 64>>) {
+    for (var b = 0u; b < BINS; b++) { (*cov)[b] = 0.0; }
+    var full = 0u;
+    // params.w bit 1: combine by the maximum instead (a diagnostic).
+    independent_occluders = (u32(light.params.w) & 1u) == 0u;
+    if (u32(light.params.z) != 2u) { scene_coverage_if(face.above, face.c, 0u, cov, &full); }
+    independent_occluders = false;
+}
+
+// Irradiance per unit sky radiance through a face with coverage `cov`.
+fn sky_face_light(face: SkyFace, normal: vec3<f32>, cov: ptr<function, array<f32, 64>>) -> f32 {
+    if (!face.above) { return 0.0; }
+    var blocked = 0.0;
+    for (var b = 0u; b < BINS; b++) {
+        if ((*cov)[b] > 0.0) {
+            blocked += (*cov)[b] * clipped_bin_weight(face.c, normal, b);
+        }
+    }
+    return max(clipped_window_weight(face.c, normal) - blocked, 0.0);
+}
+
+// Irradiance per unit sky radiance through cube face `f` alone (0 if the
+// face lies wholly below the horizon, or without `on`).
+fn sky_face_irradiance(on: bool, f: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    if (u32(light.params.z) == 1u) { return 0.0; }
+    let face = sky_face(on, f, apex, normal);
+    var cov: array<f32, 64>;
+    sky_face_coverage(face, &cov);
+    return sky_face_light(face, normal, &cov);
 }
 
 @compute @workgroup_size(64)
@@ -1353,7 +1390,12 @@ fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, sees_li
     let irradiance = hit_irradiance(pixel, point, normal);
     var e = vec3<f32>(camera.params.w * irradiance);
     if (any(light.sky.xyz > vec3<f32>(0.0))) {
+        // params.w bit 4: faces in the hit object's frame, as the cache's
+        // texels with own-occlusion masks use (and, with this bit, those
+        // without).
+        if ((u32(light.params.w) & 4u) != 0u) { sky_frame = meshes[hit.mesh].w; }
         e += light.sky.xyz * sky_irradiance(point, normal);
+        sky_frame = NONE;
     }
     colors[pixel] = vec4<f32>(albedo[hit.mesh].xyz * e / 3.14159265, 1.0);
 }
@@ -1863,6 +1905,17 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // Per baked page: its first sky sample, and how many it has (low 24 bits)
 // with its sky stride (high 8 bits).
 @group(0) @binding(48) var<storage, read> page_sky: array<vec2<u32>>;
+// Own-object sky occlusion (M5 gate 5). An instance's coverage of its own sky,
+// seen through cube faces in its frame, is the same for every instance of its
+// geometry; it is baked once per geometry on a grid over each chart, as 64 bins
+// of 8-bit coverage per face (16 words), and read bilinearly.
+// Per global chart: first self texel, grid size along u and v, and 1 if the
+// chart's geometry has masks (0: its texels walk their own object).
+@group(0) @binding(49) var<storage, read> self_charts: array<vec4<u32>>;
+// Self texels to bake: an object of the geometry, its chart, and the texel
+// (x | y << 16).
+@group(0) @binding(50) var<storage, read> self_list: array<vec4<u32>>;
+@group(0) @binding(51) var<storage, read_write> self_masks: array<u32>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -2065,6 +2118,77 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     }
 }
 
+// Bin `b`'s 8-bit coverage in face `f` of self texel `i`.
+fn self_bin(i: u32, f: u32, b: u32) -> f32 {
+    let word = self_masks[16u * (6u * i + f) + b / 4u];
+    return f32((word >> (8u * (b % 4u))) & 0xffu) / 255.0;
+}
+
+// Combines the own object's coverage of face `f` at chart coordinates `uv`
+// (bilinear between the chart's self texels) into `cov`, as one more
+// independent occluder.
+fn self_combine(chart: vec4<u32>, uv: vec2<f32>, f: u32, cov: ptr<function, array<f32, 64>>) {
+    let n = chart.yz;
+    let p = clamp(uv * vec2<f32>(n) - vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(n - vec2<u32>(1u)));
+    let a = vec2<u32>(floor(p));
+    let b = min(a + vec2<u32>(1u), n - vec2<u32>(1u));
+    let w = p - floor(p);
+    let i00 = chart.x + a.y * n.x + a.x;
+    let i10 = chart.x + a.y * n.x + b.x;
+    let i01 = chart.x + b.y * n.x + a.x;
+    let i11 = chart.x + b.y * n.x + b.x;
+    for (var k = 0u; k < BINS; k++) {
+        let own = mix(mix(self_bin(i00, f, k), self_bin(i10, f, k), w.x),
+                      mix(self_bin(i01, f, k), self_bin(i11, f, k), w.x), w.y);
+        if (own > 0.0) {
+            (*cov)[k] = 1.0 - (1.0 - (*cov)[k]) * (1.0 - own);
+        }
+    }
+}
+
+// One thread per self texel and cube face, face by face: the object's
+// coverage of its own sky through the face in its frame (every face, above
+// the horizon or not, as a receiver nearby may see it).
+@compute @workgroup_size(64)
+fn vc_self_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let count = arrayLength(&self_list);
+    // Dispatched in rows of 65,535 workgroups.
+    let j = gid.x + gid.y * 65535u * 64u;
+    let listed = j < 6u * count;
+    let f = min(j / count, 5u);
+    let k = j % count;
+    let e = self_list[k];
+    let m = e.x;
+    let chart = self_charts[e.y];
+    let texel = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
+    let s = vc_surface(m, e.y, chart.yz, texel);
+    let on = listed && s.ok;
+    sky_frame = meshes[m].w;
+    var face = sky_face(on, f, s.apex, s.normal);
+    face.above = on;
+    var cov: array<f32, 64>;
+    for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+    var full = 0u;
+    add_mesh_coverage_if(on, face.c, m, &cov, &full, 0u, 0u);
+    if (listed) {
+        for (var w = 0u; w < 16u; w++) {
+            var word = 0u;
+            for (var q = 0u; q < 4u; q++) {
+                let v = select(0.0, clamp(cov[4u * w + q], 0.0, 1.0), on);
+                word |= u32(round(v * 255.0)) << (8u * q);
+            }
+            self_masks[16u * (6u * k + f) + w] = word;
+        }
+    }
+}
+
+// Does nothing: a pass after the camera passes whose beginning timestamps
+// their end (an end-of-pass timestamp followed only by copies can land too
+// late on Metal).
+@compute @workgroup_size(1)
+fn mark() {}
+
 // One thread per sky sample and cube face, face by face, so neighbouring
 // invocations trace the same face from nearby texels.
 @compute @workgroup_size(64)
@@ -2081,7 +2205,29 @@ fn vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     let s = vc_surface(t.m, t.c, t.n, t.texel);
     let on = listed && t.inside && s.ok;
     own_object = t.m;
-    let value = sky_face_irradiance(on, f, s.apex, s.normal);
+    var value = 0.0;
+    if (u32(light.params.z) != 1u) {
+        // With its geometry's masks, the face turns with the object and its
+        // own coverage comes from them.
+        let chart = self_charts[t.c];
+        let masked = chart.w == 1u;
+        if (masked) {
+            sky_frame = meshes[t.m].w;
+            skip_object = t.m;
+        } else if ((u32(light.params.w) & 4u) != 0u) {
+            sky_frame = meshes[t.m].w;
+        }
+        let face = sky_face(on, f, s.apex, s.normal);
+        var cov: array<f32, 64>;
+        sky_face_coverage(face, &cov);
+        if (masked && face.above) {
+            let uv = (vec2<f32>(t.texel) + vec2<f32>(0.5)) / vec2<f32>(t.n);
+            self_combine(chart, uv, f, &cov);
+        }
+        value = sky_face_light(face, s.normal, &cov);
+        sky_frame = NONE;
+        skip_object = NONE;
+    }
     if (listed) { sky_partial[6u * k + f] = select(0.0, value, on); }
     if (COUNT_WORK) {
         for (var q = 0u; q < 4u; q++) {

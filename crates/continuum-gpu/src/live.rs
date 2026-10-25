@@ -82,6 +82,7 @@ pub(crate) fn encode_display(
     display: &wgpu::RenderPipeline,
     bind: &wgpu::BindGroup,
     target: &wgpu::TextureView,
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites>,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("display"),
@@ -94,6 +95,7 @@ pub(crate) fn encode_display(
                 store: wgpu::StoreOp::Store,
             },
         })],
+        timestamp_writes,
         ..Default::default()
     });
     pass.set_pipeline(display);

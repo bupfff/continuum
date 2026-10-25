@@ -65,9 +65,15 @@ pub struct CacheOptions {
     /// Texels (mask cones) baked per frame at most.
     pub bake_budget: u32,
     /// The frame period the bake aims for, in milliseconds (0: always bake
-    /// `bake_budget`). When the CPU had to wait for the GPU and the last frame
-    /// took longer, the budget scales by target / period; when a frame is
-    /// quicker, it grows by 10%; between 1,000 and `bake_budget` cones.
+    /// `bake_budget`). Where the device has timestamp queries (M5 gate 5),
+    /// the bake and the camera passes are timed on the GPU, bake time is fit
+    /// as a latency plus a cost per unit of budget, and the budget is what
+    /// fits the target after the camera passes, 20% more and less on
+    /// alternate frames so the fit can tell latency from cost. Otherwise (M4
+    /// gate 11),
+    /// when the CPU had to wait for the GPU and the last frame took longer,
+    /// the budget scales by target / period, and when a frame is quicker, it
+    /// grows by 10%. Between 1,000 and `bake_budget`.
     pub frame_target_ms: f32,
     /// Pages the pool holds.
     pub pages: u32,
@@ -80,6 +86,12 @@ pub struct CacheOptions {
     /// What a sky sample counts against the bake budget, in sun texels (at
     /// least 1).
     pub sky_sample_cost: u32,
+    /// With a sky: the spacing (in each geometry's own units) of the grid on
+    /// which its own sky occlusion is baked once, for all its instances (M5
+    /// gate 5). Sky texels then walk only the other objects. 0: off. A
+    /// geometry whose grid would exceed 1,024 texels along a chart walks
+    /// itself.
+    pub self_spacing: f32,
 }
 
 impl Default for CacheOptions {
@@ -92,7 +104,8 @@ impl Default for CacheOptions {
             frame_target_ms: 14.0,
             pages: 1 << 19,
             sky_spacing: 0.0,
-            sky_sample_cost: 50,
+            sky_sample_cost: 10,
+            self_spacing: 0.01,
         }
     }
 }
@@ -124,8 +137,17 @@ pub struct CacheStats {
     pub planning: Duration,
     /// Of that work, eviction (merging slot use, freeing pages).
     pub evicting: Duration,
-    /// The bake budget the frame planned with (sun texels, or their worth).
+    /// The bake budget the frame planned with (sun texels, or their worth),
+    /// and what its plan used.
     pub budget: u32,
+    pub spent: u32,
+    /// GPU time of the frame's bake passes and of its camera passes, in
+    /// milliseconds, where the device has timestamp queries and the frame
+    /// was not profiled (else 0).
+    pub gpu_bake_ms: f32,
+    pub gpu_render_ms: f32,
+    /// Whether the frame's GPU timings count (not a profiled frame).
+    pub timed: bool,
     /// Time spent waiting for the GPU to finish the frame two before, whose
     /// requests the plan reads.
     pub waiting: Duration,
@@ -220,6 +242,64 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
         t.tri_uv.push([0.0; 2]);
     }
     t
+}
+
+/// Own-object sky occlusion grids: per global chart `[first self texel, grid
+/// u, grid v, 1 if baked]`, and the self texels to bake `[object, chart, x |
+/// y << 16, 0]` (one instance of each geometry stands for all).
+struct SelfTables {
+    charts: Vec<[u32; 4]>,
+    texels: Vec<[u32; 4]>,
+    count: u32,
+}
+
+/// The most self texels along a chart; larger charts walk themselves.
+const SELF_GRID_MAX: u32 = 1024;
+
+fn self_tables(scene: &InstancedScene, tables: &ChartTables, spacing: f32) -> SelfTables {
+    let mut own = SelfTables {
+        charts: vec![[0; 4]; tables.charts.len().max(1)],
+        texels: Vec::new(),
+        count: 0,
+    };
+    if spacing > 0.0 {
+        for (g, &first) in tables.first_chart.iter().enumerate() {
+            let Some(m) = scene.instances.iter().position(|i| i.geometry == g) else {
+                continue;
+            };
+            let end = tables
+                .first_chart
+                .get(g + 1)
+                .copied()
+                .unwrap_or(tables.charts.len() as u32);
+            let grids: Vec<[u32; 2]> = (first..end)
+                .map(|c| {
+                    let size = Vec2::from_array(tables.charts[c as usize].size);
+                    let n = (size / spacing).ceil();
+                    [(n.x as u32).max(1), (n.y as u32).max(1)]
+                })
+                .collect();
+            if grids
+                .iter()
+                .any(|n| n[0] > SELF_GRID_MAX || n[1] > SELF_GRID_MAX)
+            {
+                continue;
+            }
+            for (c, n) in (first..end).zip(grids) {
+                own.charts[c as usize] = [own.texels.len() as u32, n[0], n[1], 1];
+                for y in 0..n[1] {
+                    for x in 0..n[0] {
+                        own.texels.push([m as u32, c, x | y << 16, 0]);
+                    }
+                }
+            }
+        }
+    }
+    own.count = own.texels.len() as u32;
+    if own.texels.is_empty() {
+        own.texels.push([0; 4]);
+    }
+    own
 }
 
 /// The shader's page-table hash.
@@ -383,6 +463,66 @@ impl PageTable {
 
 /// A readback buffer for one frame's requests and counters, and the frame
 /// and submission whose copy it holds until read.
+/// GPU timestamps around a frame's bake passes (0, 1) and camera passes (2, 3).
+pub(crate) struct GpuTimer {
+    pub(crate) set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    /// Nanoseconds per timestamp tick.
+    period: f32,
+}
+
+/// Bake time against budget spent, fit as `latency + cost × units` over
+/// recent frames (least squares with exponential forgetting).
+struct BakeModel {
+    /// Decayed sums: weight, units, units², milliseconds, units × ms.
+    sums: [f64; 5],
+    latency: f32,
+    cost: f32,
+    /// The camera passes' time, smoothed.
+    render: f32,
+}
+
+impl BakeModel {
+    fn new() -> Self {
+        BakeModel {
+            sums: [0.0; 5],
+            latency: 1.0,
+            cost: 5e-4,
+            render: 0.0,
+        }
+    }
+
+    fn add(&mut self, units: f32, bake_ms: f32, render_ms: f32) {
+        self.render = if self.render == 0.0 {
+            render_ms
+        } else {
+            0.7 * self.render + 0.3 * render_ms
+        };
+        if units <= 0.0 {
+            return;
+        }
+        let (u, y) = (units as f64, bake_ms as f64);
+        for (s, x) in self.sums.iter_mut().zip([1.0, u, u * u, y, u * y]) {
+            *s = 0.95 * *s + x;
+        }
+        let [w, su, suu, sy, suy] = self.sums;
+        let (mu, my) = (su / w, sy / w);
+        let var = suu / w - mu * mu;
+        // Refit the cost only when the budget has varied enough to tell.
+        if w >= 4.0 && var > (0.1 * mu) * (0.1 * mu) {
+            let cost = (suy / w - mu * my) / var;
+            self.cost = (cost as f32).clamp(1e-6, 1.0);
+        }
+        self.latency = ((my - self.cost as f64 * mu) as f32).clamp(0.0, 100.0);
+    }
+
+    /// The units that fit `target` milliseconds of GPU time with the camera
+    /// passes.
+    fn budget(&self, target: f32) -> f32 {
+        (target - self.render - self.latency) / self.cost
+    }
+}
+
 struct Readback {
     buffer: wgpu::Buffer,
     tiles: u32,
@@ -392,6 +532,8 @@ struct Readback {
 /// The shading and bake counters' size: four shading counters, then twelve
 /// work counters (with `KernelOptions::count_work`).
 const STATS_BYTES: u64 = 64;
+/// Four GPU timestamps after the counters in each readback.
+const TIMESTAMP_BYTES: u64 = 32;
 
 /// Table entries updated per frame at most before the whole table is sent.
 const UPDATES_CAPACITY: usize = 1 << 17;
@@ -433,6 +575,8 @@ pub(crate) struct VirtualCache {
     evicting: Duration,
     waiting: Duration,
     pub(crate) buffers: Vec<(u32, wgpu::Buffer)>,
+    /// Self texels whose masks are still to be baked (cleared once baked).
+    pub(crate) self_texels: u32,
     params: wgpu::Buffer,
     /// Alternating per frame.
     readbacks: Vec<Readback>,
@@ -444,6 +588,10 @@ pub(crate) struct VirtualCache {
     /// began (for its period).
     budget: f32,
     last_begin: Option<Instant>,
+    /// GPU timing, where the device has timestamp queries, and the bake
+    /// model it feeds.
+    pub(crate) timer: Option<GpuTimer>,
+    model: BakeModel,
     /// Slots to free, least recently used last (popped first).
     evict_queue: Vec<u32>,
 }
@@ -465,6 +613,7 @@ impl VirtualCache {
             "a sky sample costs at least 1"
         );
         let tables = chart_tables(&scene.geometries);
+        let own = self_tables(scene, &tables, if sky { options.self_spacing } else { 0.0 });
         let inv_base = 1.0 / options.base_texel;
         let chart_size: Vec<Vec2> = tables
             .charts
@@ -549,6 +698,22 @@ impl VirtualCache {
             ),
             (48, empty("page sky", budget * 8, copy_dst)),
             (
+                49,
+                storage("self charts", bytemuck::cast_slice(&own.charts), copy_dst),
+            ),
+            (
+                50,
+                storage("self texels", bytemuck::cast_slice(&own.texels), copy_dst),
+            ),
+            (
+                51,
+                empty(
+                    "self masks",
+                    own.count as u64 * 6 * 16 * 4,
+                    wgpu::BufferUsages::empty(),
+                ),
+            ),
+            (
                 40,
                 empty(
                     "slot used",
@@ -608,6 +773,7 @@ impl VirtualCache {
             evicting: Duration::ZERO,
             waiting: Duration::ZERO,
             buffers,
+            self_texels: own.count,
             params,
             readbacks: Vec::new(),
             used_readback,
@@ -619,6 +785,24 @@ impl VirtualCache {
                 options.bake_budget as f32
             },
             last_begin: None,
+            timer: device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+                .then(|| GpuTimer {
+                    set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                        label: Some("cache timestamps"),
+                        ty: wgpu::QueryType::Timestamp,
+                        count: 4,
+                    }),
+                    resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("timestamp resolve"),
+                        size: TIMESTAMP_BYTES,
+                        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    }),
+                    period: queue.get_timestamp_period(),
+                }),
+            model: BakeModel::new(),
             evict_queue: Vec::new(),
         };
         cache.resize(device, width, height);
@@ -646,7 +830,7 @@ impl VirtualCache {
             .map(|_| Readback {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("requests readback"),
-                    size: tiles as u64 * 16 + STATS_BYTES,
+                    size: tiles as u64 * 16 + STATS_BYTES + TIMESTAMP_BYTES,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -780,6 +964,8 @@ impl VirtualCache {
             evicted: std::mem::take(&mut self.evicted),
             planning: std::mem::take(&mut self.planning),
             budget: self.budget as u32,
+            spent: self.spent,
+            timed: self.timer.is_some(),
             evicting: std::mem::take(&mut self.evicting),
             waiting: std::mem::take(&mut self.waiting),
             ..Default::default()
@@ -811,6 +997,29 @@ impl VirtualCache {
         }
     }
 
+    /// Marks the frame being prepared as not timed (its passes were split
+    /// into submissions).
+    pub(crate) fn untimed(&mut self) {
+        if let Some(record) = self.log.last_mut() {
+            record.timed = false;
+        }
+    }
+
+    /// Copies the frame's GPU timestamps for reading back, after every pass
+    /// that writes them.
+    pub(crate) fn encode_timestamps(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(timer) = &self.timer else { return };
+        let r = &self.readbacks[(self.frame % 2) as usize];
+        encoder.resolve_query_set(&timer.set, 0..4, &timer.resolve, 0);
+        encoder.copy_buffer_to_buffer(
+            &timer.resolve,
+            0,
+            &r.buffer,
+            r.tiles as u64 * 16 + STATS_BYTES,
+            TIMESTAMP_BYTES,
+        );
+    }
+
     /// After the frame's submission (`index`): starts its readbacks, without
     /// waiting.
     pub(crate) fn after_submit(&mut self, index: wgpu::SubmissionIndex) {
@@ -840,7 +1049,21 @@ impl VirtualCache {
         let slot = (self.frame % 2) as usize;
         let requests = self.collect(device, slot);
         let target = self.options.frame_target_ms;
-        if target > 0.0
+        if target > 0.0 && self.timer.is_some() {
+            // Only once a frame has been timed. Alternate frames bake 20%
+            // more and less, so the fit can tell latency from cost.
+            if self.latest > 0 {
+                let dither = if self.frame.is_multiple_of(2) {
+                    1.2
+                } else {
+                    0.8
+                };
+                self.budget = (self.model.budget(target) * dither).clamp(
+                    MIN_BUDGET.min(self.options.bake_budget as f32),
+                    self.options.bake_budget as f32,
+                );
+            }
+        } else if target > 0.0
             && let Some(period) = period
         {
             let period = period.as_secs_f32() * 1e3;
@@ -898,6 +1121,28 @@ impl VirtualCache {
             .map(|r| ([r[0], r[1], r[2]], r[3]))
             .collect();
         let record = &mut self.log[frame as usize - 1];
+        if let Some(timer) = &self.timer
+            && record.timed
+        {
+            let at = 4 * tiles + STATS_BYTES as usize / 4;
+            let stamps: &[u64] =
+                bytemuck::cast_slice(&raw[4 * at..4 * at + TIMESTAMP_BYTES as usize]);
+            // A span, if both ends were written in order and within a second.
+            let ms = |a: u64, b: u64| {
+                let t = b.wrapping_sub(a) as f64 * timer.period as f64 * 1e-6;
+                (a != 0 && b > a && t < 1000.0).then_some(t as f32)
+            };
+            let bake = if record.pages_baked > 0 {
+                ms(stamps[0], stamps[1])
+            } else {
+                Some(0.0)
+            };
+            if let (Some(bake), Some(render)) = (bake, ms(stamps[2], stamps[3])) {
+                record.gpu_bake_ms = bake;
+                record.gpu_render_ms = render;
+                self.model.add(record.spent as f32, bake, render);
+            }
+        }
         record.fallback_pixels = counters[0];
         record.requests = count as u32;
         record.samples = counters[2];

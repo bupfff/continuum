@@ -61,13 +61,17 @@ pub struct MaskConeKernel {
     vc_update_pipeline: wgpu::ComputePipeline,
     vc_bake_pipeline: wgpu::ComputePipeline,
     vc_bake_sky_pipeline: wgpu::ComputePipeline,
+    vc_self_bake_pipeline: wgpu::ComputePipeline,
     vc_fill_pipeline: wgpu::ComputePipeline,
+    /// An empty pass that timestamps the end of the camera passes.
+    mark_pipeline_empty: wgpu::ComputePipeline,
     vc_shade_pipeline: wgpu::ComputePipeline,
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
     sky_max: std::cell::Cell<bool>,
     sky_prefilter: std::cell::Cell<f32>,
     sky_horizon_cull: std::cell::Cell<bool>,
+    sky_object_frame: std::cell::Cell<bool>,
     object_prefilter: std::cell::Cell<bool>,
     nearest_first: std::cell::Cell<bool>,
     profile_stage: std::cell::Cell<u32>,
@@ -125,7 +129,8 @@ pub struct KernelOptions {
     pub count_work: bool,
     /// Each invocation walks hierarchies alone, as before M5 gate 5, instead
     /// of with its subgroup (packet traversal, used where the device has
-    /// subgroups). Results are identical; only speed differs.
+    /// subgroups, except in the view cache's bakes, which always walk
+    /// alone). Results are identical; only speed differs.
     pub without_packets: bool,
 }
 
@@ -159,7 +164,13 @@ impl RectLight {
         prefilter: f32,
         nearest_first: bool,
         profile_stage: u32,
-        (sky, sky_max, sky_prefilter, sky_horizon_cull): (Vec3, bool, f32, bool),
+        (sky, sky_max, sky_prefilter, sky_horizon_cull, sky_object_frame): (
+            Vec3,
+            bool,
+            f32,
+            bool,
+            bool,
+        ),
         objects: u32,
     ) -> LightUniform {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
@@ -177,7 +188,8 @@ impl RectLight {
                 prefilter,
                 nearest_first as u32 as f32,
                 profile_stage as f32,
-                (sky_max as u32 | (!sky_horizon_cull as u32) << 1) as f32,
+                (sky_max as u32 | (!sky_horizon_cull as u32) << 1 | (sky_object_frame as u32) << 2)
+                    as f32,
             ],
             sky: v4(sky),
             objects: [objects, sky_prefilter.to_bits(), 0, 0],
@@ -207,8 +219,10 @@ pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 37, 38, 41, 42, 43,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 38, 41, 42, 46, 47,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 38, 41, 42, 46, 47, 49, 51,
 ];
+pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
+    &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 49, 50, 51];
 pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45,
@@ -223,8 +237,10 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
     let ray_query = adapter
         .features()
         .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-    // Subgroups, where available, for packet traversal (M5 gate 5).
-    let subgroups = adapter.features() & wgpu::Features::SUBGROUP;
+    // Subgroups for packet traversal, and timestamps for the view cache's
+    // bake budget, where available (M5 gate 5).
+    let subgroups =
+        adapter.features() & (wgpu::Features::SUBGROUP | wgpu::Features::TIMESTAMP_QUERY);
     wgpu::DeviceDescriptor {
         label: Some("continuum"),
         required_features: subgroups
@@ -296,7 +312,7 @@ impl MaskConeKernel {
             // it rejects in wgpu 30) once the device has the feature.
             source = source.replace(
                 solo,
-                "fn packet_any(x: bool) -> bool {\n    return subgroupAny(x);\n}",
+                "fn packet_any(x: bool) -> bool {\n    if (PACKETS) { return subgroupAny(x); }\n    return x;\n}",
             );
         }
         if !options.workgroup_stacks {
@@ -313,20 +329,25 @@ impl MaskConeKernel {
         let constants = [
             ("WORKGROUP_STACKS", flag(options.workgroup_stacks)),
             ("COUNT_WORK", flag(options.count_work)),
+            ("PACKETS", 1.0),
         ];
-        let entry = |name: &str| {
+        // The view cache's bakes walk alone: their texels can be far apart,
+        // and packets made small bakes slower (M5 gate 5).
+        let solo_constants = [constants[0], constants[1], ("PACKETS", 0.0)];
+        let entry_with = |name: &str, constants: &[(&str, f64)]| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(name),
                 layout: None,
                 module: &module,
                 entry_point: Some(name),
                 compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &constants,
+                    constants,
                     ..Default::default()
                 },
                 cache: None,
             })
         };
+        let entry = |name: &str| entry_with(name, &constants);
         let pipeline = entry("main");
         let render_pipeline = entry("render");
         let cached_pipeline = entry("render_cached");
@@ -339,9 +360,11 @@ impl MaskConeKernel {
         let shade_pipeline = entry("shade");
         let shade_cached_pipeline = entry("shade_cached_pass");
         let vc_update_pipeline = entry("vc_update");
-        let vc_bake_pipeline = entry("vc_bake");
-        let vc_bake_sky_pipeline = entry("vc_bake_sky");
+        let vc_bake_pipeline = entry_with("vc_bake", &solo_constants);
+        let vc_bake_sky_pipeline = entry_with("vc_bake_sky", &solo_constants);
+        let vc_self_bake_pipeline = entry_with("vc_self_bake", &solo_constants);
         let vc_fill_pipeline = entry("vc_fill");
+        let mark_pipeline_empty = entry("mark");
         let vc_shade_pipeline = entry("vc_shade");
         let hw_visibility_pipeline = device
             .features()
@@ -386,13 +409,16 @@ impl MaskConeKernel {
             vc_update_pipeline,
             vc_bake_pipeline,
             vc_bake_sky_pipeline,
+            vc_self_bake_pipeline,
             vc_fill_pipeline,
+            mark_pipeline_empty,
             vc_shade_pipeline,
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
             sky_max: std::cell::Cell::new(false),
             sky_prefilter: std::cell::Cell::new(1.0),
             sky_horizon_cull: std::cell::Cell::new(true),
+            sky_object_frame: std::cell::Cell::new(false),
             object_prefilter: std::cell::Cell::new(true),
             nearest_first: std::cell::Cell::new(true),
             profile_stage: std::cell::Cell::new(0),
@@ -450,6 +476,17 @@ impl MaskConeKernel {
     /// set up after the call.
     pub fn set_sky_horizon_cull(&self, on: bool) {
         self.sky_horizon_cull.set(on);
+    }
+
+    /// Sky cones turn their cube faces with the object they start on
+    /// (default off): per pixel, and in the view cache for texels without
+    /// own-occlusion masks (those with masks always do; see
+    /// `CacheOptions::self_spacing`). A uniform sky's light does not depend
+    /// on the cube's orientation, but binned coverage does: on the boulder
+    /// field, turning the cube moves the sky 1.9–4.2% from Cycles (M5 gate 5).
+    /// Applies to work set up after the call.
+    pub fn set_sky_object_frame(&self, on: bool) {
+        self.sky_object_frame.set(on);
     }
 
     /// Diagnostic: sky cones combine coverage across meshes by the maximum,
@@ -707,6 +744,7 @@ impl MaskConeKernel {
                 self.sky_max.get(),
                 self.sky_prefilter.get(),
                 self.sky_horizon_cull.get(),
+                self.sky_object_frame.get(),
             ),
             objects,
         );
@@ -964,6 +1002,7 @@ impl MaskConeKernel {
                 self.sky_max.get(),
                 self.sky_prefilter.get(),
                 self.sky_horizon_cull.get(),
+                self.sky_object_frame.get(),
             ),
             hierarchy::NONE,
         );
@@ -1126,6 +1165,7 @@ impl MaskConeKernel {
                 self.sky_max.get(),
                 self.sky_prefilter.get(),
                 self.sky_horizon_cull.get(),
+                self.sky_object_frame.get(),
             ),
             hierarchy::NONE,
         );

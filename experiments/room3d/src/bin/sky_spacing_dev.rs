@@ -1,9 +1,11 @@
-//! Development measurement (not a gate): the view cache's sky spacing against
+//! Development measurement (not a gate): the view cache's sky and self spacings against
 //! warm-up cost and accuracy, on the million-boulder field with sky only, at
-//! gate 8's viewpoints. For each spacing: a whole warm-up at a fixed budget
+//! gate 8's viewpoints. For each variant: a whole warm-up at a fixed budget
 //! with every frame profiled (bake time summed), then the warm image against
 //! the per-pixel sky at 1 sample per pixel and at 4×4 per pixel (the area
-//! integral). `cargo run --release -p room3d --bin sky_spacing_dev -- [W H]`
+//! integral). Variants are (sky spacing, self spacing) pairs, as
+//! `VARIANTS="0,0;0,0.01"`.
+//! `cargo run --release -p room3d --bin sky_spacing_dev -- [W H]`
 
 use std::time::Duration;
 
@@ -18,7 +20,24 @@ fn main() {
         .filter_map(|a| a.parse().ok())
         .collect();
     let (w, h) = (*args.first().unwrap_or(&640), *args.get(1).unwrap_or(&360));
+    // (sky spacing, self spacing) pairs, as VARIANTS="0,0;0,0.01".
+    let variants: Vec<(f32, f32)> = std::env::var("VARIANTS")
+        .ok()
+        .map(|v| {
+            v.split(';')
+                .filter_map(|p| {
+                    let (a, b) = p.split_once(',')?;
+                    Some((a.parse().ok()?, b.parse().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![(0.0, 0.0), (0.0, 0.01)]);
+    let stage: u32 = std::env::var("STAGE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let kernel = MaskConeKernel::new().expect("GPU");
+    kernel.set_profile_stage(stage);
     kernel.set_prefilter(1.0);
     kernel.set_sky_prefilter(8.0);
     let field = Field::new(1_000_000, DVec3::ZERO);
@@ -85,7 +104,7 @@ fn main() {
             "{name}: per-pixel 1 spp vs 4×4: {:.2}%",
             100.0 * relative_rmse(&one, &area)
         );
-        for spacing in [0.0f32, 0.02, 0.05, 0.1] {
+        for &(spacing, own) in &variants {
             let mut r = InstancedRenderer::with_cache(
                 &kernel,
                 format,
@@ -99,6 +118,7 @@ fn main() {
                 CacheOptions {
                     frame_target_ms: 0.0,
                     sky_spacing: spacing,
+                    self_spacing: own,
                     sky_sample_cost: 1,
                     ..Default::default()
                 },
@@ -123,7 +143,7 @@ fn main() {
             let samples: u64 = log.iter().map(|s| s.sky_samples as u64).sum();
             let image = r.read_colors();
             println!(
-                "  spacing {spacing} m: {frames} frames, bake {:.0} ms ({texels} texels, {samples} sky samples), vs 1 spp {:.2}%, vs 4×4 {:.2}%",
+                "  sky spacing {spacing} m, self spacing {own} m: {frames} frames, bake {:.0} ms ({texels} texels, {samples} sky samples), vs 1 spp {:.2}%, vs 4×4 {:.2}%",
                 ms(bake),
                 100.0 * relative_rmse(&image, &one),
                 100.0 * relative_rmse(&image, &area)

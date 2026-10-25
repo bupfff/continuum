@@ -12,8 +12,8 @@ use crate::vcache::VirtualCache;
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_VISIBILITY_BINDINGS, InstancedScene, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
-    VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_SHADE_BINDINGS,
-    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_SELF_BAKE_BINDINGS,
+    VC_SHADE_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -32,6 +32,43 @@ pub struct FrameProfile {
     /// Planning the frame's bake on the CPU (from the requests of two frames
     /// before).
     pub planning: Duration,
+}
+
+impl Cache {
+    /// The bake passes with `counts` invocations each (skipping empty ones),
+    /// timed on the GPU where the device has timestamps: the first pass that
+    /// runs writes query 0, the last query 1.
+    fn encode_bake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 4]) {
+        let ran: Vec<usize> = (0..counts.len()).filter(|&k| counts[k] > 0).collect();
+        let set = self.state.timer.as_ref().map(|t| &t.set);
+        for &k in &ran {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: timestamps(set, &ran, k, 0),
+            });
+            pass.set_pipeline(&self.passes[k]);
+            pass.set_bind_group(0, &self.binds[k], &[]);
+            pass.dispatch_workgroups(counts[k].div_ceil(64), 1, 1);
+        }
+    }
+}
+
+/// Timestamp writes for pass `k` of `ran` (the passes that run): the first
+/// writes query `begin`, the last `begin + 1`.
+fn timestamps<'a>(
+    set: Option<&'a wgpu::QuerySet>,
+    ran: &[usize],
+    k: usize,
+    begin: u32,
+) -> Option<wgpu::ComputePassTimestampWrites<'a>> {
+    let first = ran.first() == Some(&k);
+    let last = ran.last() == Some(&k);
+    set.filter(|_| first || last)
+        .map(|query_set| wgpu::ComputePassTimestampWrites {
+            query_set,
+            beginning_of_pass_write_index: first.then_some(begin),
+            end_of_pass_write_index: last.then_some(begin + 1),
+        })
 }
 
 /// The lighting cache's state and its bake passes (table updates, sun
@@ -55,6 +92,8 @@ pub struct InstancedRenderer {
     passes: Vec<(wgpu::ComputePipeline, Vec<u32>)>,
     hw: Option<HwScene>,
     display: wgpu::RenderPipeline,
+    /// An empty pass that timestamps the end of the camera passes.
+    mark: wgpu::ComputePipeline,
     scene: Vec<(u32, wgpu::Buffer)>,
     camera_buf: wgpu::Buffer,
     dims_buf: wgpu::Buffer,
@@ -241,6 +280,7 @@ impl InstancedRenderer {
             passes,
             hw,
             display_bind: display_bind(&device, &display, &colors, &dims_buf),
+            mark: kernel.mark_pipeline_empty.clone(),
             display,
             scene: scene_buffers,
             camera_buf,
@@ -255,7 +295,37 @@ impl InstancedRenderer {
             srgb: target_format.is_srgb(),
         };
         renderer.targets();
+        renderer.bake_self_masks(kernel);
         renderer
+    }
+
+    /// Bakes each geometry's own sky occlusion once (see
+    /// `CacheOptions::self_spacing`), waiting for it.
+    fn bake_self_masks(&mut self, kernel: &MaskConeKernel) {
+        let Some(cache) = &mut self.cache else { return };
+        let count = std::mem::take(&mut cache.state.self_texels);
+        if count == 0 {
+            return;
+        }
+        let all: Vec<(u32, &wgpu::Buffer)> = self
+            .scene
+            .iter()
+            .map(|(b, buf)| (*b, buf))
+            .chain(cache.state.buffers.iter().map(|(b, buf)| (*b, buf)))
+            .collect();
+        let pipeline = &kernel.vc_self_bake_pipeline;
+        let group = bind_group(&self.device, pipeline, &all, None, VC_SELF_BAKE_BINDINGS);
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            let groups = (6 * count).div_ceil(64);
+            // Within the per-dimension dispatch limit.
+            pass.dispatch_workgroups(groups.min(65_535), groups.div_ceil(65_535), 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.wait();
     }
 
     fn colors_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
@@ -313,6 +383,49 @@ impl InstancedRenderer {
             cache.binds = binds;
         }
         self.display_bind = display_bind(device, &self.display, &self.colors, &self.dims_buf);
+    }
+
+    /// Camera pass `k` (of `passes`), timed on the GPU where the cache has
+    /// timestamps: the first pass writes query 2 as it begins.
+    fn encode_camera_pass(&self, encoder: &mut wgpu::CommandEncoder, k: usize) {
+        let set = self
+            .cache
+            .as_ref()
+            .and_then(|c| c.state.timer.as_ref())
+            .map(|t| &t.set);
+        let (pipeline, _) = &self.passes[k];
+        // Only the first writes (query 2); the display pass ends the span.
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: set.filter(|_| k == 0).map(|query_set| {
+                wgpu::ComputePassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(2),
+                    end_of_pass_write_index: None,
+                }
+            }),
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &self.binds[k], &[]);
+        pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+    }
+
+    /// Where the cache has timestamps: an empty pass whose beginning writes
+    /// query 3, ending the camera passes' span.
+    fn encode_camera_end(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(timer) = self.cache.as_ref().and_then(|c| c.state.timer.as_ref()) else {
+            return;
+        };
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("camera end"),
+            timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                query_set: &timer.set,
+                beginning_of_pass_write_index: Some(3),
+                end_of_pass_write_index: None,
+            }),
+        });
+        pass.set_pipeline(&self.mark);
+        pass.dispatch_workgroups(1, 1, 1);
     }
 
     /// Call when the surface size changes.
@@ -376,26 +489,25 @@ impl InstancedRenderer {
                 self.height,
                 camera.vertical_fov_degrees,
             );
-            for ((pipeline, group), count) in cache.passes.iter().zip(&cache.binds).zip(counts) {
-                if count == 0 {
-                    continue;
-                }
-                let mut pass = encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
-            }
+            cache.encode_bake(&mut encoder, counts);
         }
-        for ((pipeline, _), group) in self.passes.iter().zip(&self.binds) {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+        for k in 0..self.passes.len() {
+            self.encode_camera_pass(&mut encoder, k);
         }
+        self.encode_camera_end(&mut encoder);
         if let Some(cache) = &mut self.cache {
             cache.state.encode_readback(&mut encoder);
         }
-        crate::live::encode_display(&mut encoder, &self.display, &self.display_bind, target);
+        crate::live::encode_display(
+            &mut encoder,
+            &self.display,
+            &self.display_bind,
+            target,
+            None,
+        );
+        if let Some(cache) = &self.cache {
+            cache.state.encode_timestamps(&mut encoder);
+        }
         let index = self.queue.submit([encoder.finish()]);
         if let Some(cache) = &mut self.cache {
             cache.state.after_submit(index);
@@ -447,28 +559,15 @@ impl InstancedRenderer {
                 self.height,
                 camera.vertical_fov_degrees,
             );
-            for ((pipeline, group), count) in cache.passes.iter().zip(&cache.binds).zip(counts) {
-                if count == 0 {
-                    continue;
-                }
-                let mut pass = encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
-            }
+            cache.encode_bake(&mut encoder, counts);
         }
         self.queue.submit([encoder.finish()]);
         self.wait();
         profile.bake = start.elapsed();
-        for (k, ((pipeline, _), group)) in self.passes.iter().zip(&self.binds).enumerate() {
+        for k in 0..self.passes.len() {
             let start = Instant::now();
             let mut encoder = self.device.create_command_encoder(&Default::default());
-            {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
-            }
+            self.encode_camera_pass(&mut encoder, k);
             let commands = encoder.finish();
             let submit = Instant::now();
             self.queue.submit([commands]);
@@ -484,9 +583,21 @@ impl InstancedRenderer {
         let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if let Some(cache) = &mut self.cache {
+            // Split into submissions, its GPU timings would mislead the bake
+            // budget.
+            cache.state.untimed();
             cache.state.encode_readback(&mut encoder);
         }
-        crate::live::encode_display(&mut encoder, &self.display, &self.display_bind, target);
+        crate::live::encode_display(
+            &mut encoder,
+            &self.display,
+            &self.display_bind,
+            target,
+            None,
+        );
+        if let Some(cache) = &self.cache {
+            cache.state.encode_timestamps(&mut encoder);
+        }
         let index = self.queue.submit([encoder.finish()]);
         if let Some(cache) = &mut self.cache {
             cache.state.after_submit(index);

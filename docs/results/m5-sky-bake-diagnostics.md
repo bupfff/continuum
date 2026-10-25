@@ -53,7 +53,13 @@ fixed budget, each frame profiled (first 12 frames after 4 warm-up frames):
   Without subgroups (`KernelOptions::without_packets`, or a device without
   them), each invocation is its own packet.
 - **Results are bit-identical** with and without packets, per pixel and
-  through the cache (`packet_check`).
+  through a warm cache (`packet_check`).
+  - A cache still warming differs from run to run, packets or not. When
+    several pixels request a page in one frame, whichever request lands
+    first sets its priority, and so the order in which pages arrive.
+  - An earlier version of this check compared caches after 80 frames, which
+    happened to be warm before sky samples became separate jobs. Corrected
+    the same day.
 - **The union is large.** A packet visits 2.6× the object nodes and 12–22×
   the triangle-hierarchy nodes its invocations need. Neighbouring texels'
   near fields barely overlap.

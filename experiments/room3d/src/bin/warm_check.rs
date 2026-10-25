@@ -1,6 +1,7 @@
 //! Quick check (not a gate): the million-boulder field's sun-only cache warmed
 //! at the standing viewpoint, as M4 gate 11's hardware row, with the current
 //! build. Prints the ray mode, frames until warm and the warm frame time.
+//! `--sky` adds the field's sky; `--flight` then flies gate 8's path once.
 
 use std::time::Instant;
 
@@ -10,7 +11,12 @@ use room3d::field::Field;
 
 fn main() {
     let sky = std::env::args().any(|a| a == "--sky");
-    let kernel = MaskConeKernel::new().expect("GPU");
+    let kernel = MaskConeKernel::new_with(continuum_gpu::KernelOptions {
+        count_work: std::env::var("COUNT").is_ok(),
+        without_packets: std::env::var("SOLO").is_ok(),
+        ..Default::default()
+    })
+    .expect("GPU");
     kernel.set_prefilter(1.0);
     kernel.set_sky_prefilter(8.0);
     let field = Field::new(1_000_000, DVec3::ZERO);
@@ -85,4 +91,89 @@ fn main() {
     );
     let p = r.frame_profiled(camera, &target);
     println!("profile: {p:?}");
+    if std::env::args().any(|a| a == "--flight") {
+        drop(r);
+        // Gate 8's flight from an empty cache, once.
+        let mut r = InstancedRenderer::with_cache(
+            &kernel,
+            format,
+            1280,
+            720,
+            1,
+            light,
+            &field.scene,
+            origin,
+            field.radiance,
+            CacheOptions::default(),
+        );
+        let forward = (camera.target - camera.eye).normalize();
+        let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
+        let mut times = Vec::new();
+        let start = Instant::now();
+        for f in 0..600 {
+            let t = f as f32 / 599.0;
+            let d = (45.0 * t).to_radians();
+            let eye = Vec3::new(camera.eye.x, camera.eye.y, 1.7 + 148.3 * t) + flat * 300.0 * t;
+            let view = continuum_gpu::Camera {
+                eye,
+                target: eye + flat * d.cos() - Vec3::Z * d.sin(),
+                vertical_fov_degrees: camera.vertical_fov_degrees,
+            };
+            let call = Instant::now();
+            r.frame(view, &target);
+            times.push(call.elapsed().as_secs_f64() * 1e3);
+        }
+        r.finish();
+        let mean = start.elapsed().as_secs_f64() * 1e3 / 600.0;
+        times.sort_by(f64::total_cmp);
+        let log = r.cache_log();
+        let fallback = log
+            .iter()
+            .map(|s| s.fallback_pixels as f64 / (1280.0 * 720.0))
+            .sum::<f64>()
+            / log.len() as f64;
+        let samples: u64 = log.iter().map(|s| s.sky_samples as u64).sum();
+        if std::env::var("FRAMES").is_ok() {
+            let from: usize = std::env::var("FRAMES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(480);
+            for s in &log[from..(from + 120).min(600)] {
+                println!(
+                    "    frame {}: spent {}, pages {}, texels {}, sky samples {}, GPU bake {:.2} ms, camera {:.2} ms, work {:?}",
+                    s.frame,
+                    s.spent,
+                    s.pages_baked,
+                    s.texels_baked,
+                    s.sky_samples,
+                    s.gpu_bake_ms,
+                    s.gpu_render_ms,
+                    s.work
+                );
+            }
+        }
+        for (k, chunk) in log.chunks(100).enumerate() {
+            let fb = chunk
+                .iter()
+                .map(|s| s.fallback_pixels as f64 / (1280.0 * 720.0))
+                .sum::<f64>()
+                / chunk.len() as f64;
+            let n = chunk.len() as f64;
+            let budget = chunk.iter().map(|s| s.budget as f64).sum::<f64>() / n;
+            let bake = chunk.iter().map(|s| s.gpu_bake_ms as f64).sum::<f64>() / n;
+            let render = chunk.iter().map(|s| s.gpu_render_ms as f64).sum::<f64>() / n;
+            println!(
+                "  frames {}–{}: fallback {:.2}%, budget {budget:.0}, GPU bake {bake:.2} ms, camera passes {render:.2} ms",
+                100 * k,
+                100 * k + chunk.len() - 1,
+                100.0 * fb
+            );
+        }
+        println!(
+            "flight: mean {mean:.2} ms, p99 {:.2} ms, worst {:.2} ms, fallback {:.2}%, sky samples {samples}",
+            times[593],
+            times[599],
+            100.0 * fallback
+        );
+    }
 }

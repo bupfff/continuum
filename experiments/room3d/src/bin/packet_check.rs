@@ -1,7 +1,10 @@
 //! Check (not a gate): packet traversal must not change any result. Renders
 //! the million-boulder field per pixel with sun and sky (320×180), and warms
-//! the lighting cache at the standing viewpoint (1280×720), with invocations
-//! walking alone and in packets, and compares bit for bit. Also reports how
+//! the lighting cache at the standing viewpoint (1280×720) until no page is
+//! requested, with kernels whose invocations walk alone and in packets, and
+//! compares bit for bit. (The cache's bakes walk alone in both since M5 gate
+//! 5; a cache still warming differs run to run, as pages arrive in an order
+//! set by which pixel's request lands first.) Also reports how
 //! far the sky's horizon cull moves the per-pixel image.
 
 use continuum::glam::DVec3;
@@ -75,9 +78,18 @@ fn main() {
                 ..Default::default()
             },
         );
-        // A fixed budget, so both runs bake the same pages in the same frames.
-        for _ in 0..80 {
+        // Until warm: which pages arrive when depends on which pixel's
+        // request lands first, but a warm cache does not.
+        loop {
             r.frame(camera, &target);
+            let latest = r.cache_stats().unwrap().frame as usize;
+            if latest >= 16
+                && r.cache_log()[latest - 16..latest]
+                    .iter()
+                    .all(|s| s.requests == 0 && s.pages_baked == 0)
+            {
+                break;
+            }
         }
         r.finish();
         r.read_colors()
@@ -103,5 +115,8 @@ fn main() {
     let ca = cached(&solo);
     let cb = cached(&packets);
     let same = ca.iter().zip(&cb).all(|(x, y)| x == y);
-    println!("cache after 80 frames, solo vs packets: bit-identical: {same}");
+    println!(
+        "warm cache, solo kernel vs packets kernel: bit-identical: {same} ({:.5}% apart)",
+        100.0 * relative_rmse(&ca, &cb)
+    );
 }
