@@ -64,6 +64,28 @@ radiance, so `set_light_radiance` re-colors a light with no bake. Three
 lights on the field, a warm sun, a cool fill and an orange lamp, are within
 1.2% of Cycles, and flights over them average 14–15 ms (M5 gate 6).
 
+### Your own scenes (glTF)
+
+`continuum_gltf::load` imports glTF 2.0 files (`.gltf`, `.glb`) as instanced
+scenes:
+
+- meshes and node instances;
+- base color factors and textures, sampled per pixel at the pixel's
+  footprint;
+- automatic charts for the lighting cache.
+
+A textured scene imported this way is within 0.43% of Cycles with the same
+textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Materials are
+diffuse only for now: metallic and roughness, normal maps, alpha and the
+file's lights are ignored.
+
+```bash
+cargo run --release -p room3d --bin gltf_view -- scene.glb
+```
+
+This renders a file lit by a sun and a sky, per pixel and through the cache,
+into `experiments/room3d/out/`.
+
 Measured offscreen at 1280×720 with hardware rays (M4 gate 11):
 
 - Warm views take 6.5–8 ms per frame.
@@ -122,6 +144,7 @@ relative RMSE (M3 gate 3).
   error ledger, 3D pyramid cones with exact per-bin rasterization, a BVH, and
   meshes with charts and smooth normals (`mesh::Surface`).
 - `crates/continuum-gpu`: wgpu compute backend (mask cones in WGSL, lighting cache, live renderer).
+- `crates/continuum-gltf`: glTF 2.0 import and export.
 - `apps/viewer`: the real-time viewer.
 - `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
 - `experiments/room3d`: 3D experiments on triangle scenes (milestones M1–M3),

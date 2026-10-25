@@ -1605,7 +1605,7 @@ fn camera_uniform(camera: Camera, width: u32, height: u32, radiance: f32) -> Cam
 /// Shared geometry placed many times (instancing), in a world that may be far
 /// larger than f32 positions can resolve: positions are f64 and are uploaded
 /// relative to a render origin.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct InstancedScene {
     /// Unique geometries, each with per-vertex shading normals.
     pub geometries: Vec<Surface>,
