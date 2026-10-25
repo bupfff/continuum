@@ -64,6 +64,14 @@ radiance, so `set_light_radiance` re-colors a light with no bake. Three
 lights on the field, a warm sun, a cool fill and an orange lamp, are within
 1.2% of Cycles, and flights over them average 14–15 ms (M5 gate 6).
 
+Texels store each light's shadowed share of its unshadowed light, and each
+pixel applies its own normal (M5 gate 7). This halves the cache's error
+against per-pixel cones. It also doubles the shading cost, so flights with
+three lights average 16–18 ms for now.
+
+Point lights with a size and spot lights (glTF's falloff) work too, per
+pixel and cached, and glTF files bring their own. They are not gated yet.
+
 ### Your own scenes (glTF)
 
 `continuum_gltf::load` imports glTF 2.0 files (`.gltf`, `.glb`) as instanced
