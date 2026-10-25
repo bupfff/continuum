@@ -20,6 +20,21 @@ use continuum_gpu::{Camera, InstancedScene, Light, RectLight};
 /// Writes the surfaces as an OBJ: object `mesh_<index>` per surface, with
 /// per-vertex normals; coordinates as they are (Z up, meters).
 pub fn write_obj(surfaces: &[Surface], path: &Path) -> io::Result<()> {
+    std::fs::write(path, obj_text(surfaces))
+}
+
+/// Writes `bytes` to `path` unless it holds them already. Returns whether it
+/// wrote.
+fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<bool> {
+    if std::fs::read(path).is_ok_and(|old| old == bytes) {
+        return Ok(false);
+    }
+    std::fs::write(path, bytes)?;
+    Ok(true)
+}
+
+/// The surfaces as OBJ text (see [`write_obj`]).
+fn obj_text(surfaces: &[Surface]) -> String {
     let mut out = String::from("# Exported from Continuum. Z up, meters.\n");
     let mut next = 1;
     for (m, s) in surfaces.iter().enumerate() {
@@ -67,7 +82,7 @@ pub fn write_obj(surfaces: &[Surface], path: &Path) -> io::Result<()> {
             next += 3;
         }
     }
-    std::fs::write(path, out)
+    out
 }
 
 /// A Cycles reference render.
@@ -209,26 +224,30 @@ pub fn render_instanced_lights(
     work: &Path,
 ) -> io::Result<Reference> {
     std::fs::create_dir_all(work)?;
+    // Whether any input differs from what the work directory holds: a
+    // result is reused only when every input and the job are unchanged.
+    let mut changed = false;
     let mut geometries = Vec::new();
     for (g, surface) in scene.geometries.iter().enumerate() {
-        // Always rewritten: a file left from another scene in the same
+        // Always checked: a file left from another scene in the same
         // directory would otherwise stand in for this one's geometry.
         let path = work.join(format!("geometry_{g}.obj"));
-        write_obj(std::slice::from_ref(surface), &path)?;
+        changed |= write_if_changed(&path, obj_text(std::slice::from_ref(surface)).as_bytes())?;
         geometries.push(format!("{:?}", path.to_string_lossy()));
     }
     // Base color textures as PNG, and each geometry's (or null).
     let mut texture_paths = Vec::new();
     for (k, t) in scene.textures.iter().enumerate() {
         let path = work.join(format!("texture_{k}.png"));
-        let file = std::fs::File::create(&path)?;
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), t.width, t.height);
+        let mut png_bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png_bytes, t.width, t.height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         encoder
             .write_header()
             .and_then(|mut w| w.write_image_data(&t.rgba))
             .map_err(io::Error::other)?;
+        changed |= write_if_changed(&path, &png_bytes)?;
         texture_paths.push(format!("{:?}", path.to_string_lossy()));
     }
     let geometry_textures: Vec<String> = (0..scene.geometries.len())
@@ -253,7 +272,7 @@ pub fn render_instanced_lights(
         raw.extend(i.albedo.to_array());
     }
     let bytes: Vec<u8> = raw.iter().flat_map(|v| v.to_le_bytes()).collect();
-    std::fs::write(&instances, bytes)?;
+    changed |= write_if_changed(&instances, &bytes)?;
     let v = |p: Vec3| format!("[{}, {}, {}]", p.x, p.y, p.z);
     let light_list: Vec<String> = lights
         .iter()
@@ -297,8 +316,39 @@ pub fn render_instanced_lights(
         camera.vertical_fov_degrees
     );
     let job_path = work.join(format!("{tag}.json"));
-    std::fs::write(&job_path, job)?;
+    changed |= write_if_changed(&job_path, job.as_bytes())?;
+    if !changed && let Some(reference) = reuse(&out, (width * height) as usize) {
+        return Ok(reference);
+    }
     run_blender("cycles/render_instanced_reference.py", &job_path, &out)
+}
+
+/// A finished render of `pixels` pixels in `out`, when its inputs are
+/// unchanged: its render time and device come from the log line kept beside
+/// it (unknown for renders from before logs were kept).
+fn reuse(out: &Path, pixels: usize) -> Option<Reference> {
+    let raw = std::fs::read(out).ok()?;
+    if raw.len() != pixels * 12 {
+        return None;
+    }
+    let line = std::fs::read_to_string(out.with_extension("log")).unwrap_or_default();
+    let field = |name: &str| {
+        line.split_whitespace()
+            .find_map(|f| f.strip_prefix(&format!("{name}=")))
+            .unwrap_or("")
+            .to_string()
+    };
+    let values: Vec<f32> = raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect();
+    Some(Reference {
+        pixels: values.as_chunks::<3>().0.to_vec(),
+        seconds: field("seconds").parse().unwrap_or(f64::NAN),
+        device: format!("{} (reused)", field("device")),
+    })
 }
 
 /// Runs a reference script in a background Blender and reads its output,
@@ -327,6 +377,7 @@ fn run_blender_once(script: &str, job_path: &Path, out: &Path) -> io::Result<Ref
             String::from_utf8_lossy(&result.stderr)
         )));
     };
+    std::fs::write(out.with_extension("log"), line)?;
     let field = |name: &str| {
         line.split_whitespace()
             .find_map(|f| f.strip_prefix(&format!("{name}=")))

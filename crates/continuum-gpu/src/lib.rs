@@ -102,7 +102,7 @@ pub use hierarchy::Hierarchy;
 pub use instanced::{FrameProfile, InstancedRenderer};
 pub use lightmap::{BLOCK, BLOCK_PLANES, Lightmap, hemicube_weights};
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
-pub use vcache::{CacheOptions, CacheStats};
+pub use vcache::{CacheOptions, CachePage, CacheStats};
 
 use hierarchy::{Placement, flatten, flatten_instanced, mesh_hierarchy, object_hierarchy};
 

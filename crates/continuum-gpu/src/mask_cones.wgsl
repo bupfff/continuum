@@ -943,11 +943,15 @@ fn cone_visible(c: Cone, normal: vec3<f32>, cov: ptr<function, array<f32, 64>>) 
             + lambert_edge(normal, d11, d01) + lambert_edge(normal, d01, d00)));
         return max(total - blocked, 0.0);
     }
-    var visible = 0.0;
+    // The window crosses the horizon: the window and each covered bin are
+    // clipped to it, as for sky faces. (Summing every bin's unclipped
+    // weight, as before, counted bins below the horizon as light.)
+    var blocked = 0.0;
     for (var b = 0u; b < BINS; b++) {
-        visible += (1.0 - (*cov)[b]) * bin_weight(c, normal, b);
+        let covered = (*cov)[b];
+        if (covered > 0.0) { blocked += covered * clipped_bin_weight(c, normal, b); }
     }
-    return visible;
+    return max(clipped_window_weight(c, normal) - blocked, 0.0);
 }
 
 // Irradiance per unit radiance at `apex` (surface normal `normal`) from the
@@ -1496,6 +1500,18 @@ fn hit_irradiance_rect(on: bool, pixel: u32, point: vec3<f32>, normal: vec3<f32>
 }
 
 // Direct light at a hit from every light in the list (RGB).
+// The unshadowed irradiance per unit radiance from light `r` at `point`
+// (normal `normal`): the light's window clipped to the horizon, which is
+// `cone_visible` with nothing covered, so a texel no geometry shadows has a
+// ratio of one; 0 where `hit_irradiance_rect` traces nothing.
+fn unshadowed_rect(point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
+    let to_light = r.corner.xyz + (r.edge_u.xyz + r.edge_v.xyz) * 0.5 - point;
+    if (dot(normal, to_light) <= 0.0) { return 0.0; }
+    let lc = light_cone_rect(point, r);
+    if (!lc.ok) { return 0.0; }
+    return clipped_window_weight(lc.c, normal);
+}
+
 fn lights_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     var e = vec3<f32>(0.0);
     for (var l = 0u; l < arrayLength(&lights); l++) {
@@ -2029,7 +2045,8 @@ struct VcParams {
     // x: 1 / base texel size, y: radians per pixel (camera), z: pixels per texel, w: 0
     params: vec4<f32>,
     // x: sky samples to bake (each as six face jobs), y: 1 with a sky, z: lights
-    // (a texel holds one channel per light, then the sky's), w: 0
+    // (a texel holds one channel per light, then the sky's), w: 1 if light
+    // channels hold ratios (`CacheOptions::light_ratio`)
     sky: vec4<u32>,
 };
 
@@ -2288,8 +2305,16 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let s = vc_surface(t.m, t.c, t.n, t.texel);
     let on = listed && t.inside && s.ok;
     let value = hit_irradiance_rect(on, 0u, s.apex, s.normal, lights[l]);
+    // With `light_ratio`, the texel keeps its light's shadowed share of the
+    // unshadowed light, and shading multiplies that by the unshadowed light
+    // at the pixel, with the pixel's own normal (a ratio estimator). Where
+    // the light is below the texel's horizon, the texel's own light is zero
+    // whatever the ratio; a ratio of one leaves pixels nearby that face the
+    // light unshadowed, as on a convex object's terminator.
+    let open = unshadowed_rect(s.apex, s.normal, lights[l]);
+    let ratio = select(select(1.0, clamp(value / open, 0.0, 1.0), open > 0.0), 0.0, !on);
     if (listed && t.inside) {
-        pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(0.0, value, on);
+        pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(select(0.0, value, on), ratio, vc.sky.w == 1u);
     }
     if (COUNT_WORK) {
         for (var k = 0u; k < 4u; k++) {
@@ -2566,27 +2591,29 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
             }
             var e = vec3<f32>(0.0);
             let count = arrayLength(&lights);
+            let point = surface + hit.normal * surface_offset(hit.distance);
+            let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
             if (found) {
+                // Each light's cached shadowed share, times its unshadowed
+                // light here.
                 for (var l = 0u; l < count; l++) {
-                    e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
+                    if (vc.sky.w == 1u) {
+                        let open = unshadowed_rect(point, normal, lights[l]);
+                        if (open > 0.0) {
+                            e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l) * open;
+                        }
+                    } else {
+                        e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
+                    }
                 }
                 e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
             } else {
                 fell_back = true;
                 request_key = finer;
                 request_priority = 1u;
-                let point = surface + hit.normal * surface_offset(hit.distance);
-                let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
                 // Unshadowed light from each light.
                 for (var l = 0u; l < count; l++) {
-                    let r = lights[l];
-                    let to_light = r.corner.xyz + (r.edge_u.xyz + r.edge_v.xyz) * 0.5 - point;
-                    let lc = light_cone_rect(point, r);
-                    if (lc.ok && dot(normal, to_light) > 0.0) {
-                        var cov: array<f32, 64>;
-                        for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
-                        e += r.radiance.xyz * cone_visible(lc.c, normal, &cov);
-                    }
+                    e += lights[l].radiance.xyz * unshadowed_rect(point, normal, lights[l]);
                 }
                 // The sky above the horizon, with the ground below it: a
                 // guess until a page arrives.

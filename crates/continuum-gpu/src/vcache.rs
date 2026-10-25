@@ -98,6 +98,11 @@ pub struct CacheOptions {
     /// holds at most 2^20 (384 MB). A geometry whose grid would exceed 1,024
     /// texels along a chart walks itself.
     pub self_spacing: f32,
+    /// Each light's texels hold the shadowed share of its unshadowed light,
+    /// and shading multiplies that by the unshadowed light at the pixel, with
+    /// the pixel's own normal (M5 gate 7); otherwise they hold irradiance,
+    /// interpolated as it is (as before).
+    pub light_ratio: bool,
 }
 
 impl Default for CacheOptions {
@@ -112,6 +117,7 @@ impl Default for CacheOptions {
             sky_spacing: 0.0,
             sky_sample_cost: 10,
             self_spacing: 0.01,
+            light_ratio: true,
         }
     }
 }
@@ -378,6 +384,24 @@ fn hash(k: [u32; 3]) -> u32 {
     h = h.wrapping_mul(0x2C1B_3C6D);
     h ^= h >> 12;
     h
+}
+
+/// A resident page as read back for diagnostics
+/// ([`crate::InstancedRenderer::read_cache_pages`]).
+#[derive(Clone, Debug)]
+pub struct CachePage {
+    pub object: u32,
+    pub chart: u32,
+    pub mip: u32,
+    pub page: [u32; 2],
+    /// Texels along u and v inside the chart's grid (those past it repeat
+    /// the nearest inside).
+    pub inside: [u32; 2],
+    /// Texel spacing in world units.
+    pub texel: f32,
+    /// One channel, 9 × 9 texels in rows of 9: a light's shadowed share of
+    /// its unshadowed light, or the sky's irradiance per unit radiance.
+    pub texels: Vec<f32>,
 }
 
 /// A page's key, (object, chart | mip << 16, page x | page y << 16), unpacked.
@@ -759,10 +783,11 @@ impl VirtualCache {
             (
                 37,
                 // Per texel, a channel per light and the sky's.
+                // Copied out only by diagnostics (`read_pages`).
                 empty(
                     "page pool",
                     options.pages as u64 * PAGE_TEXELS as u64 * channels as u64 * 4,
-                    wgpu::BufferUsages::empty(),
+                    wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
             (38, empty("bake list", budget * 16, copy_dst)),
@@ -964,6 +989,52 @@ impl VirtualCache {
         [(n.x as u32).max(1), (n.y as u32).max(1)]
     }
 
+    /// Diagnostics: every resident page with channel `ch` of its texels, read
+    /// back now (waiting for all GPU work).
+    pub(crate) fn read_pages(&self, device: &wgpu::Device, ch: u32) -> Vec<CachePage> {
+        let pool = self.buffer(37);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pool readback"),
+            size: pool.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(pool, 0, &readback, 0, None);
+        let index = self.queue.submit([encoder.finish()]);
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+        let raw = map_wait(device, &readback, index);
+        let values: &[f32] = bytemuck::cast_slice(&raw);
+        let channels = (self.lights + self.sky as u32) as usize;
+        let mut pages = Vec::new();
+        for (slot, &k) in self.slot_key.iter().enumerate() {
+            if k[0] == EMPTY {
+                continue;
+            }
+            let (m, c, mip, page) = unpack(k);
+            let n = self.grid(c, m, mip);
+            let inside = [
+                (n[0] - (page[0] * PAGE).min(n[0])).min(STRIDE),
+                (n[1] - (page[1] * PAGE).min(n[1])).min(STRIDE),
+            ];
+            let first = slot * PAGE_TEXELS as usize;
+            pages.push(CachePage {
+                object: m,
+                chart: c,
+                mip,
+                page,
+                inside,
+                texel: self.options.base_texel * self.scale[m as usize] * (1u64 << mip.min(40)) as f32,
+                texels: (0..PAGE_TEXELS as usize)
+                    .map(|t| values[(first + t) * channels + ch as usize])
+                    .collect(),
+            });
+        }
+        pages
+    }
+
     /// The sky stride of pages on object `m` at `mip`: the largest of 1, 2,
     /// 4 and 8 whose spacing stays within `sky_spacing`.
     fn sky_stride(&self, m: u32, mip: u32) -> u32 {
@@ -1037,7 +1108,7 @@ impl VirtualCache {
                 self.sky_samples.len() as u32,
                 self.sky as u32,
                 self.lights,
-                0,
+                self.options.light_ratio as u32,
             ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));

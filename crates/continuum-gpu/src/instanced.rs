@@ -707,6 +707,15 @@ impl InstancedRenderer {
         profile
     }
 
+    /// Diagnostics: every page resident in the lighting cache with channel
+    /// `channel` of its texels (one per light, then the sky's). Waits for the
+    /// GPU; empty without a cache.
+    pub fn read_cache_pages(&self, channel: u32) -> Vec<crate::CachePage> {
+        self.cache
+            .as_ref()
+            .map_or(Vec::new(), |c| c.state.read_pages(&self.device, channel))
+    }
+
     /// The last frame's linear colors (waits for the GPU).
     pub fn read_colors(&self) -> Vec<[f32; 3]> {
         let size = self.colors.size();

@@ -81,7 +81,14 @@ fn main() {
         })
         .create_view(&Default::default());
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
-    for (name, camera) in views {
+    // VIEWS="0,1" picks viewpoints (all by default).
+    let picked: Vec<usize> = std::env::var("VIEWS")
+        .map(|v| v.split(',').filter_map(|k| k.parse().ok()).collect())
+        .unwrap_or_else(|_| (0..views.len()).collect());
+    for (k, (name, camera)) in views.into_iter().enumerate() {
+        if !picked.contains(&k) {
+            continue;
+        }
         kernel.set_hardware_rays(false);
         let one = kernel
             .render_instanced(camera, w, h, light, &field.scene, origin, 0.0, 1)
