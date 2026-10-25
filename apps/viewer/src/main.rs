@@ -13,7 +13,8 @@
 //! (a million instanced boulders, about ten billion triangles, lit by a sun
 //! through a view-dependent lighting cache baked as you look around;
 //! `--boulders N` to change the count, `--scale N` to render at 1/N of the
-//! window, `--no-cache` for a mask cone per pixel every frame).
+//! window, `--sky` to add a blue-white sky (experimental: slow to warm up),
+//! `--no-cache` for a mask cone per pixel every frame).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path, P to pause moving objects,
@@ -63,6 +64,8 @@ struct World {
     /// Light the field through the view-dependent lighting cache (otherwise a
     /// mask cone per pixel every frame).
     cache: bool,
+    /// Add a sky to the field (with the cache only).
+    sky: bool,
 }
 
 impl World {
@@ -85,6 +88,7 @@ impl World {
             field: None,
             scale: 1,
             cache: true,
+            sky: false,
         }
     }
 
@@ -108,6 +112,7 @@ impl World {
             field: Some(field),
             scale: 1,
             cache: true,
+            sky: false,
         }
     }
 
@@ -141,6 +146,7 @@ impl World {
             field: None,
             scale: 1,
             cache: true,
+            sky: false,
         }
     }
 
@@ -308,6 +314,14 @@ impl App {
             MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
         if let Some(field) = &world.field {
             kernel.set_prefilter(1.0);
+            // `--sky`: a blue-white sky (M5), baked into the view cache, sky
+            // cones prefiltered 8× as coarsely. Experimental: sky texels cost
+            // about 100× sun texels, and the cache's budget floor makes
+            // warm-up slow (M5 gate 4).
+            if world.cache && world.sky {
+                kernel.set_sky(field.sky());
+                kernel.set_sky_prefilter(8.0);
+            }
             let start = Instant::now();
             let origin = field.origin_near_camera();
             let renderer = if world.cache {
@@ -615,6 +629,7 @@ fn main() {
     let mut world = world;
     world.scale = arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1);
     world.cache = !std::env::args().any(|a| a == "--no-cache");
+    world.sky = std::env::args().any(|a| a == "--sky");
     let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
     let camera = FlyCamera::looking_at(world.start.0, world.start.1);
     let mut app = App {

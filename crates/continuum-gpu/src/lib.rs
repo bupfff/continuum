@@ -140,6 +140,7 @@ pub struct RectLight {
 }
 
 impl RectLight {
+    #[allow(clippy::too_many_arguments)]
     fn uniform(
         &self,
         meshes: usize,

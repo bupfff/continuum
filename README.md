@@ -53,6 +53,8 @@ Flags:
 - `--scale N` renders at 1/N of the window.
 - `--no-cache` lights every pixel with its own mask cone every frame, as
   before.
+- `--sky` adds a blue-white sky. This is experimental: sky texels cost about
+  100× sun texels, so the view warms up slowly (M5 gate 4).
 
 Measured offscreen at 1280×720 with hardware rays (M4 gate 11):
 
