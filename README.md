@@ -54,11 +54,13 @@ Flags:
 - `--no-cache` lights every pixel with its own mask cone every frame, as
   before.
 
-Measured offscreen at 1280×720 with hardware rays (M4 gate 9):
+Measured offscreen at 1280×720 with hardware rays (M4 gate 11):
 
-- Once a view has warmed, frames take 2.9–4.7 ms.
-- Flying averages 12.8 ms per frame. While new surfaces come into view, the
-  CPU page manager sometimes spikes frames to 34–92 ms.
+- Warm views take 6.5–8 ms per frame.
+- A 600-frame flight from standing height to 150 m averages 14.6–15.0 ms,
+  with 99th-percentile frames under 33 ms.
+- The bake follows a 14 ms frame target. While flying, lighting comes from
+  coarser pages (softer shadows) and sharpens when the view settles.
 - The far field aliases, with one ray per pixel.
 
 Pixel-footprint cones are planned for the aliasing. Getting these numbers

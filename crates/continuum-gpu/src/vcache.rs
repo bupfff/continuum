@@ -36,9 +36,14 @@ pub const PAGE: u32 = 8;
 const STRIDE: u32 = PAGE + 1;
 const PAGE_TEXELS: u32 = STRIDE * STRIDE;
 const EMPTY: u32 = u32::MAX;
-/// Pages freed per eviction round at most (the least recently used first), so
-/// one round's table changes stay within a frame's update pass.
-const EVICT_MAX: usize = 32_768;
+/// Pages freed per frame at most from the eviction queue (the least recently
+/// used first), so eviction never stalls a frame (M4 gate 11).
+const EVICT_PER_FRAME: usize = 2_048;
+/// Pages unused for this many frames are evicted.
+const EVICT_AGE: u32 = 64;
+/// The adaptive bake budget's floor and starting point (cones per frame).
+const MIN_BUDGET: f32 = 1_000.0;
+const START_BUDGET: f32 = 8_000.0;
 const NONE: u32 = u32::MAX;
 /// Longest probe sequence the shader follows.
 const MAX_PROBE: usize = 64;
@@ -59,6 +64,11 @@ pub struct CacheOptions {
     pub request_tile: u32,
     /// Texels (mask cones) baked per frame at most.
     pub bake_budget: u32,
+    /// The frame period the bake aims for, in milliseconds (0: always bake
+    /// `bake_budget`). When the CPU had to wait for the GPU and the last frame
+    /// took longer, the budget scales by target / period; when a frame is
+    /// quicker, it grows by 10%; between 1,000 and `bake_budget` cones.
+    pub frame_target_ms: f32,
     /// Pages the pool holds.
     pub pages: u32,
 }
@@ -69,7 +79,8 @@ impl Default for CacheOptions {
             base_texel: 0.005,
             pixels_per_texel: 2.0,
             request_tile: 4,
-            bake_budget: 8_000,
+            bake_budget: 20_000,
+            frame_target_ms: 14.0,
             pages: 1 << 19,
         }
     }
@@ -101,6 +112,8 @@ pub struct CacheStats {
     pub planning: Duration,
     /// Of that work, eviction (merging slot use, freeing pages).
     pub evicting: Duration,
+    /// The bake budget the frame planned with (cones).
+    pub budget: u32,
     /// Time spent waiting for the GPU to finish the frame two before, whose
     /// requests the plan reads.
     pub waiting: Duration,
@@ -397,6 +410,12 @@ pub(crate) struct VirtualCache {
     /// The frame and submission whose slot use `used_readback` holds.
     used_pending: Option<(u32, wgpu::SubmissionIndex)>,
     used_requested: bool,
+    /// The current bake budget (cones per frame), and when the last frame
+    /// began (for its period).
+    budget: f32,
+    last_begin: Option<Instant>,
+    /// Slots to free, least recently used last (popped first).
+    evict_queue: Vec<u32>,
 }
 
 impl VirtualCache {
@@ -537,6 +556,13 @@ impl VirtualCache {
             used_readback,
             used_pending: None,
             used_requested: false,
+            budget: if options.frame_target_ms > 0.0 {
+                START_BUDGET.min(options.bake_budget as f32)
+            } else {
+                options.bake_budget as f32
+            },
+            last_begin: None,
+            evict_queue: Vec::new(),
         };
         cache.resize(device, width, height);
         cache
@@ -677,6 +703,7 @@ impl VirtualCache {
             resident: self.map.len() as u32,
             evicted: std::mem::take(&mut self.evicted),
             planning: std::mem::take(&mut self.planning),
+            budget: self.budget as u32,
             evicting: std::mem::take(&mut self.evicting),
             waiting: std::mem::take(&mut self.waiting),
             ..Default::default()
@@ -726,21 +753,42 @@ impl VirtualCache {
     }
 
     /// Before the frame: reads back the requests of two frames ago (waiting
-    /// only for that frame), evicts with any slot use that has arrived, and
-    /// plans the frame's bake.
+    /// only for that frame), adapts the bake budget to the frame time, queues
+    /// stale pages when slot use arrives and frees a few, and plans the
+    /// frame's bake.
     pub(crate) fn begin_frame(&mut self, device: &wgpu::Device) {
         let start = Instant::now();
+        let period = self.last_begin.map(|t| start - t);
+        self.last_begin = Some(start);
         let slot = (self.frame % 2) as usize;
         let requests = self.collect(device, slot);
+        let target = self.options.frame_target_ms;
+        if target > 0.0
+            && let Some(period) = period
+        {
+            let period = period.as_secs_f32() * 1e3;
+            let gpu_bound = self.waiting > Duration::from_millis(1);
+            if gpu_bound && period > target {
+                self.budget *= target / period;
+            } else if period < target {
+                self.budget *= 1.1;
+            }
+            self.budget = self.budget.clamp(
+                MIN_BUDGET.min(self.options.bake_budget as f32),
+                self.options.bake_budget as f32,
+            );
+        }
+        let evicting = Instant::now();
         if let Some((frame, _)) = &self.used_pending
             && frame + 2 <= self.frame
         {
             let (_, index) = self.used_pending.take().expect("pending slot use");
             let raw = map_wait(device, &self.used_readback, index);
-            let evicting = Instant::now();
-            self.evicted += self.merge_used_and_evict(bytemuck::cast_slice(&raw), 64);
-            self.evicting += evicting.elapsed();
+            self.merge_used(bytemuck::cast_slice(&raw));
+            self.queue_stale(EVICT_AGE);
         }
+        self.evicted += self.evict_queued(EVICT_PER_FRAME, EVICT_AGE);
+        self.evicting += evicting.elapsed();
         self.plan(device, requests);
         // `collect` adds its wait to `waiting`.
         self.planning += start.elapsed().saturating_sub(self.waiting);
@@ -781,13 +829,16 @@ impl VirtualCache {
         requests
     }
 
-    /// Merges slot use read back from the GPU and frees pages unused for more
-    /// than `age` frames, the least recently used first, at most `EVICT_MAX`.
-    /// Returns how many were freed.
-    fn merge_used_and_evict(&mut self, used: &[u32], age: u32) -> u32 {
+    /// Merges slot use read back from the GPU into `last_used`.
+    fn merge_used(&mut self, used: &[u32]) {
         for (l, &u) in self.last_used.iter_mut().zip(used) {
             *l = (*l).max(u);
         }
+    }
+
+    /// Queues every page unused for more than `age` frames, least recently
+    /// used first (replacing the queue).
+    fn queue_stale(&mut self, age: u32) {
         let mut stale: Vec<(u32, u32)> = (0..self.options.pages)
             .filter(|&slot| {
                 self.slot_key[slot as usize][0] != EMPTY
@@ -795,12 +846,23 @@ impl VirtualCache {
             })
             .map(|slot| (self.last_used[slot as usize], slot))
             .collect();
-        if stale.len() > EVICT_MAX {
-            stale.select_nth_unstable(EVICT_MAX);
-            stale.truncate(EVICT_MAX);
-        }
-        for &(_, slot) in &stale {
+        // Most recently used first, so the least recently used pop first.
+        stale.sort_unstable_by(|a, b| b.cmp(a));
+        self.evict_queue = stale.into_iter().map(|(_, slot)| slot).collect();
+    }
+
+    /// Frees up to `count` queued pages that are still unused for more than
+    /// `age` frames. Returns how many were freed.
+    fn evict_queued(&mut self, count: usize, age: u32) -> u32 {
+        let mut freed = 0;
+        while freed < count {
+            let Some(slot) = self.evict_queue.pop() else {
+                break;
+            };
             let k = self.slot_key[slot as usize];
+            if k[0] == EMPTY || self.last_used[slot as usize] + age >= self.frame {
+                continue;
+            }
             let (_, entry) = self.map.remove(&k).expect("resident page");
             let map = &mut self.map;
             self.table.remove(entry as usize, |moved, i| {
@@ -808,27 +870,31 @@ impl VirtualCache {
             });
             self.slot_key[slot as usize] = [EMPTY; 3];
             self.free.push(slot);
+            freed += 1;
         }
-        stale.len() as u32
+        freed as u32
     }
 
     /// With the pool full: reads slot use back now (waiting for all GPU work)
-    /// and frees pages unused for more than `age` frames.
+    /// and frees pages unused for more than `age` frames, up to a frame's
+    /// eviction count.
     fn evict_now(&mut self, device: &wgpu::Device, age: u32) -> u32 {
-        if self.used_pending.is_some() {
+        let raw = if self.used_pending.is_some() {
             // The slot-use buffer is mapped or about to be: use it.
             let (_, index) = self.used_pending.take().expect("pending slot use");
-            let raw = map_wait(device, &self.used_readback, index);
-            return self.merge_used_and_evict(bytemuck::cast_slice(&raw), age);
-        }
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
-        let index = self.queue.submit([encoder.finish()]);
-        self.used_readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
-        let raw = map_wait(device, &self.used_readback, index);
-        self.merge_used_and_evict(bytemuck::cast_slice(&raw), age)
+            map_wait(device, &self.used_readback, index)
+        } else {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
+            let index = self.queue.submit([encoder.finish()]);
+            self.used_readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+            map_wait(device, &self.used_readback, index)
+        };
+        self.merge_used(bytemuck::cast_slice(&raw));
+        self.queue_stale(age);
+        self.evict_queued(EVICT_PER_FRAME, age)
     }
 
     /// Chooses the frame's pages from the requested ones (each listed once by
@@ -844,7 +910,7 @@ impl VirtualCache {
             .map(|(k, priority)| (priority, k))
             .collect();
         // Each page costs at least one texel: no more than `budget` can fit.
-        let budget = self.options.bake_budget.max(PAGE_TEXELS);
+        let budget = (self.budget as u32).max(PAGE_TEXELS);
         if order.len() > budget as usize {
             order.select_nth_unstable(budget as usize);
             order.truncate(budget as usize);
@@ -933,7 +999,9 @@ mod tests {
         let mut table = PageTable::new(1 << 10);
         let mut rng = 12345u64;
         let mut next = || {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (rng >> 33) as u32
         };
         let mut live: HashMap<[u32; 3], u32> = HashMap::new();
