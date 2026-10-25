@@ -184,7 +184,7 @@ pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
 ];
 pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
-    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42,
+    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45,
 ];
 /// The compute `visibility` pass's bindings, for other modules.
 pub(crate) const COMPUTE_VISIBILITY_BINDINGS: &[u32] = VISIBILITY_BINDINGS;

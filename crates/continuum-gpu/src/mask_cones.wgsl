@@ -1443,7 +1443,8 @@ struct VChart {
 struct VcParams {
     // x: page table mask, y: frame, z: request tile size (pixels), w: request tiles per row
     counts: vec4<u32>,
-    // x: texels to bake, y: pages baked, z: page table updates, w: 0
+    // x: texels to bake, y: pages baked, z: page table updates, w: request
+    // set mask
     jobs: vec4<u32>,
     // x: 1 / base texel size, y: radians per pixel (camera), z: pixels per texel, w: 0
     params: vec4<f32>,
@@ -1460,23 +1461,29 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // Chart of each geometry triangle.
 @group(0) @binding(35) var<storage, read> tri_vchart: array<u32>;
 // Open addressing with linear probing: three key words, then the slot. x is
-// EMPTY_KEY for a free entry (0xfffffffe for a removed one).
+// EMPTY_KEY for a free entry (deletion moves entries back: no tombstones).
 @group(0) @binding(36) var<storage, read_write> page_table: array<vec4<u32>>;
 @group(0) @binding(37) var<storage, read_write> pool: array<f32>;
 // Pages baked this frame: key words, then the slot.
 @group(0) @binding(38) var<storage, read> bake_list: array<vec4<u32>>;
-// Per request tile: the key of a page its sample pixel lacked, w = 1 (all zero
-// if none).
+// Pages requested this frame, each once: key words, then the priority (1 for
+// a pixel with no page at all; then 2 + 30 − the gap between the found and
+// the wanted mip, so the blurriest pixels come first). Count in vc_stats[1].
 @group(0) @binding(39) var<storage, read_write> requests: array<vec4<u32>>;
 // Per slot: the last frame a pixel read it (or it was baked).
 @group(0) @binding(40) var<storage, read_write> slot_used: array<u32>;
 @group(0) @binding(41) var<uniform> vc: VcParams;
-// x: pixels shaded without any resident page (unshadowed fallback).
+// x: pixels shaded without any resident page (unshadowed fallback), y:
+// requests listed, z: sample pixels on a surface, w: of those, the ones that
+// found their wanted mip.
 @group(0) @binding(42) var<storage, read_write> vc_stats: array<atomic<u32>, 4>;
 // Texels to bake: entry in `bake_list`, and the texel's index in the 9×9 page.
 @group(0) @binding(43) var<storage, read> bake_jobs: array<vec2<u32>>;
 // Page table writes: (entry index, 0, 0, 0), then the entry.
 @group(0) @binding(44) var<storage, read> table_updates: array<vec4<u32>>;
+// This frame's requested pages, as fingerprints (open addressing; 0: free),
+// so each page is listed once.
+@group(0) @binding(45) var<storage, read_write> request_set: array<atomic<u32>>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -1663,10 +1670,32 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 var<workgroup> fallback_count: atomic<u32>;
 
+// Lists page `k` with `priority` unless it is already listed this frame. Two
+// keys with the same 32-bit fingerprint count as one; the other is requested
+// again in a later frame.
+fn vc_request(k: vec3<u32>, priority: u32) {
+    let fp = vc_hash(k) | 1u;
+    let mask = vc.jobs.w;
+    var i = vc_hash(vec3<u32>(k.z, k.x, k.y)) & mask;
+    for (var probe = 0u; probe < 32u; probe++) {
+        let r = atomicCompareExchangeWeak(&request_set[i], 0u, fp);
+        if (r.exchanged) {
+            let n = atomicAdd(&vc_stats[1], 1u);
+            if (n < arrayLength(&requests)) { requests[n] = vec4<u32>(k, priority); }
+            return;
+        }
+        if (r.old_value == fp) { return; }
+        // A spurious failure of the weak exchange: try the same entry again.
+        if (r.old_value == 0u) { continue; }
+        i = (i + 1u) & mask;
+    }
+}
+
 // Shading from the cache, reading the visibility buffer: the page of the
 // wanted mip, or failing that the finest coarser one resident, or failing
 // that unshadowed light. One pixel per request tile (a different one each
-// frame) reports the wanted page if it was missing.
+// frame) requests the page one mip finer than the one it found (or the
+// coarsest, if none), so pages arrive coarse to fine and the CPU never walks.
 @compute @workgroup_size(8, 8)
 fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     lane = li;
@@ -1676,7 +1705,8 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
     let tile = vc.counts.z;
     let sample = (vc.counts.y * 7u) % (tile * tile);
     let is_sample = in_bounds && gid.x % tile == sample % tile && gid.y % tile == sample / tile;
-    var request = vec4<u32>(0u);
+    var request_key = vec3<u32>(0u);
+    var request_priority = 0u;
     var fell_back = false;
     if (in_bounds) {
         let dir = camera_dir(gid);
@@ -1693,6 +1723,8 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
             var irradiance = 0.0;
             var found = false;
             var mip = wanted;
+            // The key of the page one mip finer than `mip` (the last missing one).
+            var finer = vec3<u32>(0u);
             loop {
                 let r = vc_page(hit.mesh, c, uv, mip);
                 let slot = vc_find(r.key);
@@ -1700,14 +1732,20 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                     slot_used[slot] = vc.counts.y;
                     irradiance = vc_bilinear(slot, r);
                     found = true;
+                    if (mip > wanted) {
+                        request_key = finer;
+                        request_priority = 32u - min(mip - wanted, 30u);
+                    }
                     break;
                 }
-                if (mip == wanted) { request = vec4<u32>(r.key, 1u); }
+                finer = r.key;
                 if (r.coarsest || mip >= 30u) { break; }
                 mip += 1u;
             }
             if (!found) {
                 fell_back = true;
+                request_key = finer;
+                request_priority = 1u;
                 let point = surface + hit.normal * surface_offset(hit.distance);
                 let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
                 let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
@@ -1718,12 +1756,16 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                     irradiance = cone_visible(lc.c, normal, &cov);
                 }
             }
+            if (is_sample) {
+                atomicAdd(&vc_stats[2], 1u);
+                if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
+            }
             color = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
         }
         colors[pixel] = vec4<f32>(color, 1.0);
     }
-    if (is_sample) {
-        requests[(gid.y / tile) * vc.counts.w + gid.x / tile] = request;
+    if (is_sample && request_priority > 0u) {
+        vc_request(request_key, request_priority);
     }
     if (fell_back) { atomicAdd(&fallback_count, 1u); }
     workgroupBarrier();
