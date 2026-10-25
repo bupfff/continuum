@@ -177,3 +177,68 @@ per pixel (the area integral):
   would be the masks' spatial interpolation. Measured ceiling: 2.6×.
 - **Packets and the horizon cull are kept.** Packets give results identical
   to solo walks; the cull is exact for the irradiance integral.
+
+## After M5 gate 6: sharing the far field does not pay
+
+Date: 2026-10-25, after gates 5 and 6.
+
+- **What was tried.** The plan for sky warm-up was to walk distant objects
+  once per page and face, from the page's middle, and each sky sample's near
+  objects alone.
+  - **The split.** An object is near when its hierarchy leaf's box meets a
+    sphere k page half-diagonals across. Node splats are allowed only for
+    nodes wholly on one side.
+  - **Combining.** Near and far coverage combine per bin as independent
+    occluders.
+  - **Where it is.** It was built and measured, then removed. The patch is
+    not in the repository.
+- **Results.** Development runs at 640×360, sky only, whole warm-ups at a
+  fixed budget, against the same cache without the split:
+
+  | Viewpoint | No split | k = 8 | k = 16 | k = 32 |
+  |---|---|---|---|---|
+  | standing | 3.65 s | 4.97 s (0.19%) | 6.76 s (0.16%) | 9.44 s (0.13%) |
+  | 10 m up | 8.53 s | 12.85 s (0.35%) | 17.09 s (0.24%) | 22.51 s (0.14%) |
+  | 40 m up | 10.32 s | 17.99 s (0.32%) | 23.45 s (0.22%) | 30.88 s (0.12%) |
+  | 150 m up | 7.04 s | 14.91 s (0.24%) | 19.82 s (0.16%) | 27.06 s (0.08%) |
+
+  The bake times are GPU time. The percentages are the image's distance from
+  the cache without the split.
+- **Accurate, but 1.4–3.8× slower.**
+  - **Why.** With object-level prefiltering, distant objects already cost
+    little: groups of them splat as single nodes. The cost is near each
+    texel, which the near walk still pays.
+  - **What the split adds.** The far pass walks every face without a horizon
+    cull, and nodes straddling the sphere cannot splat on either side.
+
+## Oversized objects under the root
+
+- **The change.** The object hierarchy now gives objects whose bounds exceed
+  64 times the median diagonal a subtree of their own under the root (here,
+  the 2 km ground among 1 m boulders). Before, every node above the ground
+  took its bounds.
+- **Whole sky warm-up, sky sample cost 1, cache bakes walking alone:**
+
+  | Viewpoint | Before | After |
+  |---|---|---|
+  | standing | 9.71 s | 7.79 s (−20%) |
+  | 150 m up | 21.20 s | 18.32 s (−14%) |
+
+- **Work per sky texel barely changed** (632 object nodes against 633), so
+  the gain is in memory locality, not in nodes visited.
+- **Images.** Sun images are bit-identical. Packets and solo walks still
+  agree bit for bit.
+
+## Where a sky face's time goes now
+
+- **Counts per sky texel** (5.9 faces): about 630 object nodes (60
+  splatted), 38 meshes, 105–113 triangle-hierarchy nodes, 21–28 triangles
+  tested.
+- **Per face, about 107 object nodes.** These are the descent of about 20
+  levels toward the apex with their siblings, plus the splatted far field.
+- **Remaining levers:**
+  - a wider hierarchy, to halve the dependent steps;
+  - faces turned with the receiver's normal (one face and four half faces);
+  - packets for large bakes. Solo walks win below about 10,000 units per
+    frame, packets above: 5.7 s against 9.7 s for a whole standing warm-up at
+    20,000.

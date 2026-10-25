@@ -164,11 +164,52 @@ pub(crate) fn object_hierarchy(
         // traverse a hierarchy that filtered every mesh out.
         items.push(0);
         nodes[0].info = [0, 1, 0, 0];
-    } else {
-        split(&mut nodes, 0, &mut items, 0, bounds, 2, 0, 0);
+        return (nodes, items);
     }
+    // Objects far larger than most (a 2 km ground among 1 m boulders) get a
+    // subtree of their own under the root: otherwise every node above them
+    // takes their bounds, and every cone descends that chain too (M5 gate 7).
+    let diagonal = |m: u32| {
+        let (lo, hi) = bounds[m as usize];
+        (hi - lo).length()
+    };
+    let mut sizes: Vec<f32> = items.iter().map(|&m| diagonal(m)).collect();
+    let mid = sizes.len() / 2;
+    let median = *sizes.select_nth_unstable_by(mid, f32::total_cmp).1;
+    let (big, small): (Vec<u32>, Vec<u32>) = items
+        .iter()
+        .partition(|&&m| diagonal(m) > OVERSIZED * median);
+    if big.is_empty() || small.is_empty() {
+        split(&mut nodes, 0, &mut items, 0, bounds, 2, 0, 0);
+        return (nodes, items);
+    }
+    let big_count = big.len();
+    items = big.into_iter().chain(small).collect();
+    nodes.push(NodeGpu::zeroed());
+    nodes.push(NodeGpu::zeroed());
+    let (head, tail) = items.split_at_mut(big_count);
+    split(&mut nodes, 1, head, 0, bounds, 2, 0, 0);
+    split(&mut nodes, 2, tail, big_count, bounds, 2, 0, 0);
+    let (a, b) = (nodes[1], nodes[2]);
+    nodes[0].lo = [
+        a.lo[0].min(b.lo[0]),
+        a.lo[1].min(b.lo[1]),
+        a.lo[2].min(b.lo[2]),
+        0.0,
+    ];
+    nodes[0].hi = [
+        a.hi[0].max(b.hi[0]),
+        a.hi[1].max(b.hi[1]),
+        a.hi[2].max(b.hi[2]),
+        0.0,
+    ];
+    nodes[0].info = [1, 0, 0, 0];
     (nodes, items)
 }
+
+/// Objects whose bounds' diagonal exceeds this many times the median get a
+/// subtree of their own under the root.
+const OVERSIZED: f32 = 64.0;
 
 /// A copy of a geometry placed in the world: `world = scale · rotation · p +
 /// translation`, with `rotation` orthonormal and `translation` relative to the

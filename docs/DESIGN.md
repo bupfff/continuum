@@ -211,14 +211,13 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (2026-10-25, after M5 gate 6)
 
-1. **Sky warm-up: share the far field across a page.** M5 G5 failed on
-   warm-up (13–95× the sun's frames), and with three lights and sky the
-   flights' 99th percentile is 35 ms (M5 G6, reported). Walk distant objects
-   once per page from its middle and each texel's near objects alone, split
-   by whether an object's hierarchy leaf meets a sphere around the page (not
-   with a far plane: the diagnostics found far planes make walks costlier).
-   This is the first cascade of wide cones (M10). Written, not yet measured
-   (`CacheOptions::sky_far`).
+1. **Sky warm-up.** M5 G5 failed on warm-up (13–95× the sun's frames), and
+   with three lights and sky the flights' 99th percentile is 35 ms (M5 G6,
+   reported). Sharing the far field per page was tried and is 1.4–3.8×
+   slower: with object-level prefiltering the far field is already cheap, and
+   the cost is each face's walk near its apex (about 107 object nodes,
+   `m5-sky-bake-diagnostics.md`). Candidates: a wider hierarchy, faces
+   turned with the normal (one and four halves), packets for large bakes.
 2. **Sky accuracy: weight coverage within bins.** The sky's error against
    Cycles depends on the cube's orientation (1.9–4.2%) and is always too
    dark. Accumulating first moments of covered area per bin would weight
