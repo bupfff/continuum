@@ -8,17 +8,18 @@
 //!   matrix with non-uniform scale, shear or a mirror is baked into a copy of
 //!   the geometry instead.
 //! - glTF is Y-up; Continuum is Z-up: (x, y, z) becomes (x, −z, y).
-//! - Albedo is the material's base color factor (linear), times the mean of
-//!   its base color texture where it has one: textures themselves are not
-//!   sampled yet.
+//! - Albedo is the material's base color factor (linear). Its base color
+//!   texture, where it has one and the primitive has the texture coordinates
+//!   it names, is imported and sampled when shading
+//!   (`InstancedScene::textures`).
 //! - Punctual lights (`KHR_lights_punctual`) are counted but not imported:
 //!   Continuum's lights are rectangles.
 
 use std::path::Path;
 
-use continuum::glam::{DMat4, DVec3, Mat3, Vec3};
+use continuum::glam::{DMat4, DVec3, Mat3, Vec2, Vec3};
 use continuum::mesh::{Surface, Tri};
-use continuum_gpu::{Instance, InstancedScene};
+use continuum_gpu::{Instance, InstancedScene, Texture};
 
 /// A camera from the file, in Continuum's Z-up world.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +42,10 @@ pub struct ImportStats {
     pub baked: usize,
     pub charts: usize,
     pub lights_skipped: usize,
+    /// Base color textures imported, and images skipped (pixel formats other
+    /// than 8 bits per channel).
+    pub textures: usize,
+    pub textures_skipped: usize,
 }
 
 /// An imported scene: geometry, instances (world positions), the file's first
@@ -72,40 +77,37 @@ fn axes() -> (DMat4, DMat4) {
 struct Primitive {
     triangles: Vec<Tri>,
     normals: Option<Vec<[Vec3; 3]>>,
+    tex: Option<Vec<[Vec2; 3]>>,
+    /// Its base color texture's index in the scene.
+    texture: Option<u32>,
     albedo: Vec3,
     /// Its geometry's index, once built.
     geometry: usize,
 }
 
-/// The mean color of a decoded image, linear (images are sRGB-encoded).
-fn mean_color(image: &gltf::image::Data) -> Option<Vec3> {
+/// A decoded image as RGBA8 (8-bit formats only).
+fn to_rgba(image: &gltf::image::Data) -> Option<Texture> {
     use gltf::image::Format;
-    let channels = match image.format {
-        Format::R8 => 1,
-        Format::R8G8 => 2,
-        Format::R8G8B8 => 3,
-        Format::R8G8B8A8 => 4,
+    let rgba: Vec<u8> = match image.format {
+        Format::R8 => image.pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        Format::R8G8 => image
+            .pixels
+            .chunks_exact(2)
+            .flat_map(|p| [p[0], p[0], p[0], p[1]])
+            .collect(),
+        Format::R8G8B8 => image
+            .pixels
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        Format::R8G8B8A8 => image.pixels.clone(),
         _ => return None,
     };
-    let linear = |c: u8| {
-        let c = c as f32 / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let mut sum = Vec3::ZERO;
-    let mut count = 0usize;
-    for px in image.pixels.chunks_exact(channels) {
-        let rgb = match channels {
-            1 | 2 => Vec3::splat(linear(px[0])),
-            _ => Vec3::new(linear(px[0]), linear(px[1]), linear(px[2])),
-        };
-        sum += rgb;
-        count += 1;
-    }
-    (count > 0).then(|| sum / count as f32)
+    Some(Texture {
+        width: image.width,
+        height: image.height,
+        rgba,
+    })
 }
 
 /// Loads a glTF 2.0 file as an instanced scene.
@@ -116,6 +118,9 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         lights_skipped: document.lights().map_or(0, |l| l.len()),
         ..Default::default()
     };
+    // Base color textures, imported once per image.
+    let mut textures: Vec<Texture> = Vec::new();
+    let mut texture_of_image: Vec<Option<Option<u32>>> = vec![None; images.len()];
     // Primitives per mesh.
     let mut meshes: Vec<Vec<Primitive>> = Vec::new();
     for mesh in document.meshes() {
@@ -138,36 +143,61 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 Some(i) => i.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
+            let material = primitive.material();
+            let pbr = material.pbr_metallic_roughness();
+            let factor = pbr.base_color_factor();
+            let albedo = Vec3::new(factor[0], factor[1], factor[2]);
+            // The base color texture, through the texture coordinate set it
+            // names.
+            let mut texture = None;
+            let mut texcoords: Option<Vec<Vec2>> = None;
+            if let Some(info) = pbr.base_color_texture()
+                && let Some(t) = reader.read_tex_coords(info.tex_coord())
+            {
+                let image = info.texture().source().index();
+                let slot = *texture_of_image[image].get_or_insert_with(|| {
+                    to_rgba(&images[image]).map(|t| {
+                        textures.push(t);
+                        textures.len() as u32 - 1
+                    })
+                });
+                if let Some(index) = slot {
+                    texture = Some(index);
+                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
+                }
+            }
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
+            let mut corner_tex = Vec::with_capacity(indices.len() / 3);
             for t in indices.chunks_exact(3) {
                 let k = [t[0] as usize, t[1] as usize, t[2] as usize];
                 triangles.push(k.map(|i| positions[i]));
                 if let Some(n) = &normals {
                     corner_normals.push(k.map(|i| n[i]));
                 }
-            }
-            let material = primitive.material();
-            let pbr = material.pbr_metallic_roughness();
-            let factor = pbr.base_color_factor();
-            let mut albedo = Vec3::new(factor[0], factor[1], factor[2]);
-            if let Some(info) = pbr.base_color_texture()
-                && let Some(mean) = mean_color(&images[info.texture().source().index()])
-            {
-                albedo *= mean;
+                if let Some(tc) = &texcoords {
+                    corner_tex.push(k.map(|i| tc[i]));
+                }
             }
             list.push(Primitive {
                 triangles,
                 normals: normals.is_some().then_some(corner_normals),
+                tex: texcoords.is_some().then_some(corner_tex),
+                texture,
                 albedo,
                 geometry: usize::MAX,
             });
         }
         meshes.push(list);
     }
+    stats.textures = textures.len();
+    stats.textures_skipped = texture_of_image
+        .iter()
+        .filter(|t| matches!(t, Some(None)))
+        .count();
     let mut scene = InstancedScene {
-        geometries: Vec::new(),
-        instances: Vec::new(),
+        textures,
+        ..Default::default()
     };
     for list in &mut meshes {
         for p in list.iter_mut() {
@@ -175,9 +205,12 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 continue;
             }
             p.geometry = scene.geometries.len();
-            scene
-                .geometries
-                .push(Surface::from_mesh(p.triangles.clone(), p.normals.clone()));
+            scene.geometries.push(Surface::from_mesh(
+                p.triangles.clone(),
+                p.normals.clone(),
+                p.tex.clone(),
+            ));
+            scene.geometry_textures.push(p.texture);
         }
     }
     // Nodes, with world matrices.
@@ -290,6 +323,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
             .map(|c| c.map(|v| (normal * v).normalize_or_zero()))
             .collect::<Vec<_>>()
     });
+    let mut tex = p.tex.clone();
     if mirrored {
         for t in &mut triangles {
             t.swap(1, 2);
@@ -299,11 +333,17 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
                 c.swap(1, 2);
             }
         }
+        if let Some(t) = &mut tex {
+            for c in t.iter_mut() {
+                c.swap(1, 2);
+            }
+        }
     }
     let geometry = scene.geometries.len();
     scene
         .geometries
-        .push(Surface::from_mesh(triangles, normals));
+        .push(Surface::from_mesh(triangles, normals, tex));
+    scene.geometry_textures.push(p.texture);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,

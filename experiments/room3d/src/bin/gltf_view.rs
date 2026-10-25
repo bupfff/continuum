@@ -38,12 +38,20 @@ fn main() -> std::io::Result<()> {
             .iter()
             .map(|c| ((c.x / spacing).ceil().max(1.0) * (c.y / spacing).ceil().max(1.0)) as u64)
             .sum();
-        let largest = s.charts.iter().map(|c| c.max_element()).fold(0.0f32, f32::max);
+        let largest = s
+            .charts
+            .iter()
+            .map(|c| c.max_element())
+            .fold(0.0f32, f32::max);
         println!(
             "  geometry {g}: {} triangles, {} charts, largest {largest:.2}, self texels {cells}{}",
             s.triangles.len(),
             s.charts.len(),
-            if largest / spacing > 1024.0 { " (too large: walks itself)" } else { "" }
+            if largest / spacing > 1024.0 {
+                " (too large: walks itself)"
+            } else {
+                ""
+            }
         );
     }
     let (lo, hi) = imported.bounds;

@@ -716,8 +716,11 @@ impl LiveRenderer {
         };
         let colors_buf = buffer("colors");
         let vis_buf = buffer("visibility");
-        let mut entries: Vec<(u32, &wgpu::Buffer)> =
-            scene.iter().map(|(b, buf)| (*b, buf)).collect();
+        let mut entries: Vec<(u32, &wgpu::Buffer)> = scene
+            .iter()
+            .filter(|(b, _)| !crate::PER_PIXEL_ONLY.contains(b))
+            .map(|(b, buf)| (*b, buf))
+            .collect();
         entries.push((6, camera_buf));
         entries.push((7, &colors_buf));
         let camera_binds = if camera_passes.len() == 2 {

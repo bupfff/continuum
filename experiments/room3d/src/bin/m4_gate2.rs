@@ -85,6 +85,7 @@ fn flattened(scene: &InstancedScene, origin: DVec3) -> InstancedScene {
     InstancedScene {
         geometries,
         instances,
+        ..Default::default()
     }
 }
 

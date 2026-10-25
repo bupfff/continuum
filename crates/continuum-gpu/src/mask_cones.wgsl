@@ -1388,6 +1388,42 @@ fn barycentric(m: u32, t: u32, world_p: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(1.0 - s - u, s, u);
 }
 
+// Base color textures (M6): a layer per texture, each TEXTURE_SIZE square with
+// mip levels; per object, its layer (NONE: none); per geometry triangle, its
+// corners' texture coordinates.
+@group(0) @binding(55) var base_color: texture_2d_array<f32>;
+@group(0) @binding(56) var base_sampler: sampler;
+@group(0) @binding(57) var<storage, read> object_texture: array<u32>;
+@group(0) @binding(58) var<storage, read> tri_tex: array<vec2<f32>>;
+
+// The surface's color at world point `p` on triangle `t` of object `m`: its
+// albedo times its texture, sampled at the mip level whose texels match the
+// pixel's footprint (`distance` along the camera ray `dir`, normal `n`).
+fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let base = albedo[m].xyz;
+    let layer = object_texture[m];
+    if (layer == NONE) { return base; }
+    let b = barycentric(m, t, p);
+    let t0 = tri_tex[3u * t];
+    let t1 = tri_tex[3u * t + 1u];
+    let t2 = tri_tex[3u * t + 2u];
+    let uv = t0 * b.x + t1 * b.y + t2 * b.z;
+    // A texel's size on the surface: the triangle's area over its area in
+    // texels.
+    let size = f32(textureDimensions(base_color).x);
+    let v0 = tris[3u * t].xyz;
+    let scale = object_scale(m);
+    let world_area = 0.5 * length(cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0)) * scale * scale;
+    let e1 = (t1 - t0) * size;
+    let e2 = (t2 - t0) * size;
+    let texel_area = 0.5 * abs(e1.x * e2.y - e1.y * e2.x);
+    let texel = sqrt(world_area / max(texel_area, 1e-12));
+    // A pixel's footprint there, stretched by the viewing angle.
+    let pixel = distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
+    let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
+    return base * textureSampleLevel(base_color, base_sampler, uv, i32(layer), lod).xyz;
+}
+
 // Interpolated shading normal (world space) at world point `p` on triangle `t`
 // of object `m`, on the side `toward` points to.
 fn shading_normal(m: u32, t: u32, p: vec3<f32>, toward: vec3<f32>) -> vec3<f32> {
@@ -1533,7 +1569,7 @@ fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, seen: u
         e += light.sky.xyz * sky_irradiance(point, normal);
         sky_frame = NONE;
     }
-    colors[pixel] = vec4<f32>(albedo[hit.mesh].xyz * e / 3.14159265, 1.0);
+    colors[pixel] = vec4<f32>(surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal) * e / 3.14159265, 1.0);
 }
 
 @compute @workgroup_size(8, 8)
@@ -2560,7 +2596,7 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                 atomicAdd(&vc_stats[2], 1u);
                 if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
             }
-            color = albedo[hit.mesh].xyz * e / 3.14159265;
+            color = surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal) * e / 3.14159265;
         }
         colors[pixel] = vec4<f32>(color, 1.0);
     }

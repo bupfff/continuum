@@ -126,6 +126,7 @@ impl Field {
             scene: InstancedScene {
                 geometries: vec![ground, boulder()],
                 instances,
+                ..Default::default()
             },
             eye,
             target,

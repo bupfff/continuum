@@ -12,8 +12,8 @@ use crate::vcache::VirtualCache;
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_VISIBILITY_BINDINGS, InstancedScene, Light, LightGpu, MaskConeKernel, RECT_LIGHT_BINDINGS,
-    RectLight, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_SELF_BAKE_BINDINGS,
-    VC_SHADE_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    RectLight, SceneTextures, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -108,6 +108,8 @@ pub struct InstancedRenderer {
     radiance: f32,
     /// Lights in the scene's light buffer (binding 52).
     lights: usize,
+    /// The scene's base color textures (bindings 55 and 56).
+    textures: SceneTextures,
     srgb: bool,
 }
 
@@ -116,6 +118,7 @@ fn bind_group(
     pipeline: &wgpu::ComputePipeline,
     buffers: &[(u32, &wgpu::Buffer)],
     tlas: Option<&wgpu::Tlas>,
+    textures: Option<&SceneTextures>,
     keep: &[u32],
 ) -> wgpu::BindGroup {
     let mut entries: Vec<wgpu::BindGroupEntry> = buffers
@@ -132,6 +135,18 @@ fn bind_group(
         entries.push(wgpu::BindGroupEntry {
             binding: 32,
             resource: tlas.as_binding(),
+        });
+    }
+    if let Some(t) = textures
+        && keep.contains(&55)
+    {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 55,
+            resource: wgpu::BindingResource::TextureView(&t.view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 56,
+            resource: wgpu::BindingResource::Sampler(&t.sampler),
         });
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -366,6 +381,7 @@ impl InstancedRenderer {
             // Shading reads the lights' buffer; the camera's radiance is unused.
             radiance: lights[0].radiance.x,
             lights: lights.len(),
+            textures: kernel.scene_textures(&scene.textures),
             srgb: target_format.is_srgb(),
         };
         renderer.targets();
@@ -388,7 +404,14 @@ impl InstancedRenderer {
             .chain(cache.state.buffers.iter().map(|(b, buf)| (*b, buf)))
             .collect();
         let pipeline = &kernel.vc_self_bake_pipeline;
-        let group = bind_group(&self.device, pipeline, &all, None, VC_SELF_BAKE_BINDINGS);
+        let group = bind_group(
+            &self.device,
+            pipeline,
+            &all,
+            None,
+            None,
+            VC_SELF_BAKE_BINDINGS,
+        );
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -438,7 +461,9 @@ impl InstancedRenderer {
         self.binds = self
             .passes
             .iter()
-            .map(|(pipeline, keep)| bind_group(device, pipeline, &all, tlas, keep))
+            .map(|(pipeline, keep)| {
+                bind_group(device, pipeline, &all, tlas, Some(&self.textures), keep)
+            })
             .collect();
         let cache_binds = self.cache.as_ref().map(|cache| {
             cache
@@ -450,7 +475,7 @@ impl InstancedRenderer {
                     VC_BAKE_SKY_BINDINGS,
                     VC_FILL_BINDINGS,
                 ])
-                .map(|(pipeline, keep)| bind_group(device, pipeline, &all, None, keep))
+                .map(|(pipeline, keep)| bind_group(device, pipeline, &all, None, None, keep))
                 .collect()
         });
         if let (Some(cache), Some(binds)) = (&mut self.cache, cache_binds) {

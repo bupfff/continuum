@@ -243,13 +243,20 @@ impl RectLight {
 
 /// Bindings the `render` entry point uses (render_frame filters the scene's
 /// buffers to these when a lightmap provides more).
-const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30, 52];
+const RENDER_BINDINGS: &[u32] = &[
+    0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30, 52, 55, 56, 57, 58,
+];
 
 /// The same list, for other modules.
 pub(crate) const RECT_LIGHT_BINDINGS: &[u32] = RENDER_BINDINGS;
 
 /// Which of the scene's bindings a pipeline uses.
 type KeepBinding = Box<dyn Fn(u32) -> bool>;
+
+/// Bindings only per-pixel shading and the view cache read (lights, base
+/// color textures): the lightmap paths, which bind every scene buffer, leave
+/// them out.
+pub(crate) const PER_PIXEL_ONLY: &[u32] = &[52, 55, 56, 57, 58];
 
 /// Bindings the `visibility` pass uses.
 const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31, 52];
@@ -269,7 +276,7 @@ pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
     &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 54, 49, 50, 51];
 pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
-    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52,
+    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58,
 ];
 /// The compute `visibility` pass's bindings, for other modules.
 pub(crate) const COMPUTE_VISIBILITY_BINDINGS: &[u32] = VISIBILITY_BINDINGS;
@@ -757,6 +764,7 @@ impl MaskConeKernel {
             height,
             buffers,
             hw_scene.as_ref().map(|h| &h.tlas),
+            &self.scene_textures(&scene.textures),
             runs,
         );
         (pixels, time, bytes)
@@ -824,6 +832,31 @@ impl MaskConeKernel {
             .chain(std::iter::once([0.0; 4]))
             .collect();
         let albedo: Vec<[f32; 4]> = scene.instances.iter().map(|i| v4(i.albedo)).collect();
+        // Per object, its texture layer (NONE: none); per geometry triangle,
+        // its corners' texture coordinates (zero without).
+        let object_textures: Vec<u32> = scene
+            .instances
+            .iter()
+            .map(|i| {
+                let has = scene.geometries[i.geometry].tex.len()
+                    == scene.geometries[i.geometry].triangles.len();
+                match scene.geometry_textures.get(i.geometry).copied().flatten() {
+                    Some(t) if has => t,
+                    _ => hierarchy::NONE,
+                }
+            })
+            .collect();
+        let mut tex: Vec<[f32; 2]> = Vec::new();
+        for g in &scene.geometries {
+            if g.tex.len() == g.triangles.len() {
+                tex.extend(g.tex.iter().flatten().map(|v| v.to_array()));
+            } else {
+                tex.extend(std::iter::repeat_n([0.0; 2], 3 * g.triangles.len()));
+            }
+        }
+        if tex.is_empty() {
+            tex.push([0.0; 2]);
+        }
         let uniform = light.uniform(
             scene.instances.len(),
             0,
@@ -874,8 +907,90 @@ impl MaskConeKernel {
             ),
             (30, storage("transforms", bytemuck::cast_slice(&xforms))),
             (52, self.lights_buffer(lights)),
+            (
+                57,
+                storage("object textures", bytemuck::cast_slice(&object_textures)),
+            ),
+            (
+                58,
+                storage("texture coordinates", bytemuck::cast_slice(&tex)),
+            ),
         ];
         buffers
+    }
+
+    /// A scene's textures, resampled into a layered texture with mip levels
+    /// (a 1×1 white layer without any).
+    pub(crate) fn scene_textures(&self, textures: &[Texture]) -> SceneTextures {
+        let size = if textures.is_empty() { 1 } else { TEXTURE_SIZE };
+        let levels = size.ilog2() + 1;
+        let layers = textures.len().max(1) as u32;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("base color"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let white = Texture {
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        };
+        let sources: Vec<&Texture> = if textures.is_empty() {
+            vec![&white]
+        } else {
+            textures.iter().collect()
+        };
+        for (layer, t) in sources.iter().enumerate() {
+            for (level, pixels) in texture_levels(t, size).iter().enumerate() {
+                let side = size >> level;
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: level as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    pixels,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * side),
+                        rows_per_image: Some(side),
+                    },
+                    wgpu::Extent3d {
+                        width: side,
+                        height: side,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("base color"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        SceneTextures { view, sampler }
     }
 
     /// Hardware acceleration structures for an instanced scene.
@@ -934,7 +1049,8 @@ impl MaskConeKernel {
         buffers: Vec<(u32, wgpu::Buffer)>,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
-        self.render_buffers_with(cached, cam, width, height, buffers, None, runs)
+        let textures = self.scene_textures(&[]);
+        self.render_buffers_with(cached, cam, width, height, buffers, None, &textures, runs)
     }
 
     /// [`Self::render_buffers`], with camera rays through hardware ray queries
@@ -948,6 +1064,7 @@ impl MaskConeKernel {
         height: u32,
         mut buffers: Vec<(u32, wgpu::Buffer)>,
         tlas: Option<&wgpu::Tlas>,
+        textures: &SceneTextures,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
         buffers.push((
@@ -995,7 +1112,10 @@ impl MaskConeKernel {
                 &self.render_pipeline,
                 Box::new(|b| RENDER_BINDINGS.contains(&b)),
             )],
-            (true, false) => vec![(&self.cached_pipeline, Box::new(|b| b != 31))],
+            (true, false) => vec![(
+                &self.cached_pipeline,
+                Box::new(|b| b != 31 && !PER_PIXEL_ONLY.contains(&b)),
+            )],
             (false, true) => vec![
                 (
                     &self.visibility_pipeline,
@@ -1011,7 +1131,10 @@ impl MaskConeKernel {
                     &self.visibility_pipeline,
                     Box::new(|b| VISIBILITY_BINDINGS.contains(&b)),
                 ),
-                (&self.shade_cached_pipeline, Box::new(|_| true)),
+                (
+                    &self.shade_cached_pipeline,
+                    Box::new(|b| !PER_PIXEL_ONLY.contains(&b)),
+                ),
             ],
         };
         let groups: Vec<(&wgpu::ComputePipeline, wgpu::BindGroup)> = passes
@@ -1031,6 +1154,16 @@ impl MaskConeKernel {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 32,
                         resource: tlas.as_binding(),
+                    });
+                }
+                if keep(55) {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 55,
+                        resource: wgpu::BindingResource::TextureView(&textures.view),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 56,
+                        resource: wgpu::BindingResource::Sampler(&textures.sampler),
                     });
                 }
                 let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1157,6 +1290,10 @@ impl MaskConeKernel {
             52,
             self.lights_buffer(&[Light::white(frame.light, frame.radiance)]),
         ));
+        // No textures: every object NONE.
+        let none = vec![hierarchy::NONE; frame.meshes.len().max(1)];
+        buffers.push((57, storage("object textures", bytemuck::cast_slice(&none))));
+        buffers.push((58, storage("texture coordinates", &[0; 8])));
         if let Some(lm) = lightmap {
             let texels: &[f32] = if lm.irradiance.is_empty() {
                 &[0.0]
@@ -1468,10 +1605,34 @@ fn camera_uniform(camera: Camera, width: u32, height: u32, radiance: f32) -> Cam
 /// Shared geometry placed many times (instancing), in a world that may be far
 /// larger than f32 positions can resolve: positions are f64 and are uploaded
 /// relative to a render origin.
+#[derive(Default)]
 pub struct InstancedScene {
     /// Unique geometries, each with per-vertex shading normals.
     pub geometries: Vec<Surface>,
     pub instances: Vec<Instance>,
+    /// Base color textures (M6), multiplying instances' albedo where their
+    /// geometry has one and texture coordinates (`Surface::tex`).
+    pub textures: Vec<Texture>,
+    /// Each geometry's texture, if any (empty: none).
+    pub geometry_textures: Vec<Option<u32>>,
+}
+
+/// A base color texture: sRGB-encoded RGBA8, rows from the top (as glTF
+/// images), sampled with repeat.
+#[derive(Clone, Debug)]
+pub struct Texture {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Textures are resampled into layers of this size, with mip levels.
+pub const TEXTURE_SIZE: u32 = 1024;
+
+/// A scene's textures as the GPU samples them (bindings 55 and 56).
+pub(crate) struct SceneTextures {
+    pub(crate) view: wgpu::TextureView,
+    pub(crate) sampler: wgpu::Sampler,
 }
 
 /// One placement of a geometry: `world = scale · rotation · p + position`.
@@ -1484,6 +1645,102 @@ pub struct Instance {
     /// World position (f64).
     pub position: DVec3,
     pub albedo: Vec3,
+}
+
+/// A texture resampled to `size × size` (bilinear, repeating), then its mip
+/// levels down to 1×1, each averaging 2×2 texels in linear light. Returns
+/// sRGB-encoded RGBA8 per level.
+fn texture_levels(t: &Texture, size: u32) -> Vec<Vec<u8>> {
+    let to_linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let to_srgb = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let s = if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round() as u8
+    };
+    let (w, h) = (t.width.max(1) as usize, t.height.max(1) as usize);
+    let texel = |x: usize, y: usize| {
+        let i = 4 * ((y % h) * w + (x % w));
+        [
+            to_linear(t.rgba[i]),
+            to_linear(t.rgba[i + 1]),
+            to_linear(t.rgba[i + 2]),
+            t.rgba[i + 3] as f32 / 255.0,
+        ]
+    };
+    let side = size as usize;
+    let mut level: Vec<[f32; 4]> = Vec::with_capacity(side * side);
+    for y in 0..side {
+        for x in 0..side {
+            // Texel centers mapped to the source, bilinear.
+            let u = (x as f32 + 0.5) / side as f32 * w as f32 - 0.5;
+            let v = (y as f32 + 0.5) / side as f32 * h as f32 - 0.5;
+            let (x0, y0) = (u.floor(), v.floor());
+            let (fx, fy) = (u - x0, v - y0);
+            let (xi, yi) = (
+                (x0 as isize).rem_euclid(w as isize) as usize,
+                (y0 as isize).rem_euclid(h as isize) as usize,
+            );
+            let mut c = [0.0f32; 4];
+            for (dx, dy, wt) in [
+                (0, 0, (1.0 - fx) * (1.0 - fy)),
+                (1, 0, fx * (1.0 - fy)),
+                (0, 1, (1.0 - fx) * fy),
+                (1, 1, fx * fy),
+            ] {
+                let s = texel(xi + dx, yi + dy);
+                for k in 0..4 {
+                    c[k] += s[k] * wt;
+                }
+            }
+            level.push(c);
+        }
+    }
+    let encode = |level: &[[f32; 4]]| -> Vec<u8> {
+        level
+            .iter()
+            .flat_map(|c| {
+                [
+                    to_srgb(c[0]),
+                    to_srgb(c[1]),
+                    to_srgb(c[2]),
+                    (c[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+                ]
+            })
+            .collect()
+    };
+    let mut out = vec![encode(&level)];
+    let mut side = side;
+    while side > 1 {
+        let half = side / 2;
+        let mut next = Vec::with_capacity(half * half);
+        for y in 0..half {
+            for x in 0..half {
+                let mut c = [0.0f32; 4];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let s = level[(2 * y + dy) * side + 2 * x + dx];
+                    for k in 0..4 {
+                        c[k] += s[k] * 0.25;
+                    }
+                }
+                next.push(c);
+            }
+        }
+        level = next;
+        side = half;
+        out.push(encode(&level));
+    }
+    out
 }
 
 fn uniform_buffer(device: &wgpu::Device, label: &str, contents: &[u8]) -> wgpu::Buffer {

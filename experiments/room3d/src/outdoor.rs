@@ -129,6 +129,7 @@ impl Outdoor {
             scene: InstancedScene {
                 geometries: vec![ground, boulder_with(60, 30), wall, pillar],
                 instances,
+                ..Default::default()
             },
             camera: Camera {
                 eye: Vec3::new(0.0, 0.0, 1.7),

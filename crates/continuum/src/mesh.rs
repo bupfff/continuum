@@ -26,6 +26,9 @@ pub struct Surface {
     pub uv: Vec<[Vec2; 3]>,
     /// World-space size of each chart along u and v, which sets texel counts.
     pub charts: Vec<Vec2>,
+    /// Texture coordinates of each triangle's vertices (glTF's TEXCOORD_0),
+    /// or empty without a texture.
+    pub tex: Vec<[Vec2; 3]>,
     /// Each chart's grid of cells: chart coordinates split into `x × y` equal
     /// cells, for finding the triangle under a chart coordinate. A renderer
     /// lists in each cell the triangles whose chart coordinates' bounds meet
@@ -100,7 +103,11 @@ impl Surface {
     ///   smooth normals merged by position.
     ///
     /// Degenerate triangles are dropped.
-    pub fn from_mesh(triangles: Vec<Tri>, normals: Option<Vec<[Vec3; 3]>>) -> Surface {
+    pub fn from_mesh(
+        triangles: Vec<Tri>,
+        normals: Option<Vec<[Vec3; 3]>>,
+        tex: Option<Vec<[Vec2; 3]>>,
+    ) -> Surface {
         let keep: Vec<usize> = (0..triangles.len())
             .filter(|&k| {
                 let t = triangles[k];
@@ -196,6 +203,9 @@ impl Surface {
             Some(n) => keep.iter().map(|&k| n[k].map(|v| v.normalize_or_zero())).collect(),
             None => smooth_normals(&s.triangles),
         };
+        if let Some(t) = tex {
+            s.tex = keep.iter().map(|&k| t[k]).collect();
+        }
         s
     }
 
@@ -277,6 +287,7 @@ impl Surface {
             triangles: self.triangles.iter().map(|t| [t[0], t[2], t[1]]).collect(),
             normals: self.normals.iter().map(|n| [-n[0], -n[2], -n[1]]).collect(),
             uv: self.uv.iter().map(|uv| [uv[0], uv[2], uv[1]]).collect(),
+            tex: self.tex.iter().map(|t| [t[0], t[2], t[1]]).collect(),
             ..self.clone()
         }
     }
@@ -341,7 +352,7 @@ mod tests {
             let (theta, phi) = (TAU * u, PI * v);
             Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), -phi.cos())
         });
-        let s = Surface::from_mesh(sphere.triangles.clone(), None);
+        let s = Surface::from_mesh(sphere.triangles.clone(), None, None);
         assert_eq!(s.triangles.len(), sphere.triangles.len());
         let limit = CHART_ANGLE_DEGREES.to_radians().cos();
         // Charts on a sphere: a handful, each within the angle of its seed.
