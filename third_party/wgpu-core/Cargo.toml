@@ -230,6 +230,9 @@ optional = true
 
 [lints.rust]
 missing_debug_implementations = "warn"
+# Continuum: quiet a lint that fires only because this copy builds as a path
+# dependency (registry builds cap lints).
+unfulfilled_lint_expectations = "allow"
 
 [lints.rust.unexpected_cfgs]
 level = "warn"

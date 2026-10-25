@@ -54,12 +54,15 @@ Flags:
 - `--no-cache` lights every pixel with its own mask cone every frame, as
   before.
 
-Not yet smooth. With hardware rays and a million instances, wgpu spends about
-16 ms of CPU time per frame in `queue.submit` (see `docs/results/m4-gate8.md`),
-whatever the resolution. Busy frames, while new surfaces come into view, also
-pay for baking and the page manager. The far field aliases (one ray per
-pixel). Fixing the overhead is the next gate; pixel-footprint cones are
-planned for the aliasing.
+Measured offscreen at 1280×720 with hardware rays (M4 gate 9):
+
+- Once a view has warmed, frames take 2.9–4.7 ms.
+- Flying averages 12.8 ms per frame. While new surfaces come into view, the
+  CPU page manager sometimes spikes frames to 34–92 ms.
+- The far field aliases, with one ray per pixel.
+
+Pixel-footprint cones are planned for the aliasing. Getting these numbers
+needed a small patch to wgpu-core (`third_party/README.md`).
 
 ![A million boulders](docs/images/m4-gate2-million-boulders.png)
 

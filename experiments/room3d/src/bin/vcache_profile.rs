@@ -19,7 +19,7 @@ fn stages(p: &FrameProfile) -> [Duration; 5] {
         p.visibility,
         p.visibility_submit,
         p.shading,
-        p.readback,
+        p.readback + p.planning,
     ]
 }
 
@@ -106,7 +106,9 @@ fn main() {
             field.radiance,
             options,
         );
-        // A frame with a full bake budget: the second from an empty cache.
+        // A frame with a full bake budget: the third from an empty cache (a
+        // frame plans from the requests of two frames before).
+        r.frame(camera, &target);
         r.frame(camera, &target);
         let busy = r.frame_profiled(camera, &target);
         let baked = r.cache_stats().unwrap();

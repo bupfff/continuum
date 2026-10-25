@@ -13,8 +13,14 @@
 //! texels within a per-frame budget of mask cones, and evicts pages no pixel
 //! has read for a while. The page table lives on the GPU (open addressing);
 //! this side keeps a mirror and sends changed entries each frame.
+//!
+//! Frames are pipelined (M4 gate 9): requests and slot use are read back
+//! asynchronously, and frame N plans its bake from frame N − 2's requests, so
+//! the CPU plans while the GPU renders the frame before.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
 use continuum::glam::Vec2;
@@ -58,15 +64,17 @@ impl Default for CacheOptions {
             base_texel: 0.005,
             pixels_per_texel: 2.0,
             request_tile: 4,
-            bake_budget: 20_000,
+            bake_budget: 8_000,
             pages: 1 << 19,
         }
     }
 }
 
-/// What the cache did in the last frame.
+/// What the cache did in one frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CacheStats {
+    /// The frame (counted from 1).
+    pub frame: u32,
     /// Pixels shaded with unshadowed light (no page of any mip resident).
     pub fallback_pixels: u32,
     /// Request tiles whose sample pixel lacked its wanted page.
@@ -76,8 +84,16 @@ pub struct CacheStats {
     pub texels_baked: u32,
     /// Pages resident after the frame's bake.
     pub resident: u32,
-    /// Pages evicted while planning the next frame.
+    /// Pages evicted while planning the frame.
     pub evicted: u32,
+    /// CPU time spent planning the frame's bake, including eviction (not
+    /// counting `waiting`).
+    pub planning: Duration,
+    /// Of that work, eviction (merging slot use, freeing pages).
+    pub evicting: Duration,
+    /// Time spent waiting for the GPU to finish the frame two before, whose
+    /// requests the plan reads.
+    pub waiting: Duration,
 }
 
 #[repr(C)]
@@ -184,10 +200,55 @@ fn unpack(k: [u32; 3]) -> (u32, u32, u32, [u32; 2]) {
     (k[0], k[1] & 0xffff, k[1] >> 16, [k[2] & 0xffff, k[2] >> 16])
 }
 
+/// A fast hash for page keys: std's SipHash cost more than the rest of the
+/// planning. Keys are not adversarial.
+#[derive(Default, Clone, Copy)]
+struct KeyHasher(u64);
+
+impl KeyHasher {
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        (self.0 ^ (self.0 >> 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut b = [0u8; 8];
+            b[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(b));
+        }
+    }
+
+    fn write_u32(&mut self, x: u32) {
+        self.add(x as u64);
+    }
+
+    fn write_u64(&mut self, x: u64) {
+        self.add(x);
+    }
+
+    fn write_usize(&mut self, x: usize) {
+        self.add(x as u64);
+    }
+}
+
+type KeyMap<V> = HashMap<[u32; 3], V, BuildHasherDefault<KeyHasher>>;
+
+/// A readback buffer for one frame's requests and counters, and the frame
+/// and submission whose copy it holds until read.
 struct Readback {
     buffer: wgpu::Buffer,
     tiles: u32,
+    pending: Option<(u32, wgpu::SubmissionIndex)>,
 }
+
+/// Table entries updated per frame at most before the whole table is sent.
+const UPDATES_CAPACITY: usize = 1 << 17;
 
 /// The lighting cache's state: GPU buffers (by binding) and the page manager.
 pub(crate) struct VirtualCache {
@@ -200,7 +261,7 @@ pub(crate) struct VirtualCache {
     table: Vec<[u32; 4]>,
     removed: usize,
     /// Resident pages: key → (slot, table entry).
-    map: HashMap<[u32; 3], (u32, u32)>,
+    map: KeyMap<(u32, u32)>,
     slot_key: Vec<[u32; 3]>,
     /// Per slot: the last frame it was read, as last read back, or the frame
     /// it was allocated in, whichever is later.
@@ -212,13 +273,24 @@ pub(crate) struct VirtualCache {
     bake_list: Vec<[u32; 4]>,
     jobs: Vec<[u32; 2]>,
     texels: u32,
+    /// The frame being prepared (counted from 1).
     frame: u32,
-    stats: CacheStats,
+    /// Per frame: what was baked, then what its shading reported once read back.
+    log: Vec<CacheStats>,
+    /// The latest frame whose requests have been read back.
+    latest: u32,
+    evicted: u32,
+    planning: Duration,
+    evicting: Duration,
+    waiting: Duration,
     pub(crate) buffers: Vec<(u32, wgpu::Buffer)>,
     params: wgpu::Buffer,
-    updates_capacity: usize,
-    readback: Readback,
+    /// Alternating per frame.
+    readbacks: Vec<Readback>,
     used_readback: wgpu::Buffer,
+    /// The frame and submission whose slot use `used_readback` holds.
+    used_pending: Option<(u32, wgpu::SubmissionIndex)>,
+    used_requested: bool,
 }
 
 impl VirtualCache {
@@ -267,7 +339,6 @@ impl VirtualCache {
         };
         let copy_dst = wgpu::BufferUsages::COPY_DST;
         let budget = options.bake_budget.max(PAGE_TEXELS) as u64;
-        let updates_capacity = 2 * budget as usize;
         let table = vec![[EMPTY, 0, 0, 0]; table_len];
         let buffers = vec![
             (
@@ -318,7 +389,7 @@ impl VirtualCache {
             (43, empty("bake jobs", 4 * (budget + 81) * 8, copy_dst)),
             (
                 44,
-                empty("table updates", updates_capacity as u64 * 32, copy_dst),
+                empty("table updates", UPDATES_CAPACITY as u64 * 32, copy_dst),
             ),
         ];
         let params = crate::uniform_buffer(
@@ -340,7 +411,7 @@ impl VirtualCache {
             scale,
             table,
             removed: 0,
-            map: HashMap::new(),
+            map: KeyMap::default(),
             slot_key: vec![[EMPTY; 3]; options.pages as usize],
             last_used: vec![0; options.pages as usize],
             free: (0..options.pages).rev().collect(),
@@ -351,26 +422,25 @@ impl VirtualCache {
             jobs: Vec::new(),
             texels: 0,
             frame: 1,
-            stats: CacheStats::default(),
+            log: Vec::new(),
+            latest: 0,
+            evicted: 0,
+            planning: Duration::ZERO,
+            evicting: Duration::ZERO,
+            waiting: Duration::ZERO,
             buffers,
             params,
-            updates_capacity,
-            readback: Readback {
-                buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("requests"),
-                    size: 16,
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                }),
-                tiles: 0,
-            },
+            readbacks: Vec::new(),
             used_readback,
+            used_pending: None,
+            used_requested: false,
         };
         cache.resize(device, width, height);
         cache
     }
 
-    /// Request buffers for a `width × height` image.
+    /// Request buffers for a `width × height` image. Requests in flight are
+    /// dropped.
     pub(crate) fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let tile = self.options.request_tile;
         let tiles = width.div_ceil(tile) * height.div_ceil(tile);
@@ -386,15 +456,18 @@ impl VirtualCache {
                 mapped_at_creation: false,
             }),
         ));
-        self.readback = Readback {
-            buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("requests readback"),
-                size: tiles as u64 * 16 + 16,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            tiles,
-        };
+        self.readbacks = (0..2)
+            .map(|_| Readback {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("requests readback"),
+                    size: tiles as u64 * 16 + 16,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                tiles,
+                pending: None,
+            })
+            .collect();
     }
 
     pub(crate) fn buffer(&self, binding: u32) -> &wgpu::Buffer {
@@ -410,14 +483,23 @@ impl VirtualCache {
         &self.params
     }
 
+    /// The latest frame whose shading has been read back.
     pub(crate) fn stats(&self) -> CacheStats {
-        self.stats
+        if self.latest == 0 {
+            return CacheStats::default();
+        }
+        self.log[self.latest as usize - 1]
+    }
+
+    /// Every frame so far (the last two may not be read back yet).
+    pub(crate) fn log(&self) -> &[CacheStats] {
+        &self.log
     }
 
     /// GPU memory the cache holds, in bytes.
     pub(crate) fn bytes(&self) -> u64 {
         self.buffers.iter().map(|(_, b)| b.size()).sum::<u64>()
-            + self.readback.buffer.size()
+            + self.readbacks.iter().map(|r| r.buffer.size()).sum::<u64>()
             + self.used_readback.size()
     }
 
@@ -457,7 +539,7 @@ impl VirtualCache {
         vertical_fov_degrees: f32,
     ) -> (u32, u32, u32) {
         let mut updates: Vec<[u32; 4]> = Vec::new();
-        if self.full_upload || self.dirty.len() > self.updates_capacity {
+        if self.full_upload || self.dirty.len() > UPDATES_CAPACITY {
             queue.write_buffer(self.buffer(36), 0, bytemuck::cast_slice(&self.table));
         } else {
             for &i in &self.dirty {
@@ -500,12 +582,17 @@ impl VirtualCache {
             ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        self.stats = CacheStats {
+        self.log.push(CacheStats {
+            frame: self.frame,
             pages_baked: self.bake_list.len() as u32,
             texels_baked: self.texels,
             resident: self.map.len() as u32,
+            evicted: std::mem::take(&mut self.evicted),
+            planning: std::mem::take(&mut self.planning),
+            evicting: std::mem::take(&mut self.evicting),
+            waiting: std::mem::take(&mut self.waiting),
             ..Default::default()
-        };
+        });
         (
             (updates.len() / 2) as u32,
             self.jobs.len() as u32,
@@ -519,19 +606,76 @@ impl VirtualCache {
         encoder.clear_buffer(self.buffer(42), 0, None);
     }
 
-    /// Copies the requests and counters for reading back after the frame.
-    pub(crate) fn encode_readback(&self, encoder: &mut wgpu::CommandEncoder) {
-        let bytes = self.readback.tiles as u64 * 16;
-        encoder.copy_buffer_to_buffer(self.buffer(39), 0, &self.readback.buffer, 0, bytes);
-        encoder.copy_buffer_to_buffer(self.buffer(42), 0, &self.readback.buffer, bytes, 16);
+    /// Copies the frame's requests and counters (and every 32 frames, slot
+    /// use) for reading back once the frame is done.
+    pub(crate) fn encode_readback(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let r = &self.readbacks[(self.frame % 2) as usize];
+        let bytes = r.tiles as u64 * 16;
+        encoder.copy_buffer_to_buffer(self.buffer(39), 0, &r.buffer, 0, bytes);
+        encoder.copy_buffer_to_buffer(self.buffer(42), 0, &r.buffer, bytes, 16);
+        self.used_requested = self.frame.is_multiple_of(32) && self.used_pending.is_none();
+        if self.used_requested {
+            encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
+        }
     }
 
-    /// After the frame's submission: reads its requests back (waiting for the
-    /// GPU) and plans the next frame's bake.
-    pub(crate) fn finish_frame(&mut self, device: &wgpu::Device) {
-        let raw = map_read(device, &self.readback.buffer);
+    /// After the frame's submission (`index`): starts its readbacks, without
+    /// waiting.
+    pub(crate) fn after_submit(&mut self, index: wgpu::SubmissionIndex) {
+        let r = &mut self.readbacks[(self.frame % 2) as usize];
+        r.buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+        r.pending = Some((self.frame, index.clone()));
+        if self.used_requested {
+            self.used_readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+            self.used_pending = Some((self.frame, index));
+            self.used_requested = false;
+        }
+        self.frame += 1;
+    }
+
+    /// Before the frame: reads back the requests of two frames ago (waiting
+    /// only for that frame), evicts with any slot use that has arrived, and
+    /// plans the frame's bake.
+    pub(crate) fn begin_frame(&mut self, device: &wgpu::Device) {
+        let start = Instant::now();
+        let slot = (self.frame % 2) as usize;
+        let requests = self.collect(device, slot);
+        if let Some((frame, _)) = &self.used_pending
+            && frame + 2 <= self.frame
+        {
+            let (_, index) = self.used_pending.take().expect("pending slot use");
+            let raw = map_wait(device, &self.used_readback, index);
+            let evicting = Instant::now();
+            self.evicted += self.merge_used_and_evict(bytemuck::cast_slice(&raw), 64);
+            self.evicting += evicting.elapsed();
+        }
+        self.plan(device, requests);
+        // `collect` adds its wait to `waiting`.
+        self.planning += start.elapsed().saturating_sub(self.waiting);
+    }
+
+    /// Reads back every frame still in flight (for reporting; plans nothing).
+    pub(crate) fn drain(&mut self, device: &wgpu::Device) {
+        for slot in 0..self.readbacks.len() {
+            self.collect(device, slot);
+        }
+    }
+
+    /// Reads back readback `slot` if a frame is pending there: records its
+    /// counters and returns its requests.
+    fn collect(&mut self, device: &wgpu::Device, slot: usize) -> Vec<[u32; 3]> {
+        let Some((frame, index)) = self.readbacks[slot].pending.take() else {
+            return Vec::new();
+        };
+        let wait = Instant::now();
+        let raw = map_wait(device, &self.readbacks[slot].buffer, index);
+        self.waiting += wait.elapsed();
         let words: &[u32] = bytemuck::cast_slice(&raw);
-        let tiles = self.readback.tiles as usize;
+        let tiles = self.readbacks[slot].tiles as usize;
         let requests: Vec<[u32; 3]> = words[..4 * tiles]
             .as_chunks::<4>()
             .0
@@ -539,23 +683,16 @@ impl VirtualCache {
             .filter(|r| r[3] == 1)
             .map(|r| [r[0], r[1], r[2]])
             .collect();
-        self.stats.requests = requests.len() as u32;
-        self.stats.fallback_pixels = words[4 * tiles];
-        self.frame += 1;
-        if self.frame.is_multiple_of(32) {
-            self.stats.evicted += self.evict(device, 64);
-        }
-        self.plan(device, requests);
+        let record = &mut self.log[frame as usize - 1];
+        record.requests = requests.len() as u32;
+        record.fallback_pixels = words[4 * tiles];
+        self.latest = self.latest.max(frame);
+        requests
     }
 
-    /// Reads back which slots pixels used, and frees pages unused for more
+    /// Merges slot use read back from the GPU and frees pages unused for more
     /// than `age` frames. Returns how many were freed.
-    fn evict(&mut self, device: &wgpu::Device, age: u32) -> u32 {
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
-        self.queue.submit([encoder.finish()]);
-        let raw = map_read(device, &self.used_readback);
-        let used: &[u32] = bytemuck::cast_slice(&raw);
+    fn merge_used_and_evict(&mut self, used: &[u32], age: u32) -> u32 {
         for (l, &u) in self.last_used.iter_mut().zip(used) {
             *l = (*l).max(u);
         }
@@ -574,6 +711,25 @@ impl VirtualCache {
             freed += 1;
         }
         freed
+    }
+
+    /// With the pool full: reads slot use back now (waiting for all GPU work)
+    /// and frees pages unused for more than `age` frames.
+    fn evict_now(&mut self, device: &wgpu::Device, age: u32) -> u32 {
+        if self.used_pending.is_some() {
+            // The slot-use buffer is mapped or about to be: use it.
+            let (_, index) = self.used_pending.take().expect("pending slot use");
+            let raw = map_wait(device, &self.used_readback, index);
+            return self.merge_used_and_evict(bytemuck::cast_slice(&raw), age);
+        }
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
+        let index = self.queue.submit([encoder.finish()]);
+        self.used_readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+        let raw = map_wait(device, &self.used_readback, index);
+        self.merge_used_and_evict(bytemuck::cast_slice(&raw), age)
     }
 
     fn mark(&mut self, entry: u32) {
@@ -618,45 +774,58 @@ impl VirtualCache {
         self.full_upload = true;
     }
 
-    /// Chooses the next frame's pages: for each request, the missing pages from
+    /// Chooses the frame's pages: for each request, the missing pages from
     /// the wanted mip up to the first resident one (or the coarsest), ordered
     /// so that coarse levels come first (pixels with no page at all first of
-    /// all), within the bake budget.
+    /// all), within the bake budget. A walk up stops at a page another request
+    /// already listed, and continues its order.
     fn plan(&mut self, device: &wgpu::Device, requests: Vec<[u32; 3]>) {
         self.bake_list.clear();
         self.jobs.clear();
         self.texels = 0;
-        let mut wanted: HashMap<[u32; 3], u32> = HashMap::new();
-        let mut seen = std::collections::HashSet::new();
+        // Page → (depth below the top of its chain, a resident page above it).
+        let mut wanted: KeyMap<(u32, bool)> = KeyMap::default();
+        let mut chain = Vec::new();
         for r in requests {
-            if !seen.insert(r) || self.map.contains_key(&r) {
+            if wanted.contains_key(&r) || self.map.contains_key(&r) {
                 continue;
             }
             let (m, c, mip0, page0) = unpack(r);
-            let mut chain = vec![r];
+            chain.clear();
+            chain.push(r);
             let (mut mip, mut page) = (mip0, page0);
-            let mut resident = false;
+            let mut top = (0, false);
             while self.grid(c, m, mip) != [1, 1] && mip < MAX_MIP {
                 page = self.coarser(c, m, mip, page);
                 mip += 1;
                 let k = key(m, c, mip, page);
                 if self.map.contains_key(&k) {
-                    resident = true;
+                    top = (0, true);
+                    break;
+                }
+                if let Some(&(depth, resident)) = wanted.get(&k) {
+                    top = (depth + 1, resident);
                     break;
                 }
                 chain.push(k);
             }
-            for (depth, k) in chain.iter().rev().enumerate() {
-                let priority = 2 * depth as u32 + resident as u32;
-                let p = wanted.entry(*k).or_insert(priority);
-                *p = (*p).min(priority);
+            for (i, k) in chain.iter().rev().enumerate() {
+                wanted.insert(*k, (top.0 + i as u32, top.1));
             }
         }
-        let mut order: Vec<([u32; 3], u32)> = wanted.into_iter().collect();
-        order.sort_unstable_by_key(|&(k, p)| (p, k));
+        let mut order: Vec<(u32, [u32; 3])> = wanted
+            .into_iter()
+            .map(|(k, (depth, resident))| (2 * depth + resident as u32, k))
+            .collect();
+        // Each page costs at least one texel: no more than `budget` can fit.
         let budget = self.options.bake_budget.max(PAGE_TEXELS);
+        if order.len() > budget as usize {
+            order.select_nth_unstable(budget as usize);
+            order.truncate(budget as usize);
+        }
+        order.sort_unstable();
         let mut evicted_now = false;
-        for (k, _) in order {
+        for (_, k) in order {
             let (m, c, mip, page) = unpack(k);
             let n = self.grid(c, m, mip);
             let inside = [
@@ -672,7 +841,7 @@ impl VirtualCache {
             }
             if self.free.is_empty() && !evicted_now {
                 evicted_now = true;
-                self.stats.evicted += self.evict(device, 2);
+                self.evicted += self.evict_now(device, 2);
             }
             let Some(slot) = self.free.pop() else { break };
             let Some(entry) = self.insert(k, slot) else {
@@ -700,14 +869,20 @@ impl VirtualCache {
     }
 }
 
-/// Reads `buffer` back (mapping it and waiting for the GPU), then unmaps it.
-fn map_read(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
-    let slice = buffer.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |r| r.expect("map failed"));
+/// Waits for submission `index`, after which `buffer` (whose mapping was
+/// requested after that submission) is mapped; copies it out and unmaps it.
+fn map_wait(device: &wgpu::Device, buffer: &wgpu::Buffer, index: wgpu::SubmissionIndex) -> Vec<u8> {
     device
-        .poll(wgpu::PollType::wait_indefinitely())
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: None,
+        })
         .expect("GPU poll failed");
-    let data = slice.get_mapped_range().expect("mapped buffer").to_vec();
+    let data = buffer
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped buffer")
+        .to_vec();
     buffer.unmap();
     data
 }

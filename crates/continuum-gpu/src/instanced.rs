@@ -27,8 +27,11 @@ pub struct FrameProfile {
     pub visibility_submit: Duration,
     /// The shading pass, if separate.
     pub shading: Duration,
-    /// Display, request readback and the next frame's planning.
+    /// Display and the copies for readback.
     pub readback: Duration,
+    /// Planning the frame's bake on the CPU (from the requests of two frames
+    /// before).
+    pub planning: Duration,
 }
 
 /// The lighting cache's state and its bake passes (table updates, texels,
@@ -327,14 +330,15 @@ impl InstancedRenderer {
         self.cache.as_ref().map_or(0, |c| c.state.bytes())
     }
 
-    /// What the lighting cache did in the last frame.
+    /// What the lighting cache did in the latest frame read back (two frames
+    /// behind the latest frame rendered).
     pub fn cache_stats(&self) -> Option<CacheStats> {
         self.cache.as_ref().map(|c| c.state.stats())
     }
 
     /// Renders one frame from `camera` (relative to the origin) into `target`.
-    /// With a lighting cache, this waits for the frame to finish (its page
-    /// requests are read back).
+    /// With a lighting cache, this first plans the frame's bake from the page
+    /// requests of two frames before (waiting for that frame only).
     pub fn frame(&mut self, camera: Camera, target: &wgpu::TextureView) {
         let cam = camera_uniform(camera, self.width, self.height, self.radiance);
         self.queue
@@ -345,6 +349,9 @@ impl InstancedRenderer {
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
+        if let Some(cache) = &mut self.cache {
+            cache.state.begin_frame(&self.device);
+        }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if let Some(cache) = &mut self.cache {
             let (updates, texels, pages) = cache.state.upload(
@@ -375,14 +382,29 @@ impl InstancedRenderer {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
         }
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &mut self.cache {
             cache.state.encode_readback(&mut encoder);
         }
         crate::live::encode_display(&mut encoder, &self.display, &self.display_bind, target);
-        self.queue.submit([encoder.finish()]);
+        let index = self.queue.submit([encoder.finish()]);
         if let Some(cache) = &mut self.cache {
-            cache.state.finish_frame(&self.device);
+            cache.state.after_submit(index);
         }
+    }
+
+    /// Waits for every submitted frame and reads back what the cache has not
+    /// read yet (for reporting: [`Self::cache_log`] is then complete).
+    pub fn finish(&mut self) {
+        self.wait();
+        if let Some(cache) = &mut self.cache {
+            cache.state.drain(&self.device);
+        }
+    }
+
+    /// What the lighting cache did in every frame so far. Shading counters
+    /// arrive two frames late; call [`Self::finish`] first for all of them.
+    pub fn cache_log(&self) -> &[CacheStats] {
+        self.cache.as_ref().map_or(&[], |c| c.state.log())
     }
 
     /// [`Self::frame`] split into stages, each submitted and waited for on its
@@ -400,6 +422,11 @@ impl InstancedRenderer {
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
         self.wait();
         let mut profile = FrameProfile::default();
+        let start = Instant::now();
+        if let Some(cache) = &mut self.cache {
+            cache.state.begin_frame(&self.device);
+        }
+        profile.planning = start.elapsed();
         let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if let Some(cache) = &mut self.cache {
@@ -451,13 +478,13 @@ impl InstancedRenderer {
         }
         let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &mut self.cache {
             cache.state.encode_readback(&mut encoder);
         }
         crate::live::encode_display(&mut encoder, &self.display, &self.display_bind, target);
-        self.queue.submit([encoder.finish()]);
+        let index = self.queue.submit([encoder.finish()]);
         if let Some(cache) = &mut self.cache {
-            cache.state.finish_frame(&self.device);
+            cache.state.after_submit(index);
         }
         self.wait();
         profile.readback = start.elapsed();
