@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-10-25, after M5 gate 5)
+## 3.6 Where we stand (updated 2026-10-25, after M5 gate 6)
 
 Against the goal in §1, honestly:
 
@@ -144,8 +144,12 @@ Against the goal in §1, honestly:
 - **Measured against an independent path tracer** (Cycles, compared
   correctly: supersampled 4×4 against Cycles' area-integrated pixels):
   - sun and sky on an outdoor scene: 0.7–1.2% (M5 G2);
-  - the million-boulder field with sky: 1.2–2.4% (M5 G3), with object-level
-    prefiltered coverage.
+  - the million-boulder field with sky: 1.2–1.9% sky only (M5 G3–G5), with
+    object-level prefiltered coverage. (G3's "sun and sky 2.4%" lit only the
+    horizon with the sun: its sun stood 1 km from the field's center, which
+    left the camera's surroundings behind the one-sided panel; M5 G6.)
+  - three colored lights around the camera (a sun, a 4° fill, a nearby lamp)
+    on the field: 1.22%, and with sky 1.03% (M5 G6).
 
   The earlier "3.8% vs Cycles" (M3 G3) compared point samples with
   area-integrated pixels and is an overestimate. The sky's figures are a
@@ -165,8 +169,12 @@ Against the goal in §1, honestly:
 - **Not yet shown in 3D or on the GPU.** The ledger, the third rule and "the
   invention" (§3.1). It has only run in 2D, with mixed results, and moving
   lights depend on it.
+- **Several colored lights** (M5 G6, passed): a list of RGB rect lights per
+  pixel and in the cache, flights at 14–15 ms with three lights. A cache
+  texel stores light per unit radiance, so re-coloring a light bakes nothing
+  and is bit-identical to a fresh cache.
 - **Not started:**
-  - more than one rect light, and colored lights;
+  - point and spot lights (only rectangles so far);
   - sharing the sky's far field across texels (cascades of wide cones), which
     is what sky warm-up needs;
   - mask cones for primary visibility and anti-aliasing. One ray per pixel is
@@ -178,7 +186,8 @@ Against the goal in §1, honestly:
 - **Against UE5.** No direct comparison has been made, so none is claimed.
   - Our measured edge: exact soft shadows from area lights and noise-free
     sky occlusion, bounce light that updates exactly in the frame the change
-    happens, with no noise, denoiser or temporal lag.
+    happens, and light colors and intensities that change for free and
+    exactly, with no noise, denoiser or temporal lag.
   - UE5 leads on everything else: materials, lights, GI bounces,
     anti-aliasing and upscaling, platforms and tooling.
 
@@ -194,43 +203,46 @@ estimates, and gates fail often, so treat them as ranges.
 | # | Work | Why | Batches |
 |---|---|---|---|
 | 1 | View-dependent lighting cache: texels only on visible surfaces, coarser with distance, a per-frame bake budget, kept across frames, exact incremental updates for movers, instanced objects | Real-time at scale. M4 gate 7 shows per-pixel cones are the bottleneck. **Done for static scenes (M4 G8–G11; G11 passed):** flying over a million boulders at 720p averages 14.6–15.0 ms with the bake budget following the frame time; lighting is softer in motion and sharpens when the view settles. Sky in this cache since M5 G5 (at frame rate, slow to converge). Not yet: movers in this cache | 2–3 (3 done) |
-| 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes had black shadows. **Sky done per pixel and matched to Cycles (M5 G2–G3); in the view cache at frame rate (M5 G5), but slow to converge.** Not yet: several colored lights | 2–3 (2.5 done) |
+| 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes had black shadows. **Sky done per pixel and matched to Cycles (M5 G2–G3); in the view cache at frame rate (M5 G5), but slow to converge. Several colored rect lights done (M5 G6).** Not yet: point and spot lights; sky warm-up | 3 (3 done) |
 | 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes | 2–3 |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel | 2 |
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use | 2 |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement, untested so far | 1–2 |
 
-### 3.8 Next steps, in order (2026-10-25)
+### 3.8 Next steps, in order (2026-10-25, after M5 gate 6)
 
-1. **Several colored lights** (rest of roadmap item 2):
-   - a list of rect lights with RGB radiance in the per-pixel and view-cache
-     paths;
-   - the cache storing one channel per light plus the sky, so changing a
-     light's color or intensity re-shades with no bake (lighting is linear in
-     emitted power);
-   - against Cycles (`cycles::render_instanced` takes one light today and
-     needs a list).
-2. **Sky warm-up: share the far field across a page.** M5 G5 failed on
-   warm-up (13–95× the sun's frames). Walk distant objects once per page
-   from its center and each texel's near objects alone; split objects by
-   distance, not with a far plane (the diagnostics found far planes make
-   walks costlier). This is the first cascade of wide cones (M10).
-3. **Sky accuracy: weight coverage within bins.** The sky's error against
+1. **Sky warm-up: share the far field across a page.** M5 G5 failed on
+   warm-up (13–95× the sun's frames), and with three lights and sky the
+   flights' 99th percentile is 35 ms (M5 G6, reported). Walk distant objects
+   once per page from its middle and each texel's near objects alone, split
+   by whether an object's hierarchy leaf meets a sphere around the page (not
+   with a far plane: the diagnostics found far planes make walks costlier).
+   This is the first cascade of wide cones (M10). Written, not yet measured
+   (`CacheOptions::sky_far`).
+2. **Sky accuracy: weight coverage within bins.** The sky's error against
    Cycles depends on the cube's orientation (1.9–4.2%) and is always too
    dark. Accumulating first moments of covered area per bin would weight
    coverage by the cosine to first order.
-4. **glTF import** (item 3).
-5. **Pixel-footprint cones for primary visibility** (item 4). Measure against
-   area-integrated references. Packet traversal (M5 G5) suits them:
-   neighbouring pixels walk alike.
+3. **glTF import** (item 3).
+4. **Pixel-footprint cones for primary visibility** (item 4). Measure against
+   area-integrated references. Packet traversal (M5 G5) suits them, and M5
+   G6 found 4×4 samples per pixel too few for small lit boulders on a dark
+   ground (the lamp alone: 30% at 4×4, 4.7% at 16×16 against Cycles).
+5. **Point and spot lights**, after the above (the rect light covers area
+   lights and suns).
 6. **Library API and Bevy plugin** (item 5), then Windows/NVIDIA CI (item 6).
 7. **Open questions:**
    - offering the wgpu-core TLAS-dependency fix upstream (needs the user's go
      ahead before posting anything);
-   - the world-space lightmap path (`LiveRenderer`) still refuses a sky;
+   - the world-space lightmap path (`LiveRenderer`) still refuses a sky and
+     takes one light;
    - wgpu compiles Metal shaders with fast math, so moving code between
      kernels changes rounding (0.02% on the sun channel in M5 G5). Results
-     stay deterministic within a build.
+     stay deterministic within a build;
+   - Metal pass timestamps: an end-of-pass timestamp followed only by copies
+     can land too late, and a render pass's start is not ordered after
+     compute passes (M5 G5); the cache times its camera passes up to an
+     empty compute pass.
 
 **v1.0, competitive in its niche** (a render library, not a full engine):
 another 20 or more batches.
@@ -288,7 +300,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | G1 mask cones in a WGSL compute shader (**passed on attempt 2**: matches the CPU to 6.4e-6, 7.5× faster than 10 CPU threads on the M4, `docs/results/m2-gate1.md`); G2 mesh hierarchy on the GPU (**failed**: identical output, rays 7.5× faster, but the frame only 1.6× faster because cone setup and rasterization dominate, `docs/results/m2-gate2.md`); G3 960×540 at 60 fps with per-pixel cones every frame (**failed**: 33.6 → 26.0 ms, identical output; per-pixel cones every frame are the brute-force path, `docs/results/m2-gate3.md`); G4 world-space lighting cache (**passed on attempt 2**: 1080p in 5.66 ms at 0.58% RMSE vs per-pixel cones, `docs/results/m2-gate4.md`); G5 moving objects with exact soft shadows (**passed**: incremental block re-bake on the GPU equals a full re-bake exactly on every frame; 9.85 ms per 1080p frame with 6.1% of blocks re-baked, vs 21.9 ms for a full re-bake alone, `docs/results/m2-gate5.md`); G6 one-bounce indirect light from cone G-buffers (**passed on attempt 2**: exact against a from-scratch trace on every frame after padding hierarchy boxes, 3.6% RMSE vs 16× the directions, 11.66 ms per 1080p frame with moving boxes, `docs/results/m2-gate6.md`); real-time viewer with moving boxes and indirect light (`apps/viewer`, about 10.8 ms per frame at 2560×1440 on the M4 Air); frame time at 1080p on M4 Air; image-diffed in CI |
 | M3 general meshes and a first showcase | Per-mesh triangle hierarchies, chart-based lightmaps with smooth normals, static coverage cache, probes on moving objects, procedural showcase, Cycles reference pipeline | G1 triangle hierarchies on the GPU (**failed**: identical output but 3.9× vs a 10× target on a 40k-triangle sphere, because cone cost grows with the triangles really inside cones; that is the prefiltered hierarchy's job, `docs/results/m3-gate1.md`); G2 general meshes in the lighting cache (**passed**: 1.61% RMSE vs per-pixel cones with the same normals, 4.99 ms at 1080p, `docs/results/m3-gate2.md`); G3 the showcase in real time vs Cycles (**failed narrowly on speed**: bit-exact on all 300 frames and 3.80% RMSE vs Cycles, but 17.76 ms vs 16.7 ms per 1080p frame, `docs/results/m3-gate3.md`) |
 | M4 scale | Prefiltered cones, instancing, large-world coordinates, a virtual lighting cache | G1 prefiltered cones (**passed**: flat cost from 40k to 2.56M triangles, 86 ms vs 13.7 s exact, 0.55% from exact, `docs/results/m4-gate1.md`); G2 ten billion instanced triangles in a large world (**failed** on two of three: the 64 km-offset field renders identically with rebasing, and 10^10 triangles fit in 152 MB, but instanced vs flattened is 0.22% vs a 0.1% target because the flattened reference is the less precise one, and 10^6 vs 10^3 instances cost 3.04× vs 2× because camera rays near the horizon dominate; cones to a small sun are nearly free, `docs/results/m4-gate2.md`); G3 nearest-first ray traversal (**passed**: identical output, 10^10 vs 10^7 triangles 1.40×, 2.83× faster than the fixed order, 100.8 ms at 1080p for a million boulders, `docs/results/m4-gate3.md`); G4 visibility buffer (**failed**: identical output but 0.88× on the field and 1.11× slower on the showcase; register pressure was not the limit, ray traversal itself is, `docs/results/m4-gate4.md`); G5 traversal stacks in workgroup memory (**failed**: identical output but 2.6× slower, as 12 KB per workgroup limits occupancy, `docs/results/m4-gate5.md`); G6 hardware ray queries for camera rays (**failed**: no faster, 0.9×, and 67–270 ms per 720p frame. A corrected diagnostic shows per-pixel sun cones, not rays, dominate; gates 2 and 4 had blamed rays from a broken "light turned away" test, `docs/results/m4-gate6.md`); G7 cones that pay only for what they see (**failed**: no speedup; a stage-by-stage profile shows cones descending the triangle hierarchies of the objects they start on dominate, 119 of 215 ms from 150 m up at 720p, so per-pixel cones every frame are the brute-force path at scale too, `docs/results/m4-gate7.md`); G8 view-dependent lighting cache (**failed** all three: 14–39% from per-pixel exact cones, 20–37 ms warm, 42.7 ms mean in flight; but warm shading fell from 47–233 ms to 2–3 ms and only 1.8% of pixels lacked a page in flight. Diagnostics: one sample per pixel is itself 13–24% from the supersampled image, so later quality gates compare with the area-integrated image; and wgpu spends 15–17 ms of CPU time per `submit` walking the TLAS's million per-instance dependencies, while hardware rays take 4.5–6.6 ms on the GPU, `docs/results/m4-gate8.md`); G9 the cache at speed (**failed** on the flight's 99th percentile, 34.0 vs 33.3 ms. Same images as G8; warm frames 2.9–4.7 ms at 720p with hardware rays after a wgpu-core patch that keeps one TLAS dependency per distinct BLAS, pipelined requests and a faster page manager; flight mean 12.8 ms, 1.6% fallback. The flight is bound by CPU planning, which re-derives a backlog of ~50k wanted pages every frame, `docs/results/m4-gate9.md`); G10 smooth flight (**failed**: progressive requests from the shader and GPU deduplication cut CPU planning to 1.9 ms per frame, but the flight is then GPU-bound at 17.6–17.9 ms mean, 38 ms 99th percentile on a hot machine; next, baking by frame time instead of a fixed cone count, `docs/results/m4-gate10.md`); G11 baking to a frame-time target (**passed**: same images; warm 6.5–8.0 ms at 720p; three flights over a million boulders at 14.6–15.0 ms mean, 26–32 ms 99th percentile, 1.7% fallback. Caveat: the budget sits near its floor while flying, so only 0.6% of samples reach their wanted mip in motion and lighting is softer until the view settles, `docs/results/m4-gate11.md`); zoom and flythrough with no shimmer |
-| M5 lights (v0.1 item 2) | Several lights, a sky environment, colored light | G1 sky light through six cube-face mask cones (**failed**: sky alone 2.74% from Cycles, sun and sky 5.12% against 3%; the reference was at fault: Blender 5.2's Cycles always box-filters at least one pixel, so it area-integrates while we point-sampled, and it loses 1.9% of a small sun 3 km away; sky interiors match Cycles to 0.1–0.5%, `docs/results/m5-gate1.md`); G2 the same with the reference fixed (**passed**: 4×4 per pixel against Cycles' one-pixel box, sun at 1 km: sky only 0.74%, sun and sky 1.19% exact and prefiltered; interiors within 0.0–0.5%, `docs/results/m5-gate2.md`); G3 object-level prefiltered coverage (**passed**: on the million-boulder field against instanced Cycles, sky only 1.15% and sun and sky 2.39% at 4×4 per pixel; more than 25× cheaper than walking every object; sun-only images bit-identical, `docs/results/m5-gate3.md`); G4 sky through the view cache (**failed** on cached-vs-per-pixel sky, 2.4–20.5% against 5%, the texel blur the sun channel also shows, and on speed; the speed numbers are confounded, since a control showed the machine running gate 11's own warm frame 10× slower than in gate 11; real finding: sky texels cost about 100× sun texels, so the bake budget's 1,000-texel floor must become a time, `docs/results/m5-gate4.md`); G5 sky through the cache at speed (**failed** on warm-up: with own-object sky masks baked once per geometry (faithful to 0.06–0.15%), sky faces as separate jobs, a horizon cull and a bake budget that follows GPU time, three sun-and-sky flights average 14.8 ms with 99th percentile under 25 ms and 4.5% fallback, warm frames 2.2–2.6 ms, sun channel unchanged; but views warm with sky in 13–95× the sun's frames, against 10×. Reported: the sky's error against Cycles depends on the cube's orientation, 1.9–4.2%, `docs/results/m5-gate5.md`; diagnostics in `docs/results/m5-sky-bake-diagnostics.md`); next: several colored lights, then the sky's far field shared per page |
+| M5 lights (v0.1 item 2) | Several lights, a sky environment, colored light | G1 sky light through six cube-face mask cones (**failed**: sky alone 2.74% from Cycles, sun and sky 5.12% against 3%; the reference was at fault: Blender 5.2's Cycles always box-filters at least one pixel, so it area-integrates while we point-sampled, and it loses 1.9% of a small sun 3 km away; sky interiors match Cycles to 0.1–0.5%, `docs/results/m5-gate1.md`); G2 the same with the reference fixed (**passed**: 4×4 per pixel against Cycles' one-pixel box, sun at 1 km: sky only 0.74%, sun and sky 1.19% exact and prefiltered; interiors within 0.0–0.5%, `docs/results/m5-gate2.md`); G3 object-level prefiltered coverage (**passed**: on the million-boulder field against instanced Cycles, sky only 1.15% and sun and sky 2.39% at 4×4 per pixel; more than 25× cheaper than walking every object; sun-only images bit-identical, `docs/results/m5-gate3.md`); G4 sky through the view cache (**failed** on cached-vs-per-pixel sky, 2.4–20.5% against 5%, the texel blur the sun channel also shows, and on speed; the speed numbers are confounded, since a control showed the machine running gate 11's own warm frame 10× slower than in gate 11; real finding: sky texels cost about 100× sun texels, so the bake budget's 1,000-texel floor must become a time, `docs/results/m5-gate4.md`); G5 sky through the cache at speed (**failed** on warm-up: with own-object sky masks baked once per geometry (faithful to 0.06–0.15%), sky faces as separate jobs, a horizon cull and a bake budget that follows GPU time, three sun-and-sky flights average 14.8 ms with 99th percentile under 25 ms and 4.5% fallback, warm frames 2.2–2.6 ms, sun channel unchanged; but views warm with sky in 13–95× the sun's frames, against 10×. Reported: the sky's error against Cycles depends on the cube's orientation, 1.9–4.2%, `docs/results/m5-gate5.md`; diagnostics in `docs/results/m5-sky-bake-diagnostics.md`); G6 several colored lights (**passed**: three RGB lights around the camera within 1.22% of Cycles at 16×16 samples per pixel over surfaces; re-coloring a warm cache bakes nothing and is bit-identical to a fresh one; flights with three lights 14.1–14.9 ms mean, 99th percentile 29–31 ms; light cones gained bounding-cone culling and nearest-first walks, which took a grazing lamp's flight from 579 to 14 ms; reported: with sky the 99th percentile is 35 ms, and gate 3's sun lit only the horizon, `docs/results/m5-gate6.md`); next: the sky's far field shared per page |
 | M6 content (v0.1 item 3) | glTF import, base-color textures, automatic charts | Real assets, measured against Cycles |
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | Against supersampled references; no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 |

@@ -58,6 +58,12 @@ Flags:
   view takes 1,400 frames to sharpen standing and up to 12,000 from above.
   Until then it is lit from coarser pages.
 
+Scenes can have several colored rectangular lights
+(`InstancedRenderer::with_cache_lights`). The cache stores light per unit
+radiance, so `set_light_radiance` re-colors a light with no bake. Three
+lights on the field, a warm sun, a cool fill and an orange lamp, are within
+1.2% of Cycles, and flights over them average 14–15 ms (M5 gate 6).
+
 Measured offscreen at 1280×720 with hardware rays (M4 gate 11):
 
 - Warm views take 6.5–8 ms per frame.
