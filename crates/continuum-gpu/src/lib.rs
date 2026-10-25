@@ -28,6 +28,9 @@ struct LightUniform {
     params: [f32; 4],
     /// Uniform sky radiance (linear RGB; zero: no sky).
     sky: [f32; 4],
+    /// `[first object-hierarchy node's coverage in blas_cov (NONE: no
+    /// object-level prefiltering), 0, 0, 0]`
+    objects: [u32; 4],
 }
 
 #[repr(C)]
@@ -62,6 +65,7 @@ pub struct MaskConeKernel {
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
     sky_max: std::cell::Cell<bool>,
+    object_prefilter: std::cell::Cell<bool>,
     nearest_first: std::cell::Cell<bool>,
     profile_stage: std::cell::Cell<u32>,
     split: std::cell::Cell<bool>,
@@ -144,6 +148,7 @@ impl RectLight {
         nearest_first: bool,
         profile_stage: u32,
         (sky, sky_max): (Vec3, bool),
+        objects: u32,
     ) -> LightUniform {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         LightUniform {
@@ -163,6 +168,7 @@ impl RectLight {
                 sky_max as u32 as f32,
             ],
             sky: v4(sky),
+            objects: [objects, 0, 0, 0],
         }
     }
 }
@@ -352,6 +358,7 @@ impl MaskConeKernel {
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
             sky_max: std::cell::Cell::new(false),
+            object_prefilter: std::cell::Cell::new(true),
             nearest_first: std::cell::Cell::new(true),
             profile_stage: std::cell::Cell::new(0),
             split: std::cell::Cell::new(false),
@@ -383,6 +390,14 @@ impl MaskConeKernel {
 
     pub fn sky(&self) -> Vec3 {
         self.sky.get()
+    }
+
+    /// Object-level prefiltering for instanced scenes (M5 gate 3, on by
+    /// default): with prefiltering on, cones splat small object-hierarchy
+    /// nodes (whole groups of objects) instead of descending into them.
+    /// Applies to work set up after the call.
+    pub fn set_object_prefilter(&self, on: bool) {
+        self.object_prefilter.set(on);
     }
 
     /// Diagnostic: sky cones combine coverage across meshes by the maximum,
@@ -606,8 +621,20 @@ impl MaskConeKernel {
                 translation: (i.position - origin).as_vec3(),
             })
             .collect();
-        let (flat, xforms, bounds) = flatten_instanced(&geometries, &placements);
+        let (mut flat, xforms, bounds) = flatten_instanced(&geometries, &placements);
         let (nodes, items) = object_hierarchy(&bounds, |_| true);
+        // Object-level prefiltering: the object hierarchy's coverage follows
+        // the triangle hierarchies' in the same buffer.
+        let objects = if self.object_prefilter.get() && self.prefilter.get() > 0.0 {
+            let roots: Vec<u32> = flat.ranges.iter().map(|r| r[2]).collect();
+            let cov =
+                hierarchy::object_coverage(&nodes, &items, &flat.blas_cov, &roots, &placements);
+            let base = (flat.blas_cov.len() / hierarchy::COVERAGE_SAMPLES) as u32;
+            flat.blas_cov.extend(cov);
+            base
+        } else {
+            hierarchy::NONE
+        };
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         let normals: Vec<[f32; 4]> = scene
             .geometries
@@ -624,6 +651,7 @@ impl MaskConeKernel {
             self.nearest_first.get(),
             self.profile_stage.get(),
             (self.sky.get(), self.sky_max.get()),
+            objects,
         );
         let storage = |label: &str, contents: &[u8]| {
             self.device
@@ -875,6 +903,7 @@ impl MaskConeKernel {
             self.nearest_first.get(),
             self.profile_stage.get(),
             (self.sky.get(), self.sky_max.get()),
+            hierarchy::NONE,
         );
         let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
@@ -1031,6 +1060,7 @@ impl MaskConeKernel {
             self.nearest_first.get(),
             self.profile_stage.get(),
             (self.sky.get(), self.sky_max.get()),
+            hierarchy::NONE,
         );
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()

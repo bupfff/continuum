@@ -90,6 +90,8 @@ up = right.cross(forward)
 data = bpy.data.cameras.new("camera")
 data.sensor_fit = "VERTICAL"
 data.angle_y = math.radians(cam["fov"])
+data.clip_start = 0.01
+data.clip_end = 1e6
 camera = bpy.data.objects.new("camera", data)
 scene.collection.objects.link(camera)
 camera.matrix_world = Matrix(

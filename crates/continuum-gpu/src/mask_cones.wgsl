@@ -30,6 +30,9 @@ struct Light {
     // lit through six cube-face mask cones per receiver (zero: no sky).
     // Per-pixel shading only so far.
     sky: vec4<f32>,
+    // x: the object hierarchy's first node in `blas_cov` (NONE: no object-
+    // level prefiltering; see `splat_object_node`)
+    objects: vec4<u32>,
 };
 
 struct Receiver {
@@ -598,6 +601,68 @@ fn light_cone(apex: vec3<f32>) -> LightCone {
     return out;
 }
 
+// Object-level prefiltering (M5 gate 3): if object-hierarchy node `n` (box
+// lo..hi) lies wholly between the cone's near and far planes and projects to
+// at most the prefilter threshold in bins, splats its hull into `cov` as one
+// more mesh, with opacity 1 − exp(−front area / silhouette) (its objects as
+// independent occluders, so overlap saturates), and returns true. Otherwise
+// returns false: descend as usual.
+fn splat_object_node(c: Cone, n: u32, lo: vec3<f32>, hi: vec3<f32>, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) -> bool {
+    if (light.objects.x == NONE || light.params.x <= 0.0) { return false; }
+    let g = f32(GRID);
+    var pts: array<vec2<f32>, 8>;
+    var mn = vec2<f32>(3.4e38);
+    var mx = vec2<f32>(-3.4e38);
+    for (var k = 0u; k < 8u; k++) {
+        let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
+        if (c.far_offset - dot(c.far_normal, corner) < 0.0) { return false; }
+        let p = to_local(c, corner);
+        if (p.z < NEAR) { return false; }
+        let q = vec2<f32>((p.x / p.z - c.window.x) / (c.window.z - c.window.x) * g,
+                          (p.y / p.z - c.window.y) / (c.window.w - c.window.y) * g);
+        pts[k] = q;
+        mn = min(mn, q);
+        mx = max(mx, q);
+    }
+    if (max(mx.x - mn.x, mx.y - mn.y) > light.params.x) { return false; }
+    if (mx.x <= 0.0 || mx.y <= 0.0 || mn.x >= g || mn.y >= g) { return true; }
+    let e = hi - lo;
+    let v = normalize(c.apex - (lo + hi) * 0.5);
+    let silhouette = abs(v.x) * e.y * e.z + abs(v.y) * e.x * e.z + abs(v.z) * e.x * e.y;
+    if (silhouette <= 1e-30) { return true; }
+    let alpha = 1.0 - exp(-node_front_area(light.objects.x + n, v) / silhouette);
+    if (alpha <= 0.0) { return true; }
+    var q = hull8(pts);
+    q = clip_line2(q, vec2<f32>(-1.0, 0.0), 0.0);
+    q = clip_line2(q, vec2<f32>(1.0, 0.0), g);
+    q = clip_line2(q, vec2<f32>(0.0, -1.0), 0.0);
+    q = clip_line2(q, vec2<f32>(0.0, 1.0), g);
+    if (q.n < 3u) { return true; }
+    var acc: array<f32, 68>;
+    for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
+    var span = vec2<u32>(68u, 0u);
+    for (var i = 0u; i < q.n; i++) {
+        let a = clamp(q.v[i], vec2<f32>(0.0), vec2<f32>(g));
+        let b = clamp(q.v[(i + 1u) % q.n], vec2<f32>(0.0), vec2<f32>(g));
+        draw_edge(&acc, &span, a, b, alpha);
+    }
+    var running = 0.0;
+    for (var b = span.x; b < min(span.y, BINS); b++) {
+        running += acc[b];
+        let covered = min(abs(running), 1.0);
+        if (covered > 1e-6) {
+            let before = (*cov)[b];
+            if (independent_occluders) {
+                (*cov)[b] = 1.0 - (1.0 - before) * (1.0 - covered);
+            } else {
+                (*cov)[b] = max(before, covered);
+            }
+            if (before < 1.0 && (*cov)[b] >= 1.0) { (*full)++; }
+        }
+    }
+    return true;
+}
+
 // Adds the coverage of every mesh in the bound hierarchy (or every mesh) to `cov`.
 fn scene_coverage(c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) {
     if (light.counts.z >= 1u) {
@@ -605,8 +670,13 @@ fn scene_coverage(c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr
         stack_set(0, 0u);
         while (sp > 0u) {
             sp--;
-            let node = nodes[stack_get(sp)];
+            let n = stack_get(sp);
+            let node = nodes[n];
             if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
+            if (splat_object_node(c, n, node.lo.xyz, node.hi.xyz, cov, full)) {
+                if (*full == BINS) { break; }
+                continue;
+            }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
                     add_mesh_coverage(c, items[k], cov, full, i, sp);

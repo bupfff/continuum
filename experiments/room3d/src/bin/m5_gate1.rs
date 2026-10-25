@@ -141,11 +141,31 @@ fn main() -> std::io::Result<()> {
     }
     let e = |img: &[[f32; 3]], r: &[room3d::cycles::Reference; 2]| relative_rmse(img, &r[0].pixels);
     let rows = [
-        ("Sky only, exact cones", e(&sky_exact, &sky_ref), Some(sky_exact_t)),
-        ("Sky only, exact, max combination (diagnostic)", e(&sky_max, &sky_ref), None),
-        ("Sun and sky, exact cones", e(&both_exact, &both_ref), Some(both_exact_t)),
-        ("Sun and sky, prefiltered cones (1 bin)", e(&both_pre, &both_ref), Some(both_pre_t)),
-        ("Sun and sky, exact, max combination (diagnostic)", e(&both_max, &both_ref), None),
+        (
+            "Sky only, exact cones",
+            e(&sky_exact, &sky_ref),
+            Some(sky_exact_t),
+        ),
+        (
+            "Sky only, exact, max combination (diagnostic)",
+            e(&sky_max, &sky_ref),
+            None,
+        ),
+        (
+            "Sun and sky, exact cones",
+            e(&both_exact, &both_ref),
+            Some(both_exact_t),
+        ),
+        (
+            "Sun and sky, prefiltered cones (1 bin)",
+            e(&both_pre, &both_ref),
+            Some(both_pre_t),
+        ),
+        (
+            "Sun and sky, exact, max combination (diagnostic)",
+            e(&both_max, &both_ref),
+            None,
+        ),
     ];
     let pass = rows[0].1 <= 0.03 && rows[2].1 <= 0.03 && rows[3].1 <= 0.03;
 
@@ -161,7 +181,11 @@ fn main() -> std::io::Result<()> {
         both_ref[0].seconds
     )
     .unwrap();
-    writeln!(out, "| Render | Relative RMSE vs Cycles | Time |\n|---|---|---|").unwrap();
+    writeln!(
+        out,
+        "| Render | Relative RMSE vs Cycles | Time |\n|---|---|---|"
+    )
+    .unwrap();
     for (name, err, time) in &rows {
         writeln!(
             out,

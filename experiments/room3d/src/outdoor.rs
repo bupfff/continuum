@@ -92,9 +92,14 @@ impl Outdoor {
             let y = (rng.next_f32() as f64 - 0.5) * 2.0 * (1.5 + 0.5 * x);
             let scale = 0.8 + 1.2 * rng.next_f32();
             let angle = rng.next_f32() * TAU;
-            let offset = DVec3::new(angle.cos() as f64, angle.sin() as f64, 0.0) * 0.45 * scale as f64;
+            let offset =
+                DVec3::new(angle.cos() as f64, angle.sin() as f64, 0.0) * 0.45 * scale as f64;
             instances.push(boulder(DVec3::new(x, y, 0.0) - offset, scale, &mut rng));
-            instances.push(boulder(DVec3::new(x, y, 0.0) + offset, scale * 0.8, &mut rng));
+            instances.push(boulder(
+                DVec3::new(x, y, 0.0) + offset,
+                scale * 0.8,
+                &mut rng,
+            ));
         }
         // The field's sun, 3 km away.
         let (elevation, azimuth) = (30f64.to_radians(), 200f64.to_radians());

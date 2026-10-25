@@ -137,6 +137,32 @@ impl Field {
         }
     }
 
+    /// The same field with the sun `distance` meters from the field's
+    /// center, keeping its direction, angular size and radiance (Cycles loses
+    /// 1.9% of a sun this small 3 km away, none at 1 km: M5 gate 1).
+    pub fn with_sun_at(mut self, distance: f64) -> Field {
+        let center = self.scene.instances[0].position;
+        let toward = (self.sun_center - center).normalize();
+        let old = (self.sun_center - center).length();
+        self.sun_center = center + toward * distance;
+        self.sun_u *= (distance / old) as f32;
+        self.sun_v *= (distance / old) as f32;
+        self
+    }
+
+    /// Uniform sky radiance (linear RGB, blue-white) whose unoccluded
+    /// irradiance on the ground is a quarter of the sun's, as in
+    /// `room3d::outdoor`.
+    pub fn sky(&self) -> Vec3 {
+        let center = self.scene.instances[0].position;
+        let distance = (self.sun_center - center).length() as f32;
+        let toward = ((self.sun_center - center) / distance as f64).as_vec3();
+        let solid_angle = self.sun_u.length() * self.sun_v.length() / (distance * distance);
+        let sun_irradiance = self.radiance * solid_angle * toward.z;
+        let tint = Vec3::new(0.6, 0.75, 1.0);
+        tint / (tint.element_sum() / 3.0) * (sun_irradiance / 4.0 / std::f32::consts::PI)
+    }
+
     /// Boulders in the field (instances other than the ground).
     pub fn boulders(&self) -> usize {
         self.scene.instances.len() - 1

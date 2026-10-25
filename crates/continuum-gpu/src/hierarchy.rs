@@ -277,6 +277,94 @@ pub(crate) fn triangle_hierarchy(
     (nodes, items.iter().map(|&t| first + t).collect(), cov)
 }
 
+/// The projected front area of a node with coverage samples `cov` (one
+/// node's [`COVERAGE_SAMPLES`]) seen from direction `v` (unit, toward the
+/// viewer): bilinear on the face of the cube of sample directions `v` points
+/// through, as the shader's `node_front_area`.
+fn front_area(cov: &[f32], v: Vec3) -> f32 {
+    let a = v.abs();
+    let axis = if a.y > a.x && a.y >= a.z {
+        1
+    } else if a.z > a.x && a.z > a.y {
+        2
+    } else {
+        0
+    };
+    let (main, s, t) = match axis {
+        0 => (v.x, v.y / a.x, v.z / a.x),
+        1 => (v.y, v.x / a.y, v.z / a.y),
+        _ => (v.z, v.x / a.z, v.y / a.z),
+    };
+    let m = if main >= 0.0 { 1 } else { -1 };
+    let s0 = if s < 0.0 { -1 } else { 0 };
+    let t0 = if t < 0.0 { -1 } else { 0 };
+    let (fs, ft) = (s - s0 as f32, t - t0 as f32);
+    let sample = |i: i32, j: i32, k: i32| cov[(9 * (i + 1) + 3 * (j + 1) + (k + 1)) as usize];
+    let f: [f32; 4] = std::array::from_fn(|c| {
+        let gs = s0 + (c as i32 & 1);
+        let gt = t0 + (c as i32 >> 1);
+        match axis {
+            0 => sample(m, gs, gt),
+            1 => sample(gs, m, gt),
+            _ => sample(gs, gt, m),
+        }
+    });
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    lerp(lerp(f[0], f[1], fs), lerp(f[2], f[3], fs), ft)
+}
+
+/// Directional coverage of the object hierarchy (M5 gate 3): per node,
+/// [`COVERAGE_SAMPLES`] summing its objects' projected front areas, each from
+/// its geometry's root coverage (`blas_cov` at `roots[object]`) seen from the
+/// sample direction rotated into the object and scaled by its scale squared.
+pub(crate) fn object_coverage(
+    nodes: &[NodeGpu],
+    items: &[u32],
+    blas_cov: &[f32],
+    roots: &[u32],
+    objects: &[Placement],
+) -> Vec<f32> {
+    let dirs = coverage_directions();
+    let per_object: Vec<[f32; COVERAGE_SAMPLES]> = objects
+        .iter()
+        .zip(roots)
+        .map(|(o, &root)| {
+            let mut out = [0.0f32; COVERAGE_SAMPLES];
+            if root == NONE {
+                return out;
+            }
+            let cov = &blas_cov[root as usize * COVERAGE_SAMPLES..][..COVERAGE_SAMPLES];
+            let to_object = o.rotation.transpose();
+            for (n, d) in dirs.iter().enumerate() {
+                if *d != Vec3::ZERO {
+                    out[n] = o.scale * o.scale * front_area(cov, to_object * *d);
+                }
+            }
+            out
+        })
+        .collect();
+    // Children always follow their parent: a reverse sweep sees them first.
+    let mut cov = vec![0.0f32; nodes.len() * COVERAGE_SAMPLES];
+    for n in (0..nodes.len()).rev() {
+        let [x, count, _, _] = nodes[n].info;
+        let (head, tail) = cov.split_at_mut((n + 1) * COVERAGE_SAMPLES);
+        let out = &mut head[n * COVERAGE_SAMPLES..];
+        if count > 0 {
+            for &m in &items[x as usize..(x + count) as usize] {
+                for (o, v) in out.iter_mut().zip(&per_object[m as usize]) {
+                    *o += v;
+                }
+            }
+        } else {
+            let base = (x as usize - n - 1) * COVERAGE_SAMPLES;
+            for k in 0..COVERAGE_SAMPLES {
+                out[k] = tail[base + k] + tail[base + COVERAGE_SAMPLES + k];
+            }
+        }
+    }
+    cov
+}
+
 /// Coverage samples per triangle-hierarchy node: directions `(i, j, k)` with
 /// each of `i, j, k` in `{-1, 0, 1}`, at index `9(i+1) + 3(j+1) + (k+1)`
 /// (index 13, the zero vector, is unused).

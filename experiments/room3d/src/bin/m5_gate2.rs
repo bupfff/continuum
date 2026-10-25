@@ -172,9 +172,24 @@ fn main() -> std::io::Result<()> {
     )
     .unwrap();
     for (name, ss, one, t) in [
-        ("Sky only, exact cones", sky_err, e(&sky_1, &sky_ref), sky_ss_t),
-        ("Sun and sky, exact cones", both_err, e(&both_1, &both_ref), both_ss_t),
-        ("Sun and sky, prefiltered cones (1 bin)", pre_err, e(&pre_1, &both_ref), pre_ss_t),
+        (
+            "Sky only, exact cones",
+            sky_err,
+            e(&sky_1, &sky_ref),
+            sky_ss_t,
+        ),
+        (
+            "Sun and sky, exact cones",
+            both_err,
+            e(&both_1, &both_ref),
+            both_ss_t,
+        ),
+        (
+            "Sun and sky, prefiltered cones (1 bin)",
+            pre_err,
+            e(&pre_1, &both_ref),
+            pre_ss_t,
+        ),
     ] {
         writeln!(
             out,
@@ -205,7 +220,8 @@ fn main() -> std::io::Result<()> {
         writeln!(
             out,
             "| {name} | {:.4} | {:.4} |",
-            region_mean(&sun_ss, r.clone(), c.clone()) / region_mean(&sun_ref, r.clone(), c.clone()),
+            region_mean(&sun_ss, r.clone(), c.clone())
+                / region_mean(&sun_ref, r.clone(), c.clone()),
             region_mean(&sky_ss, r.clone(), c.clone())
                 / region_mean(&sky_ref[0].pixels, r.clone(), c.clone())
         )

@@ -31,7 +31,11 @@ fn main() -> std::io::Result<()> {
             radiance,
             1,
         );
-        let bytes: Vec<u8> = pixels.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes: Vec<u8> = pixels
+            .iter()
+            .flatten()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         std::fs::write(out_dir.join(format!("sky_diagnostic_{name}.f32")), bytes)?;
         println!("{name}: {:.1} s", time.as_secs_f64());
     }
