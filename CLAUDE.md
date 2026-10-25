@@ -3,7 +3,38 @@
 - `docs/DESIGN.md` is the source of truth for the paradigm, design rules and
   milestones. Read it before proposing changes; update it when a decision changes.
 - Results of every experiment go in `docs/results/` with the exact numbers and caveats.
-- Experiments are binaries in `experiments/flatland/src/bin/`; shared code is the `flatland` lib, and every ledger experiment runs on `flatland::incremental`.
+- Where things live:
+  - **Current state and next steps:** DESIGN.md §3.6–3.8 and the milestone
+    table (§6). Start a new conversation there.
+  - **Renderer:** `crates/continuum-gpu`. `mask_cones.wgsl` holds the kernel;
+    `vcache.rs` is the view-dependent cache; `instanced.rs` the instanced
+    renderer; `live.rs` the lightmap renderer with movers; `hierarchy.rs`
+    the prefiltered hierarchies.
+  - **Core types:** `crates/continuum`.
+  - **2D experiments:** binaries in `experiments/flatland/src/bin/`; every
+    ledger experiment runs on `flatland::incremental`.
+  - **3D gates and diagnostics:** binaries in `experiments/room3d/src/bin/`
+    (`m<milestone>_gate<n>.rs`), with scenes in `room3d::{showcase, field,
+    outdoor}`.
+  - **Viewer:** `apps/viewer` (`cargo run --release -p viewer -- --scene
+    field --scale 2`).
+  - **Patched wgpu-core:** `third_party/` (see its README).
+- Gate workflow:
+  1. Write the gate's binary as a stub whose doc comment states the pass
+     criterion, and commit it before implementing or running.
+  2. Run it once at full size. Development runs on smaller scenes are fine
+     but must be disclosed.
+  3. Record pass or fail with exact numbers in `docs/results/<gate>.md`.
+     Never tune and re-run after a near miss; fixes go into a new gate.
+  4. Update the milestone table, §3.6–3.8 and the README, and commit.
+
+  Commits end with "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>".
+- Cycles references (Blender 5.2 at `/Applications`; `room3d::cycles`):
+  - Cycles always averages each pixel's area (at least a one-pixel box), so
+    compare our renders supersampled (4×4), never one sample per pixel.
+  - Keep small bright emitters within about 1 km: Cycles loses 1.9% of a
+    0.5° sun at 3 km.
+  - Use `render_instanced` for large instanced scenes.
 - Design rules that are easy to forget: no rasterization anywhere (hard cases get
   slower paths inside the paradigm); no blending of previous frames for image
   quality; wgpu and compute only; every performance or quality claim is measured
@@ -12,3 +43,7 @@
   stay hedged until a literature check is done.
 - Timings come from release builds, single-threaded unless stated. The dev
   machine is a fanless M4 MacBook Air: report warm and sustained numbers.
+  - Its heat moves timings by 2× or more. Before a timed gate, check `ps
+    -axo pid,etime,%cpu,command -r | head` for stray processes (games,
+    leftover scripts), and repeat an earlier gate's number as a control. If
+    the control is far off, the machine is not fit to measure (M5 gate 4).

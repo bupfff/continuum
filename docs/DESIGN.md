@@ -125,32 +125,51 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (2026-10-24)
+## 3.6 Where we stand (updated 2026-10-24, after M5 gate 4)
 
 Against the goal in §1, honestly:
 
-- **Proven in test scenes.** Mask cones as the primitive, on the CPU and the
-  GPU. The paradigm's first two rules: caches of what cannot change (texels,
-  static coverage, probe G-buffers), and exact incremental updates for moving
-  objects and bounce light, bit-exact on every frame (M2 G5–G6, M3 G3). The
-  first measurement against an independent path tracer: 3.8% RMSE vs Cycles
-  on the showcase (M3 G3).
-- **Not yet shown in 3D or on the GPU.** The ledger, which is the third rule
-  and "the invention" (§3.1). It has only run in 2D, with mixed results (G4,
-  G6, G7 failed), and moving lights depend on it.
-- **Not started.** Mask cones for primary visibility and anti-aliasing (the
-  camera casts one ray per pixel), glossy reflections, the prefiltered
-  hierarchy (§3.4, the path to Nanite-scale scenes, with M3 G1 as its
-  motivation), the quality contract (§3.3), materials beyond Lambert, more
-  than one light, more than one bounce, and asset import with automatic
-  charts.
+- **Proven in test scenes.**
+  - Mask cones as the primitive, on the CPU and the GPU.
+  - The paradigm's first two rules: caches of what cannot change, and exact
+    incremental updates for moving objects and bounce light, bit-exact on
+    every frame (M2 G5–G6, M3 G3).
+- **Proven at scale (M4).**
+  - A million instanced boulders (10^10 triangles) in a large world.
+  - A view-dependent lighting cache that flies over them at 720p in 14.6–15.0
+    ms per frame on the fanless M4 Air (M4 G11). Lighting is softer in motion
+    and sharpens when the view settles.
+  - Hardware camera rays take about 2–3 ms. This needed a patched wgpu-core
+    (`third_party/`).
+- **Measured against an independent path tracer** (Cycles, compared
+  correctly: supersampled 4×4 against Cycles' area-integrated pixels):
+  - sun and sky on an outdoor scene: 0.7–1.2% (M5 G2);
+  - the million-boulder field with sky: 1.2–2.4% (M5 G3), with object-level
+    prefiltered coverage.
+
+  The earlier "3.8% vs Cycles" (M3 G3) compared point samples with
+  area-integrated pixels and is an overestimate.
+- **Working but not at speed.** Sky light in the view cache (M5 G4).
+  - Sky texels cost about 100× sun texels, and the cache's 1,000-texel budget
+    floor makes warm-up slow. The viewer's sky is opt-in (`--sky`).
+  - G4's timings were confounded by the machine's state and must be
+    re-measured.
+- **Not yet shown in 3D or on the GPU.** The ledger, the third rule and "the
+  invention" (§3.1). It has only run in 2D, with mixed results, and moving
+  lights depend on it.
+- **Not started:**
+  - more than one rect light, and colored lights;
+  - mask cones for primary visibility and anti-aliasing. One ray per pixel is
+    13–24% from the area-integrated image on the boulder field (M4 G8), now
+    the largest quality gap;
+  - glossy reflections, materials beyond Lambert, more than one bounce;
+  - asset import with automatic charts;
+  - the quality contract (§3.3) beyond the bake's frame-time target.
 - **Against UE5.** No direct comparison has been made, so none is claimed.
-  The measured edge is narrow:
-  - Soft shadows from an area light, and bounce light, that update exactly in
-    the frame the change happens, with no noise, denoiser or temporal lag.
-    UE5 approximates area-light penumbrae (virtual shadow maps), and Lumen
-    accumulates over frames.
-  - UE5 leads on everything else: scene scale, materials, lights, GI bounces,
+  - Our measured edge: exact soft shadows from area lights and the sky, bounce
+    light that updates exactly in the frame the change happens, with no noise,
+    denoiser or temporal lag.
+  - UE5 leads on everything else: materials, lights, GI bounces,
     anti-aliasing and upscaling, platforms and tooling.
 
 ## 3.7 Road to v1 (2026-10-24)
@@ -165,11 +184,38 @@ estimates, and gates fail often, so treat them as ranges.
 | # | Work | Why | Batches |
 |---|---|---|---|
 | 1 | View-dependent lighting cache: texels only on visible surfaces, coarser with distance, a per-frame bake budget, kept across frames, exact incremental updates for movers, instanced objects | Real-time at scale. M4 gate 7 shows per-pixel cones are the bottleneck. **Done for static scenes (M4 G8–G11; G11 passed):** flying over a million boulders at 720p averages 14.6–15.0 ms with the bake budget following the frame time; lighting is softer in motion and sharpens when the view settles. Not yet: movers and sky in this cache | 2–3 (3 done) |
-| 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes currently have black shadows | 2 |
+| 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes had black shadows. **Sky done per pixel and matched to Cycles (M5 G2–G3); in the view cache but not at speed (M5 G4).** Not yet: several colored lights | 2 (2 done) |
 | 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes | 2–3 |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel | 2 |
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use | 2 |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement, untested so far | 1–2 |
+
+### 3.8 Next steps, in order (2026-10-24)
+
+1. **A time-based bake floor for the view cache.** The adaptive budget
+   (`CacheOptions::frame_target_ms`, `vcache.rs`) counts texels and never
+   drops below 1,000. Sky texels cost about 100× sun texels, so the floor alone
+   took about 250 ms per frame in M5 G4.
+   - Make the floor a time, or scale the budget by the measured cost per
+     texel.
+   - Consider baking sky at a coarser texel density than the sun, since sky
+     light varies slowly.
+   - Then re-run M5 G4's criteria on a quiet machine, with a control (see
+     `CLAUDE.md`).
+2. **Several colored lights** (rest of roadmap item 2):
+   - a list of rect lights with RGB radiance in the per-pixel and view-cache
+     paths;
+   - the cache storing RGB direct light plus the sky channel;
+   - against Cycles (`cycles::render_instanced` takes one light today and
+     needs a list).
+3. **glTF import** (item 3).
+4. **Pixel-footprint cones for primary visibility** (item 4). Measure against
+   area-integrated references.
+5. **Library API and Bevy plugin** (item 5), then Windows/NVIDIA CI (item 6).
+6. **Open questions:**
+   - offering the wgpu-core TLAS-dependency fix upstream (needs the user's go
+     ahead before posting anything);
+   - the world-space lightmap path (`LiveRenderer`) still refuses a sky.
 
 **v1.0, competitive in its niche** (a render library, not a full engine):
 another 20 or more batches.
