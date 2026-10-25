@@ -70,7 +70,10 @@ against per-pixel cones. It also doubles the shading cost, so flights with
 three lights average 16–18 ms for now.
 
 Point lights with a size and spot lights (glTF's falloff) work too, per
-pixel and cached, and glTF files bring their own. They are not gated yet.
+pixel and cached, and glTF files bring their own. A night scene lit by both
+is 1.35% from Cycles (M5 gate 8). On the fanless M4 Air, flights with
+several lights hold 13–15 ms while the machine is cool. After minutes of
+load they slow to 20 ms or more.
 
 ### Your own scenes (glTF)
 
