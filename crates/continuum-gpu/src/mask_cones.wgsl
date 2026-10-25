@@ -1635,9 +1635,47 @@ fn unshadowed_rect(point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
     if (is_sphere(r)) {
         return spot_falloff(r, normalize(point - r.corner.xyz)) * sphere_unshadowed(point, normal, r);
     }
-    let lc = light_cone_rect(point, r);
-    if (!lc.ok) { return 0.0; }
-    return clipped_window_weight(lc.c, normal);
+    return rect_open(point, normal, r);
+}
+
+// A rectangle's projected solid angle from `point` above the horizon of
+// `normal`: Lambert's formula over its corners, clipped to the horizon where
+// it crosses it. The same polygon of directions as its light cone's window
+// (`clipped_window_weight`), without building the cone. 0 behind a one-sided
+// light or in its plane.
+fn rect_open(point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
+    let u = r.edge_u.xyz;
+    let v = r.edge_v.xyz;
+    let c0 = r.corner.xyz - point;
+    let facing = dot(normalize(cross(u, v)), c0);
+    if ((r.corner.w > 0.5 && facing >= 0.0) || abs(facing) <= 1e-6) { return 0.0; }
+    var d: array<vec3<f32>, 4>;
+    d[0] = c0;
+    d[1] = c0 + u;
+    d[2] = c0 + u + v;
+    d[3] = c0 + v;
+    var poly: array<vec3<f32>, 6>;
+    var n = 0u;
+    for (var k = 0u; k < 4u; k++) {
+        let a = d[k];
+        let e = d[(k + 1u) % 4u];
+        let sa = dot(normal, a);
+        let se = dot(normal, e);
+        if (sa >= 0.0) {
+            poly[n] = a;
+            n++;
+        }
+        if ((sa >= 0.0) != (se >= 0.0)) {
+            poly[n] = a + (e - a) * (sa / (sa - se));
+            n++;
+        }
+    }
+    if (n < 3u) { return 0.0; }
+    var sum = 0.0;
+    for (var k = 0u; k < n; k++) {
+        sum += lambert_edge(normal, poly[k], poly[(k + 1u) % n]);
+    }
+    return abs(0.5 * sum);
 }
 
 fn lights_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
@@ -2731,9 +2769,10 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                 // light here.
                 for (var l = 0u; l < count; l++) {
                     if (vc.sky.w == 1u) {
-                        let open = unshadowed_rect(point, normal, lights[l]);
-                        if (open > 0.0) {
-                            e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l) * open;
+                        // Shadowed pixels need no unshadowed light.
+                        let share = vc_bilinear(found_slot, found_ref, l);
+                        if (share > 0.0) {
+                            e += lights[l].radiance.xyz * share * unshadowed_rect(point, normal, lights[l]);
                         }
                     } else {
                         e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);

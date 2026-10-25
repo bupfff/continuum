@@ -1,15 +1,13 @@
 //! Development check (not a gate): sphere lights on the textured scene at
-//! night: a point light (10 cm across) 2 m up among the boulders and a spot
-//! (5 cm across, 4 m up, aimed down the scene, 20° inner and 30° outer
-//! half-angles). Renders per pixel and through the view cache, and with
-//! `SPP=n` against Cycles at n samples per pixel (`SS` per pixel for ours,
-//! default 4).
+//! night (`Textured::night_lights`: a point light and a spot). Renders per
+//! pixel and through the view cache, and with `SPP=n` against Cycles at n
+//! samples per pixel (`SS` per pixel for ours, default 4).
 //! `cargo run --release -p room3d --bin sphere_lights_dev -- [W H]`
 
 use std::path::Path;
 
 use continuum::glam::Vec3;
-use continuum_gpu::{CacheOptions, InstancedRenderer, Light, MaskConeKernel, Spot, wgpu};
+use continuum_gpu::{CacheOptions, InstancedRenderer, MaskConeKernel, wgpu};
 use flatland::img::Image;
 use room3d::cycles::{relative_rmse, render_instanced_lights};
 use room3d::textured::Textured;
@@ -27,22 +25,7 @@ fn main() -> std::io::Result<()> {
     let kernel = MaskConeKernel::new().expect("GPU");
     kernel.set_prefilter(1.0);
     kernel.set_sky(Vec3::ZERO);
-    let point = Light::point(
-        Vec3::new(-1.0, 7.0, 2.0),
-        0.05,
-        Vec3::new(1.0, 0.8, 0.6) * 20.0,
-    );
-    let spot = Light::spot(
-        Vec3::new(2.0, 4.0, 4.0),
-        0.025,
-        Vec3::new(0.6, 0.8, 1.0) * 120.0,
-        Spot {
-            axis: Vec3::new(-0.3, 1.0, -1.2).normalize(),
-            inner: 20f32.to_radians(),
-            outer: 30f32.to_radians(),
-        },
-    );
-    let lights = [point, spot];
+    let lights = Textured::night_lights();
     let save = |img: &[[f32; 3]], tag: &str| {
         let mut image = Image::new(w as usize, h as usize, [0; 3]);
         for (i, p) in img.iter().enumerate() {
@@ -126,15 +109,46 @@ fn main() -> std::io::Result<()> {
             1,
         );
         let mut ours = vec![[0.0f32; 3]; (w * h) as usize];
+        // Pixels where a sample sees a light, with their neighbours, are
+        // scored apart, as in M5 gate 6 (emitters are thousands of times
+        // brighter than surfaces).
+        let mut sees = vec![false; (w * h) as usize];
+        let peak = lights
+            .iter()
+            .map(|l| l.radiance.max_element())
+            .fold(0.0f32, f32::max);
         for y in 0..(h * ss) as usize {
             for x in 0..(w * ss) as usize {
                 let p = big[y * (w * ss) as usize + x];
-                let o = &mut ours[(y / ss as usize) * w as usize + x / ss as usize];
+                let i = (y / ss as usize) * w as usize + x / ss as usize;
+                if p.iter().any(|&c| c > 0.01 * peak) {
+                    sees[i] = true;
+                }
                 for c in 0..3 {
-                    o[c] += p[c] / (ss * ss) as f32;
+                    ours[i][c] += p[c] / (ss * ss) as f32;
                 }
             }
         }
+        let mut apart = sees.clone();
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                if sees[(y * w as i32 + x) as usize] {
+                    for (dx, dy) in (-1..=1).flat_map(|dx| (-1..=1).map(move |dy| (dx, dy))) {
+                        let (nx, ny) = (x + dx, y + dy);
+                        if nx >= 0 && ny >= 0 && nx < w as i32 && ny < h as i32 {
+                            apart[(ny * w as i32 + nx) as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let keep = |img: &[[f32; 3]]| -> Vec<[f32; 3]> {
+            img.iter()
+                .zip(&apart)
+                .filter(|(_, a)| !**a)
+                .map(|(p, _)| *p)
+                .collect()
+        };
         let reference = render_instanced_lights(
             &t.scene,
             t.origin,
@@ -148,10 +162,11 @@ fn main() -> std::io::Result<()> {
             &out_dir.join("sphere_lights_cycles"),
         )?;
         println!(
-            "{ss}×{ss} per pixel vs Cycles {spp} spp: {:.2}% (means {:.4} / {:.4}, Cycles {:.1} s)",
-            100.0 * relative_rmse(&ours, &reference.pixels),
-            mean(&ours),
-            mean(&reference.pixels),
+            "{ss}×{ss} per pixel vs Cycles {spp} spp, over surfaces ({} pixels apart): {:.2}% (means {:.4} / {:.4}, Cycles {:.1} s)",
+            apart.iter().filter(|a| **a).count(),
+            100.0 * relative_rmse(&keep(&ours), &keep(&reference.pixels)),
+            mean(&keep(&ours)),
+            mean(&keep(&reference.pixels)),
             reference.seconds
         );
         save(&ours, "ours_ss")?;

@@ -2,7 +2,8 @@
 //! the per-pixel image (1 sample per pixel, the same lights) on the
 //! million-boulder field at gate 8's viewpoints, 1280×720 unless given.
 //! Sun only by default; `SKY=1` adds the sky, `SKY=only` lights by the sky
-//! alone; `LIGHTS=3` uses the three colored lights of M5 gate 6; `RATIO=0`
+//! alone; `LIGHTS=3` uses the three colored lights of M5 gate 6,
+//! `LIGHTS=sphere` the sun with the field's sphere lights; `RATIO=0`
 //! caches irradiance instead of light ratios. Prints
 //! frames until warm and the relative RMSE.
 //! `cargo run --release -p room3d --bin cache_error_dev -- [W H] [VIEWS=0,1]`
@@ -33,6 +34,11 @@ fn main() {
     // LIGHTS=3: the field's three colored lights (M5 gate 6) for the sun.
     let lights: Vec<Light> = if std::env::var("LIGHTS").is_ok_and(|v| v == "3") {
         field.colored_lights(origin, 1000.0).to_vec()
+    } else if std::env::var("LIGHTS").is_ok_and(|v| v == "sphere") {
+        // The sun with the field's point light and spot (M5 gate 8).
+        let mut all = vec![Light::white(light, field.radiance)];
+        all.extend(field.sphere_lights(origin));
+        all
     } else {
         vec![Light::white(
             light,

@@ -7,7 +7,7 @@ use std::f32::consts::{PI, TAU};
 
 use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum::mesh::Surface;
-use continuum_gpu::{Camera, Instance, InstancedScene, Light, RectLight};
+use continuum_gpu::{Camera, Instance, InstancedScene, Light, RectLight, Spot};
 use flatland::rng::Pcg32;
 
 /// Grid spacing of the boulders (meters) and the field's half width.
@@ -231,6 +231,44 @@ impl Field {
             Vec3::new(1.0, 0.6, 0.3) * 150.0,
         );
         [warm, fill, lamp]
+    }
+
+    /// Two sphere lights relative to `origin` (M5 gate 8), ahead of the
+    /// camera: a warm point light 10 cm across, 3 m up, 15 m ahead and 3 m to
+    /// the left; and a cool spot 5 cm across, 8 m up, 30 m ahead, aimed 45°
+    /// down along the camera's line, 25° inner and 35° outer half-angles.
+    /// Each gives the sun's ground irradiance: the point light straight below
+    /// it, the spot where its axis meets the ground.
+    pub fn sphere_lights(&self, origin: DVec3) -> [Light; 2] {
+        let (camera, _) = self.relative(origin);
+        let forward = (camera.target - camera.eye).normalize();
+        let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
+        let left = Vec3::Z.cross(flat);
+        let ground = Vec3::new(camera.eye.x, camera.eye.y, 0.0);
+        let center = self.scene.instances[0].position;
+        let distance = (self.sun_center - center).length() as f32;
+        let toward = ((self.sun_center - center) / distance as f64).as_vec3();
+        let solid_angle = self.sun_u.length() * self.sun_v.length() / (distance * distance);
+        let sun_irradiance = self.radiance * solid_angle * toward.z;
+        let point = Light::point(
+            ground + flat * 15.0 + left * 3.0 + Vec3::Z * 3.0,
+            0.05,
+            Vec3::new(1.0, 0.75, 0.5) * sun_irradiance * 9.0,
+        );
+        let spot_at = ground + flat * 30.0 + Vec3::Z * 8.0;
+        let axis = (flat - Vec3::Z).normalize();
+        // On-axis irradiance on the ground: I cos 45° / (8 √2)².
+        let spot = Light::spot(
+            spot_at,
+            0.025,
+            Vec3::new(0.6, 0.8, 1.0) * sun_irradiance * 128.0 / std::f32::consts::FRAC_1_SQRT_2,
+            Spot {
+                axis,
+                inner: 25f32.to_radians(),
+                outer: 35f32.to_radians(),
+            },
+        );
+        [point, spot]
     }
 
     /// Boulders in the field (instances other than the ground).

@@ -7,7 +7,7 @@ use std::f32::consts::TAU;
 
 use continuum::glam::{DVec3, Mat3, Vec2, Vec3};
 use continuum::mesh::Surface;
-use continuum_gpu::{Camera, Instance, InstancedScene, Light, RectLight, Texture};
+use continuum_gpu::{Camera, Instance, InstancedScene, Light, RectLight, Spot, Texture};
 use flatland::rng::Pcg32;
 
 use crate::field::boulder;
@@ -211,6 +211,30 @@ impl Textured {
             sky,
             origin: DVec3::ZERO,
         }
+    }
+}
+
+impl Textured {
+    /// Night lights for the scene (M5 gate 8): a warm point light 10 cm
+    /// across, 2 m up near the brick block, and a cool spot 5 cm across, 4 m
+    /// up, aimed down the scene with 20° inner and 30° outer half-angles.
+    pub fn night_lights() -> [Light; 2] {
+        let point = Light::point(
+            Vec3::new(-1.0, 7.0, 2.0),
+            0.05,
+            Vec3::new(1.0, 0.8, 0.6) * 20.0,
+        );
+        let spot = Light::spot(
+            Vec3::new(2.0, 4.0, 4.0),
+            0.025,
+            Vec3::new(0.6, 0.8, 1.0) * 120.0,
+            Spot {
+                axis: Vec3::new(-0.3, 1.0, -1.2).normalize(),
+                inner: 20f32.to_radians(),
+                outer: 30f32.to_radians(),
+            },
+        );
+        [point, spot]
     }
 }
 
