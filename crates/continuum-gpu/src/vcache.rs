@@ -492,9 +492,10 @@ impl VirtualCache {
             ),
             (
                 37,
+                // Two channels per texel: sun and sky irradiance.
                 empty(
                     "page pool",
-                    options.pages as u64 * PAGE_TEXELS as u64 * 4,
+                    options.pages as u64 * PAGE_TEXELS as u64 * 2 * 4,
                     wgpu::BufferUsages::empty(),
                 ),
             ),

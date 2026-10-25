@@ -423,7 +423,7 @@ fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
     var out_v0 = true;
     var out_v1 = true;
     // Splattable: every corner between the near and far planes.
-    var inside = light.params.x > 0.0;
+    var inside = prefilter_bins > 0.0;
     for (var k = 0u; k < 8u; k++) {
         let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
         let in_far = c.far_offset - dot(c.far_normal, corner) >= 0.0;
@@ -443,7 +443,7 @@ fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
         }
     }
     if (far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1) { return 0u; }
-    if (!inside || max(mx.x - mn.x, mx.y - mn.y) > light.params.x) { return 3u; }
+    if (!inside || max(mx.x - mn.x, mx.y - mn.y) > prefilter_bins) { return 3u; }
     if (mx.x <= 0.0 || mx.y <= 0.0 || mn.x >= g || mn.y >= g) { return 1u; }
     let e = hi - lo;
     let v = normalize(c.apex - (lo + hi) * 0.5);
@@ -501,6 +501,11 @@ fn cone_to_object(c: Cone, m: u32) -> Cone {
     o.far_offset = (c.far_offset - dot(c.far_normal, translation(x))) * xforms[4u * x + 3u].y;
     return o;
 }
+
+// The prefilter threshold (bins) of the cone being traced: the light's
+// (`light.params.x`), or for sky cones that times `light.objects.y` (as f32
+// bits; 0 means 1).
+var<private> prefilter_bins: f32 = 0.0;
 
 // How a bin's coverage by one mesh combines with other meshes': the maximum
 // (sun cones, whose tiny bins rarely hold two partial occluders), or as
@@ -573,6 +578,8 @@ struct LightCone {
 fn light_cone(apex: vec3<f32>) -> LightCone {
     var out: LightCone;
     out.ok = false;
+    // Light cones prefilter at the light's threshold (sky cones set theirs).
+    prefilter_bins = light.params.x;
     var forward = normalize(cross(light.edge_u.xyz, light.edge_v.xyz));
     // Behind a one-sided light: no direct light.
     if (light.counts.w == 1u && dot(forward, apex - light.corner.xyz) <= 0.0) { return out; }
@@ -608,7 +615,7 @@ fn light_cone(apex: vec3<f32>) -> LightCone {
 // independent occluders, so overlap saturates), and returns true. Otherwise
 // returns false: descend as usual.
 fn splat_object_node(c: Cone, n: u32, lo: vec3<f32>, hi: vec3<f32>, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) -> bool {
-    if (light.objects.x == NONE || light.params.x <= 0.0) { return false; }
+    if (light.objects.x == NONE || prefilter_bins <= 0.0) { return false; }
     let g = f32(GRID);
     var pts: array<vec2<f32>, 8>;
     var mn = vec2<f32>(3.4e38);
@@ -624,7 +631,7 @@ fn splat_object_node(c: Cone, n: u32, lo: vec3<f32>, hi: vec3<f32>, cov: ptr<fun
         mn = min(mn, q);
         mx = max(mx, q);
     }
-    if (max(mx.x - mn.x, mx.y - mn.y) > light.params.x) { return false; }
+    if (max(mx.x - mn.x, mx.y - mn.y) > prefilter_bins) { return false; }
     if (mx.x <= 0.0 || mx.y <= 0.0 || mn.x >= g || mn.y >= g) { return true; }
     let e = hi - lo;
     let v = normalize(c.apex - (lo + hi) * 0.5);
@@ -805,10 +812,54 @@ fn clipped_bin_weight(c: Cone, normal: vec3<f32>, b: u32) -> f32 {
     return abs(0.5 * sum);
 }
 
+// The projected solid angle (Lambert) of cone `c`'s whole window above the
+// horizon of `normal`: the window's quad of directions clipped to
+// dot(normal, d) >= 0, then Lambert's edge integrals. Bins partition the
+// window, so this is the sum of their `clipped_bin_weight`s.
+fn clipped_window_weight(c: Cone, normal: vec3<f32>) -> f32 {
+    var d: array<vec3<f32>, 4>;
+    d[0] = direction(c, 0.0, 0.0);
+    d[1] = direction(c, 1.0, 0.0);
+    d[2] = direction(c, 1.0, 1.0);
+    d[3] = direction(c, 0.0, 1.0);
+    var poly: array<vec3<f32>, 6>;
+    var n = 0u;
+    for (var k = 0u; k < 4u; k++) {
+        let a = d[k];
+        let e = d[(k + 1u) % 4u];
+        let sa = dot(normal, a);
+        let se = dot(normal, e);
+        if (sa >= 0.0) {
+            poly[n] = a;
+            n++;
+        }
+        if ((sa >= 0.0) != (se >= 0.0)) {
+            poly[n] = a + (e - a) * (sa / (sa - se));
+            n++;
+        }
+    }
+    if (n < 3u) { return 0.0; }
+    var sum = 0.0;
+    for (var k = 0u; k < n; k++) {
+        sum += lambert_edge(normal, poly[k], poly[(k + 1u) % n]);
+    }
+    return abs(0.5 * sum);
+}
+
 // Irradiance per unit sky radiance at `apex` (surface normal `normal`): the
 // uncovered projected solid angle of the six faces of a cube of directions
-// around it, each a mask cone reaching beyond the scene.
+// around it, each a mask cone reaching beyond the scene. Each face's light is
+// its whole clipped window weight minus the weights of the bins with coverage
+// (the same sum rearranged, as `cone_visible`'s fast path), so open bins cost
+// nothing.
 fn sky_irradiance(apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    // Profiling stages, as for sun cones: 1 skips the cones, 2 keeps their
+    // setup and weights but finds no coverage.
+    let stage = u32(light.params.z);
+    if (stage == 1u) { return 0.0; }
+    var scale = bitcast<f32>(light.objects.y);
+    if (scale <= 0.0) { scale = 1.0; }
+    prefilter_bins = light.params.x * scale;
     var total = 0.0;
     for (var f = 0u; f < 6u; f++) {
         let axis = f / 2u;
@@ -838,15 +889,15 @@ fn sky_irradiance(apex: vec3<f32>, normal: vec3<f32>) -> f32 {
         var full = 0u;
         // params.w = 1: combine by the maximum instead (a diagnostic).
         independent_occluders = light.params.w < 0.5;
-        scene_coverage(c, 0u, &cov, &full);
+        if (stage != 2u) { scene_coverage(c, 0u, &cov, &full); }
         independent_occluders = false;
-        var visible = 0.0;
+        var blocked = 0.0;
         for (var b = 0u; b < BINS; b++) {
-            if (cov[b] < 1.0) {
-                visible += (1.0 - cov[b]) * clipped_bin_weight(c, normal, b);
+            if (cov[b] > 0.0) {
+                blocked += cov[b] * clipped_bin_weight(c, normal, b);
             }
         }
-        total += visible;
+        total += max(clipped_window_weight(c, normal) - blocked, 0.0);
     }
     return total;
 }
@@ -1741,10 +1792,16 @@ fn vc_page(m: u32, c: u32, uv: vec2<f32>, mip: u32) -> PageRef {
     return r;
 }
 
-fn vc_bilinear(slot: u32, r: PageRef) -> f32 {
+// A texel's two channels: irradiance per unit sun radiance, and per unit sky
+// radiance (M5).
+fn vc_texel_value(i: u32) -> vec2<f32> {
+    return vec2<f32>(pool[2u * i], pool[2u * i + 1u]);
+}
+
+fn vc_bilinear(slot: u32, r: PageRef) -> vec2<f32> {
     let o = slot * PAGE_TEXELS + r.base.y * PAGE_STRIDE + r.base.x;
-    let a = mix(pool[o], pool[o + 1u], r.frac.x);
-    let b = mix(pool[o + PAGE_STRIDE], pool[o + PAGE_STRIDE + 1u], r.frac.x);
+    let a = mix(vc_texel_value(o), vc_texel_value(o + 1u), r.frac.x);
+    let b = mix(vc_texel_value(o + PAGE_STRIDE), vc_texel_value(o + PAGE_STRIDE + 1u), r.frac.x);
     return mix(a, b, r.frac.y);
 }
 
@@ -1764,7 +1821,7 @@ fn uv_barycentric(t: u32, uv: vec2<f32>) -> vec3<f32> {
 // Direct irradiance at texel `texel` of chart `c` on object `m` (grid `n`): the
 // texel's center placed on the surface through the chart's cells (the nearest
 // point of the cell's most nearly containing triangle), then a mask cone.
-fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> f32 {
+fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> vec2<f32> {
     let ch = vcharts[c];
     let uv = (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n);
     let cell = min(vec2<u32>(uv * vec2<f32>(ch.grid)), ch.grid - vec2<u32>(1u));
@@ -1783,7 +1840,7 @@ fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> f32 {
             best_b = b;
         }
     }
-    if (best_t == NONE) { return 0.0; }
+    if (best_t == NONE) { return vec2<f32>(0.0); }
     let b0 = clamp(best_b, vec3<f32>(0.0), vec3<f32>(1.0));
     let b = b0 / max(b0.x + b0.y + b0.z, 1e-20);
     let t = best_t;
@@ -1798,7 +1855,9 @@ fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> f32 {
     }
     let geometric = normal_to_world(m, cross(tris[3u * t + 1u].xyz - tris[3u * t].xyz, tris[3u * t + 2u].xyz - tris[3u * t].xyz));
     let apex = pw + normalize(geometric) * surface_offset(length(pw));
-    return hit_irradiance(0u, apex, nw);
+    var sky = 0.0;
+    if (any(light.sky.xyz > vec3<f32>(0.0))) { sky = sky_irradiance(apex, nw); }
+    return vec2<f32>(hit_irradiance(0u, apex, nw), sky);
 }
 
 @compute @workgroup_size(64)
@@ -1825,7 +1884,10 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let n = vc_grid(c, m, mip);
     let texel = page * PAGE + vec2<u32>(job.y % PAGE_STRIDE, job.y / PAGE_STRIDE);
     if (texel.x < n.x && texel.y < n.y) {
-        pool[e.w * PAGE_TEXELS + job.y] = vc_texel(m, c, n, texel);
+        let value = vc_texel(m, c, n, texel);
+        let i = e.w * PAGE_TEXELS + job.y;
+        pool[2u * i] = value.x;
+        pool[2u * i + 1u] = value.y;
     }
 }
 
@@ -1845,7 +1907,9 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
         let texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
         if (texel.x >= n.x || texel.y >= n.y) {
             let inside = min(texel, n - vec2<u32>(1u)) - page * PAGE;
-            pool[o + k] = pool[o + inside.y * PAGE_STRIDE + inside.x];
+            let nearest = o + inside.y * PAGE_STRIDE + inside.x;
+            pool[2u * (o + k)] = pool[2u * nearest];
+            pool[2u * (o + k) + 1u] = pool[2u * nearest + 1u];
         }
     }
     slot_used[e.w] = vc.counts.y;
@@ -1895,7 +1959,8 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
         let dir = camera_dir(gid);
         let pixel = gid.y * w + gid.x;
         let hit = recorded_hit(pixel, dir);
-        var color = vec3<f32>(0.0);
+        // A ray that misses everything sees the sky.
+        var color = light.sky.xyz;
         if (vis[pixel].w == 1u) {
             color = vec3<f32>(camera.params.w);
         } else if (hit.mesh != NONE) {
@@ -1903,7 +1968,8 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
             let c = tri_vchart[hit.tri];
             let uv = chart_uv(hit.mesh, hit.tri, surface);
             let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
-            var irradiance = 0.0;
+            // Sun and sky irradiance per unit radiance.
+            var irradiance = vec2<f32>(0.0);
             var found = false;
             var mip = wanted;
             // The key of the page one mip finer than `mip` (the last missing one).
@@ -1936,14 +2002,18 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                 if (lc.ok && dot(normal, to_light) > 0.0) {
                     var cov: array<f32, 64>;
                     for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
-                    irradiance = cone_visible(lc.c, normal, &cov);
+                    irradiance.x = cone_visible(lc.c, normal, &cov);
                 }
+                // The sky above the horizon, with the ground below it: a
+                // guess until a page arrives.
+                irradiance.y = 3.14159265 * 0.5 * (1.0 + normal.z);
             }
             if (is_sample) {
                 atomicAdd(&vc_stats[2], 1u);
                 if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
             }
-            color = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
+            let e = camera.params.w * irradiance.x + light.sky.xyz * irradiance.y;
+            color = albedo[hit.mesh].xyz * e / 3.14159265;
         }
         colors[pixel] = vec4<f32>(color, 1.0);
     }

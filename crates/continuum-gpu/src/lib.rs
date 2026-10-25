@@ -65,6 +65,7 @@ pub struct MaskConeKernel {
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
     sky_max: std::cell::Cell<bool>,
+    sky_prefilter: std::cell::Cell<f32>,
     object_prefilter: std::cell::Cell<bool>,
     nearest_first: std::cell::Cell<bool>,
     profile_stage: std::cell::Cell<u32>,
@@ -147,7 +148,7 @@ impl RectLight {
         prefilter: f32,
         nearest_first: bool,
         profile_stage: u32,
-        (sky, sky_max): (Vec3, bool),
+        (sky, sky_max, sky_prefilter): (Vec3, bool, f32),
         objects: u32,
     ) -> LightUniform {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
@@ -168,7 +169,7 @@ impl RectLight {
                 sky_max as u32 as f32,
             ],
             sky: v4(sky),
-            objects: [objects, 0, 0, 0],
+            objects: [objects, sky_prefilter.to_bits(), 0, 0],
         }
     }
 }
@@ -358,6 +359,7 @@ impl MaskConeKernel {
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
             sky_max: std::cell::Cell::new(false),
+            sky_prefilter: std::cell::Cell::new(1.0),
             object_prefilter: std::cell::Cell::new(true),
             nearest_first: std::cell::Cell::new(true),
             profile_stage: std::cell::Cell::new(0),
@@ -381,9 +383,10 @@ impl MaskConeKernel {
     /// A uniform sky of radiance `rgb` (linear) over the whole sphere of
     /// directions, lighting every receiver through six cube-face mask cones
     /// (M5 gate 1); camera rays that miss see it. Zero (the default) turns it
-    /// off. Per-pixel rendering only so far: the lighting caches
-    /// ([`Lightmap`], [`LiveRenderer`], [`InstancedRenderer::with_cache`])
-    /// refuse a sky. Applies to work set up after the call.
+    /// off. Per-pixel rendering and the view-dependent cache
+    /// ([`InstancedRenderer::with_cache`]) support it; the world-space
+    /// lightmaps ([`Lightmap`], [`LiveRenderer`]) refuse a sky so far. Applies
+    /// to work set up after the call.
     pub fn set_sky(&self, rgb: Vec3) {
         self.sky.set(rgb.max(Vec3::ZERO));
     }
@@ -398,6 +401,13 @@ impl MaskConeKernel {
     /// Applies to work set up after the call.
     pub fn set_object_prefilter(&self, on: bool) {
         self.object_prefilter.set(on);
+    }
+
+    /// Sky cones prefilter `factor` times as coarsely as the light's cones
+    /// (default 1): their bins are 11° wide, so coarser splats cost little
+    /// accuracy and much time. Applies to work set up after the call.
+    pub fn set_sky_prefilter(&self, factor: f32) {
+        self.sky_prefilter.set(factor.max(0.0));
     }
 
     /// Diagnostic: sky cones combine coverage across meshes by the maximum,
@@ -650,7 +660,7 @@ impl MaskConeKernel {
             self.prefilter.get(),
             self.nearest_first.get(),
             self.profile_stage.get(),
-            (self.sky.get(), self.sky_max.get()),
+            (self.sky.get(), self.sky_max.get(), self.sky_prefilter.get()),
             objects,
         );
         let storage = |label: &str, contents: &[u8]| {
@@ -902,7 +912,7 @@ impl MaskConeKernel {
             self.prefilter.get(),
             self.nearest_first.get(),
             self.profile_stage.get(),
-            (self.sky.get(), self.sky_max.get()),
+            (self.sky.get(), self.sky_max.get(), self.sky_prefilter.get()),
             hierarchy::NONE,
         );
         let flat = flatten(frame.meshes);
@@ -1059,7 +1069,7 @@ impl MaskConeKernel {
             self.prefilter.get(),
             self.nearest_first.get(),
             self.profile_stage.get(),
-            (self.sky.get(), self.sky_max.get()),
+            (self.sky.get(), self.sky_max.get(), self.sky_prefilter.get()),
             hierarchy::NONE,
         );
         let receivers_gpu: Vec<ReceiverGpu> = receivers
