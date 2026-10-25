@@ -50,7 +50,11 @@ struct Run {
 }
 
 fn run(workgroup_stacks: bool, field: &Field, still: &Showcase) -> Run {
-    let kernel = MaskConeKernel::new_with(KernelOptions { workgroup_stacks }).expect("GPU");
+    let kernel = MaskConeKernel::new_with(KernelOptions {
+        workgroup_stacks,
+        ..Default::default()
+    })
+    .expect("GPU");
     kernel.set_prefilter(1.0);
     let origin = field.origin_near_camera();
     let (camera, light) = field.relative(origin);

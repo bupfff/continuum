@@ -12,8 +12,8 @@ use crate::vcache::VirtualCache;
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_VISIBILITY_BINDINGS, InstancedScene, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
-    VC_BAKE_BINDINGS, VC_FILL_BINDINGS, VC_SHADE_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_SHADE_BINDINGS,
+    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -34,11 +34,11 @@ pub struct FrameProfile {
     pub planning: Duration,
 }
 
-/// The lighting cache's state and its bake passes (table updates, texels,
-/// borders).
+/// The lighting cache's state and its bake passes (table updates, sun
+/// texels, sky faces, sky interpolation and borders).
 struct Cache {
     state: VirtualCache,
-    passes: [wgpu::ComputePipeline; 3],
+    passes: [wgpu::ComputePipeline; 4],
     binds: Vec<wgpu::BindGroup>,
 }
 
@@ -217,10 +217,19 @@ impl InstancedRenderer {
             ],
         };
         let cache = cache.map(|options| Cache {
-            state: VirtualCache::new(&device, &kernel.queue, scene, options, width, height),
+            state: VirtualCache::new(
+                &device,
+                &kernel.queue,
+                scene,
+                options,
+                kernel.sky() != continuum::glam::Vec3::ZERO,
+                width,
+                height,
+            ),
             passes: [
                 kernel.vc_update_pipeline.clone(),
                 kernel.vc_bake_pipeline.clone(),
+                kernel.vc_bake_sky_pipeline.clone(),
                 kernel.vc_fill_pipeline.clone(),
             ],
             binds: Vec::new(),
@@ -291,7 +300,12 @@ impl InstancedRenderer {
             cache
                 .passes
                 .iter()
-                .zip([VC_UPDATE_BINDINGS, VC_BAKE_BINDINGS, VC_FILL_BINDINGS])
+                .zip([
+                    VC_UPDATE_BINDINGS,
+                    VC_BAKE_BINDINGS,
+                    VC_BAKE_SKY_BINDINGS,
+                    VC_FILL_BINDINGS,
+                ])
                 .map(|(pipeline, keep)| bind_group(device, pipeline, &all, None, keep))
                 .collect()
         });
@@ -354,18 +368,15 @@ impl InstancedRenderer {
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if let Some(cache) = &mut self.cache {
-            let (updates, texels, pages) = cache.state.upload(
+            // Before the bake, which may count its work in the counters.
+            cache.state.encode_clear(&mut encoder);
+            let counts = cache.state.upload(
                 &self.queue,
                 self.width,
                 self.height,
                 camera.vertical_fov_degrees,
             );
-            for ((pipeline, group), count) in cache
-                .passes
-                .iter()
-                .zip(&cache.binds)
-                .zip([updates, texels, pages])
-            {
+            for ((pipeline, group), count) in cache.passes.iter().zip(&cache.binds).zip(counts) {
                 if count == 0 {
                     continue;
                 }
@@ -374,7 +385,6 @@ impl InstancedRenderer {
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
             }
-            cache.state.encode_clear(&mut encoder);
         }
         for ((pipeline, _), group) in self.passes.iter().zip(&self.binds) {
             let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -430,18 +440,14 @@ impl InstancedRenderer {
         let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if let Some(cache) = &mut self.cache {
-            let (updates, texels, pages) = cache.state.upload(
+            cache.state.encode_clear(&mut encoder);
+            let counts = cache.state.upload(
                 &self.queue,
                 self.width,
                 self.height,
                 camera.vertical_fov_degrees,
             );
-            for ((pipeline, group), count) in cache
-                .passes
-                .iter()
-                .zip(&cache.binds)
-                .zip([updates, texels, pages])
-            {
+            for ((pipeline, group), count) in cache.passes.iter().zip(&cache.binds).zip(counts) {
                 if count == 0 {
                     continue;
                 }
@@ -450,7 +456,6 @@ impl InstancedRenderer {
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
             }
-            cache.state.encode_clear(&mut encoder);
         }
         self.queue.submit([encoder.finish()]);
         self.wait();

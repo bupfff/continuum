@@ -23,8 +23,9 @@ struct Light {
     // nearest-first ray traversal, 0 for a fixed child order; z: profiling
     // stage, cutting cones short to time their parts (0: off, 1: no cone,
     // 2: setup and weights only, 3: plus the object hierarchy, 4: plus triangle
-    // hierarchies but no rasterization); w: 1 for sky cones to combine
-    // coverage across meshes by the maximum (a diagnostic)
+    // hierarchies but no rasterization); w: sky flags: bit 1 to combine
+    // coverage across meshes by the maximum (a diagnostic), bit 2 to walk
+    // geometry below the receiver's horizon too
     params: vec4<f32>,
     // A uniform sky: radiance (linear RGB) over the whole sphere of directions,
     // lit through six cube-face mask cones per receiver (zero: no sky).
@@ -136,6 +137,10 @@ struct Cone {
     window: vec4<f32>, // u0, v0, u1, v1
     far_normal: vec3<f32>,
     far_offset: f32,
+    // The receiver's normal, for sky cones (zero: none). Geometry wholly
+    // below the receiver's tangent plane can only block directions below its
+    // horizon, whose light it never receives, so the walk skips it.
+    horizon: vec3<f32>,
 };
 
 fn lambert_edge(n: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
@@ -167,6 +172,8 @@ fn may_touch(c: Cone, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
     let f1 = c.far_offset - dot(c.far_normal, v1);
     let f2 = c.far_offset - dot(c.far_normal, v2);
     if (f0 < 0.0 && f1 < 0.0 && f2 < 0.0) { return false; }
+    if (dot(c.horizon, v0 - c.apex) < 0.0 && dot(c.horizon, v1 - c.apex) < 0.0
+        && dot(c.horizon, v2 - c.apex) < 0.0) { return false; }
     let p0 = to_local(c, v0);
     let p1 = to_local(c, v1);
     let p2 = to_local(c, v2);
@@ -186,9 +193,11 @@ fn may_touch_box(c: Cone, lo: vec3<f32>, hi: vec3<f32>) -> bool {
     var out_u1 = true;
     var out_v0 = true;
     var out_v1 = true;
+    var below = true;
     for (var k = 0u; k < 8u; k++) {
         let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
         if (c.far_offset - dot(c.far_normal, corner) >= 0.0) { far_out = false; }
+        if (dot(c.horizon, corner - c.apex) >= 0.0) { below = false; }
         let p = to_local(c, corner);
         if (p.z >= NEAR) { near_out = false; }
         if (p.x - c.window.x * p.z >= 0.0) { out_u0 = false; }
@@ -196,7 +205,7 @@ fn may_touch_box(c: Cone, lo: vec3<f32>, hi: vec3<f32>) -> bool {
         if (p.y - c.window.y * p.z >= 0.0) { out_v0 = false; }
         if (c.window.w * p.z - p.y >= 0.0) { out_v1 = false; }
     }
-    return !(far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1);
+    return !(far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1 || below);
 }
 
 struct Poly3 { v: array<vec3<f32>, 10>, n: u32 };
@@ -422,10 +431,12 @@ fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
     var out_u1 = true;
     var out_v0 = true;
     var out_v1 = true;
+    var below = true;
     // Splattable: every corner between the near and far planes.
     var inside = prefilter_bins > 0.0;
     for (var k = 0u; k < 8u; k++) {
         let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
+        if (dot(c.horizon, corner - c.apex) >= 0.0) { below = false; }
         let in_far = c.far_offset - dot(c.far_normal, corner) >= 0.0;
         if (in_far) { far_out = false; } else { inside = false; }
         let p = to_local(c, corner);
@@ -442,7 +453,7 @@ fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
             mx = max(mx, q);
         }
     }
-    if (far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1) { return 0u; }
+    if (far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1 || below) { return 0u; }
     if (!inside || max(mx.x - mn.x, mx.y - mn.y) > prefilter_bins) { return 3u; }
     if (mx.x <= 0.0 || mx.y <= 0.0 || mn.x >= g || mn.y >= g) { return 1u; }
     let e = hi - lo;
@@ -499,6 +510,7 @@ fn cone_to_object(c: Cone, m: u32) -> Cone {
     o.window = c.window;
     o.far_normal = rotate_to_object(x, c.far_normal);
     o.far_offset = (c.far_offset - dot(c.far_normal, translation(x))) * xforms[4u * x + 3u].y;
+    o.horizon = rotate_to_object(x, c.horizon);
     return o;
 }
 
@@ -512,8 +524,62 @@ var<private> prefilter_bins: f32 = 0.0;
 // independent occluders, 1 − Π(1 − c) (sky cones, whose 11° bins often do).
 var<private> independent_occluders: bool = false;
 
+// Diagnostics (`KernelOptions::count_work`): the work a thread's cones did.
+// work_a: object nodes tested, object nodes splatted, meshes entered,
+// triangle-hierarchy nodes tested; work_b: of those, splatted, triangles
+// tested, triangles rasterized, cones traced. Compiled away when off.
+override COUNT_WORK: bool = false;
+var<private> work_a: vec4<u32> = vec4<u32>(0u);
+var<private> work_b: vec4<u32> = vec4<u32>(0u);
+// work_c: object nodes and triangle-hierarchy nodes the packet visited; of
+// the triangle-hierarchy nodes tested, those of the receiver's own object;
+// meshes entered that were the receiver's own.
+var<private> work_c: vec4<u32> = vec4<u32>(0u);
+// The object the traced cones start on (diagnostics only).
+var<private> own_object: u32 = 0xffffffffu;
+
+// Packet traversal (M5 gate 5): the invocations of a subgroup that trace
+// cones together walk each hierarchy together. A node is visited when any of
+// them needs it, and each acts only on the nodes its own walk would visit, in
+// the same order, so every result equals walking alone; but the subgroup no
+// longer runs 32 different walks one after another. Where the device has
+// subgroups, the kernel makes `packet_any` a subgroupAny; otherwise each
+// invocation is its own packet. Traversal loops leave only on uniform
+// conditions, so the invocations stay together.
+fn packet_any(x: bool) -> bool {
+    return x;
+}
+
+// Per invocation: which traversal stack entries it needs (bit i: entry i).
+var<private> need_lo: u32 = 0u;
+var<private> need_hi: u32 = 0u;
+
+fn need_get(i: u32) -> bool {
+    return ((select(need_lo, need_hi, i >= 32u) >> (i & 31u)) & 1u) != 0u;
+}
+
+fn need_put(i: u32, v: bool) {
+    let bit = 1u << (i & 31u);
+    if (i < 32u) {
+        need_lo = select(need_lo & ~bit, need_lo | bit, v);
+    } else {
+        need_hi = select(need_hi & ~bit, need_hi | bit, v);
+    }
+}
+
 fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32, base: u32) {
+    add_mesh_coverage_if(true, world_cone, m, cov, full, i, base);
+}
+
+// `add_mesh_coverage` for the invocations with `on` set; the others follow
+// the packet's walk without acting.
+fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32, base: u32) {
     if (u32(light.params.z) == 3u) { return; }
+    if (!packet_any(on)) { return; }
+    if (COUNT_WORK && on) {
+        work_a.z++;
+        if (m == own_object) { work_c.w++; }
+    }
     let c = cone_to_object(world_cone, m);
     let range = meshes[m];
     var acc: array<f32, 68>;
@@ -525,30 +591,52 @@ fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>
         if (range.z != NONE) {
             var sp = base + 1u;
             stack_set(base, range.z);
+            need_put(base, on);
             while (sp > base) {
                 sp--;
                 let n = stack_get(sp);
+                let mine = need_get(sp);
+                if (!packet_any(mine)) { continue; }
+                if (COUNT_WORK) { work_c.y++; }
                 let node = blas[n];
-                let test = node_cone_test(c, &acc, &span, n, node.lo.xyz, node.hi.xyz);
-                if (test == 2u) { touched = true; }
-                if (test != 3u) { continue; }
+                var descend = false;
+                if (mine) {
+                    let test = node_cone_test(c, &acc, &span, n, node.lo.xyz, node.hi.xyz);
+                    if (COUNT_WORK) {
+                        work_a.w++;
+                        if (m == own_object) { work_c.z++; }
+                        if (test == 1u || test == 2u) { work_b.x++; }
+                    }
+                    if (test == 2u) { touched = true; }
+                    descend = test == 3u;
+                }
+                if (!packet_any(descend)) { continue; }
                 if (node.info.y > 0u) {
-                    for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                        if (cover_triangle(c, &acc, &span, blas_items[k])) { touched = true; }
+                    if (descend) {
+                        for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                            let drawn = cover_triangle(c, &acc, &span, blas_items[k]);
+                            if (COUNT_WORK) {
+                                work_b.y++;
+                                if (drawn) { work_b.z++; }
+                            }
+                            if (drawn) { touched = true; }
+                        }
                     }
                 } else {
                     stack_set(sp, node.info.x);
                     stack_set(sp + 1u, node.info.x + 1u);
+                    need_put(sp, descend);
+                    need_put(sp + 1u, descend);
                     sp += 2u;
                 }
             }
         }
-    } else {
+    } else if (on) {
         for (var t = range.x; t < range.x + range.y; t++) {
             if (cover_triangle(c, &acc, &span, t)) { touched = true; }
         }
     }
-    if (light.counts.y == 2u) {
+    if (light.counts.y == 2u && on) {
         for (var b = 0u; b < 64u; b++) { debug[i * BINS + b] = acc[b]; }
     }
     if (touched) {
@@ -672,34 +760,52 @@ fn splat_object_node(c: Cone, n: u32, lo: vec3<f32>, hi: vec3<f32>, cov: ptr<fun
 
 // Adds the coverage of every mesh in the bound hierarchy (or every mesh) to `cov`.
 fn scene_coverage(c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) {
+    scene_coverage_if(true, c, i, cov, full);
+}
+
+// `scene_coverage` for the invocations with `on` set; the others follow
+// the packet's walk without acting. An invocation stops needing nodes once
+// every bin is fully covered, as nothing further can change its result.
+fn scene_coverage_if(on: bool, c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) {
+    if (COUNT_WORK && on) { work_b.w++; }
     if (light.counts.z >= 1u) {
         var sp = 1u;
         stack_set(0, 0u);
+        need_put(0u, on);
         while (sp > 0u) {
             sp--;
             let n = stack_get(sp);
+            let mine = need_get(sp) && *full < BINS;
+            if (!packet_any(mine)) { continue; }
+            if (COUNT_WORK) { work_c.x++; }
             let node = nodes[n];
-            if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
-            if (splat_object_node(c, n, node.lo.xyz, node.hi.xyz, cov, full)) {
-                if (*full == BINS) { break; }
-                continue;
+            var descend = false;
+            if (mine) {
+                if (COUNT_WORK) { work_a.x++; }
+                if (may_touch_box(c, node.lo.xyz, node.hi.xyz)) {
+                    if (splat_object_node(c, n, node.lo.xyz, node.hi.xyz, cov, full)) {
+                        if (COUNT_WORK) { work_a.y++; }
+                    } else {
+                        descend = true;
+                    }
+                }
             }
+            if (!packet_any(descend)) { continue; }
             if (node.info.y > 0u) {
                 for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                    add_mesh_coverage(c, items[k], cov, full, i, sp);
+                    add_mesh_coverage_if(descend, c, items[k], cov, full, i, sp);
                 }
-                // Every bin fully covered: nothing further can change the result.
-                if (*full == BINS) { break; }
             } else {
                 stack_set(sp, node.info.x);
                 stack_set(sp + 1u, node.info.x + 1u);
+                need_put(sp, descend);
+                need_put(sp + 1u, descend);
                 sp += 2u;
             }
         }
     } else {
         for (var m = 0u; m < light.counts.x; m++) {
-            add_mesh_coverage(c, m, cov, full, i, 0u);
-            if (*full == BINS) { break; }
+            add_mesh_coverage_if(on && *full < BINS, c, m, cov, full, i, 0u);
         }
     }
 }
@@ -748,15 +854,21 @@ fn cone_visible(c: Cone, normal: vec3<f32>, cov: ptr<function, array<f32, 64>>) 
 // Irradiance per unit radiance at `apex` (surface normal `normal`) from the
 // light, through a mask cone. `i` only selects where debug output goes.
 fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return cone_irradiance_if(true, i, apex, normal);
+}
+
+// `cone_irradiance` where `on` (0 elsewhere), keeping the packet together.
+fn cone_irradiance_if(on: bool, i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     let stage = u32(light.params.z);
     if (stage == 1u) { return 0.0; }
     let lc = light_cone(apex);
-    if (!lc.ok) { return 0.0; }
+    let traced = on && lc.ok;
     // Explicit zeroing: don't rely on loop-scoped `var`s being re-initialized.
     var cov: array<f32, 64>;
     for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
     var full = 0u;
-    if (stage != 2u) { scene_coverage(lc.c, i, &cov, &full); }
+    if (stage != 2u) { scene_coverage_if(traced, lc.c, i, &cov, &full); }
+    if (!traced) { return 0.0; }
     let visible = cone_visible(lc.c, normal, &cov);
     if (light.counts.y == 1u) {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }
@@ -853,15 +965,31 @@ fn clipped_window_weight(c: Cone, normal: vec3<f32>) -> f32 {
 // (the same sum rearranged, as `cone_visible`'s fast path), so open bins cost
 // nothing.
 fn sky_irradiance(apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return sky_irradiance_if(true, apex, normal);
+}
+
+// `sky_irradiance` where `on` (0 elsewhere), keeping the packet together.
+fn sky_irradiance_if(on: bool, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     // Profiling stages, as for sun cones: 1 skips the cones, 2 keeps their
     // setup and weights but finds no coverage.
+    let stage = u32(light.params.z);
+    if (stage == 1u) { return 0.0; }
+    var total = 0.0;
+    for (var f = 0u; f < 6u; f++) {
+        total += sky_face_irradiance(on, f, apex, normal);
+    }
+    return total;
+}
+
+// Irradiance per unit sky radiance through cube face `f` alone (0 if the
+// face lies wholly below the horizon, or without `on`).
+fn sky_face_irradiance(on: bool, f: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
     let stage = u32(light.params.z);
     if (stage == 1u) { return 0.0; }
     var scale = bitcast<f32>(light.objects.y);
     if (scale <= 0.0) { scale = 1.0; }
     prefilter_bins = light.params.x * scale;
-    var total = 0.0;
-    for (var f = 0u; f < 6u; f++) {
+    {
         let axis = f / 2u;
         let sign = select(1.0, -1.0, (f & 1u) == 1u);
         var forward = vec3<f32>(0.0);
@@ -877,29 +1005,32 @@ fn sky_irradiance(apex: vec3<f32>, normal: vec3<f32>) -> f32 {
         c.window = vec4<f32>(-1.0, -1.0, 1.0, 1.0);
         c.far_normal = forward;
         c.far_offset = dot(forward, apex) + SKY_FAR;
+        // params.w bit 2: walk geometry below the horizon too (as before M5
+        // gate 5).
+        if ((u32(light.params.w) & 2u) == 0u) { c.horizon = normal; }
         // The face's directions are linear in the window, so its corners
         // decide whether any lies above the horizon.
         var above = false;
         for (var k = 0u; k < 4u; k++) {
             if (dot(normal, direction(c, f32(k & 1u), f32(k >> 1u))) > 0.0) { above = true; }
         }
-        if (!above) { continue; }
+        above = above && on;
         var cov: array<f32, 64>;
         for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
         var full = 0u;
-        // params.w = 1: combine by the maximum instead (a diagnostic).
-        independent_occluders = light.params.w < 0.5;
-        if (stage != 2u) { scene_coverage(c, 0u, &cov, &full); }
+        // params.w bit 1: combine by the maximum instead (a diagnostic).
+        independent_occluders = (u32(light.params.w) & 1u) == 0u;
+        if (stage != 2u) { scene_coverage_if(above, c, 0u, &cov, &full); }
         independent_occluders = false;
+        if (!above) { return 0.0; }
         var blocked = 0.0;
         for (var b = 0u; b < BINS; b++) {
             if (cov[b] > 0.0) {
                 blocked += cov[b] * clipped_bin_weight(c, normal, b);
             }
         }
-        total += max(clipped_window_weight(c, normal) - blocked, 0.0);
+        return max(clipped_window_weight(c, normal) - blocked, 0.0);
     }
-    return total;
 }
 
 @compute @workgroup_size(64)
@@ -1157,11 +1288,12 @@ fn light_distance(eye: vec3<f32>, dir: vec3<f32>) -> f32 {
 
 // Direct irradiance at a hit through a mask cone (0 if the surface faces away).
 fn hit_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return hit_irradiance_if(true, pixel, point, normal);
+}
+
+fn hit_irradiance_if(on: bool, pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
     let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
-    if (dot(normal, to_light) > 0.0) {
-        return cone_irradiance(pixel, point, normal);
-    }
-    return 0.0;
+    return cone_irradiance_if(on && dot(normal, to_light) > 0.0, pixel, point, normal);
 }
 
 @group(0) @binding(24) var<storage, read> normals: array<vec4<f32>>;
@@ -1682,6 +1814,8 @@ struct VcParams {
     jobs: vec4<u32>,
     // x: 1 / base texel size, y: radians per pixel (camera), z: pixels per texel, w: 0
     params: vec4<f32>,
+    // x: sky samples to bake (each as six face jobs), y: 1 with a sky, z, w: 0
+    sky: vec4<u32>,
 };
 
 const PAGE: u32 = 8u;
@@ -1709,8 +1843,9 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 @group(0) @binding(41) var<uniform> vc: VcParams;
 // x: pixels shaded without any resident page (unshadowed fallback), y:
 // requests listed, z: sample pixels on a surface, w: of those, the ones that
-// found their wanted mip.
-@group(0) @binding(42) var<storage, read_write> vc_stats: array<atomic<u32>, 4>;
+// found their wanted mip. 4–15: the bake's work counters (`work_a`,
+// `work_b`, `work_c`), with COUNT_WORK.
+@group(0) @binding(42) var<storage, read_write> vc_stats: array<atomic<u32>, 16>;
 // Texels to bake: entry in `bake_list`, and the texel's index in the 9×9 page.
 @group(0) @binding(43) var<storage, read> bake_jobs: array<vec2<u32>>;
 // Page table writes: (entry index, 0, 0, 0), then the entry.
@@ -1718,6 +1853,16 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // This frame's requested pages, as fingerprints (open addressing; 0: free),
 // so each page is listed once.
 @group(0) @binding(45) var<storage, read_write> request_set: array<atomic<u32>>;
+// Sky samples to bake (M5 gate 5): entry in `bake_list`, and the texel's index
+// in the 9×9 page. Sky light varies slowly, so it is sampled every 1, 2, 4
+// or 8 texels (the page's stride) and interpolated; each sample is six jobs,
+// one per cube face, whose results land in `sky_partial` (six per sample) for
+// `vc_fill` to sum.
+@group(0) @binding(46) var<storage, read> sky_samples: array<vec2<u32>>;
+@group(0) @binding(47) var<storage, read_write> sky_partial: array<f32>;
+// Per baked page: its first sky sample, and how many it has (low 24 bits)
+// with its sky stride (high 8 bits).
+@group(0) @binding(48) var<storage, read> page_sky: array<vec2<u32>>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -1818,10 +1963,17 @@ fn uv_barycentric(t: u32, uv: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(1.0 - s - u, s, u);
 }
 
-// Direct irradiance at texel `texel` of chart `c` on object `m` (grid `n`): the
-// texel's center placed on the surface through the chart's cells (the nearest
-// point of the cell's most nearly containing triangle), then a mask cone.
-fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> vec2<f32> {
+// Where texel `texel` of chart `c` on object `m` (grid `n`) lies: its center
+// placed on the surface through the chart's cells (the nearest point of the
+// cell's most nearly containing triangle), as a cone apex and a shading
+// normal. `ok` is false without a triangle.
+struct TexelSurface {
+    apex: vec3<f32>,
+    normal: vec3<f32>,
+    ok: bool,
+};
+
+fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
     let ch = vcharts[c];
     let uv = (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n);
     let cell = min(vec2<u32>(uv * vec2<f32>(ch.grid)), ch.grid - vec2<u32>(1u));
@@ -1840,10 +1992,9 @@ fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> vec2<f32> {
             best_b = b;
         }
     }
-    if (best_t == NONE) { return vec2<f32>(0.0); }
     let b0 = clamp(best_b, vec3<f32>(0.0), vec3<f32>(1.0));
     let b = b0 / max(b0.x + b0.y + b0.z, 1e-20);
-    let t = best_t;
+    let t = select(0u, best_t, best_t != NONE);
     let p = tris[3u * t].xyz * b.x + tris[3u * t + 1u].xyz * b.y + tris[3u * t + 2u].xyz * b.z;
     let nrm = normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z;
     var pw = p;
@@ -1855,9 +2006,30 @@ fn vc_texel(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> vec2<f32> {
     }
     let geometric = normal_to_world(m, cross(tris[3u * t + 1u].xyz - tris[3u * t].xyz, tris[3u * t + 2u].xyz - tris[3u * t].xyz));
     let apex = pw + normalize(geometric) * surface_offset(length(pw));
-    var sky = 0.0;
-    if (any(light.sky.xyz > vec3<f32>(0.0))) { sky = sky_irradiance(apex, nw); }
-    return vec2<f32>(hit_irradiance(0u, apex, nw), sky);
+    return TexelSurface(apex, nw, best_t != NONE);
+}
+
+// A baked page's texel: the job's page, and the texel's place in the chart.
+struct PageTexel {
+    e: vec4<u32>,
+    m: u32,
+    c: u32,
+    n: vec2<u32>,
+    texel: vec2<u32>,
+    inside: bool,
+};
+
+fn page_texel(page_index: u32, k: u32) -> PageTexel {
+    var t: PageTexel;
+    t.e = bake_list[page_index];
+    t.m = t.e.x;
+    t.c = t.e.y & 0xffffu;
+    let mip = t.e.y >> 16u;
+    let page = vec2<u32>(t.e.z & 0xffffu, t.e.z >> 16u);
+    t.n = vc_grid(t.c, t.m, mip);
+    t.texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
+    t.inside = t.texel.x < t.n.x && t.texel.y < t.n.y;
+    return t;
 }
 
 @compute @workgroup_size(64)
@@ -1874,25 +2046,66 @@ fn vc_update(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     lane = li;
     let j = gid.x;
-    if (j >= vc.jobs.x) { return; }
-    let job = bake_jobs[j];
-    let e = bake_list[job.x];
-    let m = e.x;
-    let c = e.y & 0xffffu;
-    let mip = e.y >> 16u;
-    let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
-    let n = vc_grid(c, m, mip);
-    let texel = page * PAGE + vec2<u32>(job.y % PAGE_STRIDE, job.y / PAGE_STRIDE);
-    if (texel.x < n.x && texel.y < n.y) {
-        let value = vc_texel(m, c, n, texel);
-        let i = e.w * PAGE_TEXELS + job.y;
-        pool[2u * i] = value.x;
-        pool[2u * i + 1u] = value.y;
+    // No early return: every invocation follows its packet's walks.
+    let listed = j < vc.jobs.x;
+    let job = bake_jobs[min(j, vc.jobs.x - 1u)];
+    let t = page_texel(job.x, job.y);
+    let s = vc_surface(t.m, t.c, t.n, t.texel);
+    let on = listed && t.inside && s.ok;
+    let sun = hit_irradiance_if(on, 0u, s.apex, s.normal);
+    if (listed && t.inside) {
+        pool[2u * (t.e.w * PAGE_TEXELS + job.y)] = select(0.0, sun, on);
+    }
+    if (COUNT_WORK) {
+        for (var k = 0u; k < 4u; k++) {
+            if (work_a[k] > 0u) { atomicAdd(&vc_stats[4u + k], work_a[k]); }
+            if (work_b[k] > 0u) { atomicAdd(&vc_stats[8u + k], work_b[k]); }
+            if (work_c[k] > 0u) { atomicAdd(&vc_stats[12u + k], work_c[k]); }
+        }
     }
 }
 
-// One thread per baked page: the border beyond the chart's grid copies the
-// nearest texel inside it (clamped lookups), and the page is marked used.
+// One thread per sky sample and cube face, face by face, so neighbouring
+// invocations trace the same face from nearby texels.
+@compute @workgroup_size(64)
+fn vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let count = vc.sky.x;
+    let j = gid.x;
+    // No early return: every invocation follows its packet's walks.
+    let listed = j < 6u * count;
+    let f = min(j / max(count, 1u), 5u);
+    let k = j % max(count, 1u);
+    let sample = sky_samples[k];
+    let t = page_texel(sample.x, sample.y);
+    let s = vc_surface(t.m, t.c, t.n, t.texel);
+    let on = listed && t.inside && s.ok;
+    own_object = t.m;
+    let value = sky_face_irradiance(on, f, s.apex, s.normal);
+    if (listed) { sky_partial[6u * k + f] = select(0.0, value, on); }
+    if (COUNT_WORK) {
+        for (var q = 0u; q < 4u; q++) {
+            if (work_a[q] > 0u) { atomicAdd(&vc_stats[4u + q], work_a[q]); }
+            if (work_b[q] > 0u) { atomicAdd(&vc_stats[8u + q], work_b[q]); }
+            if (work_c[q] > 0u) { atomicAdd(&vc_stats[12u + q], work_c[q]); }
+        }
+    }
+}
+
+// The sky channel of texel `x` of a page along one axis: the samples on
+// either side (multiples of the stride inside the grid), and the weight of
+// the second; a texel past the last sample takes the last sample's value.
+fn sky_span(x: u32, stride: u32, inside: u32) -> vec3<f32> {
+    let x0 = (x / stride) * stride;
+    let x1 = x0 + stride;
+    if (x1 >= inside || x1 >= PAGE_STRIDE) { return vec3<f32>(f32(x0), f32(x0), 0.0); }
+    return vec3<f32>(f32(x0), f32(x1), f32(x - x0) / f32(stride));
+}
+
+// One thread per baked page: sums each sky sample's faces into the sky
+// channel and interpolates it between samples (bilinearly), then fills the
+// border beyond the chart's grid with the nearest texel inside it (clamped
+// lookups), and marks the page used.
 @compute @workgroup_size(64)
 fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = gid.x;
@@ -1903,6 +2116,34 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
     let n = vc_grid(c, e.x, mip);
     let o = e.w * PAGE_TEXELS;
+    let in_grid = min(n - min(page * PAGE, n), vec2<u32>(PAGE_STRIDE));
+    let range = page_sky[p];
+    let stride = range.y >> 24u;
+    if (vc.sky.y == 0u) {
+        for (var k = 0u; k < PAGE_TEXELS; k++) { pool[2u * (o + k) + 1u] = 0.0; }
+    } else {
+        for (var q = range.x; q < range.x + (range.y & 0xffffffu); q++) {
+            let k = sky_samples[q].y;
+            if (k % PAGE_STRIDE < in_grid.x && k / PAGE_STRIDE < in_grid.y) {
+                var total = 0.0;
+                for (var f = 0u; f < 6u; f++) { total += sky_partial[6u * q + f]; }
+                pool[2u * (o + k) + 1u] = total;
+            }
+        }
+        if (stride > 1u) {
+            for (var k = 0u; k < PAGE_TEXELS; k++) {
+                let x = k % PAGE_STRIDE;
+                let y = k / PAGE_STRIDE;
+                if (x >= in_grid.x || y >= in_grid.y || (x % stride == 0u && y % stride == 0u)) { continue; }
+                let sx = sky_span(x, stride, in_grid.x);
+                let sy = sky_span(y, stride, in_grid.y);
+                let at = vec4<u32>(vec2<u32>(sx.xy), vec2<u32>(sy.xy));
+                let a = mix(pool[2u * (o + at.z * PAGE_STRIDE + at.x) + 1u], pool[2u * (o + at.z * PAGE_STRIDE + at.y) + 1u], sx.z);
+                let b = mix(pool[2u * (o + at.w * PAGE_STRIDE + at.x) + 1u], pool[2u * (o + at.w * PAGE_STRIDE + at.y) + 1u], sx.z);
+                pool[2u * (o + k) + 1u] = mix(a, b, sy.z);
+            }
+        }
+    }
     for (var k = 0u; k < PAGE_TEXELS; k++) {
         let texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
         if (texel.x >= n.x || texel.y >= n.y) {

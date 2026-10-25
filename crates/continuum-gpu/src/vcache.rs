@@ -71,6 +71,15 @@ pub struct CacheOptions {
     pub frame_target_ms: f32,
     /// Pages the pool holds.
     pub pages: u32,
+    /// With a sky: the spacing of sky samples on surfaces (meters). A page's
+    /// sky channel is sampled every 1, 2, 4 or 8 texels along each axis, the
+    /// most whose spacing stays within this, and interpolated bilinearly
+    /// between samples; sky light varies slowly, and a sky sample costs as
+    /// much as tens of sun texels (M5 gate 5). 0: every texel.
+    pub sky_spacing: f32,
+    /// What a sky sample counts against the bake budget, in sun texels (at
+    /// least 1).
+    pub sky_sample_cost: u32,
 }
 
 impl Default for CacheOptions {
@@ -82,6 +91,8 @@ impl Default for CacheOptions {
             bake_budget: 20_000,
             frame_target_ms: 14.0,
             pages: 1 << 19,
+            sky_spacing: 0.0,
+            sky_sample_cost: 50,
         }
     }
 }
@@ -100,9 +111,10 @@ pub struct CacheStats {
     /// ones that found the page of their wanted mip.
     pub samples: u32,
     pub at_wanted: u32,
-    /// Pages and texels baked in the frame.
+    /// Pages, texels and sky samples baked in the frame.
     pub pages_baked: u32,
     pub texels_baked: u32,
+    pub sky_samples: u32,
     /// Pages resident after the frame's bake.
     pub resident: u32,
     /// Pages evicted while planning the frame.
@@ -112,11 +124,17 @@ pub struct CacheStats {
     pub planning: Duration,
     /// Of that work, eviction (merging slot use, freeing pages).
     pub evicting: Duration,
-    /// The bake budget the frame planned with (cones).
+    /// The bake budget the frame planned with (sun texels, or their worth).
     pub budget: u32,
     /// Time spent waiting for the GPU to finish the frame two before, whose
     /// requests the plan reads.
     pub waiting: Duration,
+    /// The bake's work, with `KernelOptions::count_work` (zero otherwise):
+    /// object nodes tested, object nodes splatted, meshes entered,
+    /// triangle-hierarchy nodes tested, of those splatted, triangles tested,
+    /// triangles rasterized, cones traced; then object nodes and
+    /// triangle-hierarchy nodes their packets visited (packet traversal).
+    pub work: [u32; 12],
 }
 
 #[repr(C)]
@@ -134,6 +152,7 @@ struct VcParams {
     counts: [u32; 4],
     jobs: [u32; 4],
     params: [f32; 4],
+    sky: [u32; 4],
 }
 
 /// Per-chart tables shared by every object with a geometry: the chart's size
@@ -370,6 +389,10 @@ struct Readback {
     pending: Option<(u32, wgpu::SubmissionIndex)>,
 }
 
+/// The shading and bake counters' size: four shading counters, then twelve
+/// work counters (with `KernelOptions::count_work`).
+const STATS_BYTES: u64 = 64;
+
 /// Table entries updated per frame at most before the whole table is sent.
 const UPDATES_CAPACITY: usize = 1 << 17;
 
@@ -392,6 +415,13 @@ pub(crate) struct VirtualCache {
     bake_list: Vec<[u32; 4]>,
     jobs: Vec<[u32; 2]>,
     texels: u32,
+    /// Whether the sky channel is baked; this frame's sky samples (page
+    /// entry, texel) and each page's (first sample, count); and the budget
+    /// the frame's plan used, in sun texels.
+    sky: bool,
+    sky_samples: Vec<[u32; 2]>,
+    page_sky: Vec<[u32; 2]>,
+    spent: u32,
     /// The frame being prepared (counted from 1).
     frame: u32,
     /// Per frame: what was baked, then what its shading reported once read back.
@@ -424,9 +454,16 @@ impl VirtualCache {
         queue: &wgpu::Queue,
         scene: &InstancedScene,
         options: CacheOptions,
+        sky: bool,
         width: u32,
         height: u32,
     ) -> Self {
+        // So a frame's sky samples never outnumber the budget (their buffers'
+        // size).
+        assert!(
+            options.sky_sample_cost >= 1,
+            "a sky sample costs at least 1"
+        );
         let tables = chart_tables(&scene.geometries);
         let inv_base = 1.0 / options.base_texel;
         let chart_size: Vec<Vec2> = tables
@@ -500,6 +537,17 @@ impl VirtualCache {
                 ),
             ),
             (38, empty("bake list", budget * 16, copy_dst)),
+            // A plan never exceeds the budget but by its first page.
+            (46, empty("sky samples", (budget + 81) * 8, copy_dst)),
+            (
+                47,
+                empty(
+                    "sky partials",
+                    (budget + 81) * 6 * 4,
+                    wgpu::BufferUsages::empty(),
+                ),
+            ),
+            (48, empty("page sky", budget * 8, copy_dst)),
             (
                 40,
                 empty(
@@ -510,7 +558,11 @@ impl VirtualCache {
             ),
             (
                 42,
-                empty("cache stats", 16, wgpu::BufferUsages::COPY_SRC | copy_dst),
+                empty(
+                    "cache stats",
+                    STATS_BYTES,
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
+                ),
             ),
             (43, empty("bake jobs", 4 * (budget + 81) * 8, copy_dst)),
             (45, empty("request set", REQUEST_SET * 4, copy_dst)),
@@ -544,6 +596,10 @@ impl VirtualCache {
             bake_list: Vec::new(),
             jobs: Vec::new(),
             texels: 0,
+            sky,
+            sky_samples: Vec::new(),
+            page_sky: Vec::new(),
+            spent: 0,
             frame: 1,
             log: Vec::new(),
             latest: 0,
@@ -590,7 +646,7 @@ impl VirtualCache {
             .map(|_| Readback {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("requests readback"),
-                    size: tiles as u64 * 16 + 16,
+                    size: tiles as u64 * 16 + STATS_BYTES,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -643,16 +699,27 @@ impl VirtualCache {
         [(n.x as u32).max(1), (n.y as u32).max(1)]
     }
 
-    /// Writes this frame's uniform and uploads its bake list, texel list and
-    /// page table changes. Returns the passes' sizes: (table updates, texels,
-    /// pages).
+    /// The sky stride of pages on object `m` at `mip`: the largest of 1, 2,
+    /// 4 and 8 whose spacing stays within `sky_spacing`.
+    fn sky_stride(&self, m: u32, mip: u32) -> u32 {
+        let texel = self.options.base_texel * self.scale[m as usize] * (1u64 << mip.min(40)) as f32;
+        let mut stride = 1;
+        while stride < 8 && (2 * stride) as f32 * texel <= self.options.sky_spacing {
+            stride *= 2;
+        }
+        stride
+    }
+
+    /// Writes this frame's uniform and uploads its bake list, texel and sky
+    /// sample lists and page table changes. Returns the passes' sizes: table
+    /// updates, sun texels, sky face jobs, pages.
     pub(crate) fn upload(
         &mut self,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
         vertical_fov_degrees: f32,
-    ) -> (u32, u32, u32) {
+    ) -> [u32; 4] {
         let mut updates: Vec<[u32; 4]> = Vec::new();
         let dirty = self.table.take_dirty();
         if dirty.len() > UPDATES_CAPACITY {
@@ -673,6 +740,12 @@ impl VirtualCache {
         if !self.bake_list.is_empty() {
             queue.write_buffer(self.buffer(38), 0, bytemuck::cast_slice(&self.bake_list));
             queue.write_buffer(self.buffer(43), 0, bytemuck::cast_slice(&self.jobs));
+            if self.sky {
+                queue.write_buffer(self.buffer(48), 0, bytemuck::cast_slice(&self.page_sky));
+            }
+        }
+        if !self.sky_samples.is_empty() {
+            queue.write_buffer(self.buffer(46), 0, bytemuck::cast_slice(&self.sky_samples));
         }
         let tile = self.options.request_tile;
         let pixel_angle = 2.0 * (vertical_fov_degrees.to_radians() * 0.5).tan() / height as f32;
@@ -695,12 +768,14 @@ impl VirtualCache {
                 self.options.pixels_per_texel,
                 0.0,
             ],
+            sky: [self.sky_samples.len() as u32, self.sky as u32, 0, 0],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.log.push(CacheStats {
             frame: self.frame,
             pages_baked: self.bake_list.len() as u32,
             texels_baked: self.texels,
+            sky_samples: self.sky_samples.len() as u32,
             resident: self.map.len() as u32,
             evicted: std::mem::take(&mut self.evicted),
             planning: std::mem::take(&mut self.planning),
@@ -709,11 +784,12 @@ impl VirtualCache {
             waiting: std::mem::take(&mut self.waiting),
             ..Default::default()
         });
-        (
+        [
             (updates.len() / 2) as u32,
             self.jobs.len() as u32,
+            6 * self.sky_samples.len() as u32,
             self.bake_list.len() as u32,
-        )
+        ]
     }
 
     /// Clears the request tiles and counters before shading.
@@ -728,7 +804,7 @@ impl VirtualCache {
         let r = &self.readbacks[(self.frame % 2) as usize];
         let bytes = r.tiles as u64 * 16;
         encoder.copy_buffer_to_buffer(self.buffer(39), 0, &r.buffer, 0, bytes);
-        encoder.copy_buffer_to_buffer(self.buffer(42), 0, &r.buffer, bytes, 16);
+        encoder.copy_buffer_to_buffer(self.buffer(42), 0, &r.buffer, bytes, STATS_BYTES);
         self.used_requested = self.frame.is_multiple_of(32) && self.used_pending.is_none();
         if self.used_requested {
             encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
@@ -813,7 +889,7 @@ impl VirtualCache {
         self.waiting += wait.elapsed();
         let words: &[u32] = bytemuck::cast_slice(&raw);
         let tiles = self.readbacks[slot].tiles as usize;
-        let counters = &words[4 * tiles..4 * tiles + 4];
+        let counters = &words[4 * tiles..4 * tiles + STATS_BYTES as usize / 4];
         let count = (counters[1] as usize).min(tiles);
         let requests: Vec<([u32; 3], u32)> = words[..4 * count]
             .as_chunks::<4>()
@@ -826,6 +902,7 @@ impl VirtualCache {
         record.requests = count as u32;
         record.samples = counters[2];
         record.at_wanted = counters[3];
+        record.work.copy_from_slice(&counters[4..16]);
         self.latest = self.latest.max(frame);
         requests
     }
@@ -903,7 +980,10 @@ impl VirtualCache {
     fn plan(&mut self, device: &wgpu::Device, requests: Vec<([u32; 3], u32)>) {
         self.bake_list.clear();
         self.jobs.clear();
+        self.sky_samples.clear();
+        self.page_sky.clear();
         self.texels = 0;
+        self.spent = 0;
         // Pages planned in the frame between are resident already.
         let mut order: Vec<(u32, [u32; 3])> = requests
             .into_iter()
@@ -932,8 +1012,19 @@ impl VirtualCache {
             if inside[0] == 0 || inside[1] == 0 {
                 continue;
             }
-            let cost = inside[0] * inside[1];
-            if self.texels + cost > budget {
+            // One texel past the grid on each side too, in case the shader's
+            // grid is a rounding larger; it skips texels outside its own.
+            let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
+            let stride = self.sky_stride(m, mip);
+            let samples = if self.sky {
+                listed[0].div_ceil(stride) * listed[1].div_ceil(stride)
+            } else {
+                0
+            };
+            let cost = inside[0] * inside[1] + samples * self.options.sky_sample_cost;
+            // The first page always fits, so a page costlier than the whole
+            // budget still gets baked.
+            if self.spent + cost > budget && !self.bake_list.is_empty() {
                 break;
             }
             if self.free.is_empty() && !evicted_now {
@@ -950,15 +1041,22 @@ impl VirtualCache {
             self.last_used[slot as usize] = self.frame;
             let index = self.bake_list.len() as u32;
             self.bake_list.push([k[0], k[1], k[2], slot]);
-            // One texel past the grid on each side too, in case the shader's
-            // grid is a rounding larger; it skips texels outside its own.
-            let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
             for y in 0..listed[1] {
                 for x in 0..listed[0] {
                     self.jobs.push([index, y * STRIDE + x]);
                 }
             }
-            self.texels += cost;
+            if self.sky {
+                let first = self.sky_samples.len() as u32;
+                for y in (0..listed[1]).step_by(stride as usize) {
+                    for x in (0..listed[0]).step_by(stride as usize) {
+                        self.sky_samples.push([index, y * STRIDE + x]);
+                    }
+                }
+                self.page_sky.push([first, samples | stride << 24]);
+            }
+            self.texels += inside[0] * inside[1];
+            self.spent += cost;
         }
     }
 }
