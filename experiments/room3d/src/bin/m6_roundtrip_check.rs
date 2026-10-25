@@ -23,7 +23,9 @@ fn main() -> std::io::Result<()> {
     kernel.set_hardware_rays(false);
     let glb = out_dir.join("m6_roundtrip_check.glb");
     continuum_gltf::save(&t.scene, &glb)?;
-    let imported = continuum_gltf::load(&glb).map_err(std::io::Error::other)?.scene;
+    let imported = continuum_gltf::load(&glb)
+        .map_err(std::io::Error::other)?
+        .scene;
 
     // Imported instances, matched to the original's by position.
     let n = t.scene.instances.len();
@@ -132,7 +134,11 @@ fn main() -> std::io::Result<()> {
         println!(
             "{name}: {:.5}%, {differing} pixels differ, top 20 hold {:.0}% of the squared error; worst {}",
             100.0 * relative_rmse(&px, &original),
-            if total > 0.0 { 100.0 * top / total } else { 0.0 },
+            if total > 0.0 {
+                100.0 * top / total
+            } else {
+                0.0
+            },
             worst.join(", ")
         );
     };

@@ -190,7 +190,8 @@ impl Surface {
             }
             let size = (hi - lo).max(Vec2::splat(1e-6));
             for &k in list {
-                s.uv[k as usize] = tris[k as usize].map(|p| (Vec2::new(p.dot(t), p.dot(b)) - lo) / size);
+                s.uv[k as usize] =
+                    tris[k as usize].map(|p| (Vec2::new(p.dot(t), p.dot(b)) - lo) / size);
             }
             s.charts.push(size);
             // About two triangles per cell.
@@ -201,7 +202,10 @@ impl Surface {
             s.chart_grid.push([gx, gy]);
         }
         s.normals = match normals {
-            Some(n) => keep.iter().map(|&k| n[k].map(|v| v.normalize_or_zero())).collect(),
+            Some(n) => keep
+                .iter()
+                .map(|&k| n[k].map(|v| v.normalize_or_zero()))
+                .collect(),
             None => smooth_normals(&s.triangles),
         };
         if let Some(t) = tex {
@@ -357,7 +361,11 @@ mod tests {
         assert_eq!(s.triangles.len(), sphere.triangles.len());
         let limit = CHART_ANGLE_DEGREES.to_radians().cos();
         // Charts on a sphere: a handful, each within the angle of its seed.
-        assert!(s.charts.len() > 4 && s.charts.len() < 64, "{} charts", s.charts.len());
+        assert!(
+            s.charts.len() > 4 && s.charts.len() < 64,
+            "{} charts",
+            s.charts.len()
+        );
         for (k, t) in s.triangles.iter().enumerate() {
             let [a, b, c] = s.uv[k];
             // Chart coordinates in [0, 1]², counter-clockwise like the

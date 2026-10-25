@@ -19,6 +19,7 @@ import math
 import sys
 import time
 
+import bmesh
 import bpy
 import numpy as np
 from mathutils import Matrix, Vector
@@ -121,14 +122,27 @@ for g, path in enumerate(job["geometries"]):
     mod = holder.modifiers.new("instances", "NODES")
     mod.node_group = tree
 
-# The lights: quads facing edge_u x edge_v that emit only from their fronts.
+# The lights: quads facing edge_u x edge_v that emit only from their fronts,
+# or spheres ("sphere": center, "radius", "spot": null or a cone), each a
+# finely divided sphere whose silhouette has the true sphere's area.
 # "lights" lists them with RGB radiance; "light" is one with scalar radiance.
 lights = job.get("lights") or [dict(job["light"], radiance=[job["light"]["radiance"]] * 3)]
 for i, light in enumerate(lights):
-    c, u, v = (Vector(light[k]) for k in ("corner", "edge_u", "edge_v"))
     mesh = bpy.data.meshes.new(f"light{i}")
-    mesh.from_pydata([c, c + u, c + u + v, c + v], [], [(0, 1, 2, 3)])
-    emitter = bpy.data.objects.new(f"light{i}", mesh)
+    if "sphere" in light:
+        segments, rings = 128, 64
+        # A regular n-gon of circumradius R has area (n / 2) R^2 sin(2 pi / n).
+        scale = math.sqrt(math.pi / (segments / 2 * math.sin(2 * math.pi / segments)))
+        bm = bmesh.new()
+        bmesh.ops.create_uvsphere(bm, u_segments=segments, v_segments=rings, radius=light["radius"] * scale)
+        bm.to_mesh(mesh)
+        bm.free()
+        emitter = bpy.data.objects.new(f"light{i}", mesh)
+        emitter.location = Vector(light["sphere"])
+    else:
+        c, u, v = (Vector(light[k]) for k in ("corner", "edge_u", "edge_v"))
+        mesh.from_pydata([c, c + u, c + u + v, c + v], [], [(0, 1, 2, 3)])
+        emitter = bpy.data.objects.new(f"light{i}", mesh)
     scene.collection.objects.link(emitter)
     mat = bpy.data.materials.new(f"emission{i}")
     mat.use_nodes = True
@@ -140,6 +154,33 @@ for i, light in enumerate(lights):
     peak = max(rgb) if max(rgb) > 0.0 else 1.0
     front.inputs["Color"].default_value = (rgb[0] / peak, rgb[1] / peak, rgb[2] / peak, 1.0)
     front.inputs["Strength"].default_value = peak
+    spot = light.get("spot")
+    if spot:
+        # glTF's spot falloff toward the receiver ("Incoming" at the emitter):
+        # the square of a clamped ramp in the cosine to the axis.
+        ramp_scale = 1.0 / max(math.cos(spot["inner"]) - math.cos(spot["outer"]), 1e-3)
+        ramp_offset = -math.cos(spot["outer"]) * ramp_scale
+        incoming = mat.node_tree.nodes.new("ShaderNodeNewGeometry")
+        cosine = nodes.new("ShaderNodeVectorMath")
+        cosine.operation = "DOT_PRODUCT"
+        cosine.inputs[1].default_value = spot["axis"]
+        ramp = nodes.new("ShaderNodeMath")
+        ramp.operation = "MULTIPLY_ADD"
+        ramp.use_clamp = True
+        ramp.inputs[1].default_value = ramp_scale
+        ramp.inputs[2].default_value = ramp_offset
+        square = nodes.new("ShaderNodeMath")
+        square.operation = "MULTIPLY"
+        strength = nodes.new("ShaderNodeMath")
+        strength.operation = "MULTIPLY"
+        strength.inputs[1].default_value = peak
+        spot_links = mat.node_tree.links
+        spot_links.new(incoming.outputs["Incoming"], cosine.inputs[0])
+        spot_links.new(cosine.outputs["Value"], ramp.inputs[0])
+        spot_links.new(ramp.outputs["Value"], square.inputs[0])
+        spot_links.new(ramp.outputs["Value"], square.inputs[1])
+        spot_links.new(square.outputs["Value"], strength.inputs[0])
+        spot_links.new(strength.outputs["Value"], front.inputs["Strength"])
     back = nodes.new("ShaderNodeEmission")
     back.inputs["Strength"].default_value = 0.0
     geometry = nodes.new("ShaderNodeNewGeometry")

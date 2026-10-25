@@ -404,11 +404,12 @@ fn main() -> std::io::Result<()> {
         .iter()
         .all(|r| r.cases[1][0].error <= 0.75 * r.cases[1][1].error);
     let c3 = accuracy <= 0.013;
-    let c4 = rows.iter().all(|r| {
-        r.cases[1][0].frames.is_some() && ms(r.cases[1][0].frame_time) <= 16.7
-    }) && flights
+    let c4 = rows
         .iter()
-        .all(|f| ms(f.mean) <= 16.7 && ms(f.p99) <= 33.3 && f.fallback <= 0.10);
+        .all(|r| r.cases[1][0].frames.is_some() && ms(r.cases[1][0].frame_time) <= 16.7)
+        && flights
+            .iter()
+            .all(|f| ms(f.mean) <= 16.7 && ms(f.p99) <= 33.3 && f.fallback <= 0.10);
     let pass = c1 && c2 && c3 && c4;
 
     let mut out = String::new();

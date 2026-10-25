@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use continuum::glam::{DVec3, Vec3};
 use continuum::mesh::Surface;
-use continuum_gpu::{Camera, InstancedScene, Light, RectLight};
+use continuum_gpu::{Camera, Emitter, InstancedScene, Light, RectLight};
 
 /// Writes the surfaces as an OBJ: object `mesh_<index>` per surface, with
 /// per-vertex normals; coordinates as they are (Z up, meters).
@@ -276,14 +276,30 @@ pub fn render_instanced_lights(
     let v = |p: Vec3| format!("[{}, {}, {}]", p.x, p.y, p.z);
     let light_list: Vec<String> = lights
         .iter()
-        .map(|l| {
-            format!(
+        .map(|l| match l.emitter {
+            Emitter::Rect(r) => format!(
                 r#"{{"corner": {}, "edge_u": {}, "edge_v": {}, "radiance": {}}}"#,
-                v(l.rect.corner),
-                v(l.rect.edge_u),
-                v(l.rect.edge_v),
+                v(r.corner),
+                v(r.edge_u),
+                v(r.edge_v),
                 v(l.radiance)
-            )
+            ),
+            Emitter::Sphere(s) => {
+                let spot = s.spot.map_or("null".to_string(), |p| {
+                    format!(
+                        r#"{{"axis": {}, "inner": {}, "outer": {}}}"#,
+                        v(p.axis.normalize()),
+                        p.inner,
+                        p.outer
+                    )
+                });
+                format!(
+                    r#"{{"sphere": {}, "radius": {}, "spot": {spot}, "radiance": {}}}"#,
+                    v(s.center),
+                    s.radius,
+                    v(l.radiance)
+                )
+            }
         })
         .collect();
     // The lights' description, hashed into the file names.

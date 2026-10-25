@@ -12,14 +12,41 @@
 //!   texture, where it has one and the primitive has the texture coordinates
 //!   it names, is imported and sampled when shading
 //!   (`InstancedScene::textures`).
-//! - Punctual lights (`KHR_lights_punctual`) are counted but not imported:
-//!   Continuum's lights are rectangles.
+//! - Punctual lights (`KHR_lights_punctual`) are imported
+//!   ([`Imported::lights`]): point and spot lights as small spheres,
+//!   directional lights as suns.
 
 use std::path::Path;
 
 use continuum::glam::{DMat4, DVec3, Mat3, Vec2, Vec3};
 use continuum::mesh::{Surface, Tri};
-use continuum_gpu::{Instance, InstancedScene, Texture};
+use continuum_gpu::{Instance, InstancedScene, Light, Spot, Texture};
+
+/// What kind of punctual light.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImportedLightKind {
+    Point,
+    /// Half-angles in radians.
+    Spot {
+        inner: f32,
+        outer: f32,
+    },
+    Directional,
+}
+
+/// A punctual light from the file, in Continuum's Z-up world and glTF's
+/// units: candela for point and spot lights, lux for directional ones.
+#[derive(Clone, Copy, Debug)]
+pub struct ImportedLight {
+    pub kind: ImportedLightKind,
+    pub position: DVec3,
+    /// Where it shines (the node's −Z): a spot's axis, a directional light's
+    /// direction of travel.
+    pub direction: DVec3,
+    /// Linear RGB.
+    pub color: Vec3,
+    pub intensity: f32,
+}
 
 /// A camera from the file, in Continuum's Z-up world.
 #[derive(Clone, Copy, Debug)]
@@ -41,7 +68,8 @@ pub struct ImportStats {
     /// Instances whose transform was baked into a copy of their geometry.
     pub baked: usize,
     pub charts: usize,
-    pub lights_skipped: usize,
+    /// Punctual lights placed by nodes.
+    pub lights: usize,
     /// Base color textures imported, and images skipped (pixel formats other
     /// than 8 bits per channel).
     pub textures: usize,
@@ -53,6 +81,7 @@ pub struct ImportStats {
 pub struct Imported {
     pub scene: InstancedScene,
     pub camera: Option<ImportedCamera>,
+    pub lights: Vec<ImportedLight>,
     pub bounds: (DVec3, DVec3),
     pub stats: ImportStats,
 }
@@ -130,7 +159,6 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
     let (document, buffers, images) = gltf::import(path)?;
     let mut stats = ImportStats {
         meshes: document.meshes().len(),
-        lights_skipped: document.lights().map_or(0, |l| l.len()),
         ..Default::default()
     };
     // Base color textures, imported once per image.
@@ -247,6 +275,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
     // Nodes, with world matrices.
     let (c, c_inv) = axes();
     let mut camera = None;
+    let mut lights = Vec::new();
     let roots: Vec<gltf::Node> = match document
         .default_scene()
         .or_else(|| document.scenes().next())
@@ -273,6 +302,30 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 eye,
                 target: eye + ahead.normalize(),
                 vertical_fov_degrees: p.yfov().to_degrees(),
+            });
+        }
+        if let Some(light) = node.light() {
+            use gltf::khr_lights_punctual::Kind;
+            // Lights shine down their local -z, in glTF axes.
+            let direction = (c * world)
+                .transform_vector3(DVec3::new(0.0, 0.0, -1.0))
+                .normalize_or(DVec3::NEG_Z);
+            lights.push(ImportedLight {
+                kind: match light.kind() {
+                    Kind::Point => ImportedLightKind::Point,
+                    Kind::Spot {
+                        inner_cone_angle,
+                        outer_cone_angle,
+                    } => ImportedLightKind::Spot {
+                        inner: inner_cone_angle,
+                        outer: outer_cone_angle,
+                    },
+                    Kind::Directional => ImportedLightKind::Directional,
+                },
+                position: m.transform_point3(DVec3::ZERO),
+                direction,
+                color: Vec3::from_array(light.color()),
+                intensity: light.intensity(),
             });
         }
         if let Some(mesh) = node.mesh() {
@@ -307,12 +360,56 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         .iter()
         .map(|i| scene.geometries[i.geometry].triangles.len() as u64)
         .sum();
+    stats.lights = lights.len();
     Ok(Imported {
         scene,
         camera,
+        lights,
         bounds,
         stats,
     })
+}
+
+/// Radiometric watts per photometric lumen, as Blender's glTF importer
+/// converts (at 555 nm).
+const WATTS_PER_LUMEN: f32 = 1.0 / 683.0;
+
+impl Imported {
+    /// The file's lights for rendering about `origin`, in watts at 683 lumens
+    /// per watt (as Blender imports them). glTF's lights have no size: point
+    /// and spot lights become spheres of `radius`, and directional lights
+    /// suns 0.5° across, 50 scene radii beyond the scene's center.
+    pub fn lights(&self, origin: DVec3, radius: f32) -> Vec<Light> {
+        let (lo, hi) = self.bounds;
+        let center = (lo + hi) * 0.5;
+        let extent = ((hi - lo).length() * 0.5).max(1e-3);
+        self.lights
+            .iter()
+            .map(|l| {
+                let power = l.color * l.intensity * WATTS_PER_LUMEN;
+                let at = (l.position - origin).as_vec3();
+                match l.kind {
+                    ImportedLightKind::Point => Light::point(at, radius, power),
+                    ImportedLightKind::Spot { inner, outer } => Light::spot(
+                        at,
+                        radius,
+                        power,
+                        Spot {
+                            axis: l.direction.as_vec3(),
+                            inner,
+                            outer,
+                        },
+                    ),
+                    ImportedLightKind::Directional => Light::sun(
+                        (center - origin).as_vec3(),
+                        -l.direction,
+                        extent * 50.0,
+                        power,
+                    ),
+                }
+            })
+            .collect()
+    }
 }
 
 /// Places primitive `p` with world matrix `m` (Z-up): an instance of its

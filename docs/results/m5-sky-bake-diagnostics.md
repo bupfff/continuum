@@ -242,3 +242,58 @@ Date: 2026-10-25, after gates 5 and 6.
   - packets for large bakes. Solo walks win below about 10,000 units per
     frame, packets above: 5.7 s against 9.7 s for a whole standing warm-up at
     20,000.
+
+## After M6 gate 1: why sparser sky samples do not pay yet
+
+Date: 2026-10-25. Every texel is a sky sample (`sky_spacing` 0), and
+warm-up is slow (gate 5). These measurements asked how many samples a
+view really needs. Development runs on the million-boulder field, sun
+and sky, cache defaults.
+
+- **An oracle** (`sky_density_oracle`). It warms the cache at the standing
+  viewpoint (1280×720), reads every resident page's sky channel back
+  (`InstancedRenderer::read_cache_pages`), and finds each page's coarsest
+  stride (8, 4, 2 or 1) whose bilinear interpolation, as the fill pass does
+  it, stays within a tolerance of every texel. That bounds what any
+  criterion choosing strides per page could save.
+
+  | Tolerance (of the mean sky texel) | Samples, every texel | Samples, oracle | Saving | Pages at stride 8 / 4 / 2 / 1 |
+  |---|---|---|---|---|
+  | 0.5% | 947,912 | 846,727 | 1.1× | 2,191 / 175 / 258 / 15,114 |
+  | 1% | 947,912 | 785,881 | 1.2× | 2,757 / 311 / 395 / 14,275 |
+  | 2% | 947,912 | 731,065 | 1.3× | 3,438 / 378 / 357 / 13,565 |
+
+  - Stride 2's error is large on most pages: its median is 52% of the
+    mean sky texel, and 99% of pages stay under 143%.
+  - Without own-object masks the oracle is the same (median 54%), so the
+    masks are not the cause.
+- **The cause is the normal.** Sky irradiance on the bumpy boulders follows
+  the shading normal, which turns at the scale of their 2 cm triangles.
+  - Dumped pages show smooth gradients with steps of 5–10% between
+    neighbouring texels.
+  - Ground pages under a boulder's edge also jump where the boulder meets
+    the ground. This is a true discontinuity, inside the boulder.
+- **Sharing occlusion as a vector fails.** A covered bin blocks
+  `n · v` of the light, where `v` is the bin's vector irradiance, and the
+  derivative with respect to `n` has no horizon term. So texels stored the
+  face-summed occlusion vector `O`, and shading evaluated `π − n · O` with
+  each pixel's normal.
+  - Sky-only cache error at 1280×720 went from 4.11% to 4.43% standing and
+    from 9.70% to 12.92% at 10 m up (against per-pixel cones with the same
+    prefiltering).
+  - **Why.** The model is first order in the normal. Under a half-space
+    occluder (the ground), a pixel whose normal is β from the texel's is off
+    by (π/2)(1 − cos β): 9% at 30°, 30% at 60°. From above, texels are
+    coarse and normals across them differ that much.
+  - The exact form under a half-space is linear in `n` with a free constant
+    term (order 1 in spherical harmonics). It needs visibility below the
+    receiver's horizon, which the walks do not compute.
+- **A ratio to the open sky over flat ground** (`π(1 + n_z)/2`) was mixed:
+  3.69% standing (better) and 10.95% at 10 m up (worse). It is also
+  specific to scenes on a ground plane. Dropped.
+- **What this means.**
+  - Fewer sky samples will not pay until texels carry the sky's dependence
+    on the normal beyond first order.
+  - Lights are different. A ratio of shadowed to unshadowed light, with the
+    unshadowed light evaluated per pixel, removes most of their normal
+    error (M5 gate 7).

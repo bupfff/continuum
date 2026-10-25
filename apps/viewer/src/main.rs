@@ -15,9 +15,10 @@
 //! `--boulders N` to change the count, `--scale N` to render at 1/N of the
 //! window, `--sky` to add a blue-white sky (experimental: slow to warm up),
 //! `--no-cache` for a mask cone per pixel every frame). `--gltf file.glb`
-//! (or `.gltf`) flies through your own scene the same way: lit by a sun
-//! (`--sky` adds the sky), from the file's camera or one framed around the
-//! scene, over a grey ground (`--no-ground` to leave it out).
+//! (or `.gltf`) flies through your own scene the same way: lit by the file's
+//! lights or else a sun (`--sky` adds the sky), from the file's camera or one
+//! framed around the scene, over a grey ground (`--no-ground` to leave it
+//! out).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path, P to pause moving objects,
@@ -164,10 +165,14 @@ impl World {
                 String::new()
             }
         );
-        let mut scene = imported.scene;
         let (lo, hi) = imported.bounds;
         let origin = (lo + hi) * 0.5;
         let radius = ((hi - lo).length() * 0.5).max(1e-3);
+        // The file's own lights, if it has any (point and spot lights 5 cm
+        // in radius), or else a sun.
+        let mut lights = imported.lights(origin, 0.05);
+        lights.truncate(continuum_gpu::MAX_LIGHTS);
+        let mut scene = imported.scene;
         if ground {
             // 20 radii across, just below the scene, so it casts shadows.
             let h = (10.0 * radius) as f32;
@@ -176,9 +181,7 @@ impl World {
                 [c[0], c[1], c[2]],
                 [c[0], c[2], c[3]],
             ]));
-            scene
-                .geometry_textures
-                .resize(scene.geometries.len(), None);
+            scene.geometry_textures.resize(scene.geometries.len(), None);
             scene.instances.push(Instance {
                 geometry: scene.geometries.len() - 1,
                 rotation: Mat3::IDENTITY,
@@ -208,6 +211,11 @@ impl World {
             radius * 50.0,
             Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
         );
+        if lights.is_empty() {
+            lights.push(sun);
+        } else {
+            println!("Lit by the file's {} lights.", lights.len());
+        }
         let triangles = scene
             .instances
             .iter()
@@ -217,7 +225,7 @@ impl World {
             name: "glTF",
             surfaces: Vec::new(),
             albedo: Vec::new(),
-            light: sun.rect,
+            light: sun.as_rect().expect("a rectangular sun"),
             radiance: sun.radiance.x,
             first_mover: 0,
             texel: 0.0,
@@ -229,7 +237,7 @@ impl World {
             field: None,
             gltf: Some(Gltf {
                 scene,
-                lights: vec![sun],
+                lights,
                 sky: Vec3::new(0.6, 0.75, 1.0) * 0.3,
                 origin,
                 triangles,

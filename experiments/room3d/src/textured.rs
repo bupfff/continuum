@@ -202,10 +202,7 @@ impl Textured {
         let solid = (size / distance) * (size / distance);
         // Irradiance 3 on the ground from the sun; a sky giving a quarter.
         let radiance = (3.0 / (solid * el.sin())) as f32;
-        let lights = vec![Light {
-            rect: sun,
-            radiance: Vec3::new(1.0, 0.95, 0.85) * radiance,
-        }];
+        let lights = vec![Light::rect(sun, Vec3::new(1.0, 0.95, 0.85) * radiance)];
         let sky = Vec3::new(0.6, 0.75, 1.0) / (2.35 / 3.0) * (0.75 / std::f32::consts::PI);
         Textured {
             scene,

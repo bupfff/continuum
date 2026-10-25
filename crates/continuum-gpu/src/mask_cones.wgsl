@@ -716,8 +716,12 @@ struct LightCone {
     ok: bool,
 };
 
-// A rectangular light from the list (M5): corner (w: 1 if one-sided), edges,
-// and RGB radiance. Paths without a list read the light uniform as one.
+// A light from the list (M5), with RGB radiance. A rectangle: its corner
+// (w: 0 if two-sided, 1 if one-sided) and edges. A sphere (corner.w: 2): its
+// center in corner, its radius in edge_u.x; a spot if edge_v.w is 1, shining
+// along edge_v.xyz, its falloff the square of a ramp in the cosine to that
+// axis (edge_u.y the ramp's scale, edge_u.z its offset), as glTF's spot
+// lights. Paths without a list read the light uniform as one rectangle.
 struct LightRect {
     corner: vec4<f32>,
     edge_u: vec4<f32>,
@@ -736,7 +740,115 @@ fn light_cone(apex: vec3<f32>) -> LightCone {
     return light_cone_rect(apex, uniform_light());
 }
 
+fn is_sphere(r: LightRect) -> bool {
+    return r.corner.w > 1.5;
+}
+
+// Where light `r` is: a rectangle's middle or a sphere's center.
+fn light_center(r: LightRect) -> vec3<f32> {
+    if (is_sphere(r)) { return r.corner.xyz; }
+    return r.corner.xyz + (r.edge_u.xyz + r.edge_v.xyz) * 0.5;
+}
+
+// A spot's falloff in direction `w` from its center (1 for other lights).
+fn spot_falloff(r: LightRect, w: vec3<f32>) -> f32 {
+    if (!is_sphere(r) || r.edge_v.w < 0.5) { return 1.0; }
+    let a = clamp(dot(r.edge_v.xyz, w) * r.edge_u.y + r.edge_u.z, 0.0, 1.0);
+    return a * a;
+}
+
+// Whether any of light `r` lies above the horizon of `normal` at `point`
+// (a rectangle: its middle).
+fn faces_light(r: LightRect, point: vec3<f32>, normal: vec3<f32>) -> bool {
+    let to_light = light_center(r) - point;
+    if (is_sphere(r)) { return dot(normal, to_light) > -r.edge_u.x; }
+    return dot(normal, to_light) > 0.0;
+}
+
+// The fraction of each bin of a sphere light's cone inside the sphere's
+// disk, the circle inscribed in the cone's window.
+const DISK: array<f32, 64> = array<f32, 64>(
+    0.000000, 0.160355, 0.694958, 0.957934, 0.957934, 0.694958, 0.160355, 0.000000,
+    0.160355, 0.939877, 1.000000, 1.000000, 1.000000, 1.000000, 0.939877, 0.160355,
+    0.694958, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 0.694958,
+    0.957934, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 0.957934,
+    0.957934, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 0.957934,
+    0.694958, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 0.694958,
+    0.160355, 0.939877, 1.000000, 1.000000, 1.000000, 1.000000, 0.939877, 0.160355,
+    0.000000, 0.160355, 0.694958, 0.957934, 0.957934, 0.694958, 0.160355, 0.000000,
+);
+
+// A sphere light's cone from `apex`: around the direction to its center,
+// the window the square around its disk, as deep as its silhouette (only
+// geometry inside the sphere lies between that and its surface).
+fn light_cone_sphere(apex: vec3<f32>, r: LightRect) -> LightCone {
+    var out: LightCone;
+    out.ok = false;
+    prefilter_bins = light.params.x;
+    let to_center = r.corner.xyz - apex;
+    let d = length(to_center);
+    let radius = r.edge_u.x;
+    if (d <= radius * 1.0001) { return out; }
+    let forward = to_center / d;
+    let s = radius / d;
+    let t = s / sqrt(max(1.0 - s * s, 1e-12));
+    let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(forward.x) > 0.9);
+    let right = normalize(cross(helper, forward));
+    out.c.apex = apex;
+    out.c.right = right;
+    out.c.up = cross(forward, right);
+    out.c.forward = forward;
+    out.c.window = vec4<f32>(-t, -t, t, t);
+    out.c.far_normal = forward;
+    out.c.far_offset = dot(forward, apex) + (d - radius * s) * (1.0 - 1e-5);
+    bound_cone(&out.c, forward);
+    out.ok = true;
+    return out;
+}
+
+// The unshadowed irradiance per unit radiance from a sphere light at
+// `point` (normal `normal`): the projected solid angle of its cap, clipped
+// to the horizon where it crosses it (Snyder 1996, as in Lagarde and de
+// Rousiers 2014). 0 inside the sphere.
+fn sphere_unshadowed(point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
+    let to_center = r.corner.xyz - point;
+    let d2 = dot(to_center, to_center);
+    let radius = r.edge_u.x;
+    if (d2 <= radius * radius) { return 0.0; }
+    let sin2 = radius * radius / d2;
+    let cos_t = clamp(dot(normal, to_center) * inverseSqrt(d2), -1.0, 1.0);
+    if (cos_t * cos_t > sin2) {
+        return 3.14159265 * sin2 * max(cos_t, 0.0);
+    }
+    let sin_t = sqrt(1.0 - cos_t * cos_t);
+    let x = sqrt(1.0 / sin2 - 1.0);
+    let y = clamp(-x * cos_t / sin_t, -1.0, 1.0);
+    let q = sin_t * sqrt(1.0 - y * y);
+    return max((cos_t * acos(y) - x * q) * sin2 + atan(q / x), 0.0);
+}
+
+// The share of a sphere light's cap that coverage `cov` leaves open: bins
+// weighted by their part inside the disk, their solid angle and their
+// cosine to `normal` at their centers.
+fn sphere_open_share(c: Cone, normal: vec3<f32>, cov: ptr<function, array<f32, 64>>) -> f32 {
+    var total = 0.0;
+    var open = 0.0;
+    let g = f32(GRID);
+    for (var b = 0u; b < BINS; b++) {
+        let m = DISK[b];
+        if (m <= 0.0) { continue; }
+        let d = direction(c, (f32(b % GRID) + 0.5) / g, (f32(b / GRID) + 0.5) / g);
+        let l2 = dot(d, d);
+        let w = m * max(dot(normal, d), 0.0) / (l2 * l2);
+        total += w;
+        open += w * (1.0 - (*cov)[b]);
+    }
+    if (total <= 0.0) { return 1.0; }
+    return open / total;
+}
+
 fn light_cone_rect(apex: vec3<f32>, r: LightRect) -> LightCone {
+    if (is_sphere(r)) { return light_cone_sphere(apex, r); }
     var out: LightCone;
     out.ok = false;
     // Light cones prefilter at the light's threshold (sky cones set theirs).
@@ -977,6 +1089,9 @@ fn cone_irradiance_rect(on: bool, i: u32, apex: vec3<f32>, normal: vec3<f32>, r:
     var full = 0u;
     if (stage != 2u) { scene_coverage_if(traced, lc.c, i, &cov, &full); }
     if (!traced) { return 0.0; }
+    if (is_sphere(r)) {
+        return sphere_unshadowed(apex, normal, r) * sphere_open_share(lc.c, normal, &cov);
+    }
     let visible = cone_visible(lc.c, normal, &cov);
     if (light.counts.y == 1u) {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }
@@ -1451,9 +1566,20 @@ fn light_distance(eye: vec3<f32>, dir: vec3<f32>) -> f32 {
     return rect_distance(uniform_light(), eye, dir);
 }
 
-// Distance along a camera ray to the front of light `l` if it is one-sided
-// (or 3.4e38).
+// Distance along a camera ray to the front of light `l` if it is a
+// one-sided rectangle or a sphere (or 3.4e38).
 fn rect_distance(l: LightRect, eye: vec3<f32>, dir: vec3<f32>) -> f32 {
+    if (is_sphere(l)) {
+        // The nearer intersection with the sphere, if the eye is outside it.
+        let oc = eye - l.corner.xyz;
+        let b = dot(oc, dir);
+        let c = dot(oc, oc) - l.edge_u.x * l.edge_u.x;
+        let disc = b * b - c;
+        if (c <= 0.0 || disc < 0.0) { return 3.4e38; }
+        let t = -b - sqrt(disc);
+        if (t <= 0.0) { return 3.4e38; }
+        return t;
+    }
     if (l.corner.w < 0.5) { return 3.4e38; }
     let u = l.edge_u.xyz;
     let v = l.edge_v.xyz;
@@ -1495,8 +1621,8 @@ fn hit_irradiance_if(on: bool, pixel: u32, point: vec3<f32>, normal: vec3<f32>) 
 
 // `hit_irradiance_if` from light `r`.
 fn hit_irradiance_rect(on: bool, pixel: u32, point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
-    let to_light = r.corner.xyz + (r.edge_u.xyz + r.edge_v.xyz) * 0.5 - point;
-    return cone_irradiance_rect(on && dot(normal, to_light) > 0.0, pixel, point, normal, r);
+    let spot = spot_falloff(r, normalize(point - light_center(r)));
+    return spot * cone_irradiance_rect(on && spot > 0.0 && faces_light(r, point, normal), pixel, point, normal, r);
 }
 
 // Direct light at a hit from every light in the list (RGB).
@@ -1505,8 +1631,10 @@ fn hit_irradiance_rect(on: bool, pixel: u32, point: vec3<f32>, normal: vec3<f32>
 // `cone_visible` with nothing covered, so a texel no geometry shadows has a
 // ratio of one; 0 where `hit_irradiance_rect` traces nothing.
 fn unshadowed_rect(point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
-    let to_light = r.corner.xyz + (r.edge_u.xyz + r.edge_v.xyz) * 0.5 - point;
-    if (dot(normal, to_light) <= 0.0) { return 0.0; }
+    if (!faces_light(r, point, normal)) { return 0.0; }
+    if (is_sphere(r)) {
+        return spot_falloff(r, normalize(point - r.corner.xyz)) * sphere_unshadowed(point, normal, r);
+    }
     let lc = light_cone_rect(point, r);
     if (!lc.ok) { return 0.0; }
     return clipped_window_weight(lc.c, normal);
@@ -1570,7 +1698,11 @@ fn recorded_hit(pixel: u32, dir: vec3<f32>) -> Hit {
 // `seen`: the light the camera ray sees in front of the hit, index + 1 (0:
 // none).
 fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, seen: u32) {
-    if (seen != 0u) { colors[pixel] = vec4<f32>(lights[seen - 1u].radiance.xyz, 1.0); return; }
+    if (seen != 0u) {
+        let l = lights[seen - 1u];
+        colors[pixel] = vec4<f32>(l.radiance.xyz * spot_falloff(l, -dir), 1.0);
+        return;
+    }
     // A ray that misses everything sees the sky.
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(light.sky.xyz, 1.0); return; }
     let surface = eye + dir * hit.distance;
@@ -2558,7 +2690,8 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
         // A ray that misses everything sees the sky.
         var color = light.sky.xyz;
         if (vis[pixel].w != 0u) {
-            color = lights[vis[pixel].w - 1u].radiance.xyz;
+            let l = lights[vis[pixel].w - 1u];
+            color = l.radiance.xyz * spot_falloff(l, -dir);
         } else if (hit.mesh != NONE) {
             let surface = camera.eye.xyz + dir * hit.distance;
             let c = tri_vchart[hit.tri];

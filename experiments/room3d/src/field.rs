@@ -193,10 +193,10 @@ impl Field {
         };
         let tinted = |rgb: Vec3, radiance: f64| rgb / (rgb.element_sum() / 3.0) * radiance as f32;
         let sun_size = 2.0 * distance * 0.25f64.to_radians().tan();
-        let warm = Light {
-            rect: panel(toward_sun, sun_size),
-            radiance: tinted(Vec3::new(1.0, 0.9, 0.75), self.radiance as f64),
-        };
+        let warm = Light::rect(
+            panel(toward_sun, sun_size),
+            tinted(Vec3::new(1.0, 0.9, 0.75), self.radiance as f64),
+        );
         // The fill: azimuth opposite the sun's, elevation 20°, a quarter of
         // the sun's irradiance on the ground.
         let azimuth = toward_sun.y.atan2(toward_sun.x) + std::f64::consts::PI;
@@ -210,10 +210,10 @@ impl Field {
         let solid = |size: f64| (size / distance) * (size / distance);
         let sun_e = self.radiance as f64 * solid(sun_size) * toward_sun.z;
         let fill_radiance = 0.25 * sun_e / (solid(fill_size) * toward.z);
-        let fill = Light {
-            rect: panel(toward, fill_size),
-            radiance: tinted(Vec3::new(0.55, 0.7, 1.0), fill_radiance),
-        };
+        let fill = Light::rect(
+            panel(toward, fill_size),
+            tinted(Vec3::new(0.55, 0.7, 1.0), fill_radiance),
+        );
         // The lamp, facing down (edge_u × edge_v = -z).
         let forward = (camera.target - camera.eye).normalize();
         let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
@@ -221,15 +221,15 @@ impl Field {
         let lamp_center = camera.eye + flat * 25.0 + left * 8.0 + Vec3::Z * (6.0 - camera.eye.z);
         let (u, v) = (flat * 1.5, left * 1.5);
         let (u, v) = if u.cross(v).z < 0.0 { (u, v) } else { (v, u) };
-        let lamp = Light {
-            rect: RectLight {
+        let lamp = Light::rect(
+            RectLight {
                 corner: lamp_center - (u + v) * 0.5,
                 edge_u: u,
                 edge_v: v,
                 one_sided: true,
             },
-            radiance: Vec3::new(1.0, 0.6, 0.3) * 150.0,
-        };
+            Vec3::new(1.0, 0.6, 0.3) * 150.0,
+        );
         [warm, fill, lamp]
     }
 

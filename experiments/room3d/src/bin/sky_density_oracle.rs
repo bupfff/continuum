@@ -10,7 +10,9 @@
 //! (viewpoints 0–3: standing, 10 m, 40 m, 150 m up; all by default).
 
 use continuum::glam::{DVec3, Vec3};
-use continuum_gpu::{CacheOptions, CachePage, Camera, InstancedRenderer, Light, MaskConeKernel, wgpu};
+use continuum_gpu::{
+    CacheOptions, CachePage, Camera, InstancedRenderer, Light, MaskConeKernel, wgpu,
+};
 use room3d::field::Field;
 
 /// Linear interpolation span of texel `x` at `stride`, as the shader's
@@ -103,7 +105,9 @@ fn main() {
             view_formats: &[],
         })
         .create_view(&Default::default());
-    println!("| Viewpoint | Pages | Samples, every texel | Tolerance | Samples, oracle | Saving | Pages at stride 8 / 4 / 2 / 1 |");
+    println!(
+        "| Viewpoint | Pages | Samples, every texel | Tolerance | Samples, oracle | Saving | Pages at stride 8 / 4 / 2 / 1 |"
+    );
     println!("|---|---|---|---|---|---|---|");
     for (k, (name, camera)) in views.iter().enumerate() {
         if !chosen.is_empty() && !chosen.contains(&k) {

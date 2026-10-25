@@ -1,16 +1,14 @@
 //! Development tool (not a gate): imports a glTF file, prints what it found,
-//! and renders it lit by a sun and a sky, per pixel and through the view
-//! cache, writing both images to `out/`. The camera is the file's first, or
-//! one framed from the scene's bounds.
+//! and renders it lit by the file's lights (or a sun) and a sky, per pixel
+//! and through the view cache, writing both images to `out/`. The camera is
+//! the file's first, or one framed from the scene's bounds.
 //! `cargo run --release -p room3d --bin gltf_view -- <file.gltf|glb> [W H]`
 
 use std::path::Path;
 use std::time::Instant;
 
 use continuum::glam::{DVec3, Vec3};
-use continuum_gpu::{
-    CacheOptions, Camera, InstancedRenderer, Light, MaskConeKernel, wgpu,
-};
+use continuum_gpu::{CacheOptions, Camera, InstancedRenderer, Light, MaskConeKernel, wgpu};
 use flatland::img::Image;
 use room3d::cycles::relative_rmse;
 use room3d::to_rgb;
@@ -79,12 +77,18 @@ fn main() -> std::io::Result<()> {
     // giving irradiance π on a surface facing it: white at albedo 1.
     let (az, el) = (200f64.to_radians(), 30f64.to_radians());
     let toward = DVec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
-    let lights = [Light::sun(
-        Vec3::ZERO,
-        toward,
-        radius * 50.0,
-        Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
-    )];
+    // The file's own lights instead, if it has any (point and spot lights 5
+    // cm in radius).
+    let mut lights = imported.lights(origin, 0.05);
+    lights.truncate(continuum_gpu::MAX_LIGHTS);
+    if lights.is_empty() {
+        lights.push(Light::sun(
+            Vec3::ZERO,
+            toward,
+            radius * 50.0,
+            Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
+        ));
+    }
     let sky = Vec3::new(0.6, 0.75, 1.0) * 0.3;
 
     let kernel = MaskConeKernel::new().expect("GPU");

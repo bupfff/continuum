@@ -39,7 +39,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use continuum_gpu::{
-    CacheOptions, Camera, InstancedRenderer, InstancedScene, Light, MaskConeKernel, wgpu,
+    CacheOptions, Camera, Emitter, InstancedRenderer, InstancedScene, Light, MaskConeKernel, wgpu,
 };
 use room3d::cycles::{relative_rmse, render_instanced_lights};
 use room3d::textured::Textured;
@@ -240,9 +240,11 @@ fn main() -> std::io::Result<()> {
             .iter()
             .map(|l| {
                 let mut l = *l;
-                l.rect.corner *= scale;
-                l.rect.edge_u *= scale;
-                l.rect.edge_v *= scale;
+                if let Emitter::Rect(r) = &mut l.emitter {
+                    r.corner *= scale;
+                    r.edge_u *= scale;
+                    r.edge_v *= scale;
+                }
                 l
             })
             .collect();

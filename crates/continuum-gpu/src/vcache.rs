@@ -1026,7 +1026,9 @@ impl VirtualCache {
                 mip,
                 page,
                 inside,
-                texel: self.options.base_texel * self.scale[m as usize] * (1u64 << mip.min(40)) as f32,
+                texel: self.options.base_texel
+                    * self.scale[m as usize]
+                    * (1u64 << mip.min(40)) as f32,
                 texels: (0..PAGE_TEXELS as usize)
                     .map(|t| values[(first + t) * channels + ch as usize])
                     .collect(),

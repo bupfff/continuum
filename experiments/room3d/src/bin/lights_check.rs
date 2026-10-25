@@ -110,14 +110,8 @@ fn main() {
     } else {
         lamp
     };
-    let a = Light {
-        rect: sun,
-        radiance: Vec3::new(1.0, 0.85, 0.7) * field.radiance,
-    };
-    let b = Light {
-        rect: lamp,
-        radiance: Vec3::new(0.3, 0.5, 1.0) * 2000.0,
-    };
+    let a = Light::rect(sun, Vec3::new(1.0, 0.85, 0.7) * field.radiance);
+    let b = Light::rect(lamp, Vec3::new(0.3, 0.5, 1.0) * 2000.0);
 
     // 2. Linearity per pixel (compute rays, 640×360).
     kernel.set_hardware_rays(false);

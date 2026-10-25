@@ -154,20 +154,91 @@ pub struct RectLight {
     pub one_sided: bool,
 }
 
-/// A rectangular light with RGB radiance (linear), for scenes with several
-/// colored lights (M5).
+/// A light with RGB radiance (linear), for scenes with several colored
+/// lights (M5).
 #[derive(Clone, Copy, Debug)]
 pub struct Light {
-    pub rect: RectLight,
+    pub emitter: Emitter,
     pub radiance: Vec3,
 }
 
+/// What emits a light.
+#[derive(Clone, Copy, Debug)]
+pub enum Emitter {
+    /// A rectangle: an area light, or a sun far away.
+    Rect(RectLight),
+    /// A sphere: a point light with a size, or a spot.
+    Sphere(SphereLight),
+}
+
+/// A spherical light (M5): uniform radiance over its surface, seen from
+/// outside as a disk, optionally narrowed to a spot.
+#[derive(Clone, Copy, Debug)]
+pub struct SphereLight {
+    pub center: Vec3,
+    pub radius: f32,
+    pub spot: Option<Spot>,
+}
+
+/// A spot's cone, as glTF's (`KHR_lights_punctual`): full radiance toward
+/// directions within `inner` of `axis`, none beyond `outer` (half-angles in
+/// radians), and between them the square of a ramp in the cosine. The
+/// falloff applies to the direction from the light's center.
+#[derive(Clone, Copy, Debug)]
+pub struct Spot {
+    pub axis: Vec3,
+    pub inner: f32,
+    pub outer: f32,
+}
+
 impl Light {
-    /// A white light of `radiance`.
+    /// A white rectangular light of `radiance`.
     pub fn white(rect: RectLight, radiance: f32) -> Light {
         Light {
-            rect,
+            emitter: Emitter::Rect(rect),
             radiance: Vec3::splat(radiance),
+        }
+    }
+
+    /// A rectangular light.
+    pub fn rect(rect: RectLight, radiance: Vec3) -> Light {
+        Light {
+            emitter: Emitter::Rect(rect),
+            radiance,
+        }
+    }
+
+    /// A point light of `radius` at `center` with radiant intensity
+    /// `intensity` (per steradian) in every direction: radiance
+    /// `intensity / (π radius²)` over a sphere.
+    pub fn point(center: Vec3, radius: f32, intensity: Vec3) -> Light {
+        Light {
+            emitter: Emitter::Sphere(SphereLight {
+                center,
+                radius,
+                spot: None,
+            }),
+            radiance: intensity / (std::f32::consts::PI * radius * radius),
+        }
+    }
+
+    /// [`Light::point`] narrowed to a spot.
+    pub fn spot(center: Vec3, radius: f32, intensity: Vec3, spot: Spot) -> Light {
+        Light {
+            emitter: Emitter::Sphere(SphereLight {
+                center,
+                radius,
+                spot: Some(spot),
+            }),
+            ..Light::point(center, radius, intensity)
+        }
+    }
+
+    /// The rectangle, for a rectangular light.
+    pub fn as_rect(&self) -> Option<RectLight> {
+        match self.emitter {
+            Emitter::Rect(r) => Some(r),
+            Emitter::Sphere(_) => None,
         }
     }
 
@@ -188,20 +259,21 @@ impl Light {
         let b = w.cross(a).normalize() * size;
         let middle = center.as_dvec3() + toward * distance;
         let solid = (size / distance) * (size / distance);
-        Light {
-            rect: RectLight {
+        Light::rect(
+            RectLight {
                 corner: (middle - (a + b) * 0.5).as_vec3(),
                 edge_u: a.as_vec3(),
                 edge_v: b.as_vec3(),
                 one_sided: true,
             },
-            radiance: irradiance / solid as f32,
-        }
+            irradiance / solid as f32,
+        )
     }
 }
 
-/// A light as the GPU reads it: corner (w: 1 if one-sided), edges, and
-/// radiance (RGB).
+/// A light as the GPU reads it (`LightRect` in the shader): for a
+/// rectangle, its corner (w: 1 if one-sided) and edges; for a sphere, its
+/// center (w: 2), radius and spot; and radiance (RGB).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct LightGpu {
@@ -214,11 +286,30 @@ pub(crate) struct LightGpu {
 impl From<&Light> for LightGpu {
     fn from(l: &Light) -> Self {
         let v4 = |v: Vec3, w: f32| [v.x, v.y, v.z, w];
-        LightGpu {
-            corner: v4(l.rect.corner, l.rect.one_sided as u32 as f32),
-            edge_u: v4(l.rect.edge_u, 0.0),
-            edge_v: v4(l.rect.edge_v, 0.0),
-            radiance: v4(l.radiance, 0.0),
+        match l.emitter {
+            Emitter::Rect(rect) => LightGpu {
+                corner: v4(rect.corner, rect.one_sided as u32 as f32),
+                edge_u: v4(rect.edge_u, 0.0),
+                edge_v: v4(rect.edge_v, 0.0),
+                radiance: v4(l.radiance, 0.0),
+            },
+            Emitter::Sphere(sphere) => {
+                // A spot's falloff ramp, as glTF's reference: its scale and
+                // offset in the cosine to the axis.
+                let (axis, scale, offset, on) = match sphere.spot {
+                    Some(s) => {
+                        let scale = 1.0 / (s.inner.cos() - s.outer.cos()).max(1e-3);
+                        (s.axis.normalize(), scale, -s.outer.cos() * scale, 1.0)
+                    }
+                    None => (Vec3::Z, 0.0, 1.0, 0.0),
+                };
+                LightGpu {
+                    corner: v4(sphere.center, 2.0),
+                    edge_u: [sphere.radius, scale, offset, 0.0],
+                    edge_v: v4(axis, on),
+                    radiance: v4(l.radiance, 0.0),
+                }
+            }
         }
     }
 }
@@ -822,7 +913,20 @@ impl MaskConeKernel {
         scene: &InstancedScene,
         origin: DVec3,
     ) -> Vec<(u32, wgpu::Buffer)> {
-        let light = lights[0].rect;
+        // Paths without the list read the first light as a rectangle; a
+        // sphere stands there as a tiny square at its center.
+        let light = lights[0].as_rect().unwrap_or_else(|| {
+            let c = match lights[0].emitter {
+                Emitter::Sphere(s) => s.center,
+                Emitter::Rect(r) => r.corner,
+            };
+            RectLight {
+                corner: c,
+                edge_u: Vec3::X * 1e-3,
+                edge_v: Vec3::Y * 1e-3,
+                one_sided: false,
+            }
+        });
         let geometries: Vec<Vec<Tri>> = scene
             .geometries
             .iter()
