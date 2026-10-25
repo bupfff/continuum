@@ -14,7 +14,10 @@
 //! through a view-dependent lighting cache baked as you look around;
 //! `--boulders N` to change the count, `--scale N` to render at 1/N of the
 //! window, `--sky` to add a blue-white sky (experimental: slow to warm up),
-//! `--no-cache` for a mask cone per pixel every frame).
+//! `--no-cache` for a mask cone per pixel every frame). `--gltf file.glb`
+//! (or `.gltf`) flies through your own scene the same way: lit by a sun
+//! (`--sky` adds the sky), from the file's camera or one framed around the
+//! scene, over a grey ground (`--no-ground` to leave it out).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path, P to pause moving objects,
@@ -22,14 +25,16 @@
 //! camera path, if the scene has one), prints timings, and exits.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use continuum::glam::{DVec3, Vec3};
+use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum::mesh::Surface;
 use continuum_gpu::wgpu;
 use continuum_gpu::{
-    CacheOptions, Camera, InstancedRenderer, Lightmap, LiveRenderer, MaskConeKernel, RectLight,
+    CacheOptions, Camera, Instance, InstancedRenderer, InstancedScene, Light, Lightmap,
+    LiveRenderer, MaskConeKernel, RectLight,
 };
 use room3d::field::Field;
 use room3d::showcase::{self, PATH_FRAMES, Showcase};
@@ -59,13 +64,24 @@ struct World {
     showcase: Option<Showcase>,
     /// The instanced boulder field.
     field: Option<Field>,
-    /// Window pixels per rendered pixel (field scene only).
+    /// An imported glTF scene.
+    gltf: Option<Gltf>,
+    /// Window pixels per rendered pixel (field and glTF scenes only).
     scale: u32,
     /// Light the field through the view-dependent lighting cache (otherwise a
     /// mask cone per pixel every frame).
     cache: bool,
     /// Add a sky to the field (with the cache only).
     sky: bool,
+}
+
+/// An imported glTF scene with its lights and sky.
+struct Gltf {
+    scene: InstancedScene,
+    lights: Vec<Light>,
+    sky: Vec3,
+    origin: DVec3,
+    triangles: u64,
 }
 
 impl World {
@@ -86,6 +102,7 @@ impl World {
             start: (camera.eye, camera.target),
             showcase: Some(scene),
             field: None,
+            gltf: None,
             scale: 1,
             cache: true,
             sky: false,
@@ -110,6 +127,113 @@ impl World {
             start: (camera.eye, camera.target),
             showcase: None,
             field: Some(field),
+            gltf: None,
+            scale: 1,
+            cache: true,
+            sky: false,
+        }
+    }
+
+    /// The glTF file at `path`, lit by a sun 30° up, over a grey ground
+    /// unless `ground` is false. The render origin is the scene's center.
+    fn gltf(path: &Path, ground: bool) -> World {
+        let start = Instant::now();
+        let imported = continuum_gltf::load(path).unwrap_or_else(|e| {
+            eprintln!("Could not load {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        if imported.scene.instances.is_empty() {
+            eprintln!("{} has no triangles to show.", path.display());
+            std::process::exit(1);
+        }
+        println!(
+            "Imported {} in {:.2} s: {} triangles in {} instances of {} geometries, {} charts, {} textures{}.",
+            path.display(),
+            start.elapsed().as_secs_f64(),
+            imported.stats.triangles,
+            imported.stats.instances,
+            imported.scene.geometries.len(),
+            imported.stats.charts,
+            imported.stats.textures,
+            if imported.stats.skipped_primitives + imported.stats.textures_skipped > 0 {
+                format!(
+                    " ({} primitives and {} textures skipped)",
+                    imported.stats.skipped_primitives, imported.stats.textures_skipped
+                )
+            } else {
+                String::new()
+            }
+        );
+        let mut scene = imported.scene;
+        let (lo, hi) = imported.bounds;
+        let origin = (lo + hi) * 0.5;
+        let radius = ((hi - lo).length() * 0.5).max(1e-3);
+        if ground {
+            // 20 radii across, just below the scene, so it casts shadows.
+            let h = (10.0 * radius) as f32;
+            let c = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(x, y)| Vec3::new(x, y, 0.0));
+            scene.geometries.push(Surface::from_triangles(vec![
+                [c[0], c[1], c[2]],
+                [c[0], c[2], c[3]],
+            ]));
+            scene
+                .geometry_textures
+                .resize(scene.geometries.len(), None);
+            scene.instances.push(Instance {
+                geometry: scene.geometries.len() - 1,
+                rotation: Mat3::IDENTITY,
+                scale: 1.0,
+                position: DVec3::new(origin.x, origin.y, lo.z - 1e-3 * radius),
+                albedo: Vec3::splat(0.5),
+            });
+        }
+        let (eye, target, fov) = match imported.camera {
+            Some(c) => (
+                (c.eye - origin).as_vec3(),
+                (c.target - origin).as_vec3(),
+                c.vertical_fov_degrees,
+            ),
+            None => {
+                let (az, el) = (225f64.to_radians(), 25f64.to_radians());
+                let dir = DVec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
+                ((dir * radius * 2.2).as_vec3(), Vec3::ZERO, 40.0)
+            }
+        };
+        // Irradiance π on a surface facing the sun: white at albedo 1.
+        let (az, el) = (200f64.to_radians(), 30f64.to_radians());
+        let toward = DVec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
+        let sun = Light::sun(
+            Vec3::ZERO,
+            toward,
+            radius * 50.0,
+            Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
+        );
+        let triangles = scene
+            .instances
+            .iter()
+            .map(|i| scene.geometries[i.geometry].triangles.len() as u64)
+            .sum();
+        World {
+            name: "glTF",
+            surfaces: Vec::new(),
+            albedo: Vec::new(),
+            light: sun.rect,
+            radiance: sun.radiance.x,
+            first_mover: 0,
+            texel: 0.0,
+            probes: 0.0,
+            fov,
+            speed: (0.4 * radius as f32).max(0.2),
+            start: (eye, target),
+            showcase: None,
+            field: None,
+            gltf: Some(Gltf {
+                scene,
+                lights: vec![sun],
+                sky: Vec3::new(0.6, 0.75, 1.0) * 0.3,
+                origin,
+                triangles,
+            }),
             scale: 1,
             cache: true,
             sky: false,
@@ -144,6 +268,7 @@ impl World {
             start: (scene.eye, scene.target),
             showcase: None,
             field: None,
+            gltf: None,
             scale: 1,
             cache: true,
             sky: false,
@@ -152,7 +277,7 @@ impl World {
 
     /// The moving surfaces at `time` (60 Hz frames), with their mesh indices.
     fn movers(&mut self, time: f32) -> Vec<(usize, Surface)> {
-        if self.field.is_some() {
+        if self.field.is_some() || self.gltf.is_some() {
             return Vec::new();
         }
         let first = self.first_mover;
@@ -220,17 +345,18 @@ struct Gpu {
     renderer: Renderer,
 }
 
-/// The lit scene with its caches, or the instanced field (per-pixel cones).
+/// The lit scene with its caches, or an instanced scene (the field or a
+/// glTF file).
 enum Renderer {
     Live(Box<LiveRenderer>),
-    Field(Box<InstancedRenderer>),
+    Instanced(Box<InstancedRenderer>),
 }
 
 impl Renderer {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             Renderer::Live(r) => r.resize(width, height),
-            Renderer::Field(r) => r.resize(width, height),
+            Renderer::Instanced(r) => r.resize(width, height),
         }
     }
 
@@ -245,7 +371,7 @@ impl Renderer {
     fn frame(&mut self, camera: Camera, view: &wgpu::TextureView) {
         match self {
             Renderer::Live(r) => r.frame(camera, camera.vertical_fov_degrees, view),
-            Renderer::Field(r) => r.frame(camera, view),
+            Renderer::Instanced(r) => r.frame(camera, view),
         }
     }
 }
@@ -378,7 +504,68 @@ impl App {
                 config,
                 device,
                 queue,
-                renderer: Renderer::Field(Box::new(renderer)),
+                renderer: Renderer::Instanced(Box::new(renderer)),
+            };
+        }
+        if let Some(g) = &world.gltf {
+            kernel.set_prefilter(1.0);
+            if world.cache && world.sky {
+                kernel.set_sky(g.sky);
+                kernel.set_sky_prefilter(8.0);
+            }
+            let start = Instant::now();
+            let renderer = if world.cache {
+                InstancedRenderer::with_cache_lights(
+                    &kernel,
+                    format,
+                    config.width,
+                    config.height,
+                    world.scale,
+                    &g.lights,
+                    &g.scene,
+                    g.origin,
+                    CacheOptions::default(),
+                )
+            } else {
+                InstancedRenderer::new_lights(
+                    &kernel,
+                    format,
+                    config.width,
+                    config.height,
+                    world.scale,
+                    &g.lights,
+                    &g.scene,
+                    g.origin,
+                )
+            };
+            renderer.wait();
+            println!(
+                "{} (glTF scene): {} triangles, {:.0} MB on the GPU ({}), ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
+                kernel.adapter_name,
+                g.triangles,
+                (renderer.scene_bytes() + renderer.cache_bytes()) as f64 / 1e6,
+                if world.cache {
+                    "with the lighting cache"
+                } else {
+                    "a cone per pixel"
+                },
+                start.elapsed().as_secs_f64(),
+                config.width,
+                config.height,
+                world.scale,
+                if renderer.hardware_rays() {
+                    "hardware"
+                } else {
+                    "compute"
+                }
+            );
+            return Gpu {
+                window,
+                surface,
+                config,
+                device,
+                queue,
+                renderer: Renderer::Instanced(Box::new(renderer)),
             };
         }
         let meshes: Vec<_> = world.surfaces.iter().map(|s| s.triangles.clone()).collect();
@@ -613,16 +800,20 @@ impl ApplicationHandler for App {
 fn main() {
     let arg = |name: &str| std::env::args().skip_while(|a| a != name).nth(1);
     let frames_left: Option<u32> = arg("--frames").and_then(|n| n.parse().ok());
-    let world = match arg("--scene").as_deref() {
-        None | Some("showcase") => World::showcase(),
-        Some("room") => World::room(),
-        Some("field") => World::field(
+    let world = match (arg("--gltf"), arg("--scene").as_deref()) {
+        (Some(path), _) => World::gltf(
+            Path::new(&path),
+            !std::env::args().any(|a| a == "--no-ground"),
+        ),
+        (None, None | Some("showcase")) => World::showcase(),
+        (None, Some("room")) => World::room(),
+        (None, Some("field")) => World::field(
             arg("--boulders")
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(1_000_000),
         ),
-        Some(other) => {
-            eprintln!("Unknown scene {other:?}: use showcase, room or field.");
+        (None, Some(other)) => {
+            eprintln!("Unknown scene {other:?}: use showcase, room or field, or --gltf <file>.");
             std::process::exit(2);
         }
     };

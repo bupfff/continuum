@@ -122,7 +122,8 @@ impl Surface {
             let q = (p * 1e5).round();
             (q.x as i64, q.y as i64, q.z as i64)
         };
-        let mut edges: HashMap<((i64, i64, i64), (i64, i64, i64)), Vec<u32>> = HashMap::new();
+        type Edge = ((i64, i64, i64), (i64, i64, i64));
+        let mut edges: HashMap<Edge, Vec<u32>> = HashMap::new();
         for (k, t) in tris.iter().enumerate() {
             for e in 0..3 {
                 let (a, b) = (key(t[e]), key(t[(e + 1) % 3]));

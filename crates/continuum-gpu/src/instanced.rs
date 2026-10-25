@@ -288,6 +288,7 @@ impl InstancedRenderer {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         kernel: &MaskConeKernel,
         target_format: wgpu::TextureFormat,

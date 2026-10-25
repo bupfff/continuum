@@ -666,6 +666,7 @@ pub(crate) struct VirtualCache {
 }
 
 impl VirtualCache {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

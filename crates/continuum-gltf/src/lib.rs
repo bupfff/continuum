@@ -73,6 +73,16 @@ fn axes() -> (DMat4, DMat4) {
     (c, c.inverse())
 }
 
+/// The accessors a primitive reads (positions, normals, texture
+/// coordinates, indices) and its texture: primitives alike share a geometry.
+type GeometryKey = (
+    usize,
+    Option<usize>,
+    Option<usize>,
+    Option<usize>,
+    Option<u32>,
+);
+
 /// One primitive's geometry before placement.
 struct Primitive {
     triangles: Vec<Tri>,
@@ -81,15 +91,7 @@ struct Primitive {
     /// Its base color texture's index in the scene.
     texture: Option<u32>,
     albedo: Vec3,
-    /// The accessors it reads (positions, normals, texture coordinates,
-    /// indices) and its texture: primitives alike share a geometry.
-    key: (
-        usize,
-        Option<usize>,
-        Option<usize>,
-        Option<usize>,
-        Option<u32>,
-    ),
+    key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
 }
@@ -101,12 +103,16 @@ fn to_rgba(image: &gltf::image::Data) -> Option<Texture> {
         Format::R8 => image.pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         Format::R8G8 => image
             .pixels
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
         Format::R8G8B8 => image
             .pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         Format::R8G8B8A8 => image.pixels.clone(),
@@ -179,7 +185,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
             let mut corner_tex = Vec::with_capacity(indices.len() / 3);
-            for t in indices.chunks_exact(3) {
+            for t in indices.as_chunks::<3>().0 {
                 let k = [t[0] as usize, t[1] as usize, t[2] as usize];
                 triangles.push(k.map(|i| positions[i]));
                 if let Some(n) = &normals {
@@ -217,16 +223,8 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         textures,
         ..Default::default()
     };
-    let mut geometry_of: std::collections::HashMap<
-        (
-            usize,
-            Option<usize>,
-            Option<usize>,
-            Option<usize>,
-            Option<u32>,
-        ),
-        usize,
-    > = std::collections::HashMap::new();
+    let mut geometry_of: std::collections::HashMap<GeometryKey, usize> =
+        std::collections::HashMap::new();
     for list in &mut meshes {
         for p in list.iter_mut() {
             if p.triangles.is_empty() {
@@ -404,7 +402,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let mut accessors: Vec<String> = Vec::new();
     // Appends bytes as a buffer view (aligned to four), returning its index.
     let mut view = |bin: &mut Vec<u8>, bytes: &[u8], target: Option<u32>| {
-        while bin.len() % 4 != 0 {
+        while !bin.len().is_multiple_of(4) {
             bin.push(0);
         }
         let offset = bin.len();
@@ -429,7 +427,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
             .flat_map(|&p| y_up(p))
             .collect();
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for p in positions.chunks_exact(3) {
+        for p in positions.as_chunks::<3>().0 {
             for k in 0..3 {
                 lo[k] = lo[k].min(p[k]);
                 hi[k] = hi[k].max(p[k]);
@@ -526,7 +524,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let textures: Vec<String> = (0..images.len())
         .map(|k| format!(r#"{{"source":{k},"sampler":0}}"#))
         .collect();
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
     let mut json = format!(

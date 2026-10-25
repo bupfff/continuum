@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 continuum = { path = "../../crates/continuum" }
 continuum-gpu = { path = "../../crates/continuum-gpu" }
+continuum-gltf = { path = "../../crates/continuum-gltf" }
 pollster = "1.0.1"
 room3d = { path = "../../experiments/room3d" }
 winit = "0.30.13"

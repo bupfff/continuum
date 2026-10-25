@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use continuum::glam::{DVec3, Vec3};
 use continuum_gpu::{
-    CacheOptions, Camera, InstancedRenderer, Light, MaskConeKernel, RectLight, wgpu,
+    CacheOptions, Camera, InstancedRenderer, Light, MaskConeKernel, wgpu,
 };
 use flatland::img::Image;
 use room3d::cycles::relative_rmse;
@@ -75,28 +75,16 @@ fn main() -> std::io::Result<()> {
             }
         }
     };
-    // A sun 30° up from azimuth 200°, 0.5° across, far beyond the scene.
+    // A sun 30° up from azimuth 200°, 0.5° across, far beyond the scene,
+    // giving irradiance π on a surface facing it: white at albedo 1.
     let (az, el) = (200f64.to_radians(), 30f64.to_radians());
     let toward = DVec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
-    let distance = radius * 50.0;
-    let size = 2.0 * distance * 0.25f64.to_radians().tan();
-    let wdir = (-toward).as_vec3();
-    let a = Vec3::Z.cross(wdir).normalize() * size as f32;
-    let b = wdir.cross(a).normalize() * size as f32;
-    let middle = toward * distance;
-    let sun = RectLight {
-        corner: (middle - (a + b).as_dvec3() * 0.5).as_vec3(),
-        edge_u: a,
-        edge_v: b,
-        one_sided: true,
-    };
-    // Irradiance π on a surface facing the sun: white at albedo 1.
-    let solid = (size / distance) * (size / distance);
-    let radiance = (std::f64::consts::PI / solid) as f32;
-    let lights = [Light {
-        rect: sun,
-        radiance: Vec3::new(1.0, 0.92, 0.8) * radiance,
-    }];
+    let lights = [Light::sun(
+        Vec3::ZERO,
+        toward,
+        radius * 50.0,
+        Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
+    )];
     let sky = Vec3::new(0.6, 0.75, 1.0) * 0.3;
 
     let kernel = MaskConeKernel::new().expect("GPU");

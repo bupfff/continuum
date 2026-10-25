@@ -80,11 +80,16 @@ diffuse only for now: metallic and roughness, normal maps, alpha and the
 file's lights are ignored.
 
 ```bash
-cargo run --release -p room3d --bin gltf_view -- scene.glb
+cargo run --release -p viewer -- --gltf scene.glb
 ```
 
-This renders a file lit by a sun and a sky, per pixel and through the cache,
-into `experiments/room3d/out/`.
+This flies through a file in real time. The scene is lit by a sun 30° up
+(`--sky` adds the sky) and seen from the file's camera, or from one framed
+around the scene. It stands on a grey ground (`--no-ground` leaves it out),
+and `--scale N` and `--no-cache` work as for the field.
+
+`cargo run --release -p room3d --bin gltf_view -- scene.glb` renders a file
+per pixel and through the cache into `experiments/room3d/out/`.
 
 Measured offscreen at 1280×720 with hardware rays (M4 gate 11):
 

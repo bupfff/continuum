@@ -2057,6 +2057,7 @@ name = "viewer"
 version = "0.1.0"
 dependencies = [
  "continuum",
+ "continuum-gltf",
  "continuum-gpu",
  "pollster",
  "room3d",

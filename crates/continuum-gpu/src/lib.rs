@@ -170,6 +170,34 @@ impl Light {
             radiance: Vec3::splat(radiance),
         }
     }
+
+    /// A square sun 0.5° across, `distance` from `center` in the direction
+    /// `toward`, one-sided and facing `center`, whose radiance gives
+    /// `irradiance` on a surface facing it. `center` is relative to the
+    /// render origin, like every light.
+    pub fn sun(center: Vec3, toward: DVec3, distance: f64, irradiance: Vec3) -> Light {
+        let toward = toward.normalize();
+        let size = 2.0 * distance * 0.25f64.to_radians().tan();
+        let w = -toward;
+        let side = if w.cross(DVec3::Z).length() > 1e-6 {
+            DVec3::Z.cross(w)
+        } else {
+            DVec3::X
+        };
+        let a = side.normalize() * size;
+        let b = w.cross(a).normalize() * size;
+        let middle = center.as_dvec3() + toward * distance;
+        let solid = (size / distance) * (size / distance);
+        Light {
+            rect: RectLight {
+                corner: (middle - (a + b) * 0.5).as_vec3(),
+                edge_u: a.as_vec3(),
+                edge_v: b.as_vec3(),
+                one_sided: true,
+            },
+            radiance: irradiance / solid as f32,
+        }
+    }
 }
 
 /// A light as the GPU reads it: corner (w: 1 if one-sided), edges, and
