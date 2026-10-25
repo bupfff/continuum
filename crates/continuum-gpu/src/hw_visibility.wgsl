@@ -30,6 +30,5 @@ fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
         tri = meshes[mesh].x + hit.primitive_index;
         dist = hit.t;
     }
-    let sees_light = select(0u, 1u, light_distance(eye, dir) < dist);
-    vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), sees_light);
+    vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
 }

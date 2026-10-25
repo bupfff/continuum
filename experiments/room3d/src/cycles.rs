@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use continuum::glam::{DVec3, Vec3};
 use continuum::mesh::Surface;
-use continuum_gpu::{Camera, InstancedScene, RectLight};
+use continuum_gpu::{Camera, InstancedScene, Light, RectLight};
 
 /// Writes the surfaces as an OBJ: object `mesh_<index>` per surface, with
 /// per-vertex normals; coordinates as they are (Z up, meters).
@@ -159,6 +159,34 @@ pub fn render_instanced(
     seed: u32,
     work: &Path,
 ) -> io::Result<Reference> {
+    render_instanced_lights(
+        scene,
+        origin,
+        &[Light::white(light, radiance)],
+        sky,
+        camera,
+        (width, height),
+        samples,
+        bounces,
+        seed,
+        work,
+    )
+}
+
+/// [`render_instanced`] lit by several lights with RGB radiance.
+#[allow(clippy::too_many_arguments)]
+pub fn render_instanced_lights(
+    scene: &InstancedScene,
+    origin: DVec3,
+    lights: &[Light],
+    sky: Vec3,
+    camera: Camera,
+    (width, height): (u32, u32),
+    samples: u32,
+    bounces: u32,
+    seed: u32,
+    work: &Path,
+) -> io::Result<Reference> {
     std::fs::create_dir_all(work)?;
     let mut geometries = Vec::new();
     for (g, surface) in scene.geometries.iter().enumerate() {
@@ -181,18 +209,35 @@ pub fn render_instanced(
     }
     let bytes: Vec<u8> = raw.iter().flat_map(|v| v.to_le_bytes()).collect();
     std::fs::write(&instances, bytes)?;
+    let v = |p: Vec3| format!("[{}, {}, {}]", p.x, p.y, p.z);
+    let light_list: Vec<String> = lights
+        .iter()
+        .map(|l| {
+            format!(
+                r#"{{"corner": {}, "edge_u": {}, "edge_v": {}, "radiance": {}}}"#,
+                v(l.rect.corner),
+                v(l.rect.edge_u),
+                v(l.rect.edge_v),
+                v(l.radiance)
+            )
+        })
+        .collect();
+    // The lights' description, hashed into the file names.
+    let lights_json = format!("[{}]", light_list.join(", "));
+    let digest = lights_json.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    });
     let tag = format!(
-        "{width}x{height}_{samples}spp_{bounces}b_seed{seed}_r{radiance}_sky{}-{}-{}",
+        "{width}x{height}_{samples}spp_{bounces}b_seed{seed}_lights{digest:016x}_sky{}-{}-{}",
         sky.x, sky.y, sky.z
     );
     let (exr, out) = (
         work.join(format!("{tag}.exr")),
         work.join(format!("{tag}.f32")),
     );
-    let v = |p: Vec3| format!("[{}, {}, {}]", p.x, p.y, p.z);
     let job = format!(
         r#"{{"geometries": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
-  "light": {{"corner": {}, "edge_u": {}, "edge_v": {}, "radiance": {radiance}}},
+  "lights": {lights_json},
   "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
   "width": {width}, "height": {height}, "samples": {samples}, "bounces": {bounces}, "seed": {seed}}}"#,
@@ -200,9 +245,6 @@ pub fn render_instanced(
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),
-        v(light.corner),
-        v(light.edge_u),
-        v(light.edge_v),
         v(sky),
         v(camera.eye),
         v(camera.target),
@@ -213,8 +255,14 @@ pub fn render_instanced(
     run_blender("cycles/render_instanced_reference.py", &job_path, &out)
 }
 
-/// Runs a reference script in a background Blender and reads its output.
+/// Runs a reference script in a background Blender and reads its output,
+/// trying once more if Blender exits without a result (it did once, with no
+/// error, on a job that rendered the next time).
 fn run_blender(script: &str, job_path: &Path, out: &Path) -> io::Result<Reference> {
+    run_blender_once(script, job_path, out).or_else(|_| run_blender_once(script, job_path, out))
+}
+
+fn run_blender_once(script: &str, job_path: &Path, out: &Path) -> io::Result<Reference> {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(script);
     let blender = std::env::var_os("BLENDER")
         .map(PathBuf::from)

@@ -6,12 +6,14 @@
 //! it barely grows, each texel's latency dominates and the GPU idles.
 //! `cargo run --release -p room3d --bin bake_cost -- [150] [--sky]
 //! [--budgets 1000,16000] [--stage N] [--count] [--solo] [--no-cull] [--warm]
-//! [--sky-cost N]`
+//! [--sky-cost N] [--light k]`
 
 use std::time::Duration;
 
 use continuum::glam::{DVec3, Vec3};
-use continuum_gpu::{CacheOptions, Camera, InstancedRenderer, KernelOptions, MaskConeKernel, wgpu};
+use continuum_gpu::{
+    CacheOptions, Camera, InstancedRenderer, KernelOptions, Light, MaskConeKernel, wgpu,
+};
 use room3d::field::Field;
 
 fn main() {
@@ -82,6 +84,20 @@ fn main() {
         })
         .create_view(&Default::default());
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    // `--light k`: one of the field's colored lights (M5 gate 6) instead of
+    // the sun, at its own radiance.
+    let colored = args
+        .iter()
+        .position(|a| a == "--light")
+        .and_then(|i| args.get(i + 1)?.parse::<usize>().ok())
+        .map(|k| field.colored_lights(origin, 1000.0)[k]);
+    let lit = |radiance: f32| match colored {
+        Some(l) => Light {
+            radiance: l.radiance * (radiance > 0.0) as u32 as f32,
+            ..l
+        },
+        None => Light::white(light, radiance),
+    };
     for (name, radiance, sky) in [
         ("sun", field.radiance, Vec3::ZERO),
         ("sky", 0.0, field.sky()),
@@ -100,16 +116,15 @@ fn main() {
                 sky_sample_cost,
                 ..Default::default()
             };
-            let mut r = InstancedRenderer::with_cache(
+            let mut r = InstancedRenderer::with_cache_lights(
                 &kernel,
                 format,
                 1280,
                 720,
                 1,
-                light,
+                &[lit(radiance)],
                 &field.scene,
                 origin,
-                radiance,
                 options,
             );
             let mut bake = Duration::ZERO;
@@ -142,16 +157,15 @@ fn main() {
                 sky_sample_cost,
                 ..Default::default()
             };
-            let mut r = InstancedRenderer::with_cache(
+            let mut r = InstancedRenderer::with_cache_lights(
                 &kernel,
                 format,
                 1280,
                 720,
                 1,
-                light,
+                &[lit(radiance)],
                 &field.scene,
                 origin,
-                radiance,
                 options,
             );
             // Warm-up frames fill the request pipeline; then 12 profiled.

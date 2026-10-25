@@ -142,7 +142,41 @@ struct Cone {
     // below the receiver's tangent plane can only block directions below its
     // horizon, whose light it never receives, so the walk skips it.
     horizon: vec3<f32>,
+    // A circular cone around the pyramid (M5 gate 6): unit axis, and the
+    // cosine and sine of its half-angle (cosine below -1: none). Testing a
+    // box's bounding sphere against it culls what the window's planes, one at
+    // a time, miss when the window lies far off the cone's forward axis (a
+    // light seen at a grazing angle).
+    bound: vec4<f32>,
+    bound_sin: f32,
 };
+
+// Whether a sphere (center `p`, radius `r`) may meet the cone's bounding
+// circular cone.
+fn in_bound(c: Cone, p: vec3<f32>, r: f32) -> bool {
+    if (c.bound.w < -1.0) { return true; }
+    let d = p - c.apex;
+    let len = length(d);
+    if (len <= r) { return true; }
+    let s = r / len;
+    // cos(half + asin(s)): the widest angle from the axis the sphere reaches.
+    let limit = c.bound.w * sqrt(1.0 - s * s) - c.bound_sin * s;
+    return dot(c.bound.xyz, d) >= limit * len;
+}
+
+// Sets the cone's bounding circular cone around `axis` (unit), through the
+// directions of the window's corners.
+fn bound_cone(c: ptr<function, Cone>, axis: vec3<f32>) {
+    var cos_half = 1.0;
+    for (var k = 0u; k < 4u; k++) {
+        let d = normalize(direction(*c, f32(k & 1u), f32(k >> 1u)));
+        cos_half = min(cos_half, dot(axis, d));
+    }
+    // A little wider, for rounding.
+    let cos_b = clamp(cos_half - 1e-5, -1.0, 1.0);
+    (*c).bound = vec4<f32>(axis, cos_b);
+    (*c).bound_sin = sqrt(max(1.0 - cos_b * cos_b, 0.0));
+}
 
 fn lambert_edge(n: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
     let an = normalize(a);
@@ -206,7 +240,8 @@ fn may_touch_box(c: Cone, lo: vec3<f32>, hi: vec3<f32>) -> bool {
         if (p.y - c.window.y * p.z >= 0.0) { out_v0 = false; }
         if (c.window.w * p.z - p.y >= 0.0) { out_v1 = false; }
     }
-    return !(far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1 || below);
+    if (far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1 || below) { return false; }
+    return in_bound(c, (lo + hi) * 0.5, 0.5 * length(hi - lo));
 }
 
 struct Poly3 { v: array<vec3<f32>, 10>, n: u32 };
@@ -455,6 +490,7 @@ fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
         }
     }
     if (far_out || near_out || out_u0 || out_u1 || out_v0 || out_v1 || below) { return 0u; }
+    if (!in_bound(c, (lo + hi) * 0.5, 0.5 * length(hi - lo))) { return 0u; }
     if (!inside || max(mx.x - mn.x, mx.y - mn.y) > prefilter_bins) { return 3u; }
     if (mx.x <= 0.0 || mx.y <= 0.0 || mn.x >= g || mn.y >= g) { return 1u; }
     let e = hi - lo;
@@ -512,6 +548,8 @@ fn cone_to_object(c: Cone, m: u32) -> Cone {
     o.far_normal = rotate_to_object(x, c.far_normal);
     o.far_offset = (c.far_offset - dot(c.far_normal, translation(x))) * xforms[4u * x + 3u].y;
     o.horizon = rotate_to_object(x, c.horizon);
+    o.bound = vec4<f32>(rotate_to_object(x, c.bound.xyz), c.bound.w);
+    o.bound_sin = c.bound_sin;
     return o;
 }
 
@@ -552,6 +590,12 @@ var<private> own_object: u32 = 0xffffffffu;
 override PACKETS: bool = true;
 
 fn packet_any(x: bool) -> bool {
+    return x;
+}
+
+// The first invocation's `x`, shared by its packet (each invocation's own
+// without packets).
+fn packet_first(x: bool) -> bool {
     return x;
 }
 
@@ -648,7 +692,11 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
         var running = 0.0;
         for (var b = span.x; b < min(span.y, BINS); b++) {
             running += acc[b];
-            let covered = abs(running);
+            // Coverage within 1e-5 of whole is whole: a bin covered by
+            // several triangles sums to one only up to rounding, and a
+            // whole bin lets the walk stop once every bin is.
+            var covered = abs(running);
+            if (covered >= 1.0 - 1e-5) { covered = 1.0; }
             if (covered > 1e-6) {
                 let before = (*cov)[b];
                 if (independent_occluders) {
@@ -668,24 +716,47 @@ struct LightCone {
     ok: bool,
 };
 
+// A rectangular light from the list (M5): corner (w: 1 if one-sided), edges,
+// and RGB radiance. Paths without a list read the light uniform as one.
+struct LightRect {
+    corner: vec4<f32>,
+    edge_u: vec4<f32>,
+    edge_v: vec4<f32>,
+    radiance: vec4<f32>,
+};
+
+@group(0) @binding(52) var<storage, read> lights: array<LightRect>;
+
+// The light uniform's rectangle (radiance 1), for paths without a light list.
+fn uniform_light() -> LightRect {
+    return LightRect(vec4<f32>(light.corner.xyz, f32(light.counts.w)), light.edge_u, light.edge_v, vec4<f32>(1.0));
+}
+
 fn light_cone(apex: vec3<f32>) -> LightCone {
+    return light_cone_rect(apex, uniform_light());
+}
+
+fn light_cone_rect(apex: vec3<f32>, r: LightRect) -> LightCone {
     var out: LightCone;
     out.ok = false;
     // Light cones prefilter at the light's threshold (sky cones set theirs).
     prefilter_bins = light.params.x;
-    var forward = normalize(cross(light.edge_u.xyz, light.edge_v.xyz));
+    let corner0 = r.corner.xyz;
+    let edge_u = r.edge_u.xyz;
+    let edge_v = r.edge_v.xyz;
+    var forward = normalize(cross(edge_u, edge_v));
     // Behind a one-sided light: no direct light.
-    if (light.counts.w == 1u && dot(forward, apex - light.corner.xyz) <= 0.0) { return out; }
-    if (dot(forward, light.corner.xyz - apex) < 0.0) { forward = -forward; }
-    let dist = dot(forward, light.corner.xyz - apex);
+    if (r.corner.w > 0.5 && dot(forward, apex - corner0) <= 0.0) { return out; }
+    if (dot(forward, corner0 - apex) < 0.0) { forward = -forward; }
+    let dist = dot(forward, corner0 - apex);
     if (dist <= 1e-6) { return out; }
-    let right = normalize(light.edge_u.xyz);
+    let right = normalize(edge_u);
     let up = cross(forward, right);
-    let rel = light.corner.xyz - apex;
+    let rel = corner0 - apex;
     var lo = vec2<f32>(3.4e38);
     var hi = vec2<f32>(-3.4e38);
     for (var k = 0u; k < 4u; k++) {
-        let corner = rel + light.edge_u.xyz * f32(k & 1u) + light.edge_v.xyz * f32((k >> 1u) & 1u);
+        let corner = rel + edge_u * f32(k & 1u) + edge_v * f32((k >> 1u) & 1u);
         let uv = vec2<f32>(dot(right, corner), dot(up, corner)) / dist;
         lo = min(lo, uv);
         hi = max(hi, uv);
@@ -697,6 +768,8 @@ fn light_cone(apex: vec3<f32>) -> LightCone {
     out.c.window = vec4<f32>(lo, hi);
     out.c.far_normal = forward;
     out.c.far_offset = dot(forward, apex) + dist * (1.0 - 1e-5);
+    // Around the direction to the light's center.
+    bound_cone(&out.c, normalize(rel + (edge_u + edge_v) * 0.5));
     out.ok = true;
     return out;
 }
@@ -801,8 +874,29 @@ fn scene_coverage_if(on: bool, c: Cone, i: u32, cov: ptr<function, array<f32, 64
                     add_mesh_coverage_if(descend && items[k] != skip_object, c, items[k], cov, full, i, sp);
                 }
             } else {
-                stack_set(sp, node.info.x);
-                stack_set(sp + 1u, node.info.x + 1u);
+                // Nearest child first along the cone when meshes combine by
+                // the maximum (light cones): the result does not depend on the
+                // order, and an occluded cone fills every bin, and stops,
+                // sooner (M5 gate 6). Sky cones keep a fixed order, as their
+                // products would round differently.
+                var near = node.info.x;
+                var far = node.info.x + 1u;
+                if (!independent_occluders) {
+                    let a = nodes[near];
+                    let b = nodes[far];
+                    // Along the cone's true axis (a light cone's forward axis is
+                    // its light's normal).
+                    let axis = select(c.forward, c.bound.xyz, c.bound.w >= -1.0 && any(c.bound.xyz != vec3<f32>(0.0)));
+                    let da = dot(axis, (a.lo.xyz + a.hi.xyz) * 0.5 - c.apex);
+                    let db = dot(axis, (b.lo.xyz + b.hi.xyz) * 0.5 - c.apex);
+                    if (packet_first(db < da)) {
+                        near = node.info.x + 1u;
+                        far = node.info.x;
+                    }
+                }
+                // The near one is popped first.
+                stack_set(sp, far);
+                stack_set(sp + 1u, near);
                 need_put(sp, descend);
                 need_put(sp + 1u, descend);
                 sp += 2u;
@@ -864,9 +958,14 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
 
 // `cone_irradiance` where `on` (0 elsewhere), keeping the packet together.
 fn cone_irradiance_if(on: bool, i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    return cone_irradiance_rect(on, i, apex, normal, uniform_light());
+}
+
+// `cone_irradiance_if` from light `r`.
+fn cone_irradiance_rect(on: bool, i: u32, apex: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
     let stage = u32(light.params.z);
     if (stage == 1u) { return 0.0; }
-    let lc = light_cone(apex);
+    let lc = light_cone_rect(apex, r);
     let traced = on && lc.ok;
     // Explicit zeroing: don't rely on loop-scoped `var`s being re-initialized.
     var cov: array<f32, 64>;
@@ -1027,6 +1126,7 @@ fn sky_face(on: bool, f: u32, apex: vec3<f32>, normal: vec3<f32>) -> SkyFace {
     // params.w bit 2: walk geometry below the horizon too (as before M5
     // gate 5).
     if ((u32(light.params.w) & 2u) == 0u) { face.c.horizon = normal; }
+    bound_cone(&face.c, forward);
     // The face's directions are linear in the window, so its corners decide
     // whether any lies above the horizon.
     var above = false;
@@ -1308,19 +1408,40 @@ fn surface_offset(distance: f32) -> f32 {
 
 // Distance along a camera ray to the front of a one-sided light (or 3.4e38).
 fn light_distance(eye: vec3<f32>, dir: vec3<f32>) -> f32 {
-    if (light.counts.w != 1u) { return 3.4e38; }
-    let u = light.edge_u.xyz;
-    let v = light.edge_v.xyz;
+    return rect_distance(uniform_light(), eye, dir);
+}
+
+// Distance along a camera ray to the front of light `l` if it is one-sided
+// (or 3.4e38).
+fn rect_distance(l: LightRect, eye: vec3<f32>, dir: vec3<f32>) -> f32 {
+    if (l.corner.w < 0.5) { return 3.4e38; }
+    let u = l.edge_u.xyz;
+    let v = l.edge_v.xyz;
     let n = cross(u, v);
     let facing = dot(dir, n);
     if (facing >= 0.0) { return 3.4e38; }
-    let t = dot(light.corner.xyz - eye, n) / facing;
+    let t = dot(l.corner.xyz - eye, n) / facing;
     if (t <= 0.0) { return 3.4e38; }
-    let q = eye + dir * t - light.corner.xyz;
+    let q = eye + dir * t - l.corner.xyz;
     let s = dot(q, u) / dot(u, u);
     let r = dot(q, v) / dot(v, v);
     if (s < 0.0 || s > 1.0 || r < 0.0 || r > 1.0) { return 3.4e38; }
     return t;
+}
+
+// The light a camera ray sees nearer than `limit`, as its index + 1 (0:
+// none).
+fn seen_light(eye: vec3<f32>, dir: vec3<f32>, limit: f32) -> u32 {
+    var seen = 0u;
+    var nearest = limit;
+    for (var l = 0u; l < arrayLength(&lights); l++) {
+        let t = rect_distance(lights[l], eye, dir);
+        if (t < nearest) {
+            nearest = t;
+            seen = l + 1u;
+        }
+    }
+    return seen;
 }
 
 // Direct irradiance at a hit through a mask cone (0 if the surface faces away).
@@ -1329,8 +1450,23 @@ fn hit_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
 }
 
 fn hit_irradiance_if(on: bool, pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> f32 {
-    let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
-    return cone_irradiance_if(on && dot(normal, to_light) > 0.0, pixel, point, normal);
+    return hit_irradiance_rect(on, pixel, point, normal, uniform_light());
+}
+
+// `hit_irradiance_if` from light `r`.
+fn hit_irradiance_rect(on: bool, pixel: u32, point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
+    let to_light = r.corner.xyz + (r.edge_u.xyz + r.edge_v.xyz) * 0.5 - point;
+    return cone_irradiance_rect(on && dot(normal, to_light) > 0.0, pixel, point, normal, r);
+}
+
+// Direct light at a hit from every light in the list (RGB).
+fn lights_irradiance(pixel: u32, point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    var e = vec3<f32>(0.0);
+    for (var l = 0u; l < arrayLength(&lights); l++) {
+        let r = lights[l];
+        e += r.radiance.xyz * hit_irradiance_rect(true, pixel, point, normal, r);
+    }
+    return e;
 }
 
 @group(0) @binding(24) var<storage, read> normals: array<vec4<f32>>;
@@ -1359,8 +1495,7 @@ fn visibility(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invo
     let dir = camera_dir(gid);
     let eye = camera.eye.xyz;
     let hit = camera_hit(eye, dir);
-    let sees_light = select(0u, 1u, light_distance(eye, dir) < hit.distance);
-    vis[gid.y * w + gid.x] = vec4<u32>(hit.mesh, hit.tri, bitcast<u32>(hit.distance), sees_light);
+    vis[gid.y * w + gid.x] = vec4<u32>(hit.mesh, hit.tri, bitcast<u32>(hit.distance), seen_light(eye, dir, hit.distance));
 }
 
 // The hit a visibility pass recorded, rebuilt exactly as `camera_hit` returns
@@ -1380,15 +1515,16 @@ fn recorded_hit(pixel: u32, dir: vec3<f32>) -> Hit {
 }
 
 // Per-pixel shading: a mask cone at the hit.
-fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, sees_light: bool) {
-    if (sees_light) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
+// `seen`: the light the camera ray sees in front of the hit, index + 1 (0:
+// none).
+fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, seen: u32) {
+    if (seen != 0u) { colors[pixel] = vec4<f32>(lights[seen - 1u].radiance.xyz, 1.0); return; }
     // A ray that misses everything sees the sky.
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(light.sky.xyz, 1.0); return; }
     let surface = eye + dir * hit.distance;
     let point = surface + hit.normal * surface_offset(hit.distance);
     let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
-    let irradiance = hit_irradiance(pixel, point, normal);
-    var e = vec3<f32>(camera.params.w * irradiance);
+    var e = lights_irradiance(pixel, point, normal);
     if (any(light.sky.xyz > vec3<f32>(0.0))) {
         // params.w bit 4: faces in the hit object's frame, as the cache's
         // texels with own-occlusion masks use (and, with this bit, those
@@ -1409,7 +1545,7 @@ fn render(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocati
     let dir = camera_dir(gid);
     let eye = camera.eye.xyz;
     let hit = camera_hit(eye, dir);
-    shade_per_pixel(gid.y * w + gid.x, eye, dir, hit, light_distance(eye, dir) < hit.distance);
+    shade_per_pixel(gid.y * w + gid.x, eye, dir, hit, seen_light(eye, dir, hit.distance));
 }
 
 @compute @workgroup_size(8, 8)
@@ -1420,7 +1556,7 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocatio
     if (gid.x >= w || gid.y >= h) { return; }
     let dir = camera_dir(gid);
     let pixel = gid.y * w + gid.x;
-    shade_per_pixel(pixel, camera.eye.xyz, dir, recorded_hit(pixel, dir), vis[pixel].w == 1u);
+    shade_per_pixel(pixel, camera.eye.xyz, dir, recorded_hit(pixel, dir), vis[pixel].w);
 }
 
 // --- World-space lighting cache: lightmap texels on static faces. ---
@@ -1512,7 +1648,7 @@ fn shade_cached_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
     if (gid.x >= w || gid.y >= h) { return; }
     let dir = camera_dir(gid);
     let pixel = gid.y * w + gid.x;
-    shade_cached(pixel, camera.eye.xyz, dir, recorded_hit(pixel, dir), vis[pixel].w == 1u);
+    shade_cached(pixel, camera.eye.xyz, dir, recorded_hit(pixel, dir), vis[pixel].w != 0u);
 }
 
 // --- Moving geometry: re-bake exactly the lightmap blocks a change can reach. ---
@@ -1856,7 +1992,8 @@ struct VcParams {
     jobs: vec4<u32>,
     // x: 1 / base texel size, y: radians per pixel (camera), z: pixels per texel, w: 0
     params: vec4<f32>,
-    // x: sky samples to bake (each as six face jobs), y: 1 with a sky, z, w: 0
+    // x: sky samples to bake (each as six face jobs), y: 1 with a sky, z: lights
+    // (a texel holds one channel per light, then the sky's), w: 0
     sky: vec4<u32>,
 };
 
@@ -1990,16 +2127,21 @@ fn vc_page(m: u32, c: u32, uv: vec2<f32>, mip: u32) -> PageRef {
     return r;
 }
 
-// A texel's two channels: irradiance per unit sun radiance, and per unit sky
-// radiance (M5).
-fn vc_texel_value(i: u32) -> vec2<f32> {
-    return vec2<f32>(pool[2u * i], pool[2u * i + 1u]);
+// A texel's channels (M5): irradiance per unit radiance from each light, then
+// per unit sky radiance.
+fn vc_channels() -> u32 {
+    return vc.sky.z + 1u;
 }
 
-fn vc_bilinear(slot: u32, r: PageRef) -> vec2<f32> {
+// Texel `i`'s channel `ch` in the pool.
+fn pool_at(i: u32, ch: u32) -> u32 {
+    return vc_channels() * i + ch;
+}
+
+fn vc_bilinear(slot: u32, r: PageRef, ch: u32) -> f32 {
     let o = slot * PAGE_TEXELS + r.base.y * PAGE_STRIDE + r.base.x;
-    let a = mix(vc_texel_value(o), vc_texel_value(o + 1u), r.frac.x);
-    let b = mix(vc_texel_value(o + PAGE_STRIDE), vc_texel_value(o + PAGE_STRIDE + 1u), r.frac.x);
+    let a = mix(pool[pool_at(o, ch)], pool[pool_at(o + 1u, ch)], r.frac.x);
+    let b = mix(pool[pool_at(o + PAGE_STRIDE, ch)], pool[pool_at(o + PAGE_STRIDE + 1u, ch)], r.frac.x);
     return mix(a, b, r.frac.y);
 }
 
@@ -2102,12 +2244,15 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // No early return: every invocation follows its packet's walks.
     let listed = j < vc.jobs.x;
     let job = bake_jobs[min(j, vc.jobs.x - 1u)];
-    let t = page_texel(job.x, job.y);
+    // The texel within the page, and the light (M5).
+    let k = job.y & 0xffu;
+    let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
+    let t = page_texel(job.x, k);
     let s = vc_surface(t.m, t.c, t.n, t.texel);
     let on = listed && t.inside && s.ok;
-    let sun = hit_irradiance_if(on, 0u, s.apex, s.normal);
+    let value = hit_irradiance_rect(on, 0u, s.apex, s.normal, lights[l]);
     if (listed && t.inside) {
-        pool[2u * (t.e.w * PAGE_TEXELS + job.y)] = select(0.0, sun, on);
+        pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(0.0, value, on);
     }
     if (COUNT_WORK) {
         for (var k = 0u; k < 4u; k++) {
@@ -2265,15 +2410,16 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let in_grid = min(n - min(page * PAGE, n), vec2<u32>(PAGE_STRIDE));
     let range = page_sky[p];
     let stride = range.y >> 24u;
+    let sky_ch = vc.sky.z;
     if (vc.sky.y == 0u) {
-        for (var k = 0u; k < PAGE_TEXELS; k++) { pool[2u * (o + k) + 1u] = 0.0; }
+        for (var k = 0u; k < PAGE_TEXELS; k++) { pool[pool_at(o + k, sky_ch)] = 0.0; }
     } else {
         for (var q = range.x; q < range.x + (range.y & 0xffffffu); q++) {
             let k = sky_samples[q].y;
             if (k % PAGE_STRIDE < in_grid.x && k / PAGE_STRIDE < in_grid.y) {
                 var total = 0.0;
                 for (var f = 0u; f < 6u; f++) { total += sky_partial[6u * q + f]; }
-                pool[2u * (o + k) + 1u] = total;
+                pool[pool_at(o + k, sky_ch)] = total;
             }
         }
         if (stride > 1u) {
@@ -2284,9 +2430,9 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let sx = sky_span(x, stride, in_grid.x);
                 let sy = sky_span(y, stride, in_grid.y);
                 let at = vec4<u32>(vec2<u32>(sx.xy), vec2<u32>(sy.xy));
-                let a = mix(pool[2u * (o + at.z * PAGE_STRIDE + at.x) + 1u], pool[2u * (o + at.z * PAGE_STRIDE + at.y) + 1u], sx.z);
-                let b = mix(pool[2u * (o + at.w * PAGE_STRIDE + at.x) + 1u], pool[2u * (o + at.w * PAGE_STRIDE + at.y) + 1u], sx.z);
-                pool[2u * (o + k) + 1u] = mix(a, b, sy.z);
+                let a = mix(pool[pool_at(o + at.z * PAGE_STRIDE + at.x, sky_ch)], pool[pool_at(o + at.z * PAGE_STRIDE + at.y, sky_ch)], sx.z);
+                let b = mix(pool[pool_at(o + at.w * PAGE_STRIDE + at.x, sky_ch)], pool[pool_at(o + at.w * PAGE_STRIDE + at.y, sky_ch)], sx.z);
+                pool[pool_at(o + k, sky_ch)] = mix(a, b, sy.z);
             }
         }
     }
@@ -2295,8 +2441,9 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (texel.x >= n.x || texel.y >= n.y) {
             let inside = min(texel, n - vec2<u32>(1u)) - page * PAGE;
             let nearest = o + inside.y * PAGE_STRIDE + inside.x;
-            pool[2u * (o + k)] = pool[2u * nearest];
-            pool[2u * (o + k) + 1u] = pool[2u * nearest + 1u];
+            for (var ch = 0u; ch < vc_channels(); ch++) {
+                pool[pool_at(o + k, ch)] = pool[pool_at(nearest, ch)];
+            }
         }
     }
     slot_used[e.w] = vc.counts.y;
@@ -2348,15 +2495,16 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
         let hit = recorded_hit(pixel, dir);
         // A ray that misses everything sees the sky.
         var color = light.sky.xyz;
-        if (vis[pixel].w == 1u) {
-            color = vec3<f32>(camera.params.w);
+        if (vis[pixel].w != 0u) {
+            color = lights[vis[pixel].w - 1u].radiance.xyz;
         } else if (hit.mesh != NONE) {
             let surface = camera.eye.xyz + dir * hit.distance;
             let c = tri_vchart[hit.tri];
             let uv = chart_uv(hit.mesh, hit.tri, surface);
             let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
-            // Sun and sky irradiance per unit radiance.
-            var irradiance = vec2<f32>(0.0);
+            // Irradiance per unit radiance from the found page: lights, then sky.
+            var found_slot = NONE;
+            var found_ref: PageRef;
             var found = false;
             var mip = wanted;
             // The key of the page one mip finer than `mip` (the last missing one).
@@ -2366,7 +2514,8 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                 let slot = vc_find(r.key);
                 if (slot != NONE) {
                     slot_used[slot] = vc.counts.y;
-                    irradiance = vc_bilinear(slot, r);
+                    found_slot = slot;
+                    found_ref = r;
                     found = true;
                     if (mip > wanted) {
                         request_key = finer;
@@ -2378,28 +2527,38 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                 if (r.coarsest || mip >= 30u) { break; }
                 mip += 1u;
             }
-            if (!found) {
+            var e = vec3<f32>(0.0);
+            let count = arrayLength(&lights);
+            if (found) {
+                for (var l = 0u; l < count; l++) {
+                    e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
+                }
+                e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
+            } else {
                 fell_back = true;
                 request_key = finer;
                 request_priority = 1u;
                 let point = surface + hit.normal * surface_offset(hit.distance);
                 let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
-                let to_light = light.corner.xyz + (light.edge_u.xyz + light.edge_v.xyz) * 0.5 - point;
-                let lc = light_cone(point);
-                if (lc.ok && dot(normal, to_light) > 0.0) {
-                    var cov: array<f32, 64>;
-                    for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
-                    irradiance.x = cone_visible(lc.c, normal, &cov);
+                // Unshadowed light from each light.
+                for (var l = 0u; l < count; l++) {
+                    let r = lights[l];
+                    let to_light = r.corner.xyz + (r.edge_u.xyz + r.edge_v.xyz) * 0.5 - point;
+                    let lc = light_cone_rect(point, r);
+                    if (lc.ok && dot(normal, to_light) > 0.0) {
+                        var cov: array<f32, 64>;
+                        for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+                        e += r.radiance.xyz * cone_visible(lc.c, normal, &cov);
+                    }
                 }
                 // The sky above the horizon, with the ground below it: a
                 // guess until a page arrives.
-                irradiance.y = 3.14159265 * 0.5 * (1.0 + normal.z);
+                e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + normal.z));
             }
             if (is_sample) {
                 atomicAdd(&vc_stats[2], 1u);
                 if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
             }
-            let e = camera.params.w * irradiance.x + light.sky.xyz * irradiance.y;
             color = albedo[hit.mesh].xyz * e / 3.14159265;
         }
         colors[pixel] = vec4<f32>(color, 1.0);

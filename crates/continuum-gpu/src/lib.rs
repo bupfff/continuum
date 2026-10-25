@@ -154,6 +154,50 @@ pub struct RectLight {
     pub one_sided: bool,
 }
 
+/// A rectangular light with RGB radiance (linear), for scenes with several
+/// colored lights (M5).
+#[derive(Clone, Copy, Debug)]
+pub struct Light {
+    pub rect: RectLight,
+    pub radiance: Vec3,
+}
+
+impl Light {
+    /// A white light of `radiance`.
+    pub fn white(rect: RectLight, radiance: f32) -> Light {
+        Light {
+            rect,
+            radiance: Vec3::splat(radiance),
+        }
+    }
+}
+
+/// A light as the GPU reads it: corner (w: 1 if one-sided), edges, and
+/// radiance (RGB).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(crate) struct LightGpu {
+    corner: [f32; 4],
+    edge_u: [f32; 4],
+    edge_v: [f32; 4],
+    radiance: [f32; 4],
+}
+
+impl From<&Light> for LightGpu {
+    fn from(l: &Light) -> Self {
+        let v4 = |v: Vec3, w: f32| [v.x, v.y, v.z, w];
+        LightGpu {
+            corner: v4(l.rect.corner, l.rect.one_sided as u32 as f32),
+            edge_u: v4(l.rect.edge_u, 0.0),
+            edge_v: v4(l.rect.edge_v, 0.0),
+            radiance: v4(l.radiance, 0.0),
+        }
+    }
+}
+
+/// The most lights a scene can have.
+pub const MAX_LIGHTS: usize = 16;
+
 impl RectLight {
     #[allow(clippy::too_many_arguments)]
     fn uniform(
@@ -199,7 +243,7 @@ impl RectLight {
 
 /// Bindings the `render` entry point uses (render_frame filters the scene's
 /// buffers to these when a lightmap provides more).
-const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30];
+const RENDER_BINDINGS: &[u32] = &[0, 2, 3, 5, 6, 7, 8, 9, 10, 24, 25, 26, 29, 30, 52];
 
 /// The same list, for other modules.
 pub(crate) const RECT_LIGHT_BINDINGS: &[u32] = RENDER_BINDINGS;
@@ -208,15 +252,15 @@ pub(crate) const RECT_LIGHT_BINDINGS: &[u32] = RENDER_BINDINGS;
 type KeepBinding = Box<dyn Fn(u32) -> bool>;
 
 /// Bindings the `visibility` pass uses.
-const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31];
+const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31, 52];
 
 /// Bindings the hardware `hw_visibility` pass uses (32: the acceleration structure).
-pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[0, 3, 6, 31, 32];
+pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[3, 6, 31, 32, 52];
 
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
 pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 37, 38, 41, 42, 43,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 37, 38, 41, 42, 43, 52,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 38, 41, 42, 46, 47, 49, 51,
@@ -225,7 +269,7 @@ pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
     &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 49, 50, 51];
 pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
-    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45,
+    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52,
 ];
 /// The compute `visibility` pass's bindings, for other modules.
 pub(crate) const COMPUTE_VISIBILITY_BINDINGS: &[u32] = VISIBILITY_BINDINGS;
@@ -313,6 +357,12 @@ impl MaskConeKernel {
             source = source.replace(
                 solo,
                 "fn packet_any(x: bool) -> bool {\n    if (PACKETS) { return subgroupAny(x); }\n    return x;\n}",
+            );
+            let first = "fn packet_first(x: bool) -> bool {\n    return x;\n}";
+            assert!(source.contains(first), "packet_first not found");
+            source = source.replace(
+                first,
+                "fn packet_first(x: bool) -> bool {\n    if (PACKETS) { return subgroupBroadcastFirst(select(0u, 1u, x)) == 1u; }\n    return x;\n}",
             );
         }
         if !options.workgroup_stacks {
@@ -670,9 +720,33 @@ impl MaskConeKernel {
         radiance: f32,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration, u64) {
-        let buffers = self.instanced_buffers(light, scene, origin);
+        self.render_instanced_lights(
+            camera,
+            width,
+            height,
+            &[Light::white(light, radiance)],
+            scene,
+            origin,
+            runs,
+        )
+    }
+
+    /// [`Self::render_instanced`] lit by several lights, each with RGB
+    /// radiance (at most [`MAX_LIGHTS`]), and the sky if set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_instanced_lights(
+        &self,
+        camera: Camera,
+        width: u32,
+        height: u32,
+        lights: &[Light],
+        scene: &InstancedScene,
+        origin: DVec3,
+        runs: usize,
+    ) -> (Vec<[f32; 3]>, Duration, u64) {
+        let buffers = self.instanced_buffers(lights, scene, origin);
         let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
-        let cam = camera_uniform(camera, width, height, radiance);
+        let cam = camera_uniform(camera, width, height, lights[0].radiance.x);
         let hw_scene = self
             .uses_hardware_rays()
             .then(|| self.hw_scene(scene, origin));
@@ -688,13 +762,31 @@ impl MaskConeKernel {
         (pixels, time, bytes)
     }
 
+    /// The lights' buffer (binding 52), writable for changing radiance.
+    pub(crate) fn lights_buffer(&self, lights: &[Light]) -> wgpu::Buffer {
+        assert!(
+            (1..=MAX_LIGHTS).contains(&lights.len()),
+            "between 1 and {MAX_LIGHTS} lights"
+        );
+        let gpu: Vec<LightGpu> = lights.iter().map(LightGpu::from).collect();
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("lights"),
+                contents: bytemuck::cast_slice(&gpu),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            })
+    }
+
     /// Scene buffers for an instanced scene, by binding (see `render_instanced`).
+    /// The first light also fills the light uniform, which the paths without
+    /// light lists read.
     pub(crate) fn instanced_buffers(
         &self,
-        light: RectLight,
+        lights: &[Light],
         scene: &InstancedScene,
         origin: DVec3,
     ) -> Vec<(u32, wgpu::Buffer)> {
+        let light = lights[0].rect;
         let geometries: Vec<Vec<Tri>> = scene
             .geometries
             .iter()
@@ -781,6 +873,7 @@ impl MaskConeKernel {
                 storage("node coverage", bytemuck::cast_slice(&flat.blas_cov)),
             ),
             (30, storage("transforms", bytemuck::cast_slice(&xforms))),
+            (52, self.lights_buffer(lights)),
         ];
         buffers
     }
@@ -1060,6 +1153,10 @@ impl MaskConeKernel {
             }
         };
         buffers.push((24, storage("normals", bytemuck::cast_slice(normals))));
+        buffers.push((
+            52,
+            self.lights_buffer(&[Light::white(frame.light, frame.radiance)]),
+        ));
         if let Some(lm) = lightmap {
             let texels: &[f32] = if lm.irradiance.is_empty() {
                 &[0.0]

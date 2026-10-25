@@ -4,15 +4,15 @@
 
 use std::time::{Duration, Instant};
 
-use continuum::glam::DVec3;
+use continuum::glam::{DVec3, Vec3};
 
 use crate::hw::HwScene;
 use crate::live::{DisplayDims, display_bind, display_pipeline};
 use crate::vcache::VirtualCache;
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
-    HW_VISIBILITY_BINDINGS, InstancedScene, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
-    VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_SELF_BAKE_BINDINGS,
+    HW_VISIBILITY_BINDINGS, InstancedScene, Light, LightGpu, MaskConeKernel, RECT_LIGHT_BINDINGS,
+    RectLight, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_SELF_BAKE_BINDINGS,
     VC_SHADE_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
@@ -106,6 +106,8 @@ pub struct InstancedRenderer {
     height: u32,
     scale: u32,
     radiance: f32,
+    /// Lights in the scene's light buffer (binding 52).
+    lights: usize,
     srgb: bool,
 }
 
@@ -162,10 +164,9 @@ impl InstancedRenderer {
             target_width,
             target_height,
             scale,
-            light,
+            &[Light::white(light, radiance)],
             scene,
             origin,
-            radiance,
             None,
         )
     }
@@ -192,31 +193,101 @@ impl InstancedRenderer {
             target_width,
             target_height,
             scale,
-            light,
+            &[Light::white(light, radiance)],
             scene,
             origin,
-            radiance,
             Some(options),
         )
     }
 
+    /// [`Self::new`] lit by several lights, each with RGB radiance (at most
+    /// [`crate::MAX_LIGHTS`]), and the kernel's sky.
     #[allow(clippy::too_many_arguments)]
+    pub fn new_lights(
+        kernel: &MaskConeKernel,
+        target_format: wgpu::TextureFormat,
+        target_width: u32,
+        target_height: u32,
+        scale: u32,
+        lights: &[Light],
+        scene: &InstancedScene,
+        origin: DVec3,
+    ) -> Self {
+        Self::build(
+            kernel,
+            target_format,
+            target_width,
+            target_height,
+            scale,
+            lights,
+            scene,
+            origin,
+            None,
+        )
+    }
+
+    /// [`Self::with_cache`] lit by several lights. The cache keeps each
+    /// light's irradiance per unit radiance in its own channel, so
+    /// [`Self::set_light_radiance`] re-colors a light with no bake.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_cache_lights(
+        kernel: &MaskConeKernel,
+        target_format: wgpu::TextureFormat,
+        target_width: u32,
+        target_height: u32,
+        scale: u32,
+        lights: &[Light],
+        scene: &InstancedScene,
+        origin: DVec3,
+        options: CacheOptions,
+    ) -> Self {
+        Self::build(
+            kernel,
+            target_format,
+            target_width,
+            target_height,
+            scale,
+            lights,
+            scene,
+            origin,
+            Some(options),
+        )
+    }
+
+    /// Changes light `index`'s RGB radiance from the next frame. Lighting is
+    /// linear in emitted power: per-pixel frames shade with it, and the cache
+    /// re-weights its stored channels, baking nothing.
+    pub fn set_light_radiance(&mut self, index: usize, radiance: Vec3) {
+        assert!(index < self.lights, "no light {index}");
+        let buffer = &self
+            .scene
+            .iter()
+            .find(|(b, _)| *b == 52)
+            .expect("lights buffer")
+            .1;
+        let offset = (index * std::mem::size_of::<LightGpu>() + 48) as u64;
+        self.queue.write_buffer(
+            buffer,
+            offset,
+            bytemuck::cast_slice(&[radiance.x, radiance.y, radiance.z, 0.0]),
+        );
+    }
+
     fn build(
         kernel: &MaskConeKernel,
         target_format: wgpu::TextureFormat,
         target_width: u32,
         target_height: u32,
         scale: u32,
-        light: RectLight,
+        lights: &[Light],
         scene: &InstancedScene,
         origin: DVec3,
-        radiance: f32,
         cache: Option<CacheOptions>,
     ) -> Self {
         let device = kernel.device.clone();
         let scale = scale.max(1);
         let (width, height) = (target_width.div_ceil(scale), target_height.div_ceil(scale));
-        let scene_buffers = kernel.instanced_buffers(light, scene, origin);
+        let scene_buffers = kernel.instanced_buffers(lights, scene, origin);
         let camera_buf = uniform_buffer(
             &device,
             "camera",
@@ -261,7 +332,8 @@ impl InstancedRenderer {
                 &kernel.queue,
                 scene,
                 options,
-                kernel.sky() != continuum::glam::Vec3::ZERO,
+                kernel.sky() != Vec3::ZERO,
+                lights.len() as u32,
                 width,
                 height,
             ),
@@ -291,7 +363,9 @@ impl InstancedRenderer {
             width,
             height,
             scale,
-            radiance,
+            // Shading reads the lights' buffer; the camera's radiance is unused.
+            radiance: lights[0].radiance.x,
+            lights: lights.len(),
             srgb: target_format.is_srgb(),
         };
         renderer.targets();

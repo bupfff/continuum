@@ -62,7 +62,9 @@ pub struct CacheOptions {
     /// One pixel per `request_tile × request_tile` reports a missing page each
     /// frame (a different one each frame).
     pub request_tile: u32,
-    /// Texels (mask cones) baked per frame at most.
+    /// The most bake work per frame, in sun texels (one cone each; a texel
+    /// with several lights counts once per light, a sky sample
+    /// `sky_sample_cost`).
     pub bake_budget: u32,
     /// The frame period the bake aims for, in milliseconds (0: always bake
     /// `bake_budget`). Where the device has timestamp queries (M5 gate 5),
@@ -75,7 +77,10 @@ pub struct CacheOptions {
     /// the budget scales by target / period, and when a frame is quicker, it
     /// grows by 10%. Between 1,000 and `bake_budget`.
     pub frame_target_ms: f32,
-    /// Pages the pool holds.
+    /// Pages the pool holds. Each texel holds one channel per light, then
+    /// the sky's, so the pool takes 81 × 4 bytes × channels per page: 340 MB
+    /// at the default 2^19 pages with one light, 680 MB with three. Fewer
+    /// pages make flights evict while waiting for the GPU (M5 gate 6).
     pub pages: u32,
     /// With a sky: the spacing of sky samples on surfaces (meters). A page's
     /// sky channel is sampled every 1, 2, 4 or 8 texels along each axis, the
@@ -561,6 +566,8 @@ pub(crate) struct VirtualCache {
     /// entry, texel) and each page's (first sample, count); and the budget
     /// the frame's plan used, in sun texels.
     sky: bool,
+    /// Lights, each with a channel per texel.
+    lights: u32,
     sky_samples: Vec<[u32; 2]>,
     page_sky: Vec<[u32; 2]>,
     spent: u32,
@@ -603,9 +610,11 @@ impl VirtualCache {
         scene: &InstancedScene,
         options: CacheOptions,
         sky: bool,
+        lights: u32,
         width: u32,
         height: u32,
     ) -> Self {
+        let channels = lights + 1;
         // So a frame's sky samples never outnumber the budget (their buffers'
         // size).
         assert!(
@@ -678,10 +687,10 @@ impl VirtualCache {
             ),
             (
                 37,
-                // Two channels per texel: sun and sky irradiance.
+                // Per texel, a channel per light and the sky's.
                 empty(
                     "page pool",
-                    options.pages as u64 * PAGE_TEXELS as u64 * 2 * 4,
+                    options.pages as u64 * PAGE_TEXELS as u64 * channels as u64 * 4,
                     wgpu::BufferUsages::empty(),
                 ),
             ),
@@ -762,6 +771,7 @@ impl VirtualCache {
             jobs: Vec::new(),
             texels: 0,
             sky,
+            lights,
             sky_samples: Vec::new(),
             page_sky: Vec::new(),
             spent: 0,
@@ -952,7 +962,12 @@ impl VirtualCache {
                 self.options.pixels_per_texel,
                 0.0,
             ],
-            sky: [self.sky_samples.len() as u32, self.sky as u32, 0, 0],
+            sky: [
+                self.sky_samples.len() as u32,
+                self.sky as u32,
+                self.lights,
+                0,
+            ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.log.push(CacheStats {
@@ -1266,7 +1281,7 @@ impl VirtualCache {
             } else {
                 0
             };
-            let cost = inside[0] * inside[1] + samples * self.options.sky_sample_cost;
+            let cost = inside[0] * inside[1] * self.lights + samples * self.options.sky_sample_cost;
             // The first page always fits, so a page costlier than the whole
             // budget still gets baked.
             if self.spent + cost > budget && !self.bake_list.is_empty() {
@@ -1286,9 +1301,12 @@ impl VirtualCache {
             self.last_used[slot as usize] = self.frame;
             let index = self.bake_list.len() as u32;
             self.bake_list.push([k[0], k[1], k[2], slot]);
-            for y in 0..listed[1] {
-                for x in 0..listed[0] {
-                    self.jobs.push([index, y * STRIDE + x]);
+            // Light by light, so neighbouring invocations trace one light.
+            for l in 0..self.lights {
+                for y in 0..listed[1] {
+                    for x in 0..listed[0] {
+                        self.jobs.push([index, (y * STRIDE + x) | l << 8]);
+                    }
                 }
             }
             if self.sky {

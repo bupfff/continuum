@@ -104,32 +104,37 @@ for g, path in enumerate(job["geometries"]):
     mod = holder.modifiers.new("instances", "NODES")
     mod.node_group = tree
 
-# The light: a quad facing edge_u x edge_v that emits only from its front.
-light = job["light"]
-c, u, v = (Vector(light[k]) for k in ("corner", "edge_u", "edge_v"))
-mesh = bpy.data.meshes.new("light")
-mesh.from_pydata([c, c + u, c + u + v, c + v], [], [(0, 1, 2, 3)])
-emitter = bpy.data.objects.new("light", mesh)
-scene.collection.objects.link(emitter)
-mat = bpy.data.materials.new("emission")
-mat.use_nodes = True
-nodes = mat.node_tree.nodes
-nodes.clear()
-out = nodes.new("ShaderNodeOutputMaterial")
-front = nodes.new("ShaderNodeEmission")
-front.inputs["Strength"].default_value = light["radiance"]
-back = nodes.new("ShaderNodeEmission")
-back.inputs["Strength"].default_value = 0.0
-geometry = nodes.new("ShaderNodeNewGeometry")
-mix = nodes.new("ShaderNodeMixShader")
-links = mat.node_tree.links
-links.new(geometry.outputs["Backfacing"], mix.inputs["Fac"])
-links.new(front.outputs["Emission"], mix.inputs[1])
-links.new(back.outputs["Emission"], mix.inputs[2])
-links.new(mix.outputs["Shader"], out.inputs["Surface"])
-if hasattr(mat.cycles, "emission_sampling"):
-    mat.cycles.emission_sampling = "FRONT"
-mesh.materials.append(mat)
+# The lights: quads facing edge_u x edge_v that emit only from their fronts.
+# "lights" lists them with RGB radiance; "light" is one with scalar radiance.
+lights = job.get("lights") or [dict(job["light"], radiance=[job["light"]["radiance"]] * 3)]
+for i, light in enumerate(lights):
+    c, u, v = (Vector(light[k]) for k in ("corner", "edge_u", "edge_v"))
+    mesh = bpy.data.meshes.new(f"light{i}")
+    mesh.from_pydata([c, c + u, c + u + v, c + v], [], [(0, 1, 2, 3)])
+    emitter = bpy.data.objects.new(f"light{i}", mesh)
+    scene.collection.objects.link(emitter)
+    mat = bpy.data.materials.new(f"emission{i}")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    nodes.clear()
+    out = nodes.new("ShaderNodeOutputMaterial")
+    front = nodes.new("ShaderNodeEmission")
+    rgb = light["radiance"]
+    peak = max(rgb) if max(rgb) > 0.0 else 1.0
+    front.inputs["Color"].default_value = (rgb[0] / peak, rgb[1] / peak, rgb[2] / peak, 1.0)
+    front.inputs["Strength"].default_value = peak
+    back = nodes.new("ShaderNodeEmission")
+    back.inputs["Strength"].default_value = 0.0
+    geometry = nodes.new("ShaderNodeNewGeometry")
+    mix = nodes.new("ShaderNodeMixShader")
+    links = mat.node_tree.links
+    links.new(geometry.outputs["Backfacing"], mix.inputs["Fac"])
+    links.new(front.outputs["Emission"], mix.inputs[1])
+    links.new(back.outputs["Emission"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], out.inputs["Surface"])
+    if hasattr(mat.cycles, "emission_sampling"):
+        mat.cycles.emission_sampling = "FRONT"
+    mesh.materials.append(mat)
 
 cam = job["camera"]
 eye, target = Vector(cam["eye"]), Vector(cam["target"])

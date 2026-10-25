@@ -7,7 +7,7 @@ use std::f32::consts::{PI, TAU};
 
 use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum::mesh::Surface;
-use continuum_gpu::{Camera, Instance, InstancedScene, RectLight};
+use continuum_gpu::{Camera, Instance, InstancedScene, Light, RectLight};
 use flatland::rng::Pcg32;
 
 /// Grid spacing of the boulders (meters) and the field's half width.
@@ -161,6 +161,75 @@ impl Field {
         let sun_irradiance = self.radiance * solid_angle * toward.z;
         let tint = Vec3::new(0.6, 0.75, 1.0);
         tint / (tint.element_sum() / 3.0) * (sun_irradiance / 4.0 / std::f32::consts::PI)
+    }
+
+    /// Three colored lights relative to `origin` (M5 gate 6), placed around
+    /// the camera so its surroundings face them all: the sun, warm, in its
+    /// direction but `distance` from the camera, 0.5° across; a cool fill at
+    /// the opposite azimuth, 20° up, `distance` away, 4° across, giving a
+    /// quarter of the sun's irradiance; and an orange lamp (1.5 m square, 6 m
+    /// up, facing down) 25 m ahead of the camera and 8 m to its left.
+    /// (`with_sun_at` measures from the field's center, 1.4 km from the
+    /// camera, which leaves the camera's surroundings behind a one-sided sun.)
+    pub fn colored_lights(&self, origin: DVec3, distance: f64) -> [Light; 3] {
+        let (camera, _) = self.relative(origin);
+        let eye = self.eye;
+        let center = self.scene.instances[0].position;
+        let toward_sun = (self.sun_center - center).normalize();
+        // A one-sided square `size` across, `distance` from the eye toward
+        // `toward`, facing the eye.
+        let panel = |toward: DVec3, size: f64| {
+            let w = (-toward).as_vec3();
+            let a = Vec3::Z.cross(w).normalize() * size as f32;
+            let b = w.cross(a).normalize() * size as f32;
+            let middle = eye + toward * distance - origin;
+            RectLight {
+                corner: (middle - (a + b).as_dvec3() * 0.5).as_vec3(),
+                edge_u: a,
+                edge_v: b,
+                one_sided: true,
+            }
+        };
+        let tinted = |rgb: Vec3, radiance: f64| rgb / (rgb.element_sum() / 3.0) * radiance as f32;
+        let sun_size = 2.0 * distance * 0.25f64.to_radians().tan();
+        let warm = Light {
+            rect: panel(toward_sun, sun_size),
+            radiance: tinted(Vec3::new(1.0, 0.9, 0.75), self.radiance as f64),
+        };
+        // The fill: azimuth opposite the sun's, elevation 20°, a quarter of
+        // the sun's irradiance on the ground.
+        let azimuth = toward_sun.y.atan2(toward_sun.x) + std::f64::consts::PI;
+        let elevation = 20f64.to_radians();
+        let toward = DVec3::new(
+            elevation.cos() * azimuth.cos(),
+            elevation.cos() * azimuth.sin(),
+            elevation.sin(),
+        );
+        let fill_size = 2.0 * distance * 2f64.to_radians().tan();
+        let solid = |size: f64| (size / distance) * (size / distance);
+        let sun_e = self.radiance as f64 * solid(sun_size) * toward_sun.z;
+        let fill_radiance = 0.25 * sun_e / (solid(fill_size) * toward.z);
+        let fill = Light {
+            rect: panel(toward, fill_size),
+            radiance: tinted(Vec3::new(0.55, 0.7, 1.0), fill_radiance),
+        };
+        // The lamp, facing down (edge_u × edge_v = -z).
+        let forward = (camera.target - camera.eye).normalize();
+        let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
+        let left = Vec3::Z.cross(flat);
+        let lamp_center = camera.eye + flat * 25.0 + left * 8.0 + Vec3::Z * (6.0 - camera.eye.z);
+        let (u, v) = (flat * 1.5, left * 1.5);
+        let (u, v) = if u.cross(v).z < 0.0 { (u, v) } else { (v, u) };
+        let lamp = Light {
+            rect: RectLight {
+                corner: lamp_center - (u + v) * 0.5,
+                edge_u: u,
+                edge_v: v,
+                one_sided: true,
+            },
+            radiance: Vec3::new(1.0, 0.6, 0.3) * 150.0,
+        };
+        [warm, fill, lamp]
     }
 
     /// Boulders in the field (instances other than the ground).
