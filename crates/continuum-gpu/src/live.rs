@@ -244,6 +244,10 @@ impl LiveRenderer {
         radiance: f32,
         lightmap: &Lightmap,
     ) -> Self {
+        assert!(
+            kernel.sky() == Vec3::ZERO,
+            "the lighting caches do not support a sky yet"
+        );
         let device = kernel.device.clone();
         let frame = Frame {
             camera: Camera {

@@ -429,7 +429,10 @@ fn main() -> std::io::Result<()> {
         .unwrap();
         std::fs::write(
             out_dir.join(format!("m4_gate10_flight{}.csv", i + 1)),
-            format!("frame,ms,fallback,requests,texels_baked,planning_ms,waiting_ms\n{}", f.csv),
+            format!(
+                "frame,ms,fallback,requests,texels_baked,planning_ms,waiting_ms\n{}",
+                f.csv
+            ),
         )?;
     }
     writeln!(

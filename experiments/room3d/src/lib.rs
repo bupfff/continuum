@@ -3,6 +3,7 @@
 
 pub mod cycles;
 pub mod field;
+pub mod outdoor;
 pub mod showcase;
 
 use continuum::bvh::Bvh;

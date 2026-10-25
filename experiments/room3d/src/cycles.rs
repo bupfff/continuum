@@ -64,6 +64,37 @@ pub fn render(
     light: RectLight,
     radiance: f32,
     camera: Camera,
+    size: (u32, u32),
+    samples: u32,
+    bounces: u32,
+    seed: u32,
+    work: &Path,
+) -> io::Result<Reference> {
+    render_with_sky(
+        surfaces,
+        albedo,
+        light,
+        radiance,
+        Vec3::ZERO,
+        camera,
+        size,
+        samples,
+        bounces,
+        seed,
+        work,
+    )
+}
+
+/// [`render`] with a uniform sky: the world's color, `sky` (linear RGB), seen
+/// by camera rays that miss and lighting every surface.
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_sky(
+    surfaces: &[Surface],
+    albedo: &[Vec3],
+    light: RectLight,
+    radiance: f32,
+    sky: Vec3,
+    camera: Camera,
     (width, height): (u32, u32),
     samples: u32,
     bounces: u32,
@@ -73,7 +104,10 @@ pub fn render(
     std::fs::create_dir_all(work)?;
     let obj = work.join("scene.obj");
     write_obj(surfaces, &obj)?;
-    let tag = format!("{width}x{height}_{samples}spp_{bounces}b_seed{seed}");
+    let tag = format!(
+        "{width}x{height}_{samples}spp_{bounces}b_seed{seed}_r{radiance}_sky{}-{}-{}",
+        sky.x, sky.y, sky.z
+    );
     let (exr, out) = (
         work.join(format!("{tag}.exr")),
         work.join(format!("{tag}.f32")),
@@ -83,6 +117,7 @@ pub fn render(
     let job = format!(
         r#"{{"obj": {:?}, "exr": {:?}, "out": {:?}, "albedo": [{}],
   "light": {{"corner": {}, "edge_u": {}, "edge_v": {}, "radiance": {radiance}}},
+  "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
   "width": {width}, "height": {height}, "samples": {samples}, "bounces": {bounces}, "seed": {seed}}}"#,
         obj.to_string_lossy(),
@@ -92,6 +127,7 @@ pub fn render(
         v(light.corner),
         v(light.edge_u),
         v(light.edge_v),
+        v(sky),
         v(camera.eye),
         v(camera.target),
         camera.vertical_fov_degrees

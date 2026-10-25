@@ -26,6 +26,8 @@ struct LightUniform {
     /// `[prefilter threshold in bins (0: exact), 1 for nearest-first ray
     /// traversal, 0, 0]`
     params: [f32; 4],
+    /// Uniform sky radiance (linear RGB; zero: no sky).
+    sky: [f32; 4],
 }
 
 #[repr(C)]
@@ -58,6 +60,8 @@ pub struct MaskConeKernel {
     vc_fill_pipeline: wgpu::ComputePipeline,
     vc_shade_pipeline: wgpu::ComputePipeline,
     prefilter: std::cell::Cell<f32>,
+    sky: std::cell::Cell<Vec3>,
+    sky_max: std::cell::Cell<bool>,
     nearest_first: std::cell::Cell<bool>,
     profile_stage: std::cell::Cell<u32>,
     split: std::cell::Cell<bool>,
@@ -139,6 +143,7 @@ impl RectLight {
         prefilter: f32,
         nearest_first: bool,
         profile_stage: u32,
+        (sky, sky_max): (Vec3, bool),
     ) -> LightUniform {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         LightUniform {
@@ -155,8 +160,9 @@ impl RectLight {
                 prefilter,
                 nearest_first as u32 as f32,
                 profile_stage as f32,
-                0.0,
+                sky_max as u32 as f32,
             ],
+            sky: v4(sky),
         }
     }
 }
@@ -344,6 +350,8 @@ impl MaskConeKernel {
             vc_fill_pipeline,
             vc_shade_pipeline,
             prefilter: std::cell::Cell::new(0.0),
+            sky: std::cell::Cell::new(Vec3::ZERO),
+            sky_max: std::cell::Cell::new(false),
             nearest_first: std::cell::Cell::new(true),
             profile_stage: std::cell::Cell::new(0),
             split: std::cell::Cell::new(false),
@@ -361,6 +369,26 @@ impl MaskConeKernel {
     /// the call, including [`LiveRenderer`]s created after it.
     pub fn set_prefilter(&self, bins: f32) {
         self.prefilter.set(bins.max(0.0));
+    }
+
+    /// A uniform sky of radiance `rgb` (linear) over the whole sphere of
+    /// directions, lighting every receiver through six cube-face mask cones
+    /// (M5 gate 1); camera rays that miss see it. Zero (the default) turns it
+    /// off. Per-pixel rendering only so far: the lighting caches
+    /// ([`Lightmap`], [`LiveRenderer`], [`InstancedRenderer::with_cache`])
+    /// refuse a sky. Applies to work set up after the call.
+    pub fn set_sky(&self, rgb: Vec3) {
+        self.sky.set(rgb.max(Vec3::ZERO));
+    }
+
+    pub fn sky(&self) -> Vec3 {
+        self.sky.get()
+    }
+
+    /// Diagnostic: sky cones combine coverage across meshes by the maximum,
+    /// like sun cones, instead of as independent occluders.
+    pub fn set_sky_combination_max(&self, on: bool) {
+        self.sky_max.set(on);
     }
 
     pub fn prefilter(&self) -> f32 {
@@ -505,6 +533,10 @@ impl MaskConeKernel {
         lightmap: &Lightmap,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
+        assert!(
+            self.sky() == Vec3::ZERO,
+            "the lighting caches do not support a sky yet"
+        );
         let frame = Frame {
             camera,
             width,
@@ -591,6 +623,7 @@ impl MaskConeKernel {
             self.prefilter.get(),
             self.nearest_first.get(),
             self.profile_stage.get(),
+            (self.sky.get(), self.sky_max.get()),
         );
         let storage = |label: &str, contents: &[u8]| {
             self.device
@@ -652,6 +685,10 @@ impl MaskConeKernel {
     /// Bakes a lightmap: one mask cone per texel (through the hierarchy).
     /// Returns the bake time.
     pub fn bake(&self, lightmap: &mut Lightmap, light: RectLight, meshes: &[Vec<Tri>]) -> Duration {
+        assert!(
+            self.sky() == Vec3::ZERO,
+            "the lighting caches do not support a sky yet"
+        );
         let (values, time) = self.irradiance_with(&lightmap.receivers, light, meshes, true, 1);
         lightmap.irradiance = values;
         time
@@ -837,6 +874,7 @@ impl MaskConeKernel {
             self.prefilter.get(),
             self.nearest_first.get(),
             self.profile_stage.get(),
+            (self.sky.get(), self.sky_max.get()),
         );
         let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
@@ -992,6 +1030,7 @@ impl MaskConeKernel {
             self.prefilter.get(),
             self.nearest_first.get(),
             self.profile_stage.get(),
+            (self.sky.get(), self.sky_max.get()),
         );
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()

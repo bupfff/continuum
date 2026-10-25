@@ -23,8 +23,13 @@ struct Light {
     // nearest-first ray traversal, 0 for a fixed child order; z: profiling
     // stage, cutting cones short to time their parts (0: off, 1: no cone,
     // 2: setup and weights only, 3: plus the object hierarchy, 4: plus triangle
-    // hierarchies but no rasterization)
+    // hierarchies but no rasterization); w: 1 for sky cones to combine
+    // coverage across meshes by the maximum (a diagnostic)
     params: vec4<f32>,
+    // A uniform sky: radiance (linear RGB) over the whole sphere of directions,
+    // lit through six cube-face mask cones per receiver (zero: no sky).
+    // Per-pixel shading only so far.
+    sky: vec4<f32>,
 };
 
 struct Receiver {
@@ -494,6 +499,11 @@ fn cone_to_object(c: Cone, m: u32) -> Cone {
     return o;
 }
 
+// How a bin's coverage by one mesh combines with other meshes': the maximum
+// (sun cones, whose tiny bins rarely hold two partial occluders), or as
+// independent occluders, 1 − Π(1 − c) (sky cones, whose 11° bins often do).
+var<private> independent_occluders: bool = false;
+
 fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>, i: u32, base: u32) {
     if (u32(light.params.z) == 3u) { return; }
     let c = cone_to_object(world_cone, m);
@@ -540,7 +550,11 @@ fn add_mesh_coverage(world_cone: Cone, m: u32, cov: ptr<function, array<f32, 64>
             let covered = abs(running);
             if (covered > 1e-6) {
                 let before = (*cov)[b];
-                (*cov)[b] = max(before, min(covered, 1.0));
+                if (independent_occluders) {
+                    (*cov)[b] = 1.0 - (1.0 - before) * (1.0 - min(covered, 1.0));
+                } else {
+                    (*cov)[b] = max(before, min(covered, 1.0));
+                }
                 if (before < 1.0 && (*cov)[b] >= 1.0) { (*full)++; }
             }
         }
@@ -671,6 +685,100 @@ fn cone_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>) -> f32 {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }
     }
     return visible;
+}
+
+// --- Sky light: a uniform sky through six cube-face mask cones. ---
+
+// Far enough that every scene lies inside a sky cone (relative to the origin).
+const SKY_FAR: f32 = 1e7;
+
+// The projected solid angle (Lambert) of bin `b` of cone `c` above the
+// horizon of `normal`: the bin's quad of directions clipped to dot(normal, d)
+// >= 0, then Lambert's edge integrals.
+fn clipped_bin_weight(c: Cone, normal: vec3<f32>, b: u32) -> f32 {
+    let col = f32(b % GRID);
+    let row = f32(b / GRID);
+    let g = f32(GRID);
+    var d: array<vec3<f32>, 4>;
+    d[0] = direction(c, col / g, row / g);
+    d[1] = direction(c, (col + 1.0) / g, row / g);
+    d[2] = direction(c, (col + 1.0) / g, (row + 1.0) / g);
+    d[3] = direction(c, col / g, (row + 1.0) / g);
+    var above = 0u;
+    for (var k = 0u; k < 4u; k++) {
+        if (dot(normal, d[k]) > 0.0) { above++; }
+    }
+    if (above == 4u) { return bin_weight(c, normal, b); }
+    if (above == 0u) { return 0.0; }
+    // Directions interpolate linearly along a bin's edges (the edges are
+    // great-circle arcs), so the plane clip of the quad is exact.
+    var poly: array<vec3<f32>, 6>;
+    var n = 0u;
+    for (var k = 0u; k < 4u; k++) {
+        let a = d[k];
+        let e = d[(k + 1u) % 4u];
+        let sa = dot(normal, a);
+        let se = dot(normal, e);
+        if (sa >= 0.0) {
+            poly[n] = a;
+            n++;
+        }
+        if ((sa >= 0.0) != (se >= 0.0)) {
+            poly[n] = a + (e - a) * (sa / (sa - se));
+            n++;
+        }
+    }
+    var sum = 0.0;
+    for (var k = 0u; k < n; k++) {
+        sum += lambert_edge(normal, poly[k], poly[(k + 1u) % n]);
+    }
+    return abs(0.5 * sum);
+}
+
+// Irradiance per unit sky radiance at `apex` (surface normal `normal`): the
+// uncovered projected solid angle of the six faces of a cube of directions
+// around it, each a mask cone reaching beyond the scene.
+fn sky_irradiance(apex: vec3<f32>, normal: vec3<f32>) -> f32 {
+    var total = 0.0;
+    for (var f = 0u; f < 6u; f++) {
+        let axis = f / 2u;
+        let sign = select(1.0, -1.0, (f & 1u) == 1u);
+        var forward = vec3<f32>(0.0);
+        forward[axis] = sign;
+        var right = vec3<f32>(0.0);
+        right[(axis + 1u) % 3u] = 1.0;
+        let up = cross(forward, right);
+        var c: Cone;
+        c.apex = apex;
+        c.right = right;
+        c.up = up;
+        c.forward = forward;
+        c.window = vec4<f32>(-1.0, -1.0, 1.0, 1.0);
+        c.far_normal = forward;
+        c.far_offset = dot(forward, apex) + SKY_FAR;
+        // The face's directions are linear in the window, so its corners
+        // decide whether any lies above the horizon.
+        var above = false;
+        for (var k = 0u; k < 4u; k++) {
+            if (dot(normal, direction(c, f32(k & 1u), f32(k >> 1u))) > 0.0) { above = true; }
+        }
+        if (!above) { continue; }
+        var cov: array<f32, 64>;
+        for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+        var full = 0u;
+        // params.w = 1: combine by the maximum instead (a diagnostic).
+        independent_occluders = light.params.w < 0.5;
+        scene_coverage(c, 0u, &cov, &full);
+        independent_occluders = false;
+        var visible = 0.0;
+        for (var b = 0u; b < BINS; b++) {
+            if (cov[b] < 1.0) {
+                visible += (1.0 - cov[b]) * clipped_bin_weight(c, normal, b);
+            }
+        }
+        total += visible;
+    }
+    return total;
 }
 
 @compute @workgroup_size(64)
@@ -984,12 +1092,17 @@ fn recorded_hit(pixel: u32, dir: vec3<f32>) -> Hit {
 // Per-pixel shading: a mask cone at the hit.
 fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, sees_light: bool) {
     if (sees_light) { colors[pixel] = vec4<f32>(vec3<f32>(camera.params.w), 1.0); return; }
-    if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(0.0, 0.0, 0.0, 1.0); return; }
+    // A ray that misses everything sees the sky.
+    if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(light.sky.xyz, 1.0); return; }
     let surface = eye + dir * hit.distance;
     let point = surface + hit.normal * surface_offset(hit.distance);
-    let irradiance = hit_irradiance(pixel, point, shading_normal(hit.mesh, hit.tri, surface, -dir));
-    let c = albedo[hit.mesh].xyz * (camera.params.w * irradiance / 3.14159265);
-    colors[pixel] = vec4<f32>(c, 1.0);
+    let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
+    let irradiance = hit_irradiance(pixel, point, normal);
+    var e = vec3<f32>(camera.params.w * irradiance);
+    if (any(light.sky.xyz > vec3<f32>(0.0))) {
+        e += light.sky.xyz * sky_irradiance(point, normal);
+    }
+    colors[pixel] = vec4<f32>(albedo[hit.mesh].xyz * e / 3.14159265, 1.0);
 }
 
 @compute @workgroup_size(8, 8)

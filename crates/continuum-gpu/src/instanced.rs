@@ -174,6 +174,10 @@ impl InstancedRenderer {
         radiance: f32,
         cache: Option<CacheOptions>,
     ) -> Self {
+        assert!(
+            cache.is_none() || kernel.sky() == continuum::glam::Vec3::ZERO,
+            "the lighting cache does not support a sky yet"
+        );
         let device = kernel.device.clone();
         let scale = scale.max(1);
         let (width, height) = (target_width.div_ceil(scale), target_height.div_ceil(scale));

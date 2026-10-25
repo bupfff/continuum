@@ -30,7 +30,12 @@ pub struct Field {
 /// A lumpy boulder about 1 m across: a sphere with low-frequency bumps,
 /// squashed vertically (100 × 50 segments, 9,800 triangles).
 pub fn boulder() -> Surface {
-    let s = Surface::parametric(100, 50, |u, v| {
+    boulder_with(100, 50)
+}
+
+/// [`boulder`] with `nu × nv` segments.
+pub fn boulder_with(nu: usize, nv: usize) -> Surface {
+    let s = Surface::parametric(nu, nv, |u, v| {
         let (theta, phi) = (TAU * u, PI * v);
         let r = 1.0
             + 0.22 * (3.0 * theta + 1.0).sin() * (2.0 * phi).sin()

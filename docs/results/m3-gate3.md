@@ -28,6 +28,14 @@ Cycles (3), but the mean frame took 17.76 ms against 16.7. As the project's
 rules require, this is recorded as a fail: no parameters were tuned and the
 gate was not rerun.
 
+> **Correction (M5 gate 1).** The Cycles reference did not sample pixel
+> centers. Blender 5.2's Cycles always applies at least a one-pixel box
+> filter, whatever width the script asks for, so each reference pixel is its
+> area's average. The 3.80% compared those with our renders, which take one
+> sample at each pixel's center. Part of it is therefore sampling at
+> silhouettes, not lighting, and the true lighting error is likely lower. The
+> verdict (a fail on speed) is unaffected. See `m5-gate1.md`.
+
 ## Results
 
 Apple M4 (MacBook Air, on battery). 31 meshes (29 static, 7,324 triangles;

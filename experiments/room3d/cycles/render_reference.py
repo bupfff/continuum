@@ -8,9 +8,11 @@ The job (JSON) names an OBJ with one object per mesh (`mesh_<index>`, Z up,
 per-vertex normals), the albedo of each mesh, a rectangular light, a pinhole
 camera, the resolution and sample count. Materials are Lambertian (Diffuse
 BSDF, roughness 0). The light is a one-sided emitting quad facing
-`edge_u x edge_v`, visible to the camera. Light paths: direct light plus at
-most `bounces` diffuse bounces. Pixels are point-sampled at their centers (box
-filter of 0.01 pixels), with no denoising or clamping. The linear RGB result is
+`edge_u x edge_v`, visible to the camera. An optional uniform sky (`sky`, linear
+RGB) is the world color. Light paths: direct light plus at
+most `bounces` diffuse bounces. Each pixel integrates its area
+(a one-pixel box filter: Blender 5.2's Cycles applies at least one pixel even
+when asked for less, as M5 gate 1 measured), with no denoising or clamping. The linear RGB result is
 written top row first as little-endian float32 to `out`.
 """
 
@@ -100,9 +102,13 @@ camera.matrix_world = Matrix(
 )
 scene.camera = camera
 
-world = bpy.data.worlds.new("black")
+# The world: black, or a uniform sky of the given radiance (linear RGB).
+sky = job.get("sky", [0.0, 0.0, 0.0])
+world = bpy.data.worlds.new("sky")
 world.use_nodes = True
-world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.0
+background = world.node_tree.nodes["Background"]
+background.inputs["Color"].default_value = (*sky, 1.0)
+background.inputs["Strength"].default_value = 1.0 if any(sky) else 0.0
 scene.world = world
 
 scene.render.engine = "CYCLES"
@@ -138,7 +144,7 @@ cy.sample_clamp_indirect = 0.0
 if hasattr(cy, "light_sampling_threshold"):
     cy.light_sampling_threshold = 0.0
 cy.pixel_filter_type = "BOX"
-cy.filter_width = 0.01
+cy.filter_width = 1.0
 cy.seed = job["seed"]
 scene.render.resolution_x = job["width"]
 scene.render.resolution_y = job["height"]
