@@ -1,7 +1,8 @@
 //! Quick check (not a gate): the million-boulder field's sun-only cache warmed
 //! at the standing viewpoint, as M4 gate 11's hardware row, with the current
 //! build. Prints the ray mode, frames until warm and the warm frame time.
-//! `--sky` adds the field's sky, `--lights` uses three colored lights;
+//! `--sky` adds the field's sky, `--lights` uses three colored lights,
+//! `--sphere` the sun with the field's sphere lights;
 //! `--flight` then flies gate 8's path once.
 
 use std::time::Instant;
@@ -26,7 +27,13 @@ fn main() {
     kernel.set_sky(if sky { field.sky() } else { Vec3::ZERO });
     // `--lights`: the field's three colored lights (M5 gate 6) instead of
     // the sun.
-    let lights = if std::env::args().any(|a| a == "--lights") {
+    let lights = if std::env::args().any(|a| a == "--sphere") {
+        // `--sphere`: the sun with the field's point light and spot (M5 gate
+        // 8).
+        let mut all = vec![continuum_gpu::Light::white(light, field.radiance)];
+        all.extend(field.sphere_lights(origin));
+        all
+    } else if std::env::args().any(|a| a == "--lights") {
         let all = field.colored_lights(origin, 1000.0);
         match std::env::var("LIGHTS") {
             Ok(v) => v
