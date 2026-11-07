@@ -189,11 +189,9 @@ pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
                     inside[0] == inside[2] && inside[1] == inside[3] && inside[0] != inside[1];
                 if saddle && values.iter().sum::<f32>() < 0.0 {
                     // Two separate corners.
-                    for q in 0..4 {
-                        if inside[q] {
-                            let (before, after) = ((q + 3) % 4, (q + 1) % 4);
-                            emit(&[crossing(before, q), corner(q), crossing(q, after)]);
-                        }
+                    for q in (0..4).filter(|&q| inside[q]) {
+                        let (before, after) = ((q + 3) % 4, (q + 1) % 4);
+                        emit(&[crossing(before, q), corner(q), crossing(q, after)]);
                     }
                     continue;
                 }
