@@ -83,6 +83,21 @@ for g, path in enumerate(job["geometries"]):
     else:
         color_in = bsdf.inputs["Base Color"] if material else bsdf.inputs["Color"]
         mat.node_tree.links.new(attr.outputs["Color"], color_in)
+    normal_map = (job.get("normal_maps") or [None] * len(job["geometries"]))[g]
+    if normal_map:
+        # A tangent-space normal map (M10 gate 5): non-color, linear
+        # filtering, repeating, through the OBJ's texture coordinates
+        # (MikkTSpace tangents).
+        nimage = nodes.new("ShaderNodeTexImage")
+        nimage.image = bpy.data.images.load(normal_map, check_existing=True)
+        nimage.image.colorspace_settings.name = "Non-Color"
+        nimage.interpolation = "Linear"
+        nimage.extension = "REPEAT"
+        nmap = nodes.new("ShaderNodeNormalMap")
+        nmap.space = "TANGENT"
+        nmap.inputs["Strength"].default_value = 1.0
+        mat.node_tree.links.new(nimage.outputs["Color"], nmap.inputs["Color"])
+        mat.node_tree.links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
     mat.node_tree.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     source.data.materials.clear()
     source.data.materials.append(mat)

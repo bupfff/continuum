@@ -105,6 +105,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_textures: vec![Some(0), None, None],
         geometry_materials: Vec::new(),
         geometry_emission: Vec::new(),
+        geometry_normal_maps: Vec::new(),
     }
 }
 

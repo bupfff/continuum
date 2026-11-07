@@ -66,6 +66,46 @@ fn texture(f: impl Fn(f32, f32) -> Vec3) -> Texture {
     }
 }
 
+/// A texture from a function of (u, v) in [0, 1)² giving a tangent-space
+/// normal, encoded linearly (M10 gate 5).
+fn normal_texture(f: impl Fn(f32, f32) -> Vec3) -> Texture {
+    let encode = |c: f32| ((c * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let n = f(
+                (x as f32 + 0.5) / SIZE as f32,
+                (y as f32 + 0.5) / SIZE as f32,
+            );
+            rgba.extend([encode(n.x), encode(n.y), encode(n.z), 255]);
+        }
+    }
+    Texture {
+        width: SIZE,
+        height: SIZE,
+        rgba,
+    }
+}
+
+/// A beveled tile's tangent-space normal at (fu, fv) in [0, 1)² within it
+/// (v down the image): flat in the mortar (half-widths `mu`, `mv` from the
+/// edges) and inside; within `bevel` of the mortar, tilted 30° toward the
+/// nearest edge (green toward the image's top).
+fn bevel(fu: f32, fv: f32, mu: f32, mv: f32, bevel: f32) -> Vec3 {
+    let (s, c) = 30f32.to_radians().sin_cos();
+    let edges = [
+        (fu - mu, Vec3::new(-s, 0.0, c)),
+        (1.0 - fu - mu, Vec3::new(s, 0.0, c)),
+        (fv - mv, Vec3::new(0.0, s, c)),
+        (1.0 - fv - mv, Vec3::new(0.0, -s, c)),
+    ];
+    let (d, n) = edges
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .unwrap();
+    if d < 0.0 || d >= bevel { Vec3::Z } else { n }
+}
+
 pub struct Textured {
     pub scene: InstancedScene,
     pub camera: Camera,
@@ -179,6 +219,7 @@ impl Textured {
             geometry_textures: vec![Some(0), Some(1), Some(2)],
             geometry_materials: Vec::new(),
             geometry_emission: Vec::new(),
+            geometry_normal_maps: Vec::new(),
         };
         // The camera stands at 1.5 m looking along +y, slightly down; the sun
         // is 30° up behind and to the left, 1 km away, 0.5° across.
@@ -236,6 +277,25 @@ impl Textured {
                 roughness: 0.4,
             }),
         ];
+        self
+    }
+
+    /// M10 gate 5's normal maps: the ground's tiles and the block's bricks
+    /// beveled toward their mortar (bevels 12% of a tile, sloped 30°).
+    pub fn with_normal_maps(mut self) -> Textured {
+        let tiles = normal_texture(|u, v| {
+            let (tu, tv) = (u * 8.0, v * 8.0);
+            bevel(tu.fract(), tv.fract(), 0.04, 0.04, 0.12)
+        });
+        let bricks = normal_texture(|u, v| {
+            let row = (v * 8.0).floor();
+            let shift = if row as i32 % 2 == 0 { 0.0 } else { 0.5 };
+            let (bu, bv) = (u * 4.0 + shift, v * 8.0);
+            bevel(bu.fract(), bv.fract(), 0.03, 0.06, 0.12)
+        });
+        let first = self.scene.textures.len() as u32;
+        self.scene.textures.extend([tiles, bricks]);
+        self.scene.geometry_normal_maps = vec![Some(first), None, Some(first + 1)];
         self
     }
 

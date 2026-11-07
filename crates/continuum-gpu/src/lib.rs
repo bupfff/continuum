@@ -471,8 +471,8 @@ pub(crate) const VC_FILL_BINDINGS: &[u32] = &[
     3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64, 73, 77,
 ];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
-    0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55,
-    56, 57, 58, 62, 73, 76,
+    79, 0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52,
+    55, 56, 57, 58, 62, 73, 76,
 ];
 /// Bounce light's samples (M10 gate 1).
 pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
@@ -1038,7 +1038,7 @@ impl MaskConeKernel {
             height,
             buffers,
             hw_scene.as_ref().map(|h| &h.tlas),
-            &self.scene_textures(&scene.textures),
+            &self.scene_textures(&scene.textures, &scene.normal_map_textures()),
             runs,
         );
         (pixels, time, bytes)
@@ -1143,10 +1143,23 @@ impl MaskConeKernel {
             .collect();
         // Per object, its material: metallic and roughness (roughness below
         // zero: Lambertian), and its emission as half floats.
+        let normal_maps = scene.normal_map_textures();
         let materials: Vec<[u32; 4]> = scene
             .instances
             .iter()
             .map(|i| {
+                // Its normal map's layer plus one (0: none), M10 gate 5.
+                let layer = scene
+                    .geometry_normal_maps
+                    .get(i.geometry)
+                    .copied()
+                    .flatten()
+                    .filter(|_| {
+                        let g = &scene.geometries[i.geometry];
+                        g.tex.len() == g.triangles.len()
+                    })
+                    .and_then(|k| normal_maps.iter().position(|&m| m == k))
+                    .map_or(0, |p| p as u32 + 1);
                 let [metallic, roughness] =
                     match scene.geometry_materials.get(i.geometry).copied().flatten() {
                         Some(m) => [m.metallic, m.roughness.clamp(0.0, 1.0)],
@@ -1163,7 +1176,7 @@ impl MaskConeKernel {
                     metallic.to_bits(),
                     roughness.to_bits(),
                     e[0] | e[1] << 16,
-                    e[2],
+                    e[2] | layer << 16,
                 ]
             })
             .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0]))
@@ -1244,8 +1257,30 @@ impl MaskConeKernel {
     }
 
     /// A scene's textures, resampled into a layered texture with mip levels
-    /// (a 1×1 white layer without any).
-    pub(crate) fn scene_textures(&self, textures: &[Texture]) -> SceneTextures {
+    /// (a 1×1 white layer without any), and its normal maps (textures
+    /// `normal_maps`, M10 gate 5) into a linear one (a flat 1×1 layer
+    /// without any).
+    pub(crate) fn scene_textures(
+        &self,
+        textures: &[Texture],
+        normal_maps: &[u32],
+    ) -> SceneTextures {
+        let (view, sampler) = self.layered(textures, false);
+        let maps: Vec<Texture> = normal_maps
+            .iter()
+            .map(|&k| textures[k as usize].clone())
+            .collect();
+        let (normals, _) = self.layered(&maps, true);
+        SceneTextures {
+            view,
+            sampler,
+            normals,
+        }
+    }
+
+    /// Textures resampled into one layered texture with mip levels (sRGB, or
+    /// `linear`); a 1×1 layer without any (white, or a flat normal).
+    fn layered(&self, textures: &[Texture], linear: bool) -> (wgpu::TextureView, wgpu::Sampler) {
         let size = if textures.is_empty() { 1 } else { TEXTURE_SIZE };
         let levels = size.ilog2() + 1;
         let layers = textures.len().max(1) as u32;
@@ -1259,14 +1294,22 @@ impl MaskConeKernel {
             mip_level_count: levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: if linear {
+                wgpu::TextureFormat::Rgba8Unorm
+            } else {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let white = Texture {
             width: 1,
             height: 1,
-            rgba: vec![255; 4],
+            rgba: if linear {
+                vec![128, 128, 255, 255]
+            } else {
+                vec![255; 4]
+            },
         };
         let sources: Vec<&Texture> = if textures.is_empty() {
             vec![&white]
@@ -1274,7 +1317,7 @@ impl MaskConeKernel {
             textures.iter().collect()
         };
         for (layer, t) in sources.iter().enumerate() {
-            for (level, pixels) in texture_levels(t, size).iter().enumerate() {
+            for (level, pixels) in texture_levels(t, size, linear).iter().enumerate() {
                 let side = size >> level;
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -1314,7 +1357,7 @@ impl MaskConeKernel {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        SceneTextures { view, sampler }
+        (view, sampler)
     }
 
     /// Hardware acceleration structures for an instanced scene.
@@ -1379,7 +1422,7 @@ impl MaskConeKernel {
         buffers: Vec<(u32, wgpu::Buffer)>,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration) {
-        let textures = self.scene_textures(&[]);
+        let textures = self.scene_textures(&[], &[]);
         self.render_buffers_with(cached, cam, width, height, buffers, None, &textures, runs)
     }
 
@@ -1494,6 +1537,12 @@ impl MaskConeKernel {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 56,
                         resource: wgpu::BindingResource::Sampler(&textures.sampler),
+                    });
+                }
+                if keep(79) {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 79,
+                        resource: wgpu::BindingResource::TextureView(&textures.normals),
                     });
                 }
                 let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1956,6 +2005,26 @@ pub struct InstancedScene {
     /// reflections; it does not light other surfaces (use a light for that).
     /// Stored as half floats (at most 65,504).
     pub geometry_emission: Vec<Vec3>,
+    /// Each geometry's normal map, if any (empty: none; M10 gate 5): an
+    /// index into `textures` of a tangent-space normal map (linear, OpenGL's
+    /// convention as glTF specifies: green toward the image's top), read
+    /// through the geometry's texture coordinates. Used by the cache's
+    /// shading for light from lights, specular and reflections; the cached
+    /// sky and bounce light keep the interpolated normal.
+    pub geometry_normal_maps: Vec<Option<u32>>,
+}
+
+impl InstancedScene {
+    /// The textures used as normal maps, each once, in order.
+    pub(crate) fn normal_map_textures(&self) -> Vec<u32> {
+        let mut used: Vec<u32> = (0..self.geometries.len())
+            .filter(|&g| self.geometries[g].tex.len() == self.geometries[g].triangles.len())
+            .filter_map(|g| self.geometry_normal_maps.get(g).copied().flatten())
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        used
+    }
 }
 
 /// `x` (clamped to 0..=65,504) as half-float bits, truncated; values below
@@ -2000,6 +2069,8 @@ pub const TEXTURE_SIZE: u32 = 1024;
 pub(crate) struct SceneTextures {
     pub(crate) view: wgpu::TextureView,
     pub(crate) sampler: wgpu::Sampler,
+    /// Normal maps (linear), M10 gate 5.
+    pub(crate) normals: wgpu::TextureView,
 }
 
 /// One placement of a geometry: `world = scale · rotation · p + position`.
@@ -2021,10 +2092,12 @@ pub struct Instance {
 /// A texture resampled to `size × size` (bilinear, repeating), then its mip
 /// levels down to 1×1, each averaging 2×2 texels in linear light. Returns
 /// sRGB-encoded RGBA8 per level.
-fn texture_levels(t: &Texture, size: u32) -> Vec<Vec<u8>> {
+fn texture_levels(t: &Texture, size: u32, linear: bool) -> Vec<Vec<u8>> {
     let to_linear = |c: u8| {
         let c = c as f32 / 255.0;
-        if c <= 0.04045 {
+        if linear {
+            c
+        } else if c <= 0.04045 {
             c / 12.92
         } else {
             ((c + 0.055) / 1.055).powf(2.4)
@@ -2032,7 +2105,9 @@ fn texture_levels(t: &Texture, size: u32) -> Vec<Vec<u8>> {
     };
     let to_srgb = |c: f32| {
         let c = c.clamp(0.0, 1.0);
-        let s = if c <= 0.0031308 {
+        let s = if linear {
+            c
+        } else if c <= 0.0031308 {
             c * 12.92
         } else {
             1.055 * c.powf(1.0 / 2.4) - 0.055

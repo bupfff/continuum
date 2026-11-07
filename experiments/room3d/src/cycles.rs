@@ -325,8 +325,19 @@ pub fn render_instanced_lights(
             },
         )
         .collect();
+    // Each geometry's normal map (M10 gate 5): a texture's path, or null.
+    let normal_maps: Vec<String> = (0..scene.geometries.len())
+        .map(
+            |g| match scene.geometry_normal_maps.get(g).copied().flatten() {
+                Some(t) if scene.geometries[g].tex.len() == scene.geometries[g].triangles.len() => {
+                    texture_paths[t as usize].clone()
+                }
+                _ => "null".to_string(),
+            },
+        )
+        .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -334,6 +345,7 @@ pub fn render_instanced_lights(
         geometries.join(", "),
         geometry_textures.join(", "),
         materials.join(", "),
+        normal_maps.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),

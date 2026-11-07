@@ -338,6 +338,14 @@ fn bind_group(
             resource: wgpu::BindingResource::Sampler(&t.sampler),
         });
     }
+    if let Some(t) = textures
+        && keep.contains(&79)
+    {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 79,
+            resource: wgpu::BindingResource::TextureView(&t.normals),
+        });
+    }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("instanced render"),
         layout: &pipeline.get_bind_group_layout(0),
@@ -841,7 +849,7 @@ impl InstancedRenderer {
             // Shading reads the lights' buffer; the camera's radiance is unused.
             radiance: lights[0].radiance.x,
             lights: lights.len(),
-            textures: kernel.scene_textures(&scene.textures),
+            textures: kernel.scene_textures(&scene.textures, &scene.normal_map_textures()),
             srgb: target_format.is_srgb(),
             float_target: matches!(
                 target_format,
