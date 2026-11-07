@@ -46,8 +46,11 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   when they come back into view: a third of the pixels in a fast flight
   with a fast sun. Not yet with movers or a sky in the cache. Lights
   change color and intensity freely either way.
-- **Diffuse materials only.** Base color and textures are used; metallic,
-  roughness, normal maps, alpha and emission are not.
+- **Materials, experimental.** `InstancedScene::geometry_materials` takes
+  metallic and roughness (glTF's model) for the cache's shading: specular
+  from lights and one glossy reflection ray per pixel. It is 8.94% from
+  Cycles on a test scene (M10 gate 2, failed against 6%). glTF import still
+  brings base color only; normal maps, alpha and emission are not done.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
   1): 1.79% from Cycles with one bounce on a textured scene, at 1.07× the
   warm frame. At most three lights; not with movers or moving lights.
