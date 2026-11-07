@@ -1,9 +1,21 @@
 //! GPU backend for Continuum (wgpu compute; Metal, Vulkan, DX12).
 //!
-//! One kernel family: mask cones from receivers to a rectangular light, a port
+//! **Start with [`Renderer`]:** an [`InstancedScene`] (geometry placed many
+//! times, at f64 positions), its [`Light`]s (rectangles, spheres and spots,
+//! with RGB radiance) and an optional uniform sky, rendered each frame into a
+//! texture. `continuum_gltf::load` makes scenes from glTF files.
+//!
+//! How it lights: from each surface point, a *mask cone* toward each light
+//! finds what covers the light, as exact coverage of 8×8 bins, with distant
+//! geometry prefiltered. The view-dependent lighting cache keeps that work
+//! across frames on the surfaces in view, coarse first; pixels shade from it
+//! with their own normals. No frame blends in earlier frames.
+//!
+//! One kernel family underneath: mask cones from receivers to a light, a port
 //! of `continuum::cone3` (see `mask_cones.wgsl`), used for receivers, camera
-//! renders, a world-space lighting cache ([`Lightmap`]), and live rendering with
-//! moving meshes ([`LiveRenderer`]).
+//! renders, a world-space lighting cache ([`Lightmap`]), live rendering with
+//! moving meshes ([`LiveRenderer`]) and instanced scenes
+//! ([`InstancedRenderer`], which [`Renderer`] wraps).
 
 use std::time::{Duration, Instant};
 
@@ -96,12 +108,14 @@ mod hw;
 mod instanced;
 mod lightmap;
 mod live;
+mod renderer;
 mod vcache;
 
 pub use hierarchy::Hierarchy;
 pub use instanced::{FrameProfile, InstancedRenderer};
 pub use lightmap::{BLOCK, BLOCK_PLANES, Lightmap, hemicube_weights};
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
+pub use renderer::{Renderer, RendererOptions};
 pub use vcache::{CacheOptions, CachePage, CacheStats};
 
 use hierarchy::{Placement, flatten, flatten_instanced, mesh_hierarchy, object_hierarchy};
