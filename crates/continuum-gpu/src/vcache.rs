@@ -2149,7 +2149,7 @@ impl VirtualCache {
     /// does; their count.
     fn push_sky_samples(&mut self, index: u32, k: [u32; 3]) -> u32 {
         let (m, c, mip, page) = unpack(k);
-        let n = self.grid(c, m, mip);
+        let n = self.grid(c, m, mip).map(|x| x + 1);
         let inside = [
             (n[0] - (page[0] * PAGE).min(n[0])).min(STRIDE),
             (n[1] - (page[1] * PAGE).min(n[1])).min(STRIDE),
@@ -2208,7 +2208,10 @@ impl VirtualCache {
                 continue;
             }
             let (m, c, mip, page) = unpack(k);
-            let n = self.grid(c, m, mip);
+            // The shader's grid (f32) can be one texel larger than this
+            // one: a page starting just past this grid is still asked for
+            // (M10 gate 6), and its texels outside the shader's are skipped.
+            let n = self.grid(c, m, mip).map(|x| x + 1);
             let inside = [
                 (n[0] - (page[0] * PAGE).min(n[0])).min(STRIDE),
                 (n[1] - (page[1] * PAGE).min(n[1])).min(STRIDE),

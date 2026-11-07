@@ -443,6 +443,7 @@ fn gltf_round_trip_keeps_materials() {
         roughness: 0.7,
     });
     s.geometry_metallic_roughness = vec![Some(0), None, None];
+    s.geometry_alpha_cutoff = vec![Some(0.25), None, None];
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
     let imported = continuum_gltf::load(&path).unwrap().scene;
@@ -477,6 +478,10 @@ fn gltf_round_trip_keeps_materials() {
                 .is_some()
         };
         assert_eq!(bumps(&s, a.geometry), bumps(&imported, b.geometry));
+        let cut = |scene: &InstancedScene, g: usize| {
+            scene.geometry_alpha_cutoff.get(g).copied().flatten()
+        };
+        assert_eq!(cut(&s, a.geometry), cut(&imported, b.geometry));
         let mr = |scene: &InstancedScene, g: usize| {
             scene
                 .geometry_metallic_roughness

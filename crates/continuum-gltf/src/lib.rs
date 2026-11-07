@@ -18,8 +18,14 @@
 //!   Lambertian surface), stays Lambertian: the difference is a rough 4%
 //!   specular layer. A metallic-roughness texture (through the base
 //!   color's texture coordinates, or alone) becomes the geometry's
-//!   (`InstancedScene::geometry_metallic_roughness`). Alpha is not imported
-//!   yet.
+//!   (`InstancedScene::geometry_metallic_roughness`).
+//! - Alpha mode MASK becomes the geometry's alpha cutoff
+//!   (`InstancedScene::geometry_alpha_cutoff`: cut away as geometry before
+//!   upload), divided by the base color factor's alpha. BLEND is treated as
+//!   MASK at 0.5: no blending.
+//! - A double-sided material's triangles are doubled, the back faces 1 mm
+//!   behind the front ones (exactly back-to-back faces slow the cache's
+//!   bakes; M10 gate 6).
 //! - A normal texture, through the same texture coordinates as the base
 //!   color (or alone), becomes the geometry's normal map
 //!   (`InstancedScene::geometry_normal_maps`; its scale is ignored).
@@ -154,6 +160,8 @@ type GeometryKey = (
     [u32; 3],
     Option<u32>,
     Option<u32>,
+    Option<u32>,
+    bool,
 );
 
 /// One primitive's geometry before placement.
@@ -170,6 +178,8 @@ struct Primitive {
     normal_map: Option<u32>,
     /// Its metallic-roughness texture's index in the scene's textures.
     metallic_roughness: Option<u32>,
+    /// Its alpha cutoff (over its base color texture's alpha).
+    alpha_cutoff: Option<f32>,
     key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
@@ -316,6 +326,14 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     });
                 }
             }
+            let alpha_cutoff = match material.alpha_mode() {
+                gltf::material::AlphaMode::Opaque => None,
+                gltf::material::AlphaMode::Mask => Some(material.alpha_cutoff().unwrap_or(0.5)),
+                gltf::material::AlphaMode::Blend => Some(0.5),
+            }
+            .filter(|_| texture.is_some())
+            .map(|c| c / factor[3].max(1e-6));
+            let double_sided = material.double_sided();
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
             let mut corner_tex = Vec::with_capacity(indices.len() / 3);
@@ -329,6 +347,22 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     corner_tex.push(k.map(|i| tc[i]));
                 }
             }
+            if double_sided {
+                // Back faces: reversed, 1 mm behind.
+                for f in 0..triangles.len() {
+                    let t = triangles[f];
+                    let behind = -(t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero() * 0.001;
+                    triangles.push([t[0] + behind, t[2] + behind, t[1] + behind]);
+                    if normals.is_some() {
+                        let n = corner_normals[f];
+                        corner_normals.push([-n[0], -n[2], -n[1]]);
+                    }
+                    if texcoords.is_some() {
+                        let c = corner_tex[f];
+                        corner_tex.push([c[0], c[2], c[1]]);
+                    }
+                }
+            }
             list.push(Primitive {
                 triangles,
                 normals: normals.is_some().then_some(corner_normals),
@@ -339,6 +373,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 emission,
                 normal_map,
                 metallic_roughness,
+                alpha_cutoff,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
                     accessor(gltf::Semantic::Normals),
@@ -351,6 +386,8 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     emission.to_array().map(f32::to_bits),
                     normal_map,
                     metallic_roughness,
+                    alpha_cutoff.map(f32::to_bits),
+                    double_sided,
                 ),
                 geometry: usize::MAX,
             });
@@ -389,6 +426,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             scene.geometry_emission.push(p.emission);
             scene.geometry_normal_maps.push(p.normal_map);
             scene.geometry_metallic_roughness.push(p.metallic_roughness);
+            scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
         }
     }
     // Nodes, with world matrices.
@@ -595,6 +633,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_emission.push(p.emission);
     scene.geometry_normal_maps.push(p.normal_map);
     scene.geometry_metallic_roughness.push(p.metallic_roughness);
+    scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -728,6 +767,15 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 .flatten()
                 .filter(|_| scene.geometries[i.geometry].tex.len() == scene.geometries[i.geometry].triangles.len())
                 .map_or(String::new(), |t| format!(r#","normalTexture":{{"index":{t}}}"#));
+            let cut = scene
+                .geometry_alpha_cutoff
+                .get(i.geometry)
+                .copied()
+                .flatten()
+                .filter(|_| texture.is_some())
+                .map_or(String::new(), |c| {
+                    format!(r#","alphaMode":"MASK","alphaCutoff":{c:?}"#)
+                });
             let m = scene
                 .geometry_materials
                 .get(i.geometry)
@@ -760,7 +808,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 String::new()
             };
             materials.push(format!(
-                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}{bumps}}}"#,
+                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}{bumps}{cut}}}"#,
                 i.albedo.x, i.albedo.y, i.albedo.z, m.metallic, m.roughness
             ));
             meshes.push(format!(
