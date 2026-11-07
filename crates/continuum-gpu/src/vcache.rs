@@ -69,6 +69,9 @@ const INDIRECT_SAMPLES: u32 = 9;
 const INDIRECT_CHANNELS: u64 = 4;
 const INCOMPLETE_CAP: u32 = 1 << 14;
 const INDIRECT_RETRY: u32 = 4;
+/// Request priorities' flags (the shader's `SECONDARY`, `WANTS_SAMPLES`).
+const SECONDARY: u32 = 0x8000_0000;
+const WANTS_SAMPLES: u32 = 0x4000_0000;
 /// The stale passes' and the ledger's counters (16 words) in each readback.
 const MOVER_STATS_BYTES: u64 = 64;
 /// Moving lights (M9 gate 2): frames of light poses kept (a page older than
@@ -2033,10 +2036,20 @@ impl VirtualCache {
         self.page_sky.clear();
         self.texels = 0;
         self.spent = 0;
-        // Pages planned in the frame between are resident already.
+        // Resident pages shown without bounce samples: schedule them.
+        for (k, priority) in &requests {
+            if priority & WANTS_SAMPLES != 0
+                && let Some(&(slot, _)) = self.map.get(k)
+                && self.retrying.insert(slot)
+            {
+                self.retry.push_front((slot, self.frame));
+            }
+        }
+        // Pages planned in the frame between are resident already. Pixels'
+        // requests sort first; secondary ones (for light at hits) last.
         let mut order: Vec<(u32, [u32; 3])> = requests
             .into_iter()
-            .filter(|(k, _)| !self.map.contains_key(k))
+            .filter(|(k, p)| p & WANTS_SAMPLES == 0 && !self.map.contains_key(k))
             .map(|(k, priority)| (priority, k))
             .collect();
         // Each page costs at least one texel: no more than `budget` can fit.
@@ -2047,7 +2060,8 @@ impl VirtualCache {
         }
         order.sort_unstable();
         let mut evicted_now = false;
-        for (_, k) in order {
+        for (priority, k) in order {
+            let secondary = priority & SECONDARY != 0;
             // A fingerprint collision can list a page twice.
             if self.map.contains_key(&k) {
                 continue;
@@ -2070,7 +2084,7 @@ impl VirtualCache {
             } else {
                 0
             };
-            let bounce = if self.options.indirect {
+            let bounce = if self.options.indirect && !secondary {
                 INDIRECT_SAMPLES * self.options.indirect_sample_cost
             } else {
                 0
@@ -2100,7 +2114,10 @@ impl VirtualCache {
             self.bake_list.push([k[0], k[1], k[2], slot]);
             let b = self.page_bounds(m, c, mip, page);
             self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
-            self.bake_bounds.push([b[4], b[5], b[6], b[7]]);
+            // w 1: no bounce samples planned (the fill clears the slot's).
+            let bare = self.options.indirect && secondary;
+            self.bake_bounds
+                .push([b[4], b[5], b[6], bare as u32 as f32]);
             // Light by light, so neighbouring invocations trace one light.
             for l in 0..self.lights {
                 for y in 0..listed[1] {
@@ -2118,7 +2135,7 @@ impl VirtualCache {
                 }
                 self.page_sky.push([first, samples | stride << 24]);
             }
-            if self.options.indirect {
+            if self.options.indirect && !secondary {
                 for k in 0..INDIRECT_SAMPLES {
                     self.indirect_jobs.push([index, k]);
                 }

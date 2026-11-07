@@ -2844,6 +2844,11 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let e = bake_list[p];
     // A page whose stale texels did not all fit stays marked invalid (M9).
     if (bake_bounds[2u * p].w != 0.0) { return; }
+    // Baked without bounce samples (for light at hits): clear what a
+    // previous page in the slot left (M10).
+    if (bake_bounds[2u * p + 1u].w != 0.0 && vc.indirect.y == 1u) {
+        for (var q = 0u; q < 9u * IND_CH; q++) { indirect[e.w * 9u * IND_CH + q] = vec2<u32>(0u); }
+    }
     // The page's key and box, for the stale pass (M9); a bake makes it
     // current.
     slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u);
@@ -3524,6 +3529,12 @@ fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
 // re-bakes such pages' samples once the pages arrive.
 
 const IND_R: u32 = 8u;
+// Request priorities' flags: a page wanted only for light at bounce or
+// reflection hits (baked without bounce samples of its own, so requests do
+// not cascade through the scene), and a resident page shown without its
+// bounce samples (the CPU schedules them).
+const SECONDARY: u32 = 0x80000000u;
+const WANTS_SAMPLES: u32 = 0x40000000u;
 const IND_BINS: u32 = 192u;
 // Channels kept per sample: up to three lights and the sky.
 const IND_CH: u32 = 4u;
@@ -3642,7 +3653,7 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
                 if (slot != NONE) { break; }
             }
             if (slot == NONE) {
-                vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u);
+                vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY);
                 missing += w;
                 continue;
             }
@@ -3672,7 +3683,8 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     if (li == 0u && listed) {
         for (var ch = 0u; ch < IND_CH; ch++) {
             let v = ind_partial[ch].xyz;
-            indirect[indirect_at(e.w, k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, 0.0)));
+            // The y's second half is 1 once baked (0: never).
+            indirect[indirect_at(e.w, k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, 1.0)));
         }
         // Missing more than a hundredth of the hemisphere: re-bake later.
         if (ind_missing[0] > 0.01 * 3.14159265) {
@@ -3839,7 +3851,14 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
             }
         }
         e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
-        if (vc.indirect.y == 1u) { e += indirect_light(found_slot, found_ref); }
+        if (vc.indirect.y == 1u) {
+            e += indirect_light(found_slot, found_ref);
+            // A page shown without bounce samples (baked for a hit): ask for
+            // them.
+            if (unpack2x16float(indirect[indirect_at(found_slot, 0u, 0u)].y).y == 0.0) {
+                vc_request(vc_page(hit.mesh, c, uv, mip).key, 1u | WANTS_SAMPLES);
+            }
+        }
     } else {
         vc_fell_back = true;
         vc_request_key = finer;
@@ -3968,7 +3987,7 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
     let count = arrayLength(&lights);
     var e = vec3<f32>(0.0);
     if (slot == NONE) {
-        vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u);
+        vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY);
         for (var l = 0u; l < count; l++) {
             e += lights[l].radiance.xyz * unshadowed_rect(hp, hn, lights[l]);
         }
