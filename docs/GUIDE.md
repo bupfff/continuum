@@ -34,12 +34,18 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 
 ## Limits, today
 
-- **Moving objects, but not moving lights.** Instances listed in
-  `RendererOptions::movable` move rigidly (`Renderer::set_transform`; they
-  keep their scale). The cache re-bakes, within the frame, exactly what a
-  move can change and never shows stale light (M9 gate 1). With the cache,
-  movers and a sky do not mix yet. Lights change color and intensity
-  freely, but stay put.
+- **Moving objects.** Instances listed in `RendererOptions::movable` move
+  rigidly (`Renderer::set_transform`; they keep their scale). The cache
+  re-bakes, within the frame, exactly what a move can change and never
+  shows stale light (M9 gate 1). With the cache, movers and a sky do not
+  mix yet.
+- **Moving lights, experimental.** Lights listed in
+  `RendererOptions::moving_lights` move (`Renderer::set_light`; not
+  spots). The cache's ledger never shows stale light (M9 gate 2). But
+  while a light moves, pages off screen are set aside and show as missing
+  when they come back into view: a third of the pixels in a fast flight
+  with a fast sun. Not yet with movers or a sky in the cache. Lights
+  change color and intensity freely either way.
 - **Diffuse materials only.** Base color and textures are used; metallic,
   roughness, normal maps, alpha and emission are not.
 - **Direct light only** in the instanced renderer: no bounce light yet.

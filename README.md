@@ -16,7 +16,9 @@ renders:
 - area, sun, point and spot lights and a sky (M5);
 - glTF files with textures (M6);
 - objects moving among a million static ones, the cache updated exactly in
-  the frame they move, with no stale light (M9 gate 1).
+  the frame they move, with no stale light (M9 gate 1);
+- moving lights through an error ledger, experimental: never stale, but
+  with heavy fallback while a light moves (M9 gate 2, failed on that).
 
 Every claim is measured against Blender's Cycles.
 

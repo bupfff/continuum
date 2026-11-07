@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-07, after M9 gate 1)
+## 3.6 Where we stand (updated 2026-11-07, after M9 gates 1–2)
 
 Against the goal in §1, honestly:
 
@@ -179,9 +179,24 @@ Against the goal in §1, honestly:
     hull against moved boxes; same-frame re-bake of stale texels read in
     the frame before; other stale pages are marked invalid. Not yet with a
     sky, whose wide cones are the ledger's job.
-- **Not yet shown in 3D or on the GPU.** The ledger, the third rule and "the
-  invention" (§3.1). It has only run in 2D, with mixed results. Moving
-  lights, and movers under a sky, depend on it (M9 gates 2–3).
+- **A moving light through the ledger** (M9 G2, failed on fallback only).
+  The third rule ran on the GPU in 3D for the first time: a sun drifting at
+  a 24-minute day's speed over the million-boulder field.
+  - Sound: in 30 checks of up to 57,409 pages, no page shown differed from
+    a re-bake at all.
+  - 0.69% of the pages read re-baked per frame.
+  - Means 14.5 ms, against 15.6 ms with the sun still.
+  - But fallback was 33–34%, against at most 10%: off-screen pages past
+    their guard are set aside and shown missing until wanted. About
+    30,000 a frame, more than the guards' lifetime explains, cause not
+    yet established.
+  - Method: per-texel guard cones (three times the light's radius) mark
+    clear texels, exact while the light stays inside; mixed texels re-bake
+    whenever it moves; pages keep a slack and re-bake whole past it.
+  - What it certified was exactness: the ε went into snapping estimator
+    noise, and no texel was kept with a non-zero bound. Bounded deferral
+    within ε (the invention proper) is still unshown in 3D. Movers under a
+    sky, and movers with moving lights, are not supported yet.
 - **Several colored lights** (M5 G6, passed): a list of RGB rect lights per
   pixel and in the cache, flights at 14–15 ms with three lights. A cache
   texel stores light per unit radiance, so re-coloring a light bakes nothing
@@ -280,7 +295,11 @@ user's order:
    **Done (2026-11-07), M9 G1 passed** (`docs/results/m9-gate1.md`).
 2. **Moving lights, and movers' effect on sky light, through the error
    ledger** (M9 gates 2–3): the third rule, the invention (§3.1), on the
-   GPU in 3D.
+   GPU in 3D. **Moving lights tried (2026-11-07), M9 G2 failed on fallback
+   only** (`docs/results/m9-gate2.md`): sound and exact in every check,
+   0.69% of pages re-baked, but 33–34% fallback from pages set aside off
+   screen. Movers under a sky (gate 3) not started; it and the fixes from
+   gate 2 go after the tag.
 3. **Tag v0.1.**
 4. **Bounce light in the view cache** (M10).
 5. **Glossy reflections and PBR materials** (M10): roughness cones,
@@ -421,7 +440,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M6 content (v0.1 item 3) | glTF import, base-color textures, automatic charts | G1 glTF import with automatic charts and textures (**failed** on criterion 1 only: the `.glb` round trip is 0.024% from the original per pixel against 0.01%, all in one edge pixel flipped by f32 rounding of instance transforms; the imported textured scene is 0.43% from Cycles with textures at 16×16 per pixel, its automatic charts give 2.37% cached vs per-pixel against the hand-made charts' 1.52%, warm frame 1.53 ms at 720p; real assets reported: a 28k-triangle textured pack warms in 1,317 frames at 1.43 ms, `docs/results/m6-gate1.md`) |
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | G1 pixel cones for primary visibility (**failed** all three: against the 16×16 reference the textured scene is 7.15% vs one ray's 7.11%, the field from 150 m 17.91% vs 23.49% (0.76× against ≤ 0.35×), from standing height 34.61% vs 12.49% with a banding artifact on the 2.1 km ground triangles; half a pixel's turn changes the image 1.67× as much as the reference's (≤ 1.5×); warm cached frames 105 ms on the textured scene (≤ 16.7 ms), per-pixel frames 10–87 s on the field; the textured scene's error is texture filtering, not silhouettes, `docs/results/m7-gate1.md`); no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 |
-| M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2/G3 the ledger's bounded deferral on the GPU; a light switch with no lag |
+| M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G3 movers under a sky; a light switch with no lag |
 | M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | FLIP vs reference |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
