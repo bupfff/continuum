@@ -1471,6 +1471,35 @@ fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit
 
 // The camera ray through pixel `gid`: through its center, moved by
 // (right.w, up.w) pixels (zero but for supersampled references).
+// The share of a pixel a camera ray stands for (1; a quarter's ray at a
+// silhouette, half a pixel wide: 0.5).
+var<private> sub_share: f32 = 1.0;
+
+// A camera ray `(dx, dy)` pixels from pixel `gid`'s (x right, y down).
+fn camera_dir_at(gid: vec3<u32>, dx: f32, dy: f32) -> vec3<f32> {
+    let aspect = camera.params.x / camera.params.y;
+    let sx = ((f32(gid.x) + 0.5 + camera.right.w + dx) / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
+    let sy = (1.0 - (f32(gid.y) + 0.5 + camera.up.w + dy) / camera.params.y * 2.0) * camera.params.z;
+    return normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+}
+
+// Whether pixel `gid` is at a silhouette (M7 gate 3): a neighbour sees
+// another object, or a surface more than 5% nearer or farther.
+fn is_edge(gid: vec3<u32>, w: u32, h: u32) -> bool {
+    let me = vis[gid.y * w + gid.x];
+    let d = bitcast<f32>(me.z);
+    for (var k = 0u; k < 4u; k++) {
+        var x = i32(gid.x);
+        var y = i32(gid.y);
+        if (k == 0u) { x -= 1; } else if (k == 1u) { x += 1; } else if (k == 2u) { y -= 1; } else { y += 1; }
+        if (x < 0 || y < 0 || x >= i32(w) || y >= i32(h)) { continue; }
+        let o = vis[u32(y) * w + u32(x)];
+        if (o.x != me.x) { return true; }
+        if (me.x != NONE && abs(bitcast<f32>(o.z) - d) > 0.05 * d) { return true; }
+    }
+    return false;
+}
+
 fn camera_dir(gid: vec3<u32>) -> vec3<f32> {
     let aspect = camera.params.x / camera.params.y;
     let sx = ((f32(gid.x) + 0.5 + camera.right.w) / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
@@ -1564,7 +1593,7 @@ fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n
     // A pixel's footprint there, stretched by the viewing angle; times
     // eye.w where set (a reference's sub-pixel samples: their own share of
     // the pixel).
-    let footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0);
+    let footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share;
     let pixel = footprint * distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
     let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
     return base * textureSampleLevel(base_color, base_sampler, uv, i32(layer), lod).xyz;
@@ -1576,7 +1605,7 @@ fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n
 // footprint's 2×2 quarters, each at the mip of a quarter's longest axis. w
 // is 0 where the footprint is degenerate (the caller falls back).
 fn texture_box(m: u32, t: u32, dir: vec3<f32>, distance: f32, uv: vec2<f32>, size: f32, layer: u32) -> vec4<f32> {
-    let share = select(1.0, camera.eye.w, camera.eye.w > 0.0);
+    let share = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share;
     let per_pixel = 2.0 * camera.params.z / camera.params.y * share;
     let ddx = camera.right.xyz * per_pixel;
     let ddy = -camera.up.xyz * per_pixel;
@@ -2312,7 +2341,8 @@ struct VcParams {
     // moving light moved this frame
     ledger: vec4<u32>,
     // Bounce light (M10 gate 1): x: samples to bake, y: 1 if on; z: 1 to
-    // skip glossy reflection rays (M10 gate 2's diagnostic); w: 0
+    // skip glossy reflection rays (M10 gate 2's diagnostic); w: 1 for four
+    // rays at silhouette pixels (M7 gate 3)
     indirect: vec4<u32>,
 };
 
@@ -3768,6 +3798,30 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
             color = l.radiance.xyz * spot_falloff(l, -dir);
         } else if (hit.mesh != NONE) {
             color = vc_hit_color(dir, hit, is_sample);
+        }
+        // At a silhouette, four rays through the pixel's quarters (M7 gate
+        // 3), textures read for half a pixel.
+        if (vc.indirect.w == 1u && is_edge(gid, w, h)) {
+            // Counted in the last work counter (unused without
+            // COUNT_WORK).
+            if (!COUNT_WORK) { atomicAdd(&vc_stats[15], 1u); }
+            let key = vc_request_key;
+            let priority = vc_request_priority;
+            sub_share = 0.5;
+            var sum = vec3<f32>(0.0);
+            for (var q = 0u; q < 4u; q++) {
+                let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
+                let sh = primary_hit(camera.eye.xyz, sd);
+                if (sh.mesh == NONE) {
+                    sum += light.sky.xyz;
+                } else {
+                    sum += vc_hit_color(sd, sh, false);
+                }
+            }
+            sub_share = 1.0;
+            vc_request_key = key;
+            vc_request_priority = priority;
+            color = sum * 0.25;
         }
         colors[pixel] = vec4<f32>(color, 1.0);
     }

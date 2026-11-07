@@ -130,6 +130,10 @@ pub struct CacheOptions {
     pub indirect: bool,
     /// What a bounce sample counts against the bake budget, in sun texels.
     pub indirect_sample_cost: u32,
+    /// Anti-aliasing at silhouettes (M7 gate 3): pixels whose neighbours
+    /// see another object or depth average four rays through their
+    /// quarters.
+    pub edge_rays: bool,
     /// Experiments only: glossy reflection rays for materials (M10 gate 2;
     /// on by default).
     #[doc(hidden)]
@@ -165,6 +169,7 @@ impl Default for CacheOptions {
             ledger_epsilon: 0.01,
             indirect: false,
             indirect_sample_cost: 8,
+            edge_rays: false,
             glossy_rays: true,
             self_spacing: 0.01,
             light_ratio: true,
@@ -243,6 +248,9 @@ pub struct CacheStats {
     /// Of those, samples that met hits with no page resident (re-baked
     /// later).
     pub indirect_incomplete: u32,
+    /// Pixels shaded with four rays at silhouettes (M7 gate 3; not counted
+    /// with `KernelOptions::count_work`).
+    pub edge_pixels: u32,
     /// Stale pages marked invalid instead (evicted when read back).
     pub invalidated: u32,
     /// Pages read in the frame before (counted when something moved).
@@ -1453,7 +1461,7 @@ impl VirtualCache {
                 self.indirect_jobs.len() as u32,
                 self.options.indirect as u32,
                 !self.options.glossy_rays as u32,
-                0,
+                self.options.edge_rays as u32,
             ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
@@ -1896,6 +1904,7 @@ impl VirtualCache {
         record.samples = counters[2];
         record.at_wanted = counters[3];
         record.work.copy_from_slice(&counters[4..16]);
+        record.edge_pixels = counters[15];
         self.appended = 0.8 * self.appended + 0.2 * appended as f32;
         self.evict_invalid(&invalid, frame);
         // Incomplete bounce samples: re-bake once the requested pages have
