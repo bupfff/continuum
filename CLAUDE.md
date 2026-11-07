@@ -6,6 +6,9 @@
 - Where things live:
   - **Current state and next steps:** DESIGN.md §3.6–3.8 and the milestone
     table (§6). Start a new conversation there.
+  - **Library front door:** `Renderer` in
+    `crates/continuum-gpu/src/renderer.rs`; usage in `docs/GUIDE.md`; the
+    example `crates/continuum-gltf/examples/render.rs`.
   - **Renderer:** `crates/continuum-gpu`. `mask_cones.wgsl` holds the kernel;
     `vcache.rs` is the view-dependent cache; `instanced.rs` the instanced
     renderer; `live.rs` the lightmap renderer with movers; `hierarchy.rs`
@@ -47,3 +50,8 @@
     -axo pid,etime,%cpu,command -r | head` for stray processes (games,
     leftover scripts), and repeat an earlier gate's number as a control. If
     the control is far off, the machine is not fit to measure (M5 gate 4).
+  - Sustained load heats it within minutes, and a short warm-frame control
+    does not catch that. The same flight slows about 1.25× after two minutes
+    of flights and about 2× after ten minutes of heavy work (M5 gate 8;
+    `flight_repeat` measures it). Run timed criteria first in a gate, or
+    state the thermal state they measure.

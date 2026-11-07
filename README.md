@@ -5,12 +5,22 @@ rendering. Every visibility question is asked by a cone that answers in bits,
 and cached answers are recomputed only when they could have changed by more
 than a chosen, invisible error bound.
 
-Status: research stage. The core bets were tested in 2D (M0) and in 3D on the
-CPU (M1). The GPU renderer (M2, M3) renders a procedural showcase scene in real
-time with moving objects, exact soft shadows and one bounce of indirect light,
-and is measured against Blender's Cycles. See [docs/DESIGN.md](docs/DESIGN.md)
-for the design and an honest status (§3.6), and [docs/results/](docs/results/)
-for measured results.
+Status: experimental, working toward a v0.1 library release. The core bets
+were tested in 2D (M0) and in 3D on the CPU (M1). On the GPU, Continuum
+renders:
+
+- a procedural showcase in real time, with moving objects, exact soft shadows
+  and one bounce of indirect light (M2–M3);
+- a million-boulder field of ten billion triangles through a view-dependent
+  lighting cache (M4);
+- area, sun, point and spot lights and a sky (M5);
+- glTF files with textures (M6).
+
+Every claim is measured against Blender's Cycles.
+
+- [docs/GUIDE.md](docs/GUIDE.md): using it as a library.
+- [docs/DESIGN.md](docs/DESIGN.md): the design and an honest status (§3.6).
+- [docs/results/](docs/results/): every measured result.
 
 ## Try it: the real-time viewer
 
@@ -66,14 +76,15 @@ lights on the field, a warm sun, a cool fill and an orange lamp, are within
 
 Texels store each light's shadowed share of its unshadowed light, and each
 pixel applies its own normal (M5 gate 7). This halves the cache's error
-against per-pixel cones. It also doubles the shading cost, so flights with
-three lights average 16–18 ms for now.
+against per-pixel cones.
 
 Point lights with a size and spot lights (glTF's falloff) work too, per
-pixel and cached, and glTF files bring their own. A night scene lit by both
-is 1.35% from Cycles (M5 gate 8). On the fanless M4 Air, flights with
-several lights hold 13–15 ms while the machine is cool. After minutes of
-load they slow to 20 ms or more.
+pixel and cached. A night scene lit by both is 1.35% from Cycles (M5
+gate 8).
+
+On the fanless M4 Air, flights with several lights hold 13–15 ms while the
+machine is cool. After minutes of load the GPU slows, and they take 20 ms or
+more (M5 gate 8).
 
 ### Your own scenes (glTF)
 
@@ -85,22 +96,33 @@ scenes:
   footprint;
 - automatic charts for the lighting cache.
 
+- punctual lights (`KHR_lights_punctual`): point, spot and directional.
+
 A textured scene imported this way is within 0.43% of Cycles with the same
 textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Materials are
-diffuse only for now: metallic and roughness, normal maps, alpha and the
-file's lights are ignored.
+diffuse only for now: metallic and roughness, normal maps and alpha are
+ignored.
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb
 ```
 
-This flies through a file in real time. The scene is lit by a sun 30° up
-(`--sky` adds the sky) and seen from the file's camera, or from one framed
-around the scene. It stands on a grey ground (`--no-ground` leaves it out),
-and `--scale N` and `--no-cache` work as for the field.
+This flies through a file in real time:
 
-`cargo run --release -p room3d --bin gltf_view -- scene.glb` renders a file
-per pixel and through the cache into `experiments/room3d/out/`.
+- lit by the file's own lights, or else a sun 30° up (`--sky` adds the sky);
+- seen from the file's camera, or from one framed around the scene;
+- standing on a grey ground (`--no-ground` leaves it out).
+
+`--scale N` and `--no-cache` work as for the field.
+
+To render a file to an image:
+
+```bash
+cargo run --release -p continuum-gltf --example render -- scene.glb out.png
+```
+
+The same in code, through the library's `Renderer`, is in
+[docs/GUIDE.md](docs/GUIDE.md).
 
 Measured offscreen at 1280×720 with hardware rays (M4 gate 11):
 
@@ -159,8 +181,10 @@ relative RMSE (M3 gate 3).
 - `crates/continuum`: the library: direction masks (binary and continuous), the
   error ledger, 3D pyramid cones with exact per-bin rasterization, a BVH, and
   meshes with charts and smooth normals (`mesh::Surface`).
-- `crates/continuum-gpu`: wgpu compute backend (mask cones in WGSL, lighting cache, live renderer).
-- `crates/continuum-gltf`: glTF 2.0 import and export.
+- `crates/continuum-gpu`: wgpu compute backend: `Renderer` (the library's
+  front door), mask cones in WGSL, the lighting caches, the live renderer.
+- `crates/continuum-gltf`: glTF 2.0 import and export, and the `render`
+  example.
 - `apps/viewer`: the real-time viewer.
 - `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
 - `experiments/room3d`: 3D experiments on triangle scenes (milestones M1–M3),
@@ -203,6 +227,10 @@ cargo run --release -p room3d --bin m4_gate4
 cargo run --release -p room3d --bin m4_gate5
 cargo run --release -p room3d --bin render_field -- 1000000 1920 1080
 ```
+
+Later gates follow the same pattern:
+`cargo run --release -p room3d --bin m<milestone>_gate<n>`. M5 gates 1–8 and
+M6 gate 1 are the latest, with results in `docs/results/`.
 
 ![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)
 

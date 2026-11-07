@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-10-25, after M5 gate 8)
+## 3.6 Where we stand (updated 2026-10-25, after M5 gate 8 and the library's front door)
 
 Against the goal in §1, honestly:
 
@@ -195,6 +195,11 @@ Against the goal in §1, honestly:
     the GPU slows by up to about 2×, and flights averaged 20–25 ms.
   - The bake budget follows GPU time but cannot go below its floor, and the
     camera passes do not shrink.
+- **A library front door** (not gated: no claim beyond its use).
+  - `continuum_gpu::Renderer` wraps the kernel and the instanced renderer
+    with the measured defaults.
+  - `continuum-gltf`'s `render` example turns a glTF file into a PNG.
+  - `docs/GUIDE.md` covers setup, concepts and limits.
 - **Imported content** (M6 G1, failed on round-trip precision only).
   - glTF 2.0 files load as instanced scenes, with automatic charts for any
     mesh and base color textures sampled per pixel at the pixel's footprint.
@@ -239,7 +244,7 @@ estimates, and gates fail often, so treat them as ranges.
 | 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes had black shadows. **Sky done per pixel and matched to Cycles (M5 G2–G3); in the view cache at frame rate (M5 G5), but slow to converge. Several colored rect lights done (M5 G6), cached as ratios (M5 G7); point and spot lights (M5 G8).** Not yet: sky warm-up; sustained speed with several lights | 3 (3 done) |
 | 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes. **Done (M6 G1, failed on round-trip precision only):** a textured import is 0.43% from Cycles, automatic charts are within a point of hand-made ones in the cache, warm frames take 1.5 ms. Not yet: PBR parameters, normal maps, alpha, the file's lights | 2–3 (1 done) |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel | 2 |
-| 5 | Library API, Bevy plugin, examples, documentation | Something people can use | 2 |
+| 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Started:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`. Not yet: the viewer on `Renderer`, rustdoc for the rest of the public API, a Bevy plugin | 2 (half done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement, untested so far | 1–2 |
 
 ### 3.8 Next steps, in order (2026-10-25, after M5 gate 7)
@@ -248,9 +253,10 @@ The user's budget allows about a third again of the work so far (about 5–7
 sessions). That fits a v0.1 release (§3.7) with the scope below; v1.0 does
 not fit.
 
-1. **Library API, examples and documentation** (item 5): a `Renderer`,
-   `Scene` and `Light` API, a "load your glTF" example, a getting-started
-   guide.
+1. **Finish the library's surface** (item 5).
+   - Done: `Renderer`, the `render` example, `docs/GUIDE.md`.
+   - Left: move the viewer's glTF and field paths onto `Renderer`, document
+     the rest of the public API, and hide experiment-only knobs.
 2. **Pixel-footprint cones for primary visibility** (item 4), if the budget
    allows: the largest visible quality gap (aliasing).
    - Measure against area-integrated references.
@@ -315,13 +321,17 @@ whose lighting is exact, stable and incremental, used inside other engines
    FLIP for image error, fixed benchmark protocol for timings.
 5. **Portable.** wgpu only, compute only: Metal, DX12, Vulkan, later WebGPU.
 
-## 5. Library shape (planned)
+## 5. Library shape
 
 - `continuum`: core types (masks, bounds, ledger, hierarchy), CPU reference paths.
-- `continuum-gpu`: wgpu backend.
-- `bevy_continuum`: Bevy integration.
+- `continuum-gpu`: wgpu backend. `Renderer` is the front door for v0.1:
+  static instanced scenes, lights and sky, through the view cache
+  (`docs/GUIDE.md`).
+- `continuum-gltf`: glTF import and export.
+- `bevy_continuum` (planned): Bevy integration.
 
-API direction, not final:
+The direction for v1, once the ledger drives moving objects and lights (not
+final):
 
 ```rust
 let mut renderer = Renderer::new(&device, QualityContract {
