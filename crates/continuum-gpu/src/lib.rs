@@ -84,6 +84,9 @@ pub struct MaskConeKernel {
     /// An empty pass that timestamps the end of the camera passes.
     mark_pipeline_empty: wgpu::ComputePipeline,
     vc_shade_pipeline: wgpu::ComputePipeline,
+    render_cones_pipeline: wgpu::ComputePipeline,
+    vc_shade_cones_pipeline: wgpu::ComputePipeline,
+    pixel_cones: std::cell::Cell<bool>,
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
     sky_max: std::cell::Cell<bool>,
@@ -443,6 +446,12 @@ pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41, 46, 47,
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58,
 ];
+/// Bindings of `vc_shade_cones`: the cache's shading with pixel cones for
+/// visibility (the scene's hierarchies instead of a visibility buffer).
+pub(crate) const VC_SHADE_CONES_BINDINGS: &[u32] = &[
+    0, 2, 3, 5, 6, 7, 8, 9, 10, 23, 24, 25, 26, 29, 30, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55,
+    56, 57, 58,
+];
 /// The compute `visibility` pass's bindings, for other modules.
 pub(crate) const COMPUTE_VISIBILITY_BINDINGS: &[u32] = VISIBILITY_BINDINGS;
 
@@ -617,6 +626,8 @@ impl MaskConeKernel {
         let vc_fill_pipeline = entry("vc_fill");
         let mark_pipeline_empty = entry("mark");
         let vc_shade_pipeline = entry("vc_shade");
+        let render_cones_pipeline = entry("render_cones");
+        let vc_shade_cones_pipeline = entry("vc_shade_cones");
         let hw_visibility_pipeline = device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
@@ -664,6 +675,9 @@ impl MaskConeKernel {
             vc_fill_pipeline,
             mark_pipeline_empty,
             vc_shade_pipeline,
+            render_cones_pipeline,
+            vc_shade_cones_pipeline,
+            pixel_cones: std::cell::Cell::new(false),
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
             sky_max: std::cell::Cell::new(false),
@@ -787,6 +801,13 @@ impl MaskConeKernel {
     #[doc(hidden)]
     pub fn set_profile_stage(&self, stage: u32) {
         self.profile_stage.set(stage);
+    }
+
+    /// Primary visibility through pixel cones (M7) instead of one camera
+    /// ray per pixel, in instanced renderers created after the call.
+    #[doc(hidden)]
+    pub fn set_pixel_cones(&self, on: bool) {
+        self.pixel_cones.set(on);
     }
 
     pub(crate) fn uses_hardware_rays(&self) -> bool {

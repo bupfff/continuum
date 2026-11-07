@@ -51,6 +51,11 @@ pub struct RendererOptions {
     pub sky: Option<Vec3>,
     /// The cache's tuning.
     pub cache_options: CacheOptions,
+    /// Anti-aliasing (experimental, M7): each pixel traces a mask cone
+    /// through its square instead of one ray through its center, and shows
+    /// the surfaces it meets in proportion to their visible coverage. Off:
+    /// one ray per pixel (hardware ray queries where available).
+    pub pixel_cones: bool,
 }
 
 impl Default for RendererOptions {
@@ -60,6 +65,7 @@ impl Default for RendererOptions {
             cache: true,
             sky: None,
             cache_options: CacheOptions::default(),
+            pixel_cones: false,
         }
     }
 }
@@ -96,6 +102,7 @@ impl Renderer {
         kernel.set_prefilter(1.0);
         kernel.set_sky_prefilter(8.0);
         kernel.set_sky(options.sky.unwrap_or(Vec3::ZERO));
+        kernel.set_pixel_cones(options.pixel_cones);
         let inner = if options.cache {
             InstancedRenderer::with_cache_lights(
                 &kernel,

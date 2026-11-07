@@ -1456,10 +1456,12 @@ fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit
     return hit;
 }
 
+// The camera ray through pixel `gid`: through its center, moved by
+// (right.w, up.w) pixels (zero but for supersampled references).
 fn camera_dir(gid: vec3<u32>) -> vec3<f32> {
     let aspect = camera.params.x / camera.params.y;
-    let sx = ((f32(gid.x) + 0.5) / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
-    let sy = (1.0 - (f32(gid.y) + 0.5) / camera.params.y * 2.0) * camera.params.z;
+    let sx = ((f32(gid.x) + 0.5 + camera.right.w) / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
+    let sy = (1.0 - (f32(gid.y) + 0.5 + camera.up.w) / camera.params.y * 2.0) * camera.params.z;
     return normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
 }
 
@@ -1541,8 +1543,11 @@ fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n
     let e2 = (t2 - t0) * size;
     let texel_area = 0.5 * abs(e1.x * e2.y - e1.y * e2.x);
     let texel = sqrt(world_area / max(texel_area, 1e-12));
-    // A pixel's footprint there, stretched by the viewing angle.
-    let pixel = distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
+    // A pixel's footprint there, stretched by the viewing angle; times
+    // eye.w where set (a reference's sub-pixel samples: their own share of
+    // the pixel).
+    let footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0);
+    let pixel = footprint * distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
     let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
     return base * textureSampleLevel(base_color, base_sampler, uv, i32(layer), lod).xyz;
 }
@@ -1747,6 +1752,12 @@ fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, seen: u
     }
     // A ray that misses everything sees the sky.
     if (hit.mesh == 0xffffffffu) { colors[pixel] = vec4<f32>(light.sky.xyz, 1.0); return; }
+    colors[pixel] = vec4<f32>(per_pixel_hit_color(pixel, eye, dir, hit), 1.0);
+}
+
+// The color of surface `hit`, seen along `dir` from `eye`, lit through a
+// mask cone per light (and the sky's cones).
+fn per_pixel_hit_color(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit) -> vec3<f32> {
     let surface = eye + dir * hit.distance;
     let point = surface + hit.normal * surface_offset(hit.distance);
     let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
@@ -1759,7 +1770,7 @@ fn shade_per_pixel(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, hit: Hit, seen: u
         e += light.sky.xyz * sky_irradiance(point, normal);
         sky_frame = NONE;
     }
-    colors[pixel] = vec4<f32>(surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal) * e / 3.14159265, 1.0);
+    return surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal) * e / 3.14159265;
 }
 
 @compute @workgroup_size(8, 8)
@@ -2722,9 +2733,8 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
     let tile = vc.counts.z;
     let sample = (vc.counts.y * 7u) % (tile * tile);
     let is_sample = in_bounds && gid.x % tile == sample % tile && gid.y % tile == sample / tile;
-    var request_key = vec3<u32>(0u);
-    var request_priority = 0u;
-    var fell_back = false;
+    vc_request_priority = 0u;
+    vc_fell_back = false;
     if (in_bounds) {
         let dir = camera_dir(gid);
         let pixel = gid.y * w + gid.x;
@@ -2735,78 +2745,494 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
             let l = lights[vis[pixel].w - 1u];
             color = l.radiance.xyz * spot_falloff(l, -dir);
         } else if (hit.mesh != NONE) {
-            let surface = camera.eye.xyz + dir * hit.distance;
-            let c = tri_vchart[hit.tri];
-            let uv = chart_uv(hit.mesh, hit.tri, surface);
-            let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
-            // Irradiance per unit radiance from the found page: lights, then sky.
-            var found_slot = NONE;
-            var found_ref: PageRef;
-            var found = false;
-            var mip = wanted;
-            // The key of the page one mip finer than `mip` (the last missing one).
-            var finer = vec3<u32>(0u);
-            loop {
-                let r = vc_page(hit.mesh, c, uv, mip);
-                let slot = vc_find(r.key);
-                if (slot != NONE) {
-                    slot_used[slot] = vc.counts.y;
-                    found_slot = slot;
-                    found_ref = r;
-                    found = true;
-                    if (mip > wanted) {
-                        request_key = finer;
-                        request_priority = 32u - min(mip - wanted, 30u);
-                    }
-                    break;
-                }
-                finer = r.key;
-                if (r.coarsest || mip >= 30u) { break; }
-                mip += 1u;
-            }
-            var e = vec3<f32>(0.0);
-            let count = arrayLength(&lights);
-            let point = surface + hit.normal * surface_offset(hit.distance);
-            let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
-            if (found) {
-                // Each light's cached shadowed share, times its unshadowed
-                // light here.
-                for (var l = 0u; l < count; l++) {
-                    if (vc.sky.w == 1u) {
-                        // Shadowed pixels need no unshadowed light.
-                        let share = vc_bilinear(found_slot, found_ref, l);
-                        if (share > 0.0) {
-                            e += lights[l].radiance.xyz * share * unshadowed_rect(point, normal, lights[l]);
-                        }
-                    } else {
-                        e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
-                    }
-                }
-                e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
-            } else {
-                fell_back = true;
-                request_key = finer;
-                request_priority = 1u;
-                // Unshadowed light from each light.
-                for (var l = 0u; l < count; l++) {
-                    e += lights[l].radiance.xyz * unshadowed_rect(point, normal, lights[l]);
-                }
-                // The sky above the horizon, with the ground below it: a
-                // guess until a page arrives.
-                e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + normal.z));
-            }
-            if (is_sample) {
-                atomicAdd(&vc_stats[2], 1u);
-                if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
-            }
-            color = surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal) * e / 3.14159265;
+            color = vc_hit_color(dir, hit, is_sample);
         }
         colors[pixel] = vec4<f32>(color, 1.0);
     }
-    if (is_sample && request_priority > 0u) {
-        vc_request(request_key, request_priority);
+    if (is_sample && vc_request_priority > 0u) {
+        vc_request(vc_request_key, vc_request_priority);
     }
-    if (fell_back) { atomicAdd(&fallback_count, 1u); }
+    if (vc_fell_back) { atomicAdd(&fallback_count, 1u); }
+    workgroupBarrier();
+    if (li == 0u) {
+        let count = atomicLoad(&fallback_count);
+        if (count > 0u) { atomicAdd(&vc_stats[0], count); }
+    }
+}
+
+// What shading from the cache asks of the frame: the page a sample pixel
+// requests (key and priority; 0: none), and whether a pixel fell back to
+// unshadowed light.
+var<private> vc_request_key: vec3<u32> = vec3<u32>(0u);
+var<private> vc_request_priority: u32 = 0u;
+var<private> vc_fell_back: bool = false;
+
+// The color of surface `hit` seen along camera ray `dir`, lit from the
+// cache: the page of the wanted mip, or failing that the finest coarser one
+// resident, or failing that unshadowed light. `sample`: the pixel samples
+// this frame (its request and statistics count).
+fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
+    let surface = camera.eye.xyz + dir * hit.distance;
+    let c = tri_vchart[hit.tri];
+    let uv = chart_uv(hit.mesh, hit.tri, surface);
+    let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
+    // Irradiance per unit radiance from the found page: lights, then sky.
+    var found_slot = NONE;
+    var found_ref: PageRef;
+    var found = false;
+    var mip = wanted;
+    // The key of the page one mip finer than `mip` (the last missing one).
+    var finer = vec3<u32>(0u);
+    loop {
+        let r = vc_page(hit.mesh, c, uv, mip);
+        let slot = vc_find(r.key);
+        if (slot != NONE) {
+            slot_used[slot] = vc.counts.y;
+            found_slot = slot;
+            found_ref = r;
+            found = true;
+            if (mip > wanted) {
+                vc_request_key = finer;
+                vc_request_priority = 32u - min(mip - wanted, 30u);
+            }
+            break;
+        }
+        finer = r.key;
+        if (r.coarsest || mip >= 30u) { break; }
+        mip += 1u;
+    }
+    var e = vec3<f32>(0.0);
+    let count = arrayLength(&lights);
+    let point = surface + hit.normal * surface_offset(hit.distance);
+    let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
+    if (found) {
+        // Each light's cached shadowed share, times its unshadowed
+        // light here.
+        for (var l = 0u; l < count; l++) {
+            if (vc.sky.w == 1u) {
+                // Shadowed pixels need no unshadowed light.
+                let share = vc_bilinear(found_slot, found_ref, l);
+                if (share > 0.0) {
+                    e += lights[l].radiance.xyz * share * unshadowed_rect(point, normal, lights[l]);
+                }
+            } else {
+                e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
+            }
+        }
+        e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
+    } else {
+        vc_fell_back = true;
+        vc_request_key = finer;
+        vc_request_priority = 1u;
+        // Unshadowed light from each light.
+        for (var l = 0u; l < count; l++) {
+            e += lights[l].radiance.xyz * unshadowed_rect(point, normal, lights[l]);
+        }
+        // The sky above the horizon, with the ground below it: a
+        // guess until a page arrives.
+        e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + normal.z));
+    }
+    if (sample) {
+        atomicAdd(&vc_stats[2], 1u);
+        if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
+    }
+    return surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal) * e / 3.14159265;
+}
+
+
+// --- Pixel cones (M7): primary visibility through each pixel's square. ---
+//
+// A pixel's cone is its square seen from the eye, split into 8×8 bins of
+// equal image-plane area. Front to back through the object hierarchy, each
+// object it meets becomes a fragment: its mean coverage of the bins (its
+// front-facing triangles summed per bin, prefiltered below a bin, as light
+// cones do), a mask of the bins it covers at least half of, and its depth
+// along a ray through its coverage. Fragments composite by mask, nearest
+// first, so nearer ones hide farther ones bin by bin; each visible one is
+// shaded once, at a ray through its visible bins; what none covers sees the
+// sky.
+
+const PIXEL_FRAGMENTS: u32 = 4u;
+
+struct Fragment {
+    mesh: u32,
+    // Bins it covers at least half of (bit b of x for b < 32, of y above).
+    mask: vec2<u32>,
+    // Mean coverage over the 64 bins.
+    cover: f32,
+    // Distance along the ray through `st` to its surface.
+    depth: f32,
+    // Its coverage's centroid in the pixel, in [0, 1]².
+    st: vec2<f32>,
+};
+
+// The pixel's fragments, nearest first.
+var<private> frags: array<Fragment, PIXEL_FRAGMENTS>;
+var<private> frag_count: u32 = 0u;
+// Diagnostics (profile stage 9: `render_cones` writes them as the pixel's
+// color): object nodes visited, meshes entered, triangle-hierarchy nodes
+// tested.
+var<private> pc_work: vec3<u32> = vec3<u32>(0u);
+
+
+// Bins the last `mesh_fragment` covered wholly.
+var<private> frag_solid: vec2<u32> = vec2<u32>(0u);
+
+fn bit_count(m: vec2<u32>) -> u32 {
+    return countOneBits(m.x) + countOneBits(m.y);
+}
+
+// The cone through pixel `gid`'s square.
+fn pixel_cone(gid: vec3<u32>) -> Cone {
+    let aspect = camera.params.x / camera.params.y;
+    let tz = camera.params.z;
+    var c: Cone;
+    c.apex = camera.eye.xyz;
+    c.right = camera.right.xyz;
+    c.up = camera.up.xyz;
+    c.forward = camera.forward.xyz;
+    c.window = vec4<f32>(
+        (f32(gid.x) / camera.params.x * 2.0 - 1.0) * tz * aspect,
+        (1.0 - f32(gid.y + 1u) / camera.params.y * 2.0) * tz,
+        (f32(gid.x + 1u) / camera.params.x * 2.0 - 1.0) * tz * aspect,
+        (1.0 - f32(gid.y) / camera.params.y * 2.0) * tz,
+    );
+    c.far_normal = camera.forward.xyz;
+    c.far_offset = 1e30;
+    c.horizon = vec3<f32>(0.0);
+    c.bound = vec4<f32>(0.0, 0.0, 0.0, -2.0);
+    c.bound_sin = 0.0;
+    return c;
+}
+
+// The center of bin `b` in the pixel, in [0, 1]².
+fn bin_center(b: u32) -> vec2<f32> {
+    return (vec2<f32>(f32(b % GRID), f32(b / GRID)) + 0.5) / f32(GRID);
+}
+
+// The mean center of the bins in mask `m` (the pixel's center if empty).
+fn mask_centroid(m: vec2<u32>) -> vec2<f32> {
+    var sum = vec2<f32>(0.0);
+    var n = 0.0;
+    for (var b = 0u; b < BINS; b++) {
+        let word = select(m.x, m.y, b >= 32u);
+        if (((word >> (b & 31u)) & 1u) != 0u) {
+            sum += bin_center(b);
+            n += 1.0;
+        }
+    }
+    if (n == 0.0) { return vec2<f32>(0.5); }
+    return sum / n;
+}
+
+// Mesh `m`'s coverage of pixel cone `world_cone` as a fragment (depth not
+// yet set); `frag_solid` gets the bins it covers wholly. Triangle hierarchy
+// traversal uses `stack` from `base` up.
+fn mesh_fragment(world_cone: Cone, m: u32, base: u32) -> Fragment {
+    var f = Fragment(m, vec2<u32>(0u), 0.0, 3.4e38, vec2<f32>(0.5));
+    frag_solid = vec2<u32>(0u);
+    let c = cone_to_object(world_cone, m);
+    let range = meshes[m];
+    var acc: array<f32, 68>;
+    for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
+    var span = vec2<u32>(68u, 0u);
+    var touched = false;
+    if (range.z != NONE) {
+        var sp = base + 1u;
+        stack_set(base, range.z);
+        while (sp > base) {
+            sp--;
+            let n = stack_get(sp);
+            let node = blas[n];
+            pc_work.z++;
+            let test = node_cone_test(c, &acc, &span, n, node.lo.xyz, node.hi.xyz);
+            if (test == 2u) { touched = true; }
+            if (test != 3u) { continue; }
+            if (node.info.y > 0u) {
+                for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                    if (cover_triangle(c, &acc, &span, blas_items[k])) { touched = true; }
+                }
+            } else {
+                stack_set(sp, node.info.x);
+                stack_set(sp + 1u, node.info.x + 1u);
+                sp += 2u;
+            }
+        }
+    } else {
+        for (var t = range.x; t < range.x + range.y; t++) {
+            if (cover_triangle(c, &acc, &span, t)) { touched = true; }
+        }
+    }
+    if (!touched) { return f; }
+    var running = 0.0;
+    var sum = 0.0;
+    var centroid = vec2<f32>(0.0);
+    for (var b = span.x; b < min(span.y, BINS); b++) {
+        running += acc[b];
+        var covered = min(abs(running), 1.0);
+        if (covered >= 1.0 - 1e-5) { covered = 1.0; }
+        if (covered <= 1e-6) { continue; }
+        sum += covered;
+        centroid += covered * bin_center(b);
+        let bit = 1u << (b & 31u);
+        if (covered >= 0.5) {
+            if (b < 32u) { f.mask.x |= bit; } else { f.mask.y |= bit; }
+        }
+        if (covered >= 1.0) {
+            if (b < 32u) { frag_solid.x |= bit; } else { frag_solid.y |= bit; }
+        }
+    }
+    f.cover = sum / f32(BINS);
+    if (sum > 0.0) { f.st = centroid / sum; }
+    return f;
+}
+
+const MISS: Hit = Hit(3.4e38, 0xffffffffu, 0xffffffffu, vec3<f32>(0.0));
+
+// The nearest hit on mesh `m` along the ray through `st` in pixel cone `c`,
+// its normal facing the ray. Triangle traversal uses `stack` from `base` up.
+fn fragment_hit(c: Cone, m: u32, st: vec2<f32>, base: u32) -> Hit {
+    let dir = normalize(direction(c, st.x, st.y));
+    var hit = nearest_in_mesh(c.apex, dir, m, MISS, base);
+    if (hit.mesh == m && dot(hit.normal, dir) > 0.0) { hit.normal = -hit.normal; }
+    return hit;
+}
+
+// Inserts `f` among the pixel's fragments, nearest first. When they are
+// full, the one with the least coverage (`f` or a kept one) is dropped.
+fn insert_fragment(f: Fragment) {
+    if (frag_count == PIXEL_FRAGMENTS) {
+        var least = PIXEL_FRAGMENTS;
+        var least_cover = f.cover;
+        for (var k = 0u; k < PIXEL_FRAGMENTS; k++) {
+            if (frags[k].cover < least_cover) {
+                least = k;
+                least_cover = frags[k].cover;
+            }
+        }
+        if (least == PIXEL_FRAGMENTS) { return; }
+        for (var k = least; k + 1u < PIXEL_FRAGMENTS; k++) { frags[k] = frags[k + 1u]; }
+        frag_count--;
+    }
+    var at = frag_count;
+    while (at > 0u && frags[at - 1u].depth > f.depth) {
+        frags[at] = frags[at - 1u];
+        at--;
+    }
+    frags[at] = f;
+    frag_count++;
+}
+
+// The least distance along the cone's forward axis of a box's corners: no
+// point of the box is nearer along any of the cone's rays.
+fn box_near(c: Cone, lo: vec3<f32>, hi: vec3<f32>) -> f32 {
+    var near = 3.4e38;
+    for (var k = 0u; k < 8u; k++) {
+        let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
+        near = min(near, dot(c.forward, corner - c.apex));
+    }
+    return near;
+}
+
+// Collects pixel cone `c`'s fragments: objects nearest first, until the
+// fragments cover every bin wholly; then only objects that may lie in front
+// of the farthest fragment.
+fn pixel_fragments(c: Cone) {
+    // Prefiltered as light cones are: nodes within the threshold (in bins)
+    // splat their coverage.
+    prefilter_bins = light.params.x;
+    frag_count = 0u;
+    var solid = vec2<u32>(0u);
+    var limit = 3.4e38;
+    var sp = 1u;
+    stack_set(0, 0u);
+    while (sp > 0u) {
+        sp--;
+        let node = nodes[stack_get(sp)];
+        pc_work.x++;
+        if (!may_touch_box(c, node.lo.xyz, node.hi.xyz)) { continue; }
+        if (limit < 3.4e38 && box_near(c, node.lo.xyz, node.hi.xyz) > limit) { continue; }
+        if (node.info.y > 0u) {
+            for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                let m = items[k];
+                pc_work.y++;
+                var f = mesh_fragment(c, m, sp);
+                if (f.cover <= 1e-4) { continue; }
+                let mesh_solid = frag_solid;
+                // Its depth: along a ray through its coverage, else through
+                // its most covered bins, else the box's near side.
+                var hit = fragment_hit(c, m, f.st, sp);
+                if (hit.mesh != m && bit_count(f.mask) > 0u) {
+                    hit = fragment_hit(c, m, mask_centroid(f.mask), sp);
+                }
+                f.depth = select(box_near(c, node.lo.xyz, node.hi.xyz), hit.distance, hit.mesh == m);
+                insert_fragment(f);
+                solid |= mesh_solid;
+                if (bit_count(solid) == BINS) {
+                    // A little beyond the farthest kept fragment: a
+                    // fragment's surface can reach past the depth of its
+                    // one ray.
+                    var far = 0.0;
+                    for (var j = 0u; j < frag_count; j++) { far = max(far, frags[j].depth); }
+                    limit = far * 1.02;
+                }
+            }
+        } else {
+            var near = node.info.x;
+            var far = node.info.x + 1u;
+            let a = nodes[near];
+            let b = nodes[far];
+            // The one whose box begins nearer along the cone is popped
+            // first: a large surface behind (the ground) is met early and
+            // bounds the walk.
+            if (box_near(c, b.lo.xyz, b.hi.xyz) < box_near(c, a.lo.xyz, a.hi.xyz)) {
+                near = node.info.x + 1u;
+                far = node.info.x;
+            }
+            stack_set(sp, far);
+            stack_set(sp + 1u, near);
+            sp += 2u;
+        }
+    }
+}
+
+// The fragments' visible coverage (nearest first), the sum of it, and the
+// most visible fragment.
+var<private> frag_weight: array<f32, PIXEL_FRAGMENTS>;
+var<private> frag_visible: array<vec2<u32>, PIXEL_FRAGMENTS>;
+var<private> frag_total: f32 = 0.0;
+var<private> frag_best: u32 = 0u;
+
+// Finds pixel cone `c`'s fragments (pixel `gid`) and their visible
+// coverage: bins hidden by nearer fragments' masks do not count, and a
+// fragment without a mask (every bin under half covered) is hidden in
+// proportion to the bins already covered. Returns the color of a light the
+// pixel's center sees in front of every fragment (w: 1), shown as with one
+// ray, or w: 0.
+fn cone_pixel_setup(gid: vec3<u32>, c: Cone) -> vec4<f32> {
+    cull_back = true;
+    pixel_fragments(c);
+    let center = camera_dir(gid);
+    var nearest = 3.4e38;
+    if (frag_count > 0u) { nearest = frags[0].depth; }
+    let seen = seen_light(c.apex, center, nearest);
+    if (seen != 0u) {
+        let l = lights[seen - 1u];
+        return vec4<f32>(l.radiance.xyz * spot_falloff(l, -center), 1.0);
+    }
+    var covered = vec2<u32>(0u);
+    frag_total = 0.0;
+    frag_best = 0u;
+    for (var k = 0u; k < frag_count; k++) {
+        let f = frags[k];
+        let vis = f.mask & ~covered;
+        let bits = bit_count(f.mask);
+        var w = f.cover * (1.0 - f32(bit_count(covered)) / f32(BINS));
+        if (bits > 0u) { w = f.cover * f32(bit_count(vis)) / f32(bits); }
+        w = min(w, max(1.0 - frag_total, 0.0));
+        frag_weight[k] = w;
+        frag_visible[k] = vis;
+        frag_total += w;
+        covered |= f.mask;
+        if (w > frag_weight[frag_best]) { frag_best = k; }
+    }
+    return vec4<f32>(0.0);
+}
+
+// Where fragment `k` of pixel cone `c` is shaded: a ray through its visible
+// bins, else through its coverage. `hit.mesh` is not the fragment's if
+// neither ray hits it (its coverage too thin).
+struct FragmentRay {
+    hit: Hit,
+    dir: vec3<f32>,
+};
+
+fn fragment_ray(c: Cone, k: u32) -> FragmentRay {
+    let m = frags[k].mesh;
+    var st = mask_centroid(frag_visible[k]);
+    var hit = MISS;
+    if (bit_count(frag_visible[k]) > 0u) { hit = fragment_hit(c, m, st, 0u); }
+    if (hit.mesh != m) {
+        st = frags[k].st;
+        hit = fragment_hit(c, m, st, 0u);
+    }
+    return FragmentRay(hit, normalize(direction(c, st.x, st.y)));
+}
+
+// The pixel's color from the weighted sum of its shaded fragments' colors
+// (`shaded`: their weights): the share of fragments no ray hit goes to the
+// others, and the sky fills what no fragment covers.
+fn cone_pixel_finish(color: vec3<f32>, shaded: f32) -> vec3<f32> {
+    var c = color;
+    if (shaded > 0.0) { c *= frag_total / shaded; }
+    return c + max(1.0 - frag_total, 0.0) * light.sky.xyz;
+}
+
+@compute @workgroup_size(8, 8)
+fn render_cones(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let pixel = gid.y * w + gid.x;
+    let c = pixel_cone(gid);
+    let seen = cone_pixel_setup(gid, c);
+    if (u32(light.params.z) == 9u) {
+        colors[pixel] = vec4<f32>(vec3<f32>(pc_work), f32(frag_count));
+        return;
+    }
+
+    if (seen.w > 0.0) {
+        colors[pixel] = vec4<f32>(seen.xyz, 1.0);
+        return;
+    }
+    var color = vec3<f32>(0.0);
+    var shaded = 0.0;
+    for (var k = 0u; k < frag_count; k++) {
+        if (frag_weight[k] <= 0.0) { continue; }
+        let r = fragment_ray(c, k);
+        if (r.hit.mesh != frags[k].mesh) { continue; }
+        color += frag_weight[k] * per_pixel_hit_color(pixel, c.apex, r.dir, r.hit);
+        shaded += frag_weight[k];
+    }
+    colors[pixel] = vec4<f32>(cone_pixel_finish(color, shaded), 1.0);
+}
+
+// `vc_shade` with pixel cones for visibility (no visibility pass).
+@compute @workgroup_size(8, 8)
+fn vc_shade_cones(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    let in_bounds = gid.x < w && gid.y < h;
+    let tile = vc.counts.z;
+    let sample = (vc.counts.y * 7u) % (tile * tile);
+    let is_sample = in_bounds && gid.x % tile == sample % tile && gid.y % tile == sample / tile;
+    vc_request_priority = 0u;
+    vc_fell_back = false;
+    if (in_bounds) {
+        let pixel = gid.y * w + gid.x;
+        let c = pixel_cone(gid);
+        var color = cone_pixel_setup(gid, c);
+        if (color.w == 0.0) {
+            var sum = vec3<f32>(0.0);
+            var shaded = 0.0;
+            for (var k = 0u; k < frag_count; k++) {
+                if (frag_weight[k] <= 0.0) { continue; }
+                let r = fragment_ray(c, k);
+                if (r.hit.mesh != frags[k].mesh) { continue; }
+                // The most visible fragment requests pages for the pixel.
+                sum += frag_weight[k] * vc_hit_color(r.dir, r.hit, is_sample && k == frag_best);
+                shaded += frag_weight[k];
+            }
+            color = vec4<f32>(cone_pixel_finish(sum, shaded), 1.0);
+        }
+        colors[pixel] = vec4<f32>(color.xyz, 1.0);
+    }
+    if (is_sample && vc_request_priority > 0u) {
+        vc_request(vc_request_key, vc_request_priority);
+    }
+    if (vc_fell_back) { atomicAdd(&fallback_count, 1u); }
     workgroupBarrier();
     if (li == 0u) {
         let count = atomicLoad(&fallback_count);

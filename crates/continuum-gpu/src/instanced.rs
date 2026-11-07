@@ -13,7 +13,8 @@ use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_VISIBILITY_BINDINGS, InstancedScene, Light, LightGpu, MaskConeKernel, RECT_LIGHT_BINDINGS,
     RectLight, SceneTextures, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_UPDATE_BINDINGS,
+    camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -111,6 +112,12 @@ pub struct InstancedRenderer {
     /// The scene's base color textures (bindings 55 and 56).
     textures: SceneTextures,
     srgb: bool,
+    /// Where camera rays cross each pixel, from its center, in pixels
+    /// (references that average many sub-pixel positions).
+    pixel_offset: [f32; 2],
+    /// Textures are sampled for this share of a pixel's width (1: the
+    /// pixel; 1/16 for references at 16×16 samples per pixel).
+    footprint: f32,
 }
 
 fn bind_group(
@@ -269,6 +276,20 @@ impl InstancedRenderer {
         )
     }
 
+    /// Camera rays cross each pixel `(dx, dy)` pixels from its center (x
+    /// right, y down) from the next frame: for supersampled references,
+    /// which average frames over a grid of offsets. Pixel cones ignore it.
+    pub fn set_pixel_offset(&mut self, dx: f32, dy: f32) {
+        self.pixel_offset = [dx, dy];
+    }
+
+    /// Textures are sampled at the footprint of `share` of a pixel's width
+    /// from the next frame (1 by default): for references that average
+    /// `n × n` sub-pixel samples, `1 / n`, as at `n` times the resolution.
+    pub fn set_footprint(&mut self, share: f32) {
+        self.footprint = share;
+    }
+
     /// Changes light `index`'s RGB radiance from the next frame. Lighting is
     /// linear in emitted power: per-pixel frames shade with it, and the cache
     /// re-weights its stored channels, baking nothing.
@@ -311,9 +332,10 @@ impl InstancedRenderer {
         );
         let dims_buf = uniform_buffer(&device, "dims", &[0; std::mem::size_of::<DisplayDims>()]);
         let display = display_pipeline(&device, target_format);
-        let hw = kernel
-            .uses_hardware_rays()
-            .then(|| kernel.hw_scene(scene, origin));
+        let pixel_cones = kernel.pixel_cones.get();
+        // Pixel cones need no camera rays, so no acceleration structure.
+        let hw =
+            (kernel.uses_hardware_rays() && !pixel_cones).then(|| kernel.hw_scene(scene, origin));
         let visibility = match (&hw, &kernel.hw_visibility_pipeline) {
             (Some(_), Some(pipeline)) => Some((pipeline.clone(), HW_VISIBILITY_BINDINGS.to_vec())),
             _ => None,
@@ -324,6 +346,14 @@ impl InstancedRenderer {
             keep
         };
         let passes = match (cache.is_some(), visibility) {
+            (false, _) if pixel_cones => vec![(
+                kernel.render_cones_pipeline.clone(),
+                RECT_LIGHT_BINDINGS.to_vec(),
+            )],
+            (true, _) if pixel_cones => vec![(
+                kernel.vc_shade_cones_pipeline.clone(),
+                VC_SHADE_CONES_BINDINGS.to_vec(),
+            )],
             (false, Some(v)) => vec![
                 v,
                 (
@@ -384,6 +414,8 @@ impl InstancedRenderer {
             lights: lights.len(),
             textures: kernel.scene_textures(&scene.textures),
             srgb: target_format.is_srgb(),
+            pixel_offset: [0.0; 2],
+            footprint: 1.0,
         };
         renderer.targets();
         renderer.bake_self_masks(kernel);
@@ -567,7 +599,10 @@ impl InstancedRenderer {
     /// With a lighting cache, this first plans the frame's bake from the page
     /// requests of two frames before (waiting for that frame only).
     pub fn frame(&mut self, camera: Camera, target: &wgpu::TextureView) {
-        let cam = camera_uniform(camera, self.width, self.height, self.radiance);
+        let mut cam = camera_uniform(camera, self.width, self.height, self.radiance);
+        cam.right[3] = self.pixel_offset[0];
+        cam.up[3] = self.pixel_offset[1];
+        cam.eye[3] = self.footprint;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
         let dims = DisplayDims {
@@ -633,7 +668,10 @@ impl InstancedRenderer {
     /// own, for profiling. The stages' sum exceeds a normal frame by the extra
     /// synchronization.
     pub fn frame_profiled(&mut self, camera: Camera, target: &wgpu::TextureView) -> FrameProfile {
-        let cam = camera_uniform(camera, self.width, self.height, self.radiance);
+        let mut cam = camera_uniform(camera, self.width, self.height, self.radiance);
+        cam.right[3] = self.pixel_offset[0];
+        cam.up[3] = self.pixel_offset[1];
+        cam.eye[3] = self.footprint;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
         let dims = DisplayDims {
