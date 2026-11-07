@@ -231,8 +231,9 @@ cargo run --release -p room3d --bin render_field -- 1000000 1920 1080
 ```
 
 Later gates follow the same pattern:
-`cargo run --release -p room3d --bin m<milestone>_gate<n>`. M5 gates 1–8 and
-M6 gate 1 are the latest, with results in `docs/results/`.
+`cargo run --release -p room3d --bin m<milestone>_gate<n>`. M5 gates 1–8,
+M6 gate 1 and M7 gate 1 (pixel cones for anti-aliasing, failed) are the
+latest, with results in `docs/results/`.
 
 ![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)
 

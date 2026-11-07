@@ -43,7 +43,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   roughness, normal maps, alpha and emission are not.
 - **Direct light only** in the instanced renderer: no bounce light yet.
 - **One ray per pixel for visibility,** so distant detail aliases.
-  Pixel-footprint cones are planned.
+  `RendererOptions::pixel_cones` (off by default) traces a cone through each
+  pixel instead; it is experimental and far from real time on large scenes
+  (M7 gate 1: 105 ms per frame on a small textured scene).
 - **The sky converges slowly** in the cache: a view takes hundreds to
   thousands of frames to sharpen (M5 G5). It is opt-in.
 - **Sustained speed on fanless laptops.** Flights with several lights hold
