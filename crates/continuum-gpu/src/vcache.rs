@@ -1443,13 +1443,11 @@ impl VirtualCache {
                 self.moving,
                 POSE_RING,
                 self.options.ledger_epsilon.to_bits(),
-                // A safety limit on the ledger's re-bakes: eight times the
-                // frame's budget (a page at least); the top bit tells whether
-                // a moving light moved.
-                (8 * self.budget as u32)
-                    .max(PAGE_TEXELS * self.lights)
-                    .min(0x7fff_ffff)
-                    | (lit as u32) << 31,
+                // A limit on the ledger's re-bakes: the appended jobs'
+                // capacity (M9 gate 4: a limit of eight times the frame's
+                // budget bound in gate 2 and set visible pages aside); the
+                // top bit tells whether a moving light moved.
+                self.append_jobs().min(0x7fff_ffff) | (lit as u32) << 31,
             ],
             indirect: [
                 self.indirect_jobs.len() as u32,
