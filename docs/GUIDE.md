@@ -55,6 +55,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   1): 1.79% from Cycles with one bounce on a textured scene, at 1.07× the
   warm frame. At most three lights; not with movers or moving lights.
 - **One ray per pixel for visibility,** so distant detail aliases.
+  Textures are box-filtered over each pixel's footprint (M7 gate 2), which
+  halves their error against the area-integrated image.
   `RendererOptions::pixel_cones` (off by default) traces a cone through each
   pixel instead; it is experimental and far from real time on large scenes
   (M7 gate 1: 105 ms per frame on a small textured scene).
