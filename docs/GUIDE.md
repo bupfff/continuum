@@ -59,7 +59,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   emitted radiance in the cache's shading, directly and in reflections.
   It does not light other surfaces: use a light for that. glTF import
   brings the emissive factor times `KHR_materials_emissive_strength` (not
-  emissive textures). Normal maps and alpha are not done.
+  emissive textures).
+- **Normal maps.** `InstancedScene::geometry_normal_maps` takes, per
+  geometry, a tangent-space normal map (an index into `textures`; linear,
+  OpenGL's convention as glTF specifies). The cache's shading uses it for
+  light from lights, specular and reflections; the sky and bounce light
+  keep the interpolated normal. 3.63% from Cycles on a beveled-tile scene
+  (M10 gate 5). glTF import brings normal textures (scale ignored).
+  Tangents come from texture coordinates per triangle (MikkTSpace differs on
+  curved meshes). Alpha is not done.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
   1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
   the warm frame; re-coloring stays free (M10 gate 4). At most three
