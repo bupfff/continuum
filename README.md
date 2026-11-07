@@ -5,9 +5,9 @@ rendering. Every visibility question is asked by a cone that answers in bits,
 and cached answers are recomputed only when they could have changed by more
 than a chosen, invisible error bound.
 
-Status: experimental, working toward a v0.1 library release. The core bets
-were tested in 2D (M0) and in 3D on the CPU (M1). On the GPU, Continuum
-renders:
+Status: experimental; `v0.1.0` is tagged, and later work is on `main`. The
+core bets were tested in 2D (M0) and in 3D on the CPU (M1). On the GPU,
+Continuum renders:
 
 - a procedural showcase in real time, with moving objects, exact soft shadows
   and one bounce of indirect light (M2–M3);
@@ -24,14 +24,18 @@ renders:
   failed on that);
 - one bounce of light in the cache, 1.79% from Cycles with one bounce
   (M10 gate 1);
+- metallic-roughness materials with glossy reflections, experimental
+  (8.94% from Cycles, M10 gate 2, failed against 6%);
 - normal maps, 3.63% from Cycles (M10 gate 5), alpha cutouts, 3.29% (M10
-  gate 7), and emission.
+  gate 7), and emission;
+- textures box-filtered over each pixel's footprint (M7 gate 2).
 
 Every claim is measured against Blender's Cycles.
 
 - [docs/GUIDE.md](docs/GUIDE.md): using it as a library; API reference with
   `cargo doc --no-deps -p continuum-gpu -p continuum-gltf --open`.
-- [docs/DESIGN.md](docs/DESIGN.md): the design and an honest status (§3.6).
+- [docs/DESIGN.md](docs/DESIGN.md): the design, an honest status (§3.6),
+  and what to do next (§3.8, "Start here").
 - [docs/results/](docs/results/): every measured result.
 
 ## Try it: the real-time viewer

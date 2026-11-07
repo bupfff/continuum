@@ -31,6 +31,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 | A textured glTF scene against Cycles | 0.43% | M6 G1 |
 | Point and spot lights against Cycles | 1.35% | M5 G8 |
 | Re-coloring or dimming a light | free and exact (nothing is re-baked) | M5 G6 |
+| One bounce of light, textured scene, against Cycles | 1.79% | M10 G1 |
+| Normal maps against Cycles | 3.63% | M10 G5 |
+| Alpha-masked foliage against Cycles | 3.29% | M10 G7 |
 
 ## Limits, today
 
@@ -80,12 +83,16 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
   the warm frame; re-coloring stays free (M10 gate 4). At most three
   lights; not with movers or moving lights.
+- **Materials, normal maps and emission are in the cached path only;**
+  the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **One ray per pixel for visibility,** so distant detail aliases.
   Textures are box-filtered over each pixel's footprint (M7 gate 2), which
   halves their error against the area-integrated image.
   `RendererOptions::pixel_cones` (off by default) traces a cone through each
   pixel instead; it is experimental and far from real time on large scenes
   (M7 gate 1: 105 ms per frame on a small textured scene).
+  `CacheOptions::edge_rays` (off) adds four rays at silhouette pixels; it
+  halves the error far away but costs up to 13× the frame (M7 gate 3).
 - **The sky converges slowly** in the cache: a view takes hundreds to
   thousands of frames to sharpen (M5 G5). It is opt-in.
 - **Sustained speed on fanless laptops.** Flights with several lights hold

@@ -5,20 +5,26 @@
 - Results of every experiment go in `docs/results/` with the exact numbers and caveats.
 - Where things live:
   - **Current state and next steps:** DESIGN.md §3.6–3.8 and the milestone
-    table (§6). Start a new conversation there.
+    table (§6). Start a new conversation at §3.8's "Start here" block, and
+    keep it current at the end of each session.
   - **Library front door:** `Renderer` in
     `crates/continuum-gpu/src/renderer.rs`; usage in `docs/GUIDE.md`; the
     example `crates/continuum-gltf/examples/render.rs`.
   - **Renderer:** `crates/continuum-gpu`. `mask_cones.wgsl` holds the kernel;
     `vcache.rs` is the view-dependent cache; `instanced.rs` the instanced
     renderer; `live.rs` the lightmap renderer with movers; `hierarchy.rs`
-    the prefiltered hierarchies.
+    the prefiltered hierarchies; `cutout.rs` alpha cutouts made geometry.
+  - **Materials and textures:** `InstancedScene` in `continuum-gpu/src/lib.rs`
+    (`geometry_materials`, `_emission`, `_normal_maps`,
+    `_metallic_roughness`, `_alpha_cutoff`); glTF import and save in
+    `crates/continuum-gltf/src/lib.rs`.
   - **Core types:** `crates/continuum`.
   - **2D experiments:** binaries in `experiments/flatland/src/bin/`; every
     ledger experiment runs on `flatland::incremental`.
   - **3D gates and diagnostics:** binaries in `experiments/room3d/src/bin/`
     (`m<milestone>_gate<n>.rs`), with scenes in `room3d::{showcase, field,
-    outdoor}`.
+    outdoor, textured}` (`Textured::new()` and its `.with_materials()`,
+    `.with_normal_maps()`, `.with_foliage()`).
   - **Viewer:** `apps/viewer` (`cargo run --release -p viewer -- --scene
     field --scale 2`).
   - **Patched wgpu-core:** `third_party/` (see its README).

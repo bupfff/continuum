@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-07, after M10 gate 1)
+## 3.6 Where we stand (updated 2026-11-07, after M10 gate 7)
 
 Against the goal in §1, honestly:
 
@@ -263,18 +263,45 @@ Against the goal in §1, honestly:
   - Method: 3×3 hemicube samples per page (192 rays each), reading the
     direct light the cache holds at the hits; hits with no page request
     one and re-bake later.
-  - Re-coloring alone bakes nothing, but after supersampling the cache did
-    not stay settled, and that failed the check. Not yet with movers or
-    moving lights.
+  - Re-coloring alone bakes nothing (M10 G4, passed): gate 1's failure was
+    its own settle helper, which returned after one frame. M10 G3's
+    secondary requests stopped request cascades (materials settle in 1.12×
+    the frames instead of 6.9×). Not yet with movers or moving lights.
+- **Metallic-roughness materials and glossy reflections** (M10 G2, failed
+  on accuracy). GGX specular from lights (a representative point times the
+  cached shadowed share), a split-sum directional albedo, and one
+  reflection ray per pixel reading the cache at the lobe's mip. 8.94% from
+  Cycles against at most 6% (12.71% without reflection rays), warm frame
+  1.82×. Metallic-roughness textures scale the factors (tested, not gated).
+- **Normal maps** (M10 G5, passed): tangent-space maps with per-triangle
+  tangents bend the normal for light from lights, specular and
+  reflections. 3.63% from Cycles with the maps against 26.42% ignoring
+  them, at 1.04× the warm frame. The sky and bounce light ignore the maps.
+- **Alpha cutouts** (M10 G7, passed; G6 reached no criterion). Masked
+  triangles become the opaque part of their texture, as geometry, before
+  upload (`cut_out`: marching squares on the bilinear alpha), so every path
+  sees the cut exactly. 3.29% from Cycles masking the cards itself, against
+  34.07% with opaque cards, at 1.15× the warm frame.
+- **Emission** (not gated, exact by construction): a per-geometry emitted
+  radiance added in the cached shading and in reflections. It lights
+  nothing else.
+- **Texture filtering for the area integral** (M7 G2, passed): a box
+  filter over the pixel's footprint (ray differentials, four taps) halves
+  the textured scene's error against the area-integrated image (7.11% to
+  3.99%) at 1.03× the warm frame. On by default.
+- **Silhouette rays** (M7 G3, failed): four compute rays at edge pixels
+  halve the field's error from 150 m, but cost 13× the frame there
+  (`CacheOptions::edge_rays`, off by default).
 - **Not started:**
   - sharing the sky's far field across texels (cascades of wide cones), which
     is what sky warm-up needs;
-  - anti-aliasing that runs in real time. One ray per pixel is 12–23% from
-    the area-integrated image on the boulder field (M4 G8, M7 G1), the
-    largest quality gap. Pixel cones (M7 G1, failed) cost 10–87 s per frame
-    there; on the textured scene the larger error is texture filtering (mips
-    chosen per pixel are blurrier than area integration);
-  - more than one bounce; alpha blending;
+  - anti-aliasing of silhouettes that runs in real time. One ray per pixel
+    is 12–23% from the area-integrated image on the boulder field (M4 G8,
+    M7 G1), the largest quality gap. Pixel cones (M7 G1) and compute
+    silhouette rays (M7 G3) both failed on cost; hardware rays for the
+    silhouettes are untried;
+  - more than one bounce; alpha blending; emission that lights other
+    surfaces;
   - the quality contract (§3.3) beyond the bake's frame-time target.
 - **Against UE5.** No direct comparison has been made, so none is claimed.
   - Our measured edge: exact soft shadows from area lights and noise-free
@@ -283,8 +310,9 @@ Against the goal in §1, honestly:
     exactly, with no noise, denoiser or temporal lag.
   - Moving objects update the cache exactly in the frame they move (M9
     G1), with no stale light.
-  - UE5 leads on everything else: materials, lights, GI bounces,
-    anti-aliasing and upscaling, platforms and tooling.
+  - UE5 leads on everything else: material accuracy and features beyond
+    glTF's metallic-roughness basics, lights, GI bounces, anti-aliasing and
+    upscaling, platforms and tooling.
 
 ## 3.7 Road to v1 (2026-10-24)
 
@@ -306,8 +334,61 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-07)
 
+**Start here (end of session, 2026-11-07).** The state in one place, for a
+new conversation:
+
+- **Done since the `v0.1.0` tag** (each with its results file in
+  `docs/results/`):
+  - passed: M9 G1 movers in the view cache; M10 G4 re-coloring with bounce
+    light; M10 G5 normal maps; M10 G7 alpha cutouts; M7 G2 texture box
+    filter;
+  - failed but kept, working with known costs: M9 G2/G4 moving lights
+    (sound, 1.6× at a real sun's speed); M9 G3 movers under a sky (sound,
+    3.6–4.0× while moving); M10 G1/G3 bounce light (accurate); M10 G2
+    materials (8.94% against 6%); M7 G3 silhouette rays (13× cost, off);
+  - M10 G6 reached no criterion (a cache bug, fixed; re-run as G7);
+  - not gated, tested: emission; metallic-roughness textures; glTF import
+    and save of metallic and roughness, emission, normal and
+    metallic-roughness textures, alpha modes (MASK; BLEND as MASK at 0.5)
+    and double-sided materials (back faces 1 mm behind).
+- **Candidates for next, in the order I would take them** (the user picks;
+  each is for a new gate):
+  1. *Back-to-back faces.* Exactly coplanar back-to-back triangles make the
+     cache's bakes about 100× slower (found in M10 G6; cause unknown).
+     Small and contained; removes the 1 mm offset workaround.
+  2. *Sky warm-up* (M5 G5). Every outdoor scene with a sky converges
+     slowly: still flights with sky show 21–22% fallback at 720p (M9 G3).
+     The biggest practical weakness; research (§3.8 item 6 below lists
+     what did not pay).
+  3. *Movers under a sky* (M9 G3's follow-up): texel-level sky charges
+     with the cosine to the normal and the horizon, re-baking only the sky
+     samples past ε. The per-page sphere bound is about 5,000× loose.
+  4. *Moving lights* (M9 G4's follow-up): a tight bound for mixed texels,
+     which now re-bake every frame the light moves.
+  5. *Materials accuracy* (M10 G2's follow-up): diagnose the 8.94%; the
+     likely cause is one reflection ray per pixel (no blur across the
+     glossy lobe), then the specular visibility taken from the diffuse
+     share.
+  6. *Silhouette anti-aliasing through hardware rays* (M7 G3's follow-up).
+  7. Combinations not supported yet: bounce light with movers or moving
+     lights; movers with moving lights. Also emission that lights other
+     surfaces, alpha blending, MikkTSpace tangents.
+- **Known issues:** exactly back-to-back faces (above); the cache's sky is
+  slow to converge; sustained speed on the fanless Air (M5 G8); Metal only
+  measured.
+- **Needs the user:** which candidate next; a `v0.2` tag (everything above
+  is on `main`, CI green as of the last push); a cloud GPU account for an
+  NVIDIA benchmark; any publishing.
+- **Working notes:** gate binaries are `experiments/room3d/src/bin/
+  m<milestone>_gate<n>.rs`; test scenes are in `room3d::textured`
+  (`Textured::new()`, `.with_materials()`, `.with_normal_maps()`,
+  `.with_foliage()`) and `room3d::field`. Settle a view by waiting for 32
+  quiet frames rendered after the call (M10 G4's helper); an earlier helper
+  returned after one frame. Cycles references are cached per work directory
+  (`out/<gate>_cycles`) and re-rendered when the job changes.
+
 **Decided 2026-11-07: a more complete paradigm before the tag.** The
-user's order:
+user's order (all attempted; results above and below):
 
 1. **Moving objects in the view cache** (M9 gate 1): the second rule
    (exact incremental updates) in `Renderer`, not only the lightmap path.
@@ -317,7 +398,7 @@ user's order:
    GPU in 3D. **Moving lights tried (2026-11-07), M9 G2 failed on fallback
    only** (`docs/results/m9-gate2.md`): sound and exact in every check,
    0.69% of pages re-baked, but 33–34% fallback from pages set aside off
-   screen. Movers under a sky (gate 3) not started. **M9 G4** (no work
+   screen. **M9 G4** (no work
    limit; `docs/results/m9-gate4.md`) kept soundness and cut fallback to
    about 5%, but costs 1.6× at a real sun's speed: mixed texels re-bake
    every frame the light moves, as their bound (with ε for snapping, 7.5×
