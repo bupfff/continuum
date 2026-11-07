@@ -25,7 +25,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
-use continuum::glam::Vec2;
+use continuum::glam::{Vec2, Vec3};
 use continuum::mesh::Surface;
 use wgpu::util::DeviceExt;
 
@@ -34,7 +34,7 @@ use crate::InstancedScene;
 /// Texels along a page's side (stored with a one-texel border).
 pub const PAGE: u32 = 8;
 const STRIDE: u32 = PAGE + 1;
-const PAGE_TEXELS: u32 = STRIDE * STRIDE;
+pub(crate) const PAGE_TEXELS: u32 = STRIDE * STRIDE;
 const EMPTY: u32 = u32::MAX;
 /// Pages freed per frame at most from the eviction queue (the least recently
 /// used first), so eviction never stalls a frame (M4 gate 11).
@@ -49,6 +49,20 @@ const MAX_PROBE: usize = 64;
 /// Entries in the per-frame set of requested pages (a power of two, at least
 /// twice the request tiles of a 1080p frame).
 const REQUEST_SET: u64 = 1 << 18;
+/// Movers (M9): pages the stale pass may append to a frame's bake at most
+/// (fewer with many lights: at most 2^21 texel jobs), slots it may list as
+/// invalid per frame, and how recently a stale page must have been read to
+/// be re-baked rather than marked invalid (1: in the frame before; every
+/// pixel marks the page it reads).
+const APPEND_PAGES: u32 = 4096;
+const APPEND_JOBS: u32 = 1 << 21;
+const INVALID_CAP: u32 = 1 << 14;
+/// Candidate pages (tested texel by texel) per frame at most; more are
+/// marked invalid whole.
+const CANDIDATES: u32 = 1 << 16;
+const VISIBLE_WINDOW: u32 = 1;
+/// The stale pass's counters (eight words) in each readback.
+const MOVER_STATS_BYTES: u64 = 32;
 
 /// Settings of the lighting cache.
 #[derive(Clone, Copy, Debug)]
@@ -167,6 +181,22 @@ pub struct CacheStats {
     /// Time spent waiting for the GPU to finish the frame two before, whose
     /// requests the plan reads.
     pub waiting: Duration,
+    /// Movers (M9): objects moved this frame.
+    pub moved: u32,
+    /// Pages with stale texels re-baked in the frame (read in the frame
+    /// before).
+    pub rebaked_pages: u32,
+    /// Texel-light pairs re-baked for movers (one cone each).
+    pub rebaked_texels: u32,
+    /// Pages whose boxes a move may touch, tested texel by texel.
+    pub candidates: u32,
+    /// Stale pages marked invalid instead (evicted when read back).
+    pub invalidated: u32,
+    /// Pages read in the frame before (counted when something moved).
+    pub visible_pages: u32,
+    /// Of the stale pages read recently, those that did not fit the frame's
+    /// bake (marked invalid too).
+    pub missed: u32,
     /// The bake's work, with `KernelOptions::count_work` (zero otherwise):
     /// object nodes tested, object nodes splatted, meshes entered,
     /// triangle-hierarchy nodes tested, of those splatted, triangles tested,
@@ -191,6 +221,7 @@ struct VcParams {
     jobs: [u32; 4],
     params: [f32; 4],
     sky: [u32; 4],
+    movers: [u32; 4],
 }
 
 /// Per-chart tables shared by every object with a geometry: the chart's size
@@ -206,6 +237,8 @@ struct ChartTables {
     tri_uv: Vec<[f32; 2]>,
     /// First global chart of each geometry.
     first_chart: Vec<u32>,
+    /// Per cell: the object-space box of its triangles (lo above hi: none).
+    cell_bounds: Vec<[Vec3; 2]>,
 }
 
 fn chart_tables(geometries: &[Surface]) -> ChartTables {
@@ -216,6 +249,7 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
         tri_chart: Vec::new(),
         tri_uv: Vec::new(),
         first_chart: Vec::new(),
+        cell_bounds: Vec::new(),
     };
     let mut first_tri = 0u32;
     for g in geometries {
@@ -260,6 +294,13 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
         }
         for (cell, list) in lists.into_iter().enumerate() {
             t.cells[first_cell + cell] = [t.cell_tris.len() as u32, list.len() as u32];
+            let mut b = [Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)];
+            for &tri in &list {
+                for v in g.triangles[(tri - first_tri) as usize] {
+                    b = [b[0].min(v), b[1].max(v)];
+                }
+            }
+            t.cell_bounds.push(b);
             t.cell_tris.extend(list);
         }
         first_tri += g.triangles.len() as u32;
@@ -642,6 +683,21 @@ pub(crate) struct VirtualCache {
     /// Size of each global chart, and the scale of each object.
     chart_size: Vec<Vec2>,
     scale: Vec<f32>,
+    /// Each global chart's cell grid and first cell, and each cell's
+    /// object-space box (for pages' boxes, M9).
+    chart_cells: Vec<([u32; 2], u32)>,
+    cell_bounds: Vec<[Vec3; 2]>,
+    /// Per page in `bake_list`: its texels' object-space box (lo, hi).
+    bake_bounds: Vec<[f32; 4]>,
+    /// Movers (M9): the objects moved this frame (old box with the object's
+    /// index, new box), the pages the stale pass may append, the frame each
+    /// slot was last allocated in, and the appended bake work, smoothed (sun
+    /// texels).
+    moved: Vec<[f32; 4]>,
+    moved_count: u32,
+    append_pages: u32,
+    alloc_frame: Vec<u32>,
+    appended: f32,
     table: PageTable,
     /// Resident pages: key → (slot, table entry).
     map: KeyMap<(u32, u32)>,
@@ -692,6 +748,9 @@ pub(crate) struct VirtualCache {
     model: BakeModel,
     /// Slots to free, least recently used last (popped first).
     evict_queue: Vec<u32>,
+    /// A frame whose invalid slots overflowed the list: every slot's mark
+    /// is read back before the next plan.
+    overflowed: Option<u32>,
 }
 
 impl VirtualCache {
@@ -705,8 +764,19 @@ impl VirtualCache {
         lights: u32,
         width: u32,
         height: u32,
+        movers: u32,
     ) -> Self {
         let channels = lights + 1;
+        assert!(
+            movers == 0 || !sky,
+            "moving objects with a sky in the cache are not supported yet"
+        );
+        let append_pages = if movers > 0 {
+            APPEND_PAGES.min(APPEND_JOBS / (PAGE_TEXELS * lights))
+        } else {
+            0
+        };
+        let append_jobs = (append_pages * PAGE_TEXELS * lights) as u64;
         // So a frame's sky samples never outnumber the budget (their buffers'
         // size).
         assert!(
@@ -795,7 +865,67 @@ impl VirtualCache {
                     wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
-            (38, empty("bake list", budget * 16, copy_dst)),
+            (
+                38,
+                empty("bake list", (budget + append_pages as u64) * 16, copy_dst),
+            ),
+            (
+                63,
+                empty("bake bounds", (budget + append_pages as u64) * 32, copy_dst),
+            ),
+            (
+                60,
+                empty(
+                    "moved",
+                    (2 * lights as u64 + 2 + movers as u64 * (4 + 4 * lights as u64)) * 16,
+                    copy_dst,
+                ),
+            ),
+            (
+                61,
+                empty(
+                    "slot info",
+                    options.pages as u64 * 48,
+                    wgpu::BufferUsages::empty(),
+                ),
+            ),
+            (
+                62,
+                empty(
+                    "slot stale",
+                    options.pages as u64 * 4,
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
+                ),
+            ),
+            (
+                64,
+                empty(
+                    "mover stats",
+                    MOVER_STATS_BYTES,
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
+                ),
+            ),
+            (
+                65,
+                empty(
+                    "invalid list",
+                    INVALID_CAP as u64 * 4,
+                    wgpu::BufferUsages::COPY_SRC,
+                ),
+            ),
+            (66, empty("dispatch args", 36, wgpu::BufferUsages::INDIRECT)),
+            (
+                67,
+                empty(
+                    "candidates",
+                    if movers > 0 {
+                        CANDIDATES as u64 * 8
+                    } else {
+                        16
+                    },
+                    wgpu::BufferUsages::empty(),
+                ),
+            ),
             // A plan never exceeds the budget but by its first page.
             (46, empty("sky samples", (budget + 81) * 8, copy_dst)),
             (
@@ -839,7 +969,10 @@ impl VirtualCache {
                     wgpu::BufferUsages::COPY_SRC | copy_dst,
                 ),
             ),
-            (43, empty("bake jobs", 4 * (budget + 81) * 8, copy_dst)),
+            (
+                43,
+                empty("bake jobs", (4 * (budget + 81) + append_jobs) * 8, copy_dst),
+            ),
             (45, empty("request set", REQUEST_SET * 4, copy_dst)),
             (
                 44,
@@ -863,6 +996,18 @@ impl VirtualCache {
             inv_base,
             chart_size,
             scale,
+            chart_cells: tables
+                .charts
+                .iter()
+                .map(|c| (c.grid, c.first_cell))
+                .collect(),
+            cell_bounds: tables.cell_bounds,
+            bake_bounds: Vec::new(),
+            moved: Vec::new(),
+            moved_count: 0,
+            append_pages,
+            alloc_frame: vec![0; options.pages as usize],
+            appended: 0.0,
             table,
             map: KeyMap::default(),
             slot_key: vec![[EMPTY; 3]; options.pages as usize],
@@ -915,6 +1060,7 @@ impl VirtualCache {
                 }),
             model: BakeModel::new(),
             evict_queue: Vec::new(),
+            overflowed: None,
         };
         cache.resize(device, width, height);
         cache
@@ -941,7 +1087,11 @@ impl VirtualCache {
             .map(|_| Readback {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("requests readback"),
-                    size: tiles as u64 * 16 + STATS_BYTES + TIMESTAMP_BYTES,
+                    size: tiles as u64 * 16
+                        + STATS_BYTES
+                        + TIMESTAMP_BYTES
+                        + MOVER_STATS_BYTES
+                        + INVALID_CAP as u64 * 4,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -1053,14 +1203,15 @@ impl VirtualCache {
 
     /// Writes this frame's uniform and uploads its bake list, texel and sky
     /// sample lists and page table changes. Returns the passes' sizes: table
-    /// updates, sun texels, sky face jobs, pages.
+    /// updates, sun texels, sky face jobs, pages; then the objects moved (the
+    /// stale pass runs if any).
     pub(crate) fn upload(
         &mut self,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
         vertical_fov_degrees: f32,
-    ) -> [u32; 4] {
+    ) -> [u32; 5] {
         let mut updates: Vec<[u32; 4]> = Vec::new();
         let dirty = self.table.take_dirty();
         if dirty.len() > UPDATES_CAPACITY {
@@ -1080,6 +1231,7 @@ impl VirtualCache {
         }
         if !self.bake_list.is_empty() {
             queue.write_buffer(self.buffer(38), 0, bytemuck::cast_slice(&self.bake_list));
+            queue.write_buffer(self.buffer(63), 0, bytemuck::cast_slice(&self.bake_bounds));
             queue.write_buffer(self.buffer(43), 0, bytemuck::cast_slice(&self.jobs));
             if self.sky {
                 queue.write_buffer(self.buffer(48), 0, bytemuck::cast_slice(&self.page_sky));
@@ -1087,6 +1239,10 @@ impl VirtualCache {
         }
         if !self.sky_samples.is_empty() {
             queue.write_buffer(self.buffer(46), 0, bytemuck::cast_slice(&self.sky_samples));
+        }
+        let moved = std::mem::take(&mut self.moved_count);
+        if moved > 0 {
+            queue.write_buffer(self.buffer(60), 0, bytemuck::cast_slice(&self.moved));
         }
         let tile = self.options.request_tile;
         let pixel_angle = 2.0 * (vertical_fov_degrees.to_radians() * 0.5).tan() / height as f32;
@@ -1115,6 +1271,7 @@ impl VirtualCache {
                 self.lights,
                 self.options.light_ratio as u32,
             ],
+            movers: [moved, self.append_pages, self.append_jobs(), VISIBLE_WINDOW],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.log.push(CacheStats {
@@ -1130,20 +1287,174 @@ impl VirtualCache {
             timed: self.timer.is_some(),
             evicting: std::mem::take(&mut self.evicting),
             waiting: std::mem::take(&mut self.waiting),
+            moved,
             ..Default::default()
         });
+        self.moved.clear();
         [
             (updates.len() / 2) as u32,
             self.jobs.len() as u32,
             6 * self.sky_samples.len() as u32,
             self.bake_list.len() as u32,
+            moved,
         ]
+    }
+
+    /// Objects moved since the last frame, each with its index and its old
+    /// and new world boxes (relative to the origin, padded): the next
+    /// frame's stale pass tests every page against them. With each light's
+    /// box (`lights`) and a box holding every texel's apex (`scene`), it
+    /// also lists, per light, each box's shadow region's box (empty if
+    /// none) and their union, and the union of the moved boxes, so most
+    /// pages are passed over with a few box tests.
+    ///
+    /// Layout (vec4s): per light its union's lo and hi; the moved boxes'
+    /// union's lo and hi; then per object: old lo (with the object's index
+    /// as bits in w), old hi, new lo, new hi, and per light the old and new
+    /// shadow regions' lo and hi.
+    pub(crate) fn set_moved(
+        &mut self,
+        moved: &[(u32, [Vec3; 2], [Vec3; 2])],
+        lights: &[(Vec3, Vec3)],
+        scene: (Vec3, Vec3),
+    ) {
+        let v4 = |v: Vec3, w: f32| [v.x, v.y, v.z, w];
+        let empty = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let grow = |a: (Vec3, Vec3), b: (Vec3, Vec3)| (a.0.min(b.0), a.1.max(b.1));
+        let mut unions = vec![empty; lights.len()];
+        let mut all = empty;
+        let mut entries = Vec::new();
+        for (object, old, new) in moved {
+            let (old, new) = ((old[0], old[1]), (new[0], new[1]));
+            all = grow(grow(all, old), new);
+            entries.push(v4(old.0, f32::from_bits(*object)));
+            entries.push(v4(old.1, 0.0));
+            entries.push(v4(new.0, 0.0));
+            entries.push(v4(new.1, 0.0));
+            for (l, light) in lights.iter().enumerate() {
+                for b in [old, new] {
+                    let r = crate::hierarchy::shadow_region(b, *light, scene).unwrap_or(empty);
+                    if r.0.x <= r.1.x {
+                        unions[l] = grow(unions[l], r);
+                    }
+                    entries.push(v4(r.0, 0.0));
+                    entries.push(v4(r.1, 0.0));
+                }
+            }
+        }
+        self.moved.clear();
+        for u in unions {
+            self.moved.push(v4(u.0, 0.0));
+            self.moved.push(v4(u.1, 0.0));
+        }
+        self.moved.push(v4(all.0, 0.0));
+        self.moved.push(v4(all.1, 0.0));
+        self.moved.extend(entries);
+        self.moved_count = moved.len() as u32;
+    }
+
+    /// Texel jobs the stale passes may append to a frame's bake.
+    fn append_jobs(&self) -> u32 {
+        self.append_pages * PAGE_TEXELS * self.lights
+    }
+
+    /// Slots the pool holds.
+    pub(crate) fn pages(&self) -> u32 {
+        self.options.pages
+    }
+
+    /// Diagnostics: resident slots whose pages shading may read (not
+    /// marked stale in `marks`).
+    pub(crate) fn readable_pages(&self, marks: &[u32]) -> Vec<u32> {
+        (0..self.options.pages)
+            .filter(|&s| self.slot_key[s as usize][0] != EMPTY && marks[s as usize] == 0)
+            .collect()
+    }
+
+    /// Diagnostics: pages one re-bake of `upload_rebake` holds at most.
+    pub(crate) fn rebake_chunk(&self) -> usize {
+        let budget = self.options.bake_budget.max(PAGE_TEXELS) as u64;
+        let pages = budget + self.append_pages as u64;
+        let jobs = 4 * (budget + 81) + (self.append_pages * PAGE_TEXELS * self.lights) as u64;
+        pages.min(jobs / (PAGE_TEXELS * self.lights) as u64) as usize
+    }
+
+    /// Diagnostics: lists slots `slots` (resident) for a bake of every
+    /// texel and light, as the frame's plan would, with no table updates
+    /// and no sky samples. Returns the bake's counts.
+    pub(crate) fn upload_rebake(&mut self, queue: &wgpu::Queue, slots: &[u32]) -> [u32; 5] {
+        let mut list = Vec::new();
+        let mut bounds = Vec::new();
+        let mut jobs = Vec::new();
+        for (index, &slot) in slots.iter().enumerate() {
+            let k = self.slot_key[slot as usize];
+            let (m, c, mip, page) = unpack(k);
+            list.push([k[0], k[1], k[2], slot]);
+            let b = self.page_bounds(m, c, mip, page);
+            bounds.push([b[0], b[1], b[2], b[3]]);
+            bounds.push([b[4], b[5], b[6], b[7]]);
+            for l in 0..self.lights {
+                for t in 0..PAGE_TEXELS {
+                    jobs.push([index as u32, t | l << 8]);
+                }
+            }
+        }
+        queue.write_buffer(self.buffer(38), 0, bytemuck::cast_slice(&list));
+        queue.write_buffer(self.buffer(63), 0, bytemuck::cast_slice(&bounds));
+        queue.write_buffer(self.buffer(43), 0, bytemuck::cast_slice(&jobs));
+        let mut params: VcParams = Zeroable::zeroed();
+        params.counts = [self.table.entries.len() as u32 - 1, self.frame, 1, 1];
+        params.jobs = [
+            jobs.len() as u32,
+            list.len() as u32,
+            0,
+            REQUEST_SET as u32 - 1,
+        ];
+        params.params = [self.inv_base, 0.0, self.options.pixels_per_texel, 0.0];
+        params.sky = [
+            0,
+            self.sky as u32,
+            self.lights,
+            self.options.light_ratio as u32,
+        ];
+        params.movers = [0, self.append_pages, self.append_jobs(), VISIBLE_WINDOW];
+        queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        [0, jobs.len() as u32, 0, list.len() as u32, 0]
+    }
+
+    /// The object-space box of the apexes of page `(m, c, mip, page)`'s
+    /// texels: the boxes of the triangles of every chart cell its texel
+    /// centers fall in (with a cell's margin for rounding). A texel's apex
+    /// lies on one of its cell's triangles (`vc_surface`).
+    fn page_bounds(&self, m: u32, c: u32, mip: u32, page: [u32; 2]) -> [f32; 8] {
+        let n = self.grid(c, m, mip);
+        let (g, first) = self.chart_cells[c as usize];
+        let range = |p: u32, n: u32, g: u32| {
+            let x0 = p * PAGE;
+            let x1 = (p * PAGE + PAGE).min(n - 1);
+            let cell = |x: u32| ((x as f32 + 0.5) / n as f32 * g as f32) as u32;
+            (cell(x0).saturating_sub(1), (cell(x1) + 1).min(g - 1))
+        };
+        let (x0, x1) = range(page[0], n[0], g[0]);
+        let (y0, y1) = range(page[1], n[1], g[1]);
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let b = self.cell_bounds[(first + y * g[0] + x) as usize];
+                (lo, hi) = (lo.min(b[0]), hi.max(b[1]));
+            }
+        }
+        if lo.x > hi.x {
+            (lo, hi) = (Vec3::ZERO, Vec3::ZERO);
+        }
+        [lo.x, lo.y, lo.z, 0.0, hi.x, hi.y, hi.z, 0.0]
     }
 
     /// Clears the request tiles and counters before shading.
     pub(crate) fn encode_clear(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.clear_buffer(self.buffer(42), 0, None);
         encoder.clear_buffer(self.buffer(45), 0, None);
+        encoder.clear_buffer(self.buffer(64), 0, None);
     }
 
     /// Copies the frame's requests and counters (and every 32 frames, slot
@@ -1153,6 +1464,17 @@ impl VirtualCache {
         let bytes = r.tiles as u64 * 16;
         encoder.copy_buffer_to_buffer(self.buffer(39), 0, &r.buffer, 0, bytes);
         encoder.copy_buffer_to_buffer(self.buffer(42), 0, &r.buffer, bytes, STATS_BYTES);
+        if self.log.last().is_some_and(|l| l.moved > 0) {
+            let at = bytes + STATS_BYTES + TIMESTAMP_BYTES;
+            encoder.copy_buffer_to_buffer(self.buffer(64), 0, &r.buffer, at, MOVER_STATS_BYTES);
+            encoder.copy_buffer_to_buffer(
+                self.buffer(65),
+                0,
+                &r.buffer,
+                at + MOVER_STATS_BYTES,
+                INVALID_CAP as u64 * 4,
+            );
+        }
         self.used_requested = self.frame.is_multiple_of(32) && self.used_pending.is_none();
         if self.used_requested {
             encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
@@ -1211,6 +1533,9 @@ impl VirtualCache {
         self.last_begin = Some(start);
         let slot = (self.frame % 2) as usize;
         let requests = self.collect(device, slot);
+        if self.overflowed.take().is_some() {
+            self.evict_marked(device);
+        }
         let target = self.options.frame_target_ms;
         if target > 0.0 && self.timer.is_some() {
             // Only once a frame has been timed. Alternate frames bake 20%
@@ -1221,7 +1546,8 @@ impl VirtualCache {
                 } else {
                     0.8
                 };
-                self.budget = (self.model.budget(target) * dither).clamp(
+                // Re-baking for movers comes out of the same time.
+                self.budget = ((self.model.budget(target) - self.appended) * dither).clamp(
                     MIN_BUDGET.min(self.options.bake_budget as f32),
                     self.options.bake_budget as f32,
                 );
@@ -1283,7 +1609,29 @@ impl VirtualCache {
             .iter()
             .map(|r| ([r[0], r[1], r[2]], r[3]))
             .collect();
+        // Movers (M9): the stale pass's counters and invalid slots.
+        let moved = self.log[frame as usize - 1].moved > 0;
+        let mut mover = [0u32; 8];
+        let mut invalid: Vec<u32> = Vec::new();
+        if moved {
+            let at = 4 * tiles + (STATS_BYTES + TIMESTAMP_BYTES) as usize / 4;
+            mover.copy_from_slice(&words[at..at + 8]);
+            let listed = (mover[1] as usize).min(INVALID_CAP as usize);
+            invalid.extend_from_slice(&words[at + 8..at + 8 + listed]);
+            if mover[1] as usize > listed {
+                // More than the list holds: every slot's mark is read back.
+                self.overflowed = Some(frame);
+            }
+        }
+        let appended = mover[5].min(self.append_jobs());
         let record = &mut self.log[frame as usize - 1];
+        record.rebaked_pages = mover[6];
+        record.rebaked_texels = appended;
+        record.invalidated = mover[1];
+        record.visible_pages = mover[2];
+        record.missed = mover[3];
+        record.candidates = mover[4];
+        record.spent += appended;
         if let Some(timer) = &self.timer
             && record.timed
         {
@@ -1295,7 +1643,7 @@ impl VirtualCache {
                 let t = b.wrapping_sub(a) as f64 * timer.period as f64 * 1e-6;
                 (a != 0 && b > a && t < 1000.0).then_some(t as f32)
             };
-            let bake = if record.pages_baked > 0 {
+            let bake = if record.pages_baked > 0 || moved {
                 ms(stamps[0], stamps[1])
             } else {
                 Some(0.0)
@@ -1311,8 +1659,56 @@ impl VirtualCache {
         record.samples = counters[2];
         record.at_wanted = counters[3];
         record.work.copy_from_slice(&counters[4..16]);
+        self.appended = 0.8 * self.appended + 0.2 * appended as f32;
+        self.evict_invalid(&invalid, frame);
         self.latest = self.latest.max(frame);
         requests
+    }
+
+    /// Evicts the slots the stale pass marked invalid in `frame`, unless a
+    /// later plan has reused them.
+    fn evict_invalid(&mut self, slots: &[u32], frame: u32) {
+        for &slot in slots {
+            let k = self.slot_key[slot as usize];
+            if k[0] == EMPTY || self.alloc_frame[slot as usize] >= frame {
+                continue;
+            }
+            let (_, entry) = self.map.remove(&k).expect("resident page");
+            let map = &mut self.map;
+            self.table.remove(entry as usize, |moved, i| {
+                map.get_mut(&moved).expect("resident page").1 = i;
+            });
+            self.slot_key[slot as usize] = [EMPTY; 3];
+            self.free.push(slot);
+            self.evicted += 1;
+        }
+    }
+
+    /// Evicts every resident slot marked stale (waiting for all GPU work):
+    /// when a frame marked more than the invalid list holds.
+    fn evict_marked(&mut self, device: &wgpu::Device) {
+        let marks = self.read_buffer(device, 62);
+        let marks: &[u32] = bytemuck::cast_slice(&marks);
+        let slots: Vec<u32> = (0..self.options.pages)
+            .filter(|&s| marks[s as usize] != 0)
+            .collect();
+        self.evict_invalid(&slots, self.frame);
+    }
+
+    /// Binding `binding`'s buffer read back now (waiting for all GPU work).
+    pub(crate) fn read_buffer(&self, device: &wgpu::Device, binding: u32) -> Vec<u8> {
+        let source = self.buffer(binding);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cache readback"),
+            size: source.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(source, 0, &readback, 0, None);
+        let index = self.queue.submit([encoder.finish()]);
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+        map_wait(device, &readback, index)
     }
 
     /// Merges slot use read back from the GPU into `last_used`.
@@ -1387,6 +1783,7 @@ impl VirtualCache {
     /// the shader, with its priority), within the bake budget.
     fn plan(&mut self, device: &wgpu::Device, requests: Vec<([u32; 3], u32)>) {
         self.bake_list.clear();
+        self.bake_bounds.clear();
         self.jobs.clear();
         self.sky_samples.clear();
         self.page_sky.clear();
@@ -1447,8 +1844,12 @@ impl VirtualCache {
             self.map.insert(k, (slot, entry));
             self.slot_key[slot as usize] = k;
             self.last_used[slot as usize] = self.frame;
+            self.alloc_frame[slot as usize] = self.frame;
             let index = self.bake_list.len() as u32;
             self.bake_list.push([k[0], k[1], k[2], slot]);
+            let b = self.page_bounds(m, c, mip, page);
+            self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
+            self.bake_bounds.push([b[4], b[5], b[6], b[7]]);
             // Light by light, so neighbouring invocations trace one light.
             for l in 0..self.lights {
                 for y in 0..listed[1] {
@@ -1493,7 +1894,6 @@ fn map_wait(device: &wgpu::Device, buffer: &wgpu::Buffer, index: wgpu::Submissio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use continuum::glam::Vec3;
 
     #[test]
     fn every_triangle_of_a_parametric_chart_lands_in_its_cell() {

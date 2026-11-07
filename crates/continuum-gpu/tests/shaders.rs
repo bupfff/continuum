@@ -16,8 +16,8 @@ fn constants(packets: bool) -> PipelineConstants {
     c
 }
 
-/// Translates every entry point of `source` (or only `only`); returns the
-/// failures.
+/// Translates every entry point of `source` (or only those whose names
+/// start with `only`); returns the failures.
 fn translate(label: &str, source: &str, packets: bool, only: Option<&str>) -> Vec<String> {
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
@@ -26,7 +26,7 @@ fn translate(label: &str, source: &str, packets: bool, only: Option<&str>) -> Ve
         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
     let mut failures = Vec::new();
     for ep in &module.entry_points {
-        if only.is_some_and(|o| o != ep.name) {
+        if only.is_some_and(|o| !ep.name.starts_with(o)) {
             continue;
         }
         let name = ep.name.clone();
@@ -118,7 +118,7 @@ fn kernel_translates_for_every_backend() {
             &format!("hardware rays (packets {packets})"),
             &hw,
             packets,
-            Some("hw_visibility"),
+            Some("hw_"),
         ));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

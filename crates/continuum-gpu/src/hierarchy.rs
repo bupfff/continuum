@@ -66,13 +66,23 @@ pub(crate) fn flatten(meshes: &[Vec<Tri>]) -> Flat {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct NodeGpu {
     lo: [f32; 4],
     hi: [f32; 4],
     /// Leaf: `[first item, item count, 0, 0]`; interior: `[left child, 0, 0, 0]`
     /// with the right child at `left + 1`.
     info: [u32; 4],
+}
+
+impl NodeGpu {
+    /// The node's box.
+    pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
+        (
+            Vec3::new(self.lo[0], self.lo[1], self.lo[2]),
+            Vec3::new(self.hi[0], self.hi[1], self.hi[2]),
+        )
+    }
 }
 
 /// Median splits on the longest centroid axis over `items` (indices into
@@ -222,6 +232,187 @@ pub(crate) struct Placement {
     pub translation: Vec3,
 }
 
+impl Placement {
+    /// The transform as the shader reads it (`xforms`): rows 0–2 of the
+    /// rotation with the translation in `w`, then `[scale, 1 / scale, 0, 0]`.
+    pub(crate) fn rows(&self) -> [[f32; 4]; 4] {
+        let r = self.rotation.transpose();
+        let t = self.translation;
+        [
+            [r.x_axis.x, r.x_axis.y, r.x_axis.z, t.x],
+            [r.y_axis.x, r.y_axis.y, r.y_axis.z, t.y],
+            [r.z_axis.x, r.z_axis.y, r.z_axis.z, t.z],
+            [self.scale, 1.0 / self.scale, 0.0, 0.0],
+        ]
+    }
+
+    /// The padded world bounds of an object-space box `(lo, hi)` placed here.
+    pub(crate) fn world_bounds(&self, (lo, hi): (Vec3, Vec3)) -> (Vec3, Vec3) {
+        let (mut wlo, mut whi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for c in 0..8 {
+            let p = Vec3::new(
+                if c & 1 == 0 { lo.x } else { hi.x },
+                if c & 2 == 0 { lo.y } else { hi.y },
+                if c & 4 == 0 { lo.z } else { hi.z },
+            );
+            let w = self.rotation * p * self.scale + self.translation;
+            (wlo, whi) = (wlo.min(w), whi.max(w));
+        }
+        padded((wlo, whi))
+    }
+}
+
+/// `info.z` of object-hierarchy nodes whose coverage is not prefiltered:
+/// cones always descend them (the movers' subtree, whose boxes change).
+const NO_SPLAT: u32 = 1;
+
+/// Where the movable objects' subtree lives in a hierarchy from
+/// [`object_hierarchy_with_movers`]: its root is node 2 (the root's second
+/// child; node 1 roots the static objects), its other nodes are the
+/// `nodes` from `first_node`, its items the `objects.len()` from
+/// `first_item`.
+#[derive(Clone, Debug)]
+pub(crate) struct MoverTree {
+    /// The static objects' root (node 1), for the root's bounds.
+    pub fixed_root: NodeGpu,
+    pub first_node: u32,
+    pub nodes: u32,
+    pub first_item: u32,
+    /// The movable objects.
+    pub objects: Vec<u32>,
+}
+
+/// An object hierarchy whose root's first child roots the static objects
+/// (as [`object_hierarchy`] builds them) and whose second child roots the
+/// `movable` ones, a subtree rebuilt with [`mover_subtree`] as they move.
+/// Neither the root nor the movers' nodes carry prefiltered coverage.
+pub(crate) fn object_hierarchy_with_movers(
+    bounds: &[(Vec3, Vec3)],
+    movable: &[u32],
+) -> (Vec<NodeGpu>, Vec<u32>, MoverTree) {
+    let mut is_movable = vec![false; bounds.len()];
+    for &m in movable {
+        is_movable[m as usize] = true;
+    }
+    assert!(
+        is_movable.iter().any(|&m| !m),
+        "a scene with movers needs a static object"
+    );
+    let (fixed, mut items) = object_hierarchy(bounds, |m| !is_movable[m]);
+    // Static node i ≥ 1 goes to i + 2; node 0 to 1.
+    let place = |i: u32| if i == 0 { 1 } else { i + 2 };
+    let mut tree = MoverTree {
+        fixed_root: NodeGpu::zeroed(),
+        first_node: fixed.len() as u32 + 2,
+        nodes: 0,
+        first_item: items.len() as u32,
+        objects: movable.to_vec(),
+    };
+    let mover_bounds: Vec<(Vec3, Vec3)> = movable.iter().map(|&m| bounds[m as usize]).collect();
+    let (root, region, mover_items) = mover_subtree(&tree, &mover_bounds);
+    tree.nodes = region.len() as u32;
+    let mut nodes = vec![NodeGpu::zeroed(); tree.first_node as usize];
+    for (i, n) in fixed.iter().enumerate() {
+        let mut n = *n;
+        if n.info[1] == 0 {
+            n.info[0] = place(n.info[0]);
+        }
+        nodes[place(i as u32) as usize] = n;
+    }
+    nodes[2] = root;
+    nodes.extend(region);
+    nodes[0] = union_root(nodes[1], nodes[2]);
+    tree.fixed_root = nodes[1];
+    items.extend(mover_items);
+    (nodes, items, tree)
+}
+
+/// The root over the static subtree (node 1) and the movers' (node 2).
+pub(crate) fn union_root(a: NodeGpu, b: NodeGpu) -> NodeGpu {
+    let mut root = NodeGpu::zeroed();
+    for k in 0..3 {
+        root.lo[k] = a.lo[k].min(b.lo[k]);
+        root.hi[k] = a.hi[k].max(b.hi[k]);
+    }
+    root.info = [1, 0, NO_SPLAT, 0];
+    root
+}
+
+/// The movers' subtree over their current (padded) world bounds, in
+/// `tree.objects` order: its root (node 2), its other nodes (from
+/// `tree.first_node`) and its items (from `tree.first_item`). Its shape
+/// depends only on the movers' count, so it always fits its place.
+pub(crate) fn mover_subtree(
+    tree: &MoverTree,
+    bounds: &[(Vec3, Vec3)],
+) -> (NodeGpu, Vec<NodeGpu>, Vec<u32>) {
+    let mut local = vec![NodeGpu::zeroed()];
+    let mut order: Vec<u32> = (0..bounds.len() as u32).collect();
+    split(
+        &mut local,
+        0,
+        &mut order,
+        0,
+        bounds,
+        2,
+        tree.first_node - 1,
+        tree.first_item,
+    );
+    for n in &mut local {
+        n.info[2] = NO_SPLAT;
+    }
+    let items = order.iter().map(|&k| tree.objects[k as usize]).collect();
+    let root = local[0];
+    (root, local.split_off(1), items)
+}
+
+/// A box around the region where a cone from a point to the light box
+/// `l` can meet the box `m` (M9): the points `m + t (m − l)`, `t ≥ 0`
+/// (the region behind `m` as seen from `l`), clipped to `s`, which holds
+/// every point that matters. `None` if the region misses `s`. For each `t`
+/// those points fill a box whose bounds are linear in `t`, so the region's
+/// box spans the boxes at the ends of the range of `t` meeting `s`.
+pub(crate) fn shadow_region(
+    m: (Vec3, Vec3),
+    l: (Vec3, Vec3),
+    s: (Vec3, Vec3),
+) -> Option<(Vec3, Vec3)> {
+    let d_lo = m.0 - l.1;
+    let d_hi = m.1 - l.0;
+    let (mut t0, mut t1) = (0.0f32, f32::INFINITY);
+    for a in 0..3 {
+        // m.lo + t d_lo <= s.hi
+        let (b, c) = (d_lo[a], s.1[a] - m.0[a]);
+        if b > 0.0 {
+            t1 = t1.min(c / b);
+        } else if b < 0.0 {
+            t0 = t0.max(c / b);
+        } else if c < 0.0 {
+            return None;
+        }
+        // m.hi + t d_hi >= s.lo
+        let (b, c) = (d_hi[a], s.0[a] - m.1[a]);
+        if b > 0.0 {
+            t0 = t0.max(c / b);
+        } else if b < 0.0 {
+            t1 = t1.min(c / b);
+        } else if c > 0.0 {
+            return None;
+        }
+    }
+    if t0 > t1 * (1.0 + 1e-6) + 1e-6 {
+        return None;
+    }
+    if !t1.is_finite() {
+        return Some(s);
+    }
+    let lo = (m.0 + d_lo * t0).min(m.0 + d_lo * t1).max(s.0);
+    let hi = (m.1 + d_hi * t0).max(m.1 + d_hi * t1).min(s.1);
+    // A margin for rounding: the exact test follows on the GPU.
+    let pad = 1e-4 * lo.abs().max(hi.abs()).max_element().max(1.0);
+    Some((lo - pad, hi + pad))
+}
+
 /// Objects placing shared geometry, flattened: each geometry's triangles and
 /// hierarchy once, and per object a range pointing at them with a transform
 /// (`[row 0, row 1, row 2]` of the rotation with the translation in `w`, then
@@ -238,27 +429,8 @@ pub(crate) fn flatten_instanced(
     for (k, o) in objects.iter().enumerate() {
         let [first, count, root, _] = ranges[o.geometry];
         flat.ranges.push([first, count, root, k as u32]);
-        let r = o.rotation.transpose();
-        for (row, t) in [
-            (r.x_axis, o.translation.x),
-            (r.y_axis, o.translation.y),
-            (r.z_axis, o.translation.z),
-        ] {
-            transforms.push([row.x, row.y, row.z, t]);
-        }
-        transforms.push([o.scale, 1.0 / o.scale, 0.0, 0.0]);
-        let (lo, hi) = local[o.geometry];
-        let (mut wlo, mut whi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for c in 0..8 {
-            let p = Vec3::new(
-                if c & 1 == 0 { lo.x } else { hi.x },
-                if c & 2 == 0 { lo.y } else { hi.y },
-                if c & 4 == 0 { lo.z } else { hi.z },
-            );
-            let w = o.rotation * p * o.scale + o.translation;
-            (wlo, whi) = (wlo.min(w), whi.max(w));
-        }
-        bounds.push(padded((wlo, whi)));
+        transforms.extend(o.rows());
+        bounds.push(o.world_bounds(local[o.geometry]));
     }
     if flat.ranges.is_empty() {
         flat.ranges.push([0, 0, NONE, NONE]);

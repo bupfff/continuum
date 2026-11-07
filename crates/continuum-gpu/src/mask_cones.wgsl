@@ -977,7 +977,9 @@ fn scene_coverage_if(on: bool, c: Cone, i: u32, cov: ptr<function, array<f32, 64
             if (mine) {
                 if (COUNT_WORK) { work_a.x++; }
                 if (may_touch_box(c, node.lo.xyz, node.hi.xyz)) {
-                    if (splat_object_node(c, n, node.lo.xyz, node.hi.xyz, cov, full)) {
+                    // info.z 1: no prefiltered coverage (the root and the
+                    // movers' subtree, whose boxes change).
+                    if (node.info.z == 0u && splat_object_node(c, n, node.lo.xyz, node.hi.xyz, cov, full)) {
                         if (COUNT_WORK) { work_a.y++; }
                     } else {
                         descend = true;
@@ -2233,6 +2235,10 @@ struct VcParams {
     // (a texel holds one channel per light, then the sky's), w: 1 if light
     // channels hold ratios (`CacheOptions::light_ratio`)
     sky: vec4<u32>,
+    // Movers (M9): x: objects moved this frame (in `moved`), y: pages the
+    // stale pass may append to the bake, z: 0, w: a page read within this
+    // many frames is re-baked when stale (otherwise marked invalid)
+    movers: vec4<u32>,
 };
 
 const PAGE: u32 = 8u;
@@ -2252,7 +2258,7 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 @group(0) @binding(36) var<storage, read_write> page_table: array<vec4<u32>>;
 @group(0) @binding(37) var<storage, read_write> pool: array<f32>;
 // Pages baked this frame: key words, then the slot.
-@group(0) @binding(38) var<storage, read> bake_list: array<vec4<u32>>;
+@group(0) @binding(38) var<storage, read_write> bake_list: array<vec4<u32>>;
 // Pages requested this frame, each once: key words, then the priority (1 for
 // a pixel with no page at all; then 2 + 30 − the gap between the found and
 // the wanted mip, so the blurriest pixels come first). Count in vc_stats[1].
@@ -2266,7 +2272,7 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // `work_b`, `work_c`), with COUNT_WORK.
 @group(0) @binding(42) var<storage, read_write> vc_stats: array<atomic<u32>, 16>;
 // Texels to bake: entry in `bake_list`, and the texel's index in the 9×9 page.
-@group(0) @binding(43) var<storage, read> bake_jobs: array<vec2<u32>>;
+@group(0) @binding(43) var<storage, read_write> bake_jobs: array<vec2<u32>>;
 // Page table writes: (entry index, 0, 0, 0), then the entry.
 @group(0) @binding(44) var<storage, read> table_updates: array<vec4<u32>>;
 // This frame's requested pages, as fingerprints (open addressing; 0: free),
@@ -2293,6 +2299,37 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // (x | y << 16).
 @group(0) @binding(50) var<storage, read> self_list: array<vec4<u32>>;
 @group(0) @binding(51) var<storage, read_write> self_masks: array<u32>;
+// Movers (M9). Objects moved this frame, in world space relative to the
+// origin (vec4s): per light, the union of the moved boxes' shadow regions
+// (lo, hi); the union of the moved boxes (lo, hi); then per object its old
+// box (lo with the object's index as bits in w, hi), its new box (lo, hi),
+// and per light its old and new boxes' shadow regions (lo, hi each; empty
+// if none). A shadow region bounds where a cone toward the light can meet
+// the box (`shadow_region` in `hierarchy.rs`).
+@group(0) @binding(60) var<storage, read> moved: array<vec4<f32>>;
+// Per slot, written when its page is baked: the page's key with 1 in w
+// (0: never baked), then the object-space box of its texels' apexes (lo,
+// hi; floats as bits).
+@group(0) @binding(61) var<storage, read_write> slot_info: array<vec4<u32>>;
+// Per slot: 1 if its page is stale and was not re-baked (shading treats it
+// as missing until the CPU evicts it, or a bake replaces it).
+@group(0) @binding(62) var<storage, read_write> slot_stale: array<atomic<u32>>;
+// Per baked page (as `bake_list`): its texels' object-space box (lo, hi).
+@group(0) @binding(63) var<storage, read_write> bake_bounds: array<vec4<f32>>;
+// The stale passes' counters: 0 pages appended to the bake, 1 pages marked
+// invalid (listed in `invalid_list`), 2 pages read in the frame before
+// (visible), 3 visible stale pages that did not fit the bake, 4 candidate
+// pages (tested texel by texel), 5 texel jobs appended to the bake, 6 pages
+// with any texel re-baked; 7 unused.
+@group(0) @binding(64) var<storage, read_write> mover_stats: array<atomic<u32>, 8>;
+// Slots marked invalid this frame, for the CPU to evict.
+@group(0) @binding(65) var<storage, read_write> invalid_list: array<u32>;
+// Indirect dispatch sizes (x, y, z each): the texel test, the bake's texel
+// jobs, the fill's pages.
+@group(0) @binding(66) var<storage, read_write> dispatch_args: array<u32, 9>;
+// Candidate pages: the slot, and its entry in `bake_list` (NONE: not read
+// in the frame before, so marked invalid if any texel is stale).
+@group(0) @binding(67) var<storage, read_write> candidates: array<vec2<u32>>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -2308,7 +2345,11 @@ fn vc_find(k: vec3<u32>) -> u32 {
     for (var probe = 0u; probe < 64u; probe++) {
         let e = page_table[i];
         if (e.x == EMPTY_KEY) { return NONE; }
-        if (e.x == k.x && e.y == k.y && e.z == k.z) { return e.w; }
+        if (e.x == k.x && e.y == k.y && e.z == k.z) {
+            // A stale page that was not re-baked is missing (M9).
+            if (atomicLoad(&slot_stale[e.w]) != 0u) { return NONE; }
+            return e.w;
+        }
         i = (i + 1u) & mask;
     }
     return NONE;
@@ -2481,8 +2522,9 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     lane = li;
     let j = gid.x;
     // No early return: every invocation follows its packet's walks.
-    let listed = j < vc.jobs.x;
-    let job = bake_jobs[min(j, vc.jobs.x - 1u)];
+    let total = bake_job_count();
+    let listed = j < total;
+    let job = bake_jobs[min(j, max(total, 1u) - 1u)];
     // The texel within the page, and the light (M5).
     let k = job.y & 0xffu;
     let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
@@ -2643,12 +2685,20 @@ fn sky_span(x: u32, stride: u32, inside: u32) -> vec3<f32> {
 // One thread per baked page: sums each sky sample's faces into the sky
 // channel and interpolates it between samples (bilinearly), then fills the
 // border beyond the chart's grid with the nearest texel inside it (clamped
-// lookups), and marks the page used.
+// lookups), and marks a planned page used.
 @compute @workgroup_size(64)
 fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = gid.x;
-    if (p >= vc.jobs.y) { return; }
+    if (p >= bake_page_count()) { return; }
     let e = bake_list[p];
+    // A page whose stale texels did not all fit stays marked invalid (M9).
+    if (bake_bounds[2u * p].w != 0.0) { return; }
+    // The page's key and box, for the stale pass (M9); a bake makes it
+    // current.
+    slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u);
+    slot_info[3u * e.w + 1u] = bitcast<vec4<u32>>(bake_bounds[2u * p]);
+    slot_info[3u * e.w + 2u] = bitcast<vec4<u32>>(bake_bounds[2u * p + 1u]);
+    atomicStore(&slot_stale[e.w], 0u);
     let c = e.y & 0xffffu;
     let mip = e.y >> 16u;
     let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
@@ -2693,7 +2743,309 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    slot_used[e.w] = vc.counts.y;
+    // A page the CPU planned counts as used (its pixels asked for it); one
+    // the movers' stale pass re-baked keeps its last use, so it is re-baked
+    // again only if pixels read it (M9).
+    if (p < vc.jobs.y) { slot_used[e.w] = vc.counts.y; }
+}
+
+// --- Movers in the view cache (M9 gate 1). ---
+//
+// A texel's channel for a light depends on a mover only if the mover's box
+// meets the hull of the texel's apex and the light's bounding box: a light
+// cone never leaves that hull. Each frame something moves:
+// - `vc_stale` tests every resident page's box. A page on a moved object is
+//   stale whole. A page whose box's hull meets a moved box is a candidate.
+// - `vc_stale_texels` tests each candidate's texels at their apexes, light
+//   by light.
+// Stale texels of pages read in the frame before are appended to the
+// frame's bake (only the lights they depend on; `vc_args` sizes the indirect
+// dispatches). Other pages with a stale texel are marked invalid, so stale
+// light is never shown.
+
+// Pages and texel jobs the stale passes appended (within the capacities).
+fn appended_pages() -> u32 {
+    return min(atomicLoad(&mover_stats[0]), vc.movers.y);
+}
+
+fn appended_jobs() -> u32 {
+    return min(atomicLoad(&mover_stats[5]), vc.movers.z);
+}
+
+// The bake's pages and texel jobs: the CPU's plan, then the appended ones.
+fn bake_page_count() -> u32 {
+    return vc.jobs.y + appended_pages();
+}
+
+fn bake_job_count() -> u32 {
+    return vc.jobs.x + appended_jobs();
+}
+
+struct Box3 {
+    lo: vec3<f32>,
+    hi: vec3<f32>,
+};
+
+// The world box of object `m`'s object-space box (lo, hi), padded by the
+// apex offset and rounding.
+fn world_box(m: u32, lo: vec3<f32>, hi: vec3<f32>) -> Box3 {
+    var b = Box3(lo, hi);
+    let x = meshes[m].w;
+    if (x != NONE) {
+        let s = xforms[4u * x + 3u].x;
+        let c = (lo + hi) * 0.5;
+        let e = (hi - lo) * 0.5;
+        let wc = rotate_to_world(x, c) * s + translation(x);
+        let we = vec3<f32>(dot(abs(xforms[4u * x].xyz), e), dot(abs(xforms[4u * x + 1u].xyz), e),
+                           dot(abs(xforms[4u * x + 2u].xyz), e)) * s;
+        b = Box3(wc - we, wc + we);
+    }
+    let far = max(max(abs(b.lo), abs(b.hi)), vec3<f32>(1.0));
+    let pad = 2.0 * surface_offset(length(far)) + 1e-5 * max(far.x, max(far.y, far.z));
+    return Box3(b.lo - vec3<f32>(pad), b.hi + vec3<f32>(pad));
+}
+
+// A box around everything a light cone toward light `r` can reach near the
+// light: its bounding sphere (a sphere light's cone window, the square
+// around its disk, reaches about 1.42 radii from its center).
+fn light_box(r: LightRect) -> Box3 {
+    var c = light_center(r);
+    var radius = 0.0;
+    if (is_sphere(r)) {
+        radius = 1.5 * r.edge_u.x;
+    } else {
+        radius = 0.5 * (length(r.edge_u.xyz) + length(r.edge_v.xyz));
+    }
+    let far = max(abs(c), vec3<f32>(1.0));
+    radius = radius * 1.001 + 1e-5 * max(far.x, max(far.y, far.z)) + 1e-4;
+    return Box3(c - vec3<f32>(radius), c + vec3<f32>(radius));
+}
+
+// Whether box `m` meets the convex hull of boxes `p` and `l`. The hull is
+// the union over s in [0, 1] of the boxes (1 − s) p + s l, whose bounds are
+// linear in s, so each axis bounds s to an interval.
+fn hull_meets(p: Box3, l: Box3, m: Box3) -> bool {
+    var s0 = 0.0;
+    var s1 = 1.0;
+    for (var a = 0u; a < 3u; a++) {
+        // lo(s) = p.lo + s (l.lo − p.lo) <= m.hi
+        let b0 = l.lo[a] - p.lo[a];
+        let c0 = m.hi[a] - p.lo[a];
+        if (b0 > 0.0) { s1 = min(s1, c0 / b0); } else if (b0 < 0.0) { s0 = max(s0, c0 / b0); } else if (c0 < 0.0) { return false; }
+        // hi(s) = p.hi + s (l.hi − p.hi) >= m.lo
+        let b1 = l.hi[a] - p.hi[a];
+        let c1 = m.lo[a] - p.hi[a];
+        if (b1 > 0.0) { s0 = max(s0, c1 / b1); } else if (b1 < 0.0) { s1 = min(s1, c1 / b1); } else if (c1 > 0.0) { return false; }
+    }
+    return s0 <= s1 + 1e-6;
+}
+
+fn boxes_meet(a: Box3, b: Box3) -> bool {
+    return all(a.lo <= b.hi) && all(b.lo <= a.hi);
+}
+
+// Entry `i` of `moved` and the next as a box.
+fn moved_box(i: u32) -> Box3 {
+    return Box3(moved[i].xyz, moved[i + 1u].xyz);
+}
+
+// Whether a cone toward light `l` from anywhere in box `p` may meet a box
+// moved this frame (old or new place).
+fn may_be_shadowed(p: Box3, l: u32) -> bool {
+    let lights_n = vc.sky.z;
+    if (!boxes_meet(p, moved_box(2u * l))) { return false; }
+    let lb = light_box(lights[l]);
+    let first = 2u * lights_n + 2u;
+    let stride = 4u + 4u * lights_n;
+    for (var k = 0u; k < vc.movers.x; k++) {
+        let e = first + k * stride;
+        let r = e + 4u + 4u * l;
+        if (boxes_meet(p, moved_box(r)) && hull_meets(p, lb, moved_box(e))) { return true; }
+        if (boxes_meet(p, moved_box(r + 2u)) && hull_meets(p, lb, moved_box(e + 2u))) { return true; }
+    }
+    return false;
+}
+
+// Marks slot `s` invalid (once) and lists it for the CPU.
+fn mark_invalid(s: u32) {
+    if (atomicExchange(&slot_stale[s], 1u) == 0u) {
+        let q = atomicAdd(&mover_stats[1], 1u);
+        if (q < arrayLength(&invalid_list)) { invalid_list[q] = s; }
+    }
+}
+
+// An entry in the frame's bake for slot `s`'s page (key `key`, box lo..hi),
+// or NONE if the bake is full.
+fn append_page(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>) -> u32 {
+    let p = atomicAdd(&mover_stats[0], 1u);
+    if (p >= vc.movers.y) {
+        atomicAdd(&mover_stats[3], 1u);
+        return NONE;
+    }
+    let entry = vc.jobs.y + p;
+    bake_list[entry] = vec4<u32>(key, s);
+    bake_bounds[2u * entry] = vec4<f32>(lo, 0.0);
+    bake_bounds[2u * entry + 1u] = vec4<f32>(hi, 0.0);
+    return entry;
+}
+
+// `count` texel jobs appended to the bake: the first's index, or NONE if
+// they do not fit. The count never passes the capacity, so every job the
+// bake runs was written.
+fn append_jobs(count: u32) -> u32 {
+    var old = atomicLoad(&mover_stats[5]);
+    loop {
+        if (old + count > vc.movers.z) { return NONE; }
+        let r = atomicCompareExchangeWeak(&mover_stats[5], old, old + count);
+        if (r.exchanged) { return vc.jobs.x + old; }
+        old = r.old_value;
+    }
+    return NONE;
+}
+
+// A page appended to the bake whose stale texels did not all fit: the fill
+// leaves it marked invalid (bounds' w: 1), and it is listed for eviction.
+fn fail_entry(entry: u32, s: u32) {
+    bake_bounds[2u * entry].w = 1.0;
+    atomicStore(&slot_stale[s], 1u);
+    let q = atomicAdd(&mover_stats[1], 1u);
+    if (q < arrayLength(&invalid_list)) { invalid_list[q] = s; }
+}
+
+// One thread per slot (dispatched in rows of 65,535 workgroups).
+@compute @workgroup_size(64)
+fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let s = gid.x + gid.y * 65535u * 64u;
+    if (s >= arrayLength(&slot_stale)) { return; }
+    let info = slot_info[3u * s];
+    if (info.w == 0u) { return; }
+    let m = info.x;
+    let visible = slot_used[s] + vc.movers.w >= vc.counts.y;
+    if (visible) { atomicAdd(&mover_stats[2], 1u); }
+    let lo = bitcast<vec3<f32>>(slot_info[3u * s + 1u].xyz);
+    let hi = bitcast<vec3<f32>>(slot_info[3u * s + 2u].xyz);
+    let page = world_box(m, lo, hi);
+    let lights_n = vc.sky.z;
+    let first = 2u * lights_n + 2u;
+    let stride = 4u + 4u * lights_n;
+    // A page on a moved object (it lies within the moved boxes' union) is
+    // stale whole.
+    var own = false;
+    if (boxes_meet(page, moved_box(2u * lights_n))) {
+        for (var k = 0u; k < vc.movers.x; k++) {
+            if (bitcast<u32>(moved[first + k * stride].w) == m) { own = true; }
+        }
+    }
+    if (own) {
+        if (!visible) {
+            mark_invalid(s);
+            return;
+        }
+        let entry = append_page(s, info.xyz, lo, hi);
+        if (entry == NONE) {
+            mark_invalid(s);
+            return;
+        }
+        let j = append_jobs(PAGE_TEXELS * lights_n);
+        if (j == NONE) {
+            atomicAdd(&mover_stats[3], 1u);
+            fail_entry(entry, s);
+            return;
+        }
+        atomicAdd(&mover_stats[6], 1u);
+        for (var l = 0u; l < lights_n; l++) {
+            for (var k = 0u; k < PAGE_TEXELS; k++) {
+                bake_jobs[j + l * PAGE_TEXELS + k] = vec2<u32>(entry, k | (l << 8u));
+            }
+        }
+        return;
+    }
+    var candidate = false;
+    for (var l = 0u; l < lights_n && !candidate; l++) {
+        candidate = may_be_shadowed(page, l);
+    }
+    if (!candidate) { return; }
+    let c = atomicAdd(&mover_stats[4], 1u);
+    if (c >= arrayLength(&candidates)) {
+        mark_invalid(s);
+        return;
+    }
+    var entry = NONE;
+    if (visible) {
+        entry = append_page(s, info.xyz, lo, hi);
+        if (entry == NONE) {
+            candidates[c] = vec2<u32>(NONE, NONE);
+            mark_invalid(s);
+            return;
+        }
+    }
+    candidates[c] = vec2<u32>(s, entry);
+}
+
+// One thread per candidate page's texel (dispatched in rows of 65,535
+// workgroups): its apex tested against each light's moved boxes. A stale
+// texel of a visible page is re-baked for the lights it depends on; one of
+// another page marks the page invalid.
+@compute @workgroup_size(64)
+fn vc_stale_texels(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let j = gid.x + gid.y * 65535u * 64u;
+    let c = j / PAGE_TEXELS;
+    let k = j % PAGE_TEXELS;
+    if (c >= min(atomicLoad(&mover_stats[4]), arrayLength(&candidates))) { return; }
+    let cand = candidates[c];
+    let s = cand.x;
+    if (s == NONE) { return; }
+    let info = slot_info[3u * s];
+    let m = info.x;
+    let chart = info.y & 0xffffu;
+    let mip = info.y >> 16u;
+    let page = vec2<u32>(info.z & 0xffffu, info.z >> 16u);
+    let n = vc_grid(chart, m, mip);
+    let texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
+    if (texel.x >= n.x || texel.y >= n.y) { return; }
+    let surface = vc_surface(m, chart, n, texel);
+    if (!surface.ok) { return; }
+    let far = max(abs(surface.apex), vec3<f32>(1.0));
+    let pad = 1e-5 * max(far.x, max(far.y, far.z));
+    let apex = Box3(surface.apex - vec3<f32>(pad), surface.apex + vec3<f32>(pad));
+    let lights_n = vc.sky.z;
+    for (var l = 0u; l < lights_n; l++) {
+        if (!may_be_shadowed(apex, l)) { continue; }
+        if (cand.y == NONE) {
+            mark_invalid(s);
+            return;
+        }
+        let at = append_jobs(1u);
+        if (at == NONE) {
+            // The bake is full: the page cannot be made current.
+            atomicAdd(&mover_stats[3], 1u);
+            fail_entry(cand.y, s);
+            return;
+        }
+        bake_jobs[at] = vec2<u32>(cand.y, k | (l << 8u));
+        // The first stale texel counts the page (the fill clears the mark).
+        if (atomicExchange(&slot_stale[s], 1u) == 0u) { atomicAdd(&mover_stats[6], 1u); }
+    }
+}
+
+// After `vc_stale`: the texel test's dispatch size.
+@compute @workgroup_size(1)
+fn vc_args() {
+    let groups = (min(atomicLoad(&mover_stats[4]), arrayLength(&candidates)) * PAGE_TEXELS + 63u) / 64u;
+    dispatch_args[0] = min(groups, 65535u);
+    dispatch_args[1] = (groups + 65534u) / 65535u;
+    dispatch_args[2] = 1u;
+}
+
+// After `vc_stale_texels`: the bake's and the fill's dispatch sizes.
+@compute @workgroup_size(1)
+fn vc_args_bake() {
+    dispatch_args[3] = (bake_job_count() + 63u) / 64u;
+    dispatch_args[4] = 1u;
+    dispatch_args[5] = 1u;
+    dispatch_args[6] = (bake_page_count() + 63u) / 64u;
+    dispatch_args[7] = 1u;
+    dispatch_args[8] = 1u;
 }
 
 var<workgroup> fallback_count: atomic<u32>;

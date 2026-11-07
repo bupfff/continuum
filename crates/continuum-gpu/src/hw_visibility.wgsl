@@ -32,3 +32,40 @@ fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
 }
+
+// The movable objects' own top-level structure (M9): they are left out of
+// `scene_as` and rebuilt here as they move.
+@group(0) @binding(59) var movers_as: acceleration_structure;
+
+// `hw_visibility` for scenes with movers: the nearer hit of the static
+// structure and the movers'.
+@compute @workgroup_size(8, 8)
+fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
+    let eye = camera.eye.xyz;
+    var mesh = 0xffffffffu;
+    var tri = 0xffffffffu;
+    var dist = 3.4e38;
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
+    rayQueryProceed(&rq);
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind != 0u) {
+        mesh = hit.instance_custom_data;
+        tri = meshes[mesh].x + hit.primitive_index;
+        dist = hit.t;
+    }
+    var mq: ray_query;
+    rayQueryInitialize(&mq, movers_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, dist, eye, dir));
+    rayQueryProceed(&mq);
+    let moved = rayQueryGetCommittedIntersection(&mq);
+    if (moved.kind != 0u && moved.t < dist) {
+        mesh = moved.instance_custom_data;
+        tri = meshes[mesh].x + moved.primitive_index;
+        dist = moved.t;
+    }
+    vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
+}

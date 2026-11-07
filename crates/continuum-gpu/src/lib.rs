@@ -61,31 +61,20 @@ struct ReceiverGpu {
 pub struct MaskConeKernel {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
-    render_pipeline: wgpu::ComputePipeline,
-    cached_pipeline: wgpu::ComputePipeline,
-    mark_pipeline: wgpu::ComputePipeline,
-    rebake_pipeline: wgpu::ComputePipeline,
-    probe_build_pipeline: wgpu::ComputePipeline,
-    probe_gather_pipeline: wgpu::ComputePipeline,
-    bake_static_pipeline: wgpu::ComputePipeline,
-    visibility_pipeline: wgpu::ComputePipeline,
-    /// Camera rays through hardware ray queries, if the device has them.
-    hw_visibility_pipeline: Option<wgpu::ComputePipeline>,
+    /// The kernel's shader, its pipelines built the first time each is used
+    /// (a renderer builds only the passes it runs).
+    module: wgpu::ShaderModule,
+    /// The shader's source, for the hardware-ray module.
+    source: String,
+    /// Whether the device has ray queries (for hardware camera rays), and
+    /// that module, built when first needed.
+    ray_queries: bool,
+    hw_module: std::cell::OnceCell<wgpu::ShaderModule>,
+    /// Pipeline-overridable constants: workgroup stacks, work counters.
+    workgroup_stacks: bool,
+    count_work: bool,
+    pipelines: std::cell::RefCell<std::collections::HashMap<&'static str, wgpu::ComputePipeline>>,
     hardware_rays: std::cell::Cell<bool>,
-    shade_pipeline: wgpu::ComputePipeline,
-    shade_cached_pipeline: wgpu::ComputePipeline,
-    /// The view-dependent lighting cache's passes.
-    vc_update_pipeline: wgpu::ComputePipeline,
-    vc_bake_pipeline: wgpu::ComputePipeline,
-    vc_bake_sky_pipeline: wgpu::ComputePipeline,
-    vc_self_bake_pipeline: wgpu::ComputePipeline,
-    vc_fill_pipeline: wgpu::ComputePipeline,
-    /// An empty pass that timestamps the end of the camera passes.
-    mark_pipeline_empty: wgpu::ComputePipeline,
-    vc_shade_pipeline: wgpu::ComputePipeline,
-    render_cones_pipeline: wgpu::ComputePipeline,
-    vc_shade_cones_pipeline: wgpu::ComputePipeline,
     pixel_cones: std::cell::Cell<bool>,
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
@@ -131,7 +120,7 @@ pub use vcache::{CacheOptions, CacheStats};
 #[doc(hidden)]
 pub use hierarchy::Hierarchy;
 #[doc(hidden)]
-pub use instanced::{FrameProfile, InstancedRenderer};
+pub use instanced::{CacheCheck, FrameProfile, InstancedRenderer};
 #[doc(hidden)]
 pub use lightmap::{BLOCK, BLOCK_PLANES, hemicube_weights};
 #[doc(hidden)]
@@ -426,31 +415,73 @@ type KeepBinding = Box<dyn Fn(u32) -> bool>;
 /// them out.
 pub(crate) const PER_PIXEL_ONLY: &[u32] = &[52, 55, 56, 57, 58];
 
+/// The kernel's compute entry points (`mask_cones.wgsl`).
+const ENTRY_POINTS: &[&str] = &[
+    "main",
+    "render",
+    "render_cached",
+    "mark_blocks",
+    "rebake",
+    "probe_build",
+    "probe_gather",
+    "bake_static",
+    "visibility",
+    "shade",
+    "shade_cached_pass",
+    "vc_update",
+    "vc_bake",
+    "vc_bake_sky",
+    "vc_self_bake",
+    "vc_fill",
+    "mark",
+    "vc_shade",
+    "render_cones",
+    "vc_shade_cones",
+    "vc_stale",
+    "vc_args",
+    "vc_stale_texels",
+    "vc_args_bake",
+];
+
+/// The hardware-ray module's entry points (`hw_visibility.wgsl`).
+const HW_ENTRY_POINTS: &[&str] = &["hw_visibility", "hw_visibility_movers"];
+
 /// Bindings the `visibility` pass uses.
 const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31, 52];
 
 /// Bindings the hardware `hw_visibility` pass uses (32: the acceleration structure).
 pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[3, 6, 31, 32, 52];
+/// `hw_visibility_movers` adds the movers' acceleration structure (59).
+pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[3, 6, 31, 32, 52, 59];
 
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
 pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 64,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51,
 ];
 pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
     &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 54, 49, 50, 51];
-pub(crate) const VC_FILL_BINDINGS: &[u32] = &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48];
+pub(crate) const VC_FILL_BINDINGS: &[u32] =
+    &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
-    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58,
+    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58, 62,
 ];
+/// The movers' stale passes (M9) and the dispatch sizes after each.
+pub(crate) const VC_STALE_BINDINGS: &[u32] =
+    &[3, 30, 38, 40, 41, 43, 52, 60, 61, 62, 63, 64, 65, 67];
+pub(crate) const VC_ARGS_BINDINGS: &[u32] = &[64, 66, 67];
+pub(crate) const VC_STALE_TEXELS_BINDINGS: &[u32] = &[
+    2, 3, 23, 24, 30, 33, 34, 41, 43, 52, 54, 60, 61, 62, 63, 64, 65, 67,
+];
+pub(crate) const VC_ARGS_BAKE_BINDINGS: &[u32] = &[41, 64, 66];
 /// Bindings of `vc_shade_cones`: the cache's shading with pixel cones for
 /// visibility (the scene's hierarchies instead of a visibility buffer).
 pub(crate) const VC_SHADE_CONES_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 6, 7, 8, 9, 10, 23, 24, 25, 26, 29, 30, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55,
-    56, 57, 58,
+    56, 57, 58, 62,
 ];
 /// The compute `visibility` pass's bindings, for other modules.
 pub(crate) const COMPUTE_VISIBILITY_BINDINGS: &[u32] = VISIBILITY_BINDINGS;
@@ -585,106 +616,20 @@ impl MaskConeKernel {
             label: Some("mask_cones"),
             source: wgpu::ShaderSource::Wgsl(source.clone().into()),
         });
-        let flag = |on: bool| if on { 1.0 } else { 0.0 };
-        let constants = [
-            ("WORKGROUP_STACKS", flag(options.workgroup_stacks)),
-            ("COUNT_WORK", flag(options.count_work)),
-            ("PACKETS", 1.0),
-        ];
-        // The view cache's bakes walk alone: their texels can be far apart,
-        // and packets made small bakes slower (M5 gate 5).
-        let solo_constants = [constants[0], constants[1], ("PACKETS", 0.0)];
-        // CONTINUUM_PIPELINE_TIMES: print how long each pipeline takes to
-        // build (shader compilers differ by orders of magnitude).
-        let timed = std::env::var_os("CONTINUUM_PIPELINE_TIMES").is_some();
-        let entry_with = |name: &str, constants: &[(&str, f64)]| {
-            let start = Instant::now();
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(name),
-                layout: None,
-                module: &module,
-                entry_point: Some(name),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants,
-                    ..Default::default()
-                },
-                cache: None,
-            });
-            if timed {
-                eprintln!("pipeline {name}: {:.2} s", start.elapsed().as_secs_f64());
-            }
-            pipeline
-        };
-        let entry = |name: &str| entry_with(name, &constants);
-        let pipeline = entry("main");
-        let render_pipeline = entry("render");
-        let cached_pipeline = entry("render_cached");
-        let mark_pipeline = entry("mark_blocks");
-        let rebake_pipeline = entry("rebake");
-        let probe_build_pipeline = entry("probe_build");
-        let probe_gather_pipeline = entry("probe_gather");
-        let bake_static_pipeline = entry("bake_static");
-        let visibility_pipeline = entry("visibility");
-        let shade_pipeline = entry("shade");
-        let shade_cached_pipeline = entry("shade_cached_pass");
-        let vc_update_pipeline = entry("vc_update");
-        let vc_bake_pipeline = entry_with("vc_bake", &solo_constants);
-        let vc_bake_sky_pipeline = entry_with("vc_bake_sky", &solo_constants);
-        let vc_self_bake_pipeline = entry_with("vc_self_bake", &solo_constants);
-        let vc_fill_pipeline = entry("vc_fill");
-        let mark_pipeline_empty = entry("mark");
-        let vc_shade_pipeline = entry("vc_shade");
-        let render_cones_pipeline = entry("render_cones");
-        let vc_shade_cones_pipeline = entry("vc_shade_cones");
-        let hw_visibility_pipeline = device
+        let ray_queries = device
             .features()
-            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
-            .then(|| {
-                let hw_source = format!(
-                    "enable wgpu_ray_query;\n{source}\n{}",
-                    include_str!("hw_visibility.wgsl")
-                );
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("hw_visibility"),
-                    source: wgpu::ShaderSource::Wgsl(hw_source.into()),
-                });
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("hw_visibility"),
-                    layout: None,
-                    module: &module,
-                    entry_point: Some("hw_visibility"),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &constants,
-                        ..Default::default()
-                    },
-                    cache: None,
-                })
-            });
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
         MaskConeKernel {
             device,
             queue,
-            pipeline,
-            render_pipeline,
-            cached_pipeline,
-            mark_pipeline,
-            rebake_pipeline,
-            probe_build_pipeline,
-            probe_gather_pipeline,
-            bake_static_pipeline,
-            visibility_pipeline,
-            hardware_rays: std::cell::Cell::new(hw_visibility_pipeline.is_some()),
-            hw_visibility_pipeline,
-            shade_pipeline,
-            shade_cached_pipeline,
-            vc_update_pipeline,
-            vc_bake_pipeline,
-            vc_bake_sky_pipeline,
-            vc_self_bake_pipeline,
-            vc_fill_pipeline,
-            mark_pipeline_empty,
-            vc_shade_pipeline,
-            render_cones_pipeline,
-            vc_shade_cones_pipeline,
+            module,
+            source,
+            ray_queries,
+            hw_module: std::cell::OnceCell::new(),
+            workgroup_stacks: options.workgroup_stacks,
+            count_work: options.count_work,
+            pipelines: Default::default(),
+            hardware_rays: std::cell::Cell::new(ray_queries),
             pixel_cones: std::cell::Cell::new(false),
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
@@ -697,6 +642,75 @@ impl MaskConeKernel {
             profile_stage: std::cell::Cell::new(0),
             split: std::cell::Cell::new(false),
             adapter_name,
+        }
+    }
+
+    /// The pipeline of entry point `name`, built on first use. Entry points
+    /// named `hw_*` come from the hardware-ray module.
+    pub(crate) fn entry(&self, name: &'static str) -> wgpu::ComputePipeline {
+        if let Some(p) = self.pipelines.borrow().get(name) {
+            return p.clone();
+        }
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        // The view cache's bakes walk alone: their texels can be far apart,
+        // and packets made small bakes slower (M5 gate 5).
+        let solo = matches!(name, "vc_bake" | "vc_bake_sky" | "vc_self_bake");
+        let constants = [
+            ("WORKGROUP_STACKS", flag(self.workgroup_stacks)),
+            ("COUNT_WORK", flag(self.count_work)),
+            ("PACKETS", flag(!solo)),
+        ];
+        let module = if name.starts_with("hw_") {
+            assert!(self.ray_queries, "no ray queries on this device");
+            self.hw_module.get_or_init(|| {
+                let hw_source = format!(
+                    "enable wgpu_ray_query;\n{}\n{}",
+                    self.source,
+                    include_str!("hw_visibility.wgsl")
+                );
+                self.device
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("hw_visibility"),
+                        source: wgpu::ShaderSource::Wgsl(hw_source.into()),
+                    })
+            })
+        } else {
+            &self.module
+        };
+        // CONTINUUM_PIPELINE_TIMES: print how long each pipeline takes to
+        // build (shader compilers differ by orders of magnitude).
+        let start = Instant::now();
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: None,
+                module,
+                entry_point: Some(name),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
+                cache: None,
+            });
+        if std::env::var_os("CONTINUUM_PIPELINE_TIMES").is_some() {
+            eprintln!("pipeline {name}: {:.2} s", start.elapsed().as_secs_f64());
+        }
+        self.pipelines.borrow_mut().insert(name, pipeline.clone());
+        pipeline
+    }
+
+    /// Builds every pipeline now (they are otherwise built on first use):
+    /// for timing, and to check that each compiles on the device.
+    #[doc(hidden)]
+    pub fn build_all_pipelines(&self) {
+        for name in ENTRY_POINTS {
+            self.entry(name);
+        }
+        if self.ray_queries {
+            for name in HW_ENTRY_POINTS {
+                self.entry(name);
+            }
         }
     }
 
@@ -793,7 +807,7 @@ impl MaskConeKernel {
 
     /// Whether this kernel can cast camera rays with hardware ray queries.
     pub fn has_hardware_rays(&self) -> bool {
-        self.hw_visibility_pipeline.is_some()
+        self.ray_queries
     }
 
     /// Camera rays for instanced scenes through hardware ray queries (the
@@ -819,7 +833,7 @@ impl MaskConeKernel {
     }
 
     pub(crate) fn uses_hardware_rays(&self) -> bool {
-        self.hardware_rays.get() && self.hw_visibility_pipeline.is_some()
+        self.hardware_rays.get() && self.ray_queries
     }
 
     /// Camera frames as a visibility pass then a shading pass, or as one pass
@@ -995,12 +1009,12 @@ impl MaskConeKernel {
         origin: DVec3,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration, u64) {
-        let buffers = self.instanced_buffers(lights, scene, origin);
+        let (buffers, _) = self.instanced_buffers(lights, scene, origin, &[]);
         let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
         let cam = camera_uniform(camera, width, height, lights[0].radiance.x);
         let hw_scene = self
             .uses_hardware_rays()
-            .then(|| self.hw_scene(scene, origin));
+            .then(|| self.hw_scene(scene, origin, &[]));
         let (pixels, time) = self.render_buffers_with(
             false,
             cam,
@@ -1037,7 +1051,8 @@ impl MaskConeKernel {
         lights: &[Light],
         scene: &InstancedScene,
         origin: DVec3,
-    ) -> Vec<(u32, wgpu::Buffer)> {
+        movable: &[usize],
+    ) -> (Vec<(u32, wgpu::Buffer)>, Option<hierarchy::MoverTree>) {
         // Paths without the list read the first light as a rectangle; a
         // sphere stands there as a tiny square at its center.
         let light = lights[0].as_rect().unwrap_or_else(|| {
@@ -1068,7 +1083,14 @@ impl MaskConeKernel {
             })
             .collect();
         let (mut flat, xforms, bounds) = flatten_instanced(&geometries, &placements);
-        let (nodes, items) = object_hierarchy(&bounds, |_| true);
+        let (nodes, items, movers) = if movable.is_empty() {
+            let (nodes, items) = object_hierarchy(&bounds, |_| true);
+            (nodes, items, None)
+        } else {
+            let movable: Vec<u32> = movable.iter().map(|&m| m as u32).collect();
+            let (nodes, items, tree) = hierarchy::object_hierarchy_with_movers(&bounds, &movable);
+            (nodes, items, Some(tree))
+        };
         // Object-level prefiltering: the object hierarchy's coverage follows
         // the triangle hierarchies' in the same buffer.
         let objects = if self.object_prefilter.get() && self.prefilter.get() > 0.0 {
@@ -1130,12 +1152,13 @@ impl MaskConeKernel {
             ),
             objects,
         );
+        // Writable for movers (the hierarchy's movers subtree, transforms).
         let storage = |label: &str, contents: &[u8]| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(label),
                     contents,
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 })
         };
         let buffers = vec![
@@ -1173,7 +1196,7 @@ impl MaskConeKernel {
                 storage("texture coordinates", bytemuck::cast_slice(&tex)),
             ),
         ];
-        buffers
+        (buffers, movers)
     }
 
     /// A scene's textures, resampled into a layered texture with mip levels
@@ -1251,7 +1274,12 @@ impl MaskConeKernel {
     }
 
     /// Hardware acceleration structures for an instanced scene.
-    pub(crate) fn hw_scene(&self, scene: &InstancedScene, origin: DVec3) -> hw::HwScene {
+    pub(crate) fn hw_scene(
+        &self,
+        scene: &InstancedScene,
+        origin: DVec3,
+        movable: &[usize],
+    ) -> hw::HwScene {
         let geometries: Vec<Vec<Tri>> = scene
             .geometries
             .iter()
@@ -1267,7 +1295,7 @@ impl MaskConeKernel {
                 translation: (i.position - origin).as_vec3(),
             })
             .collect();
-        hw::build(&self.device, &self.queue, &geometries, &placements)
+        hw::build(&self.device, &self.queue, &geometries, &placements, movable)
     }
 
     /// Bakes a lightmap for [`LiveRenderer::new`]: one mask cone per texel
@@ -1354,43 +1382,43 @@ impl MaskConeKernel {
         // Single pass, or a visibility pass then a shading pass; each pipeline
         // gets exactly the bindings it uses.
         let split = self.split.get();
-        let hw = tlas.is_some() && self.hw_visibility_pipeline.is_some();
-        let passes: Vec<(&wgpu::ComputePipeline, KeepBinding)> = match (cached, split || hw) {
+        let hw = tlas.is_some() && self.ray_queries;
+        let passes: Vec<(wgpu::ComputePipeline, KeepBinding)> = match (cached, split || hw) {
             (false, true) if hw => vec![
                 (
-                    self.hw_visibility_pipeline.as_ref().unwrap(),
+                    self.entry("hw_visibility"),
                     Box::new(|b| HW_VISIBILITY_BINDINGS.contains(&b)),
                 ),
                 (
-                    &self.shade_pipeline,
+                    self.entry("shade"),
                     Box::new(|b| b == 31 || RENDER_BINDINGS.contains(&b)),
                 ),
             ],
             (false, false) => vec![(
-                &self.render_pipeline,
+                self.entry("render"),
                 Box::new(|b| RENDER_BINDINGS.contains(&b)),
             )],
             (true, false) => vec![(
-                &self.cached_pipeline,
+                self.entry("render_cached"),
                 Box::new(|b| b != 31 && !PER_PIXEL_ONLY.contains(&b)),
             )],
             (false, true) => vec![
                 (
-                    &self.visibility_pipeline,
+                    self.entry("visibility"),
                     Box::new(|b| VISIBILITY_BINDINGS.contains(&b)),
                 ),
                 (
-                    &self.shade_pipeline,
+                    self.entry("shade"),
                     Box::new(|b| b == 31 || RENDER_BINDINGS.contains(&b)),
                 ),
             ],
             (true, true) => vec![
                 (
-                    &self.visibility_pipeline,
+                    self.entry("visibility"),
                     Box::new(|b| VISIBILITY_BINDINGS.contains(&b)),
                 ),
                 (
-                    &self.shade_cached_pipeline,
+                    self.entry("shade_cached_pass"),
                     Box::new(|b| !PER_PIXEL_ONLY.contains(&b)),
                 ),
             ],
@@ -1429,7 +1457,7 @@ impl MaskConeKernel {
                     layout: &pipeline.get_bind_group_layout(0),
                     entries: &entries,
                 });
-                (*pipeline, group)
+                (pipeline, group)
             })
             .collect();
         let mut best = Duration::MAX;
@@ -1644,6 +1672,7 @@ impl MaskConeKernel {
         debug_mode: u32,
         hierarchy: Hierarchy,
     ) -> (Vec<f32>, Vec<f32>, Duration) {
+        let main = self.entry("main");
         let debug = debug_mode != 0;
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         let uniform = light.uniform(
@@ -1747,7 +1776,7 @@ impl MaskConeKernel {
         });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mask_cones"),
-            layout: &self.pipeline.get_bind_group_layout(0),
+            layout: &main.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1805,7 +1834,7 @@ impl MaskConeKernel {
             let mut encoder = self.device.create_command_encoder(&Default::default());
             {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.pipeline);
+                pass.set_pipeline(&main);
                 pass.set_bind_group(0, &bind_group, &[]);
                 pass.dispatch_workgroups(groups, 1, 1);
             }

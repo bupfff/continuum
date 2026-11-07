@@ -441,3 +441,95 @@ fn hardware_and_compute_rays_agree() {
         "ray paths differ: {d:?}"
     );
 }
+
+/// Where mover `k` of `movers_at` is after `frame` frames of circling.
+fn mover_place(s: &InstancedScene, instance: usize, frame: u32) -> (Mat3, DVec3) {
+    let i = &s.instances[instance];
+    let a = 0.15 * frame as f64 + instance as f64;
+    let offset = DVec3::new(
+        a.cos() - (instance as f64).cos(),
+        a.sin() - (instance as f64).sin(),
+        0.0,
+    ) * 0.35;
+    (
+        Mat3::from_rotation_z(0.1 * frame as f32) * i.rotation,
+        i.position + offset,
+    )
+}
+
+/// Moving objects in the view cache (M9 gate 1): no page the cache may show
+/// ever holds stale light, and once settled it shows what a cache built for
+/// the final placements shows.
+#[test]
+fn movers_leave_no_stale_light() {
+    let s = scene(DVec3::ZERO);
+    let movable: Vec<usize> = vec![1, 2, 6, 11];
+    let options = RendererOptions {
+        cache_options: CacheOptions {
+            frame_target_ms: 0.0,
+            pages: 1 << 15,
+            ..Default::default()
+        },
+        movable: movable.clone(),
+        ..Default::default()
+    };
+    let mut r = renderer(kernel(), &s, DVec3::ZERO, options.clone());
+    let view = target(&r);
+    for _ in 0..30 {
+        r.render(camera(), &view);
+    }
+    let mut rebaked = 0;
+    for frame in 1..=40 {
+        for &m in &movable {
+            let (rotation, position) = mover_place(&s, m, frame);
+            r.set_transform(m, rotation, position);
+        }
+        r.render(camera(), &view);
+        if let Some(stats) = r.stats() {
+            rebaked += stats.rebaked_pages;
+        }
+        if frame % 8 == 0 {
+            let check = r.verify_cache();
+            eprintln!("frame {frame}: {check:?}");
+            assert!(check.pages > 0, "no pages to check");
+            assert_eq!(check.differing, 0, "stale light in the cache: {check:?}");
+        }
+    }
+    assert!(rebaked > 0, "nothing was re-baked");
+    // Requests sample one pixel per 4×4 tile, a different one each frame
+    // over 16 frames: 32 quiet frames see every pixel twice.
+    let mut frames = 0;
+    while frames < 2_000 && !r.is_settled(32) {
+        r.render(camera(), &view);
+        frames += 1;
+    }
+    assert!(r.is_settled(32), "not settled after {frames} frames");
+    let moved = r.read_colors();
+
+    // A cache built with the movers where they ended.
+    let mut placed = s.clone();
+    for &m in &movable {
+        let (rotation, position) = mover_place(&s, m, 40);
+        placed.instances[m].rotation = rotation;
+        placed.instances[m].position = position;
+    }
+    let mut fresh = renderer(kernel(), &placed, DVec3::ZERO, options);
+    let mut frames = 0;
+    while frames < 2_000 && !fresh.is_settled(32) {
+        fresh.render(camera(), &view_for(&fresh));
+        frames += 1;
+    }
+    let expected = fresh.read_colors();
+    dump("movers_moved", &moved);
+    dump("movers_fresh", &expected);
+    let d = difference(&moved, &expected);
+    eprintln!("moved against fresh: {d:?}");
+    assert!(
+        d.relative_rmse == 0.0,
+        "the moved cache differs from a fresh one: {d:?}"
+    );
+}
+
+fn view_for(r: &Renderer) -> wgpu::TextureView {
+    target(r)
+}

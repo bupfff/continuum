@@ -27,7 +27,7 @@
 //! renderer.render(camera, &view);
 //! ```
 
-use continuum::glam::{DVec3, Vec3};
+use continuum::glam::{DVec3, Mat3, Vec3};
 
 use crate::{
     CacheOptions, CacheStats, Camera, InstancedRenderer, InstancedScene, Light, MaskConeKernel,
@@ -56,6 +56,11 @@ pub struct RendererOptions {
     /// the surfaces it meets in proportion to their visible coverage. Off:
     /// one ray per pixel (hardware ray queries where available).
     pub pixel_cones: bool,
+    /// Instances that may move ([`Renderer::set_transform`]). The cache
+    /// re-bakes, within the frame, what a move makes stale (M9 gate 1), and
+    /// never shows stale light. With the cache, movers and a sky do not mix
+    /// yet. Empty (the default): a static scene.
+    pub movable: Vec<usize>,
 }
 
 impl Default for RendererOptions {
@@ -66,15 +71,17 @@ impl Default for RendererOptions {
             sky: None,
             cache_options: CacheOptions::default(),
             pixel_cones: false,
+            movable: Vec::new(),
         }
     }
 }
 
 /// An instanced scene with its lights, rendered with mask cones: exact soft
 /// shadows from every light's area, through a lighting cache kept across
-/// frames. The scene and lights stay still; the camera moves freely, and
-/// lights can change color and intensity at no cost
-/// ([`Renderer::set_light_radiance`]).
+/// frames. The camera moves freely; instances marked movable move
+/// ([`Renderer::set_transform`]), and the cache re-bakes only what their
+/// moves can change; lights stay put but can change color and intensity at
+/// no cost ([`Renderer::set_light_radiance`]).
 pub struct Renderer {
     kernel: MaskConeKernel,
     inner: InstancedRenderer,
@@ -103,31 +110,27 @@ impl Renderer {
         kernel.set_sky_prefilter(8.0);
         kernel.set_sky(options.sky.unwrap_or(Vec3::ZERO));
         kernel.set_pixel_cones(options.pixel_cones);
-        let inner = if options.cache {
-            InstancedRenderer::with_cache_lights(
-                &kernel,
-                format,
-                width,
-                height,
-                options.scale,
-                lights,
-                scene,
-                origin,
-                options.cache_options,
-            )
-        } else {
-            InstancedRenderer::new_lights(
-                &kernel,
-                format,
-                width,
-                height,
-                options.scale,
-                lights,
-                scene,
-                origin,
-            )
-        };
+        let inner = InstancedRenderer::with_movers(
+            &kernel,
+            format,
+            width,
+            height,
+            options.scale,
+            lights,
+            scene,
+            origin,
+            options.cache.then_some(options.cache_options),
+            &options.movable,
+        );
         Renderer { kernel, inner }
+    }
+
+    /// Moves instance `instance` (one of [`RendererOptions::movable`]) to
+    /// `rotation` (orthonormal) and `position` (in the world, f64) from the
+    /// next frame. Its scale stays.
+    pub fn set_transform(&mut self, instance: usize, rotation: Mat3, position: DVec3) {
+        self.inner
+            .set_instance_transform(instance, rotation, position);
     }
 
     /// Renders a frame seen from `camera` into `target` (a texture of the
@@ -201,6 +204,13 @@ impl Renderer {
     /// Whether camera rays use hardware ray queries (otherwise compute).
     pub fn hardware_rays(&self) -> bool {
         self.inner.hardware_rays()
+    }
+
+    /// Diagnostics (M9 gate 1): re-bakes every page the cache may show and
+    /// counts values that changed (zero when no stale light is held).
+    #[doc(hidden)]
+    pub fn verify_cache(&mut self) -> crate::CacheCheck {
+        self.inner.verify_cache()
     }
 
     /// The kernel, for its device and adapter.

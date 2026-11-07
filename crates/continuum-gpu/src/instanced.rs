@@ -4,17 +4,19 @@
 
 use std::time::{Duration, Instant};
 
-use continuum::glam::{DVec3, Vec3};
+use continuum::glam::{DVec3, Mat3, Vec3};
 
+use crate::hierarchy::{MoverTree, NodeGpu, Placement, mesh_bounds, mover_subtree, union_root};
 use crate::hw::HwScene;
 use crate::live::{DisplayDims, display_bind, display_pipeline};
-use crate::vcache::VirtualCache;
+use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
-    HW_VISIBILITY_BINDINGS, InstancedScene, Light, LightGpu, MaskConeKernel, RECT_LIGHT_BINDINGS,
-    RectLight, SceneTextures, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_UPDATE_BINDINGS,
-    camera_uniform, uniform_buffer,
+    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
+    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
+    VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_STALE_BINDINGS,
+    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -35,21 +37,62 @@ pub struct FrameProfile {
     pub planning: Duration,
 }
 
+/// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
+/// buffer at an offset (after the movers' stale pass).
+enum Dispatch {
+    Groups(u32, u32),
+    Indirect(u64),
+}
+
 impl Cache {
-    /// The bake passes with `counts` invocations each (skipping empty ones),
-    /// timed on the GPU where the device has timestamps: the first pass that
-    /// runs writes query 0, the last query 1.
-    fn encode_bake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 4]) {
-        let ran: Vec<usize> = (0..counts.len()).filter(|&k| counts[k] > 0).collect();
+    /// The bake passes for `counts` (table updates, sun texels, sky face
+    /// jobs, pages; then objects moved), skipping empty ones, timed on the
+    /// GPU where the device has timestamps: the first pass that runs writes
+    /// query 0, the last query 1. With movers moved, the stale pass runs
+    /// after the table updates and sizes the bake and the fill.
+    fn encode_bake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 5]) {
+        let groups = |n: u32| Dispatch::Groups(n.div_ceil(64), 1);
+        let mut list: Vec<(&wgpu::ComputePipeline, &wgpu::BindGroup, Dispatch)> = Vec::new();
+        if counts[0] > 0 {
+            list.push((&self.passes[0], &self.binds[0], groups(counts[0])));
+        }
+        let moved = counts[4] > 0 && self.movers.is_some();
+        if let (true, Some((passes, binds))) = (moved, &self.movers) {
+            let g = self.state.pages().div_ceil(64);
+            list.push((
+                &passes[0],
+                &binds[0],
+                Dispatch::Groups(g.min(65_535), g.div_ceil(65_535)),
+            ));
+            list.push((&passes[1], &binds[1], Dispatch::Groups(1, 1)));
+            list.push((&passes[2], &binds[2], Dispatch::Indirect(0)));
+            list.push((&passes[3], &binds[3], Dispatch::Groups(1, 1)));
+            list.push((&self.passes[1], &self.binds[1], Dispatch::Indirect(12)));
+        } else if counts[1] > 0 {
+            list.push((&self.passes[1], &self.binds[1], groups(counts[1])));
+        }
+        if counts[2] > 0 {
+            list.push((&self.passes[2], &self.binds[2], groups(counts[2])));
+        }
+        if moved {
+            list.push((&self.passes[3], &self.binds[3], Dispatch::Indirect(24)));
+        } else if counts[3] > 0 {
+            list.push((&self.passes[3], &self.binds[3], groups(counts[3])));
+        }
         let set = self.state.timer.as_ref().map(|t| &t.set);
-        for &k in &ran {
+        let ran: Vec<usize> = (0..list.len()).collect();
+        let args = self.state.buffer(66);
+        for (k, (pipeline, bind, dispatch)) in list.iter().enumerate() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
                 timestamp_writes: timestamps(set, &ran, k, 0),
             });
-            pass.set_pipeline(&self.passes[k]);
-            pass.set_bind_group(0, &self.binds[k], &[]);
-            pass.dispatch_workgroups(counts[k].div_ceil(64), 1, 1);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, *bind, &[]);
+            match dispatch {
+                Dispatch::Groups(x, y) => pass.dispatch_workgroups(*x, *y, 1),
+                Dispatch::Indirect(offset) => pass.dispatch_workgroups_indirect(args, *offset),
+            }
         }
     }
 }
@@ -78,6 +121,59 @@ struct Cache {
     state: VirtualCache,
     passes: [wgpu::ComputePipeline; 4],
     binds: Vec<wgpu::BindGroup>,
+    /// With movers: the stale passes (pages, then candidates' texels), each
+    /// followed by a dispatch-size pass, and their bind groups.
+    movers: Option<([wgpu::ComputePipeline; 4], Vec<wgpu::BindGroup>)>,
+}
+
+/// What [`InstancedRenderer::verify_cache`] found: resident pages that
+/// shading may read, their values (texels × channels), and how many of
+/// those changed when re-baked from scratch, and by how much at most.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CacheCheck {
+    /// Resident pages shading may read.
+    pub pages: u32,
+    /// Their values (texels × channels).
+    pub values: u64,
+    /// Values that changed when re-baked.
+    pub differing: u64,
+    /// The largest change.
+    pub largest: f32,
+}
+
+/// Objects that may move (M9): where their subtree lives in the object
+/// hierarchy, and their placements and world boxes now.
+struct Movers {
+    tree: MoverTree,
+    origin: DVec3,
+    /// Per mover (in `tree.objects` order): its placement, its padded
+    /// world box, and whether it moved since the last frame.
+    placements: Vec<Placement>,
+    bounds: Vec<(Vec3, Vec3)>,
+    dirty: Vec<bool>,
+    /// Instance index → mover index.
+    index: std::collections::HashMap<usize, usize>,
+    /// Each geometry's object-space box.
+    local: Vec<(Vec3, Vec3)>,
+    /// A box around each light's cone ends (as the shader's `light_box`,
+    /// a little larger).
+    light_boxes: Vec<(Vec3, Vec3)>,
+}
+
+/// A box around every point a light cone toward `light` reaches near the
+/// light (its bounding sphere; a sphere light's cone window, the square
+/// around its disk, reaches about 1.42 radii from its center), a little
+/// larger than the shader's `light_box`.
+fn light_box(light: &Light) -> (Vec3, Vec3) {
+    let (c, r) = match light.emitter {
+        crate::Emitter::Rect(r) => (
+            r.corner + (r.edge_u + r.edge_v) * 0.5,
+            0.5 * (r.edge_u.length() + r.edge_v.length()),
+        ),
+        crate::Emitter::Sphere(s) => (s.center, 1.5 * s.radius),
+    };
+    let r = r * 1.01 + 2e-5 * c.abs().max_element().max(1.0) + 1e-3;
+    (c - Vec3::splat(r), c + Vec3::splat(r))
 }
 
 /// Persistent GPU state for flying through an [`InstancedScene`]: geometry,
@@ -121,13 +217,14 @@ pub struct InstancedRenderer {
     /// Textures are sampled for this share of a pixel's width (1: the
     /// pixel; 1/16 for references at 16×16 samples per pixel).
     footprint: f32,
+    movers: Option<Movers>,
 }
 
 fn bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::ComputePipeline,
     buffers: &[(u32, &wgpu::Buffer)],
-    tlas: Option<&wgpu::Tlas>,
+    tlas: &[(u32, &wgpu::Tlas)],
     textures: Option<&SceneTextures>,
     keep: &[u32],
 ) -> wgpu::BindGroup {
@@ -139,13 +236,13 @@ fn bind_group(
             resource: buf.as_entire_binding(),
         })
         .collect();
-    if let Some(tlas) = tlas
-        && keep.contains(&32)
-    {
-        entries.push(wgpu::BindGroupEntry {
-            binding: 32,
-            resource: tlas.as_binding(),
-        });
+    for (binding, tlas) in tlas {
+        if keep.contains(binding) {
+            entries.push(wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: tlas.as_binding(),
+            });
+        }
     }
     if let Some(t) = textures
         && keep.contains(&55)
@@ -193,6 +290,7 @@ impl InstancedRenderer {
             scene,
             origin,
             None,
+            &[],
         )
     }
 
@@ -222,6 +320,7 @@ impl InstancedRenderer {
             scene,
             origin,
             Some(options),
+            &[],
         )
     }
 
@@ -248,6 +347,7 @@ impl InstancedRenderer {
             scene,
             origin,
             None,
+            &[],
         )
     }
 
@@ -276,7 +376,128 @@ impl InstancedRenderer {
             scene,
             origin,
             Some(options),
+            &[],
         )
+    }
+
+    /// A renderer whose instances `movable` may move
+    /// ([`Self::set_instance_transform`]), with or without a lighting cache
+    /// (M9). The cache re-bakes what a move makes stale within the frame
+    /// and never shows stale light; it does not support a sky with movers
+    /// yet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_movers(
+        kernel: &MaskConeKernel,
+        target_format: wgpu::TextureFormat,
+        target_width: u32,
+        target_height: u32,
+        scale: u32,
+        lights: &[Light],
+        scene: &InstancedScene,
+        origin: DVec3,
+        cache: Option<CacheOptions>,
+        movable: &[usize],
+    ) -> Self {
+        Self::build(
+            kernel,
+            target_format,
+            target_width,
+            target_height,
+            scale,
+            lights,
+            scene,
+            origin,
+            cache,
+            movable,
+        )
+    }
+
+    /// Moves movable instance `instance` (given at construction) to
+    /// `rotation` (orthonormal) and `position` from the next frame. Its
+    /// scale stays.
+    pub fn set_instance_transform(&mut self, instance: usize, rotation: Mat3, position: DVec3) {
+        let movers = self.movers.as_mut().expect("a renderer with movers");
+        let &k = movers
+            .index
+            .get(&instance)
+            .unwrap_or_else(|| panic!("instance {instance} is not movable"));
+        let p = &mut movers.placements[k];
+        let translation = (position - movers.origin).as_vec3();
+        if p.rotation != rotation || p.translation != translation {
+            p.rotation = rotation;
+            p.translation = translation;
+            movers.dirty[k] = true;
+        }
+    }
+
+    /// Applies the moves since the last frame: the movers' transforms, their
+    /// subtree and the root, their hardware structure (in `encoder`), and
+    /// the cache's list of moved objects for its stale pass.
+    fn apply_moves(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(movers) = &mut self.movers else {
+            return;
+        };
+        if !movers.dirty.iter().any(|&d| d) {
+            return;
+        }
+        let buffer = |b: u32| {
+            &self
+                .scene
+                .iter()
+                .find(|(k, _)| *k == b)
+                .expect("scene buffer")
+                .1
+        };
+        let mut moved = Vec::new();
+        for k in 0..movers.placements.len() {
+            if !std::mem::take(&mut movers.dirty[k]) {
+                continue;
+            }
+            let p = movers.placements[k];
+            let object = movers.tree.objects[k];
+            let old = movers.bounds[k];
+            let new = p.world_bounds(movers.local[p.geometry]);
+            movers.bounds[k] = new;
+            moved.push((object, [old.0, old.1], [new.0, new.1]));
+            self.queue.write_buffer(
+                buffer(30),
+                object as u64 * 64,
+                bytemuck::cast_slice(&p.rows()),
+            );
+        }
+        let (root, region, items) = mover_subtree(&movers.tree, &movers.bounds);
+        let node = std::mem::size_of::<NodeGpu>() as u64;
+        let nodes = buffer(9);
+        let top = union_root(movers.tree.fixed_root, root);
+        self.queue.write_buffer(nodes, 0, bytemuck::bytes_of(&top));
+        self.queue
+            .write_buffer(nodes, 2 * node, bytemuck::bytes_of(&root));
+        if !region.is_empty() {
+            self.queue.write_buffer(
+                nodes,
+                movers.tree.first_node as u64 * node,
+                bytemuck::cast_slice(&region),
+            );
+        }
+        self.queue.write_buffer(
+            buffer(10),
+            movers.tree.first_item as u64 * 4,
+            bytemuck::cast_slice(&items),
+        );
+        if let Some(hw) = &mut self.hw {
+            hw.update_movers(encoder, &movers.placements);
+        }
+        if let Some(cache) = &mut self.cache {
+            // Every texel's apex lies within the objects' boxes; the
+            // movers' old boxes stay in for this frame's test.
+            let (mut lo, mut hi) = top.bounds();
+            for (_, old, _) in &moved {
+                (lo, hi) = (lo.min(old[0]), hi.max(old[1]));
+            }
+            let pad = 1e-3 * lo.abs().max(hi.abs()).max_element().max(1.0);
+            let scene = (lo - Vec3::splat(pad), hi + Vec3::splat(pad));
+            cache.state.set_moved(&moved, &movers.light_boxes, scene);
+        }
     }
 
     /// How the display pass writes colors (`display.wgsl`): 0 with the tone
@@ -334,11 +555,50 @@ impl InstancedRenderer {
         scene: &InstancedScene,
         origin: DVec3,
         cache: Option<CacheOptions>,
+        movable: &[usize],
     ) -> Self {
         let device = kernel.device.clone();
         let scale = scale.max(1);
         let (width, height) = (target_width.div_ceil(scale), target_height.div_ceil(scale));
-        let scene_buffers = kernel.instanced_buffers(lights, scene, origin);
+        let (scene_buffers, tree) = kernel.instanced_buffers(lights, scene, origin, movable);
+        let movers = tree.map(|tree| {
+            let local: Vec<(Vec3, Vec3)> = scene
+                .geometries
+                .iter()
+                .map(|g| mesh_bounds(&g.triangles))
+                .collect();
+            let placements: Vec<Placement> = tree
+                .objects
+                .iter()
+                .map(|&m| {
+                    let i = &scene.instances[m as usize];
+                    Placement {
+                        geometry: i.geometry,
+                        rotation: i.rotation,
+                        scale: i.scale,
+                        translation: (i.position - origin).as_vec3(),
+                    }
+                })
+                .collect();
+            Movers {
+                bounds: placements
+                    .iter()
+                    .map(|p| p.world_bounds(local[p.geometry]))
+                    .collect(),
+                dirty: vec![false; placements.len()],
+                index: tree
+                    .objects
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &m)| (m as usize, k))
+                    .collect(),
+                placements,
+                local,
+                origin,
+                light_boxes: lights.iter().map(light_box).collect(),
+                tree,
+            }
+        });
         let camera_buf = uniform_buffer(
             &device,
             "camera",
@@ -348,42 +608,47 @@ impl InstancedRenderer {
         let display = display_pipeline(&device, target_format);
         let pixel_cones = kernel.pixel_cones.get();
         // Pixel cones need no camera rays, so no acceleration structure.
-        let hw =
-            (kernel.uses_hardware_rays() && !pixel_cones).then(|| kernel.hw_scene(scene, origin));
-        let visibility = match (&hw, &kernel.hw_visibility_pipeline) {
-            (Some(_), Some(pipeline)) => Some((pipeline.clone(), HW_VISIBILITY_BINDINGS.to_vec())),
-            _ => None,
-        };
+        let hw = (kernel.uses_hardware_rays() && !pixel_cones)
+            .then(|| kernel.hw_scene(scene, origin, movable));
+        let visibility = hw.as_ref().map(|hw| {
+            if hw.movers.is_some() {
+                (
+                    kernel.entry("hw_visibility_movers"),
+                    HW_VISIBILITY_MOVERS_BINDINGS.to_vec(),
+                )
+            } else {
+                (
+                    kernel.entry("hw_visibility"),
+                    HW_VISIBILITY_BINDINGS.to_vec(),
+                )
+            }
+        });
         let shade_bindings = |list: &[u32]| {
             let mut keep = list.to_vec();
             keep.push(31);
             keep
         };
         let passes = match (cache.is_some(), visibility) {
-            (false, _) if pixel_cones => vec![(
-                kernel.render_cones_pipeline.clone(),
-                RECT_LIGHT_BINDINGS.to_vec(),
-            )],
+            (false, _) if pixel_cones => {
+                vec![(kernel.entry("render_cones"), RECT_LIGHT_BINDINGS.to_vec())]
+            }
             (true, _) if pixel_cones => vec![(
-                kernel.vc_shade_cones_pipeline.clone(),
+                kernel.entry("vc_shade_cones"),
                 VC_SHADE_CONES_BINDINGS.to_vec(),
             )],
             (false, Some(v)) => vec![
                 v,
-                (
-                    kernel.shade_pipeline.clone(),
-                    shade_bindings(RECT_LIGHT_BINDINGS),
-                ),
+                (kernel.entry("shade"), shade_bindings(RECT_LIGHT_BINDINGS)),
             ],
-            (false, None) => vec![(kernel.render_pipeline.clone(), RECT_LIGHT_BINDINGS.to_vec())],
+            (false, None) => vec![(kernel.entry("render"), RECT_LIGHT_BINDINGS.to_vec())],
             (true, v) => vec![
                 v.unwrap_or_else(|| {
                     (
-                        kernel.visibility_pipeline.clone(),
+                        kernel.entry("visibility"),
                         COMPUTE_VISIBILITY_BINDINGS.to_vec(),
                     )
                 }),
-                (kernel.vc_shade_pipeline.clone(), VC_SHADE_BINDINGS.to_vec()),
+                (kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()),
             ],
         };
         let cache = cache.map(|options| Cache {
@@ -396,12 +661,24 @@ impl InstancedRenderer {
                 lights.len() as u32,
                 width,
                 height,
+                movable.len() as u32,
             ),
+            movers: (!movable.is_empty()).then(|| {
+                (
+                    [
+                        kernel.entry("vc_stale"),
+                        kernel.entry("vc_args"),
+                        kernel.entry("vc_stale_texels"),
+                        kernel.entry("vc_args_bake"),
+                    ],
+                    Vec::new(),
+                )
+            }),
             passes: [
-                kernel.vc_update_pipeline.clone(),
-                kernel.vc_bake_pipeline.clone(),
-                kernel.vc_bake_sky_pipeline.clone(),
-                kernel.vc_fill_pipeline.clone(),
+                kernel.entry("vc_update"),
+                kernel.entry("vc_bake"),
+                kernel.entry("vc_bake_sky"),
+                kernel.entry("vc_fill"),
             ],
             binds: Vec::new(),
         });
@@ -412,7 +689,7 @@ impl InstancedRenderer {
             passes,
             hw,
             display_bind: display_bind(&device, &display, &colors, &dims_buf),
-            mark: kernel.mark_pipeline_empty.clone(),
+            mark: kernel.entry("mark"),
             display,
             scene: scene_buffers,
             camera_buf,
@@ -436,6 +713,7 @@ impl InstancedRenderer {
             ),
             pixel_offset: [0.0; 2],
             footprint: 1.0,
+            movers,
         };
         renderer.targets();
         renderer.bake_self_masks(kernel);
@@ -456,12 +734,12 @@ impl InstancedRenderer {
             .map(|(b, buf)| (*b, buf))
             .chain(cache.state.buffers.iter().map(|(b, buf)| (*b, buf)))
             .collect();
-        let pipeline = &kernel.vc_self_bake_pipeline;
+        let pipeline = &kernel.entry("vc_self_bake");
         let group = bind_group(
             &self.device,
             pipeline,
             &all,
-            None,
+            &[],
             None,
             VC_SELF_BAKE_BINDINGS,
         );
@@ -510,16 +788,22 @@ impl InstancedRenderer {
             all.extend(cache.state.buffers.iter().map(|(b, buf)| (*b, buf)));
             all.push((41, cache.state.params()));
         }
-        let tlas = self.hw.as_ref().map(|h| &h.tlas);
+        let mut tlas: Vec<(u32, &wgpu::Tlas)> = Vec::new();
+        if let Some(hw) = &self.hw {
+            tlas.push((32, &hw.tlas));
+            if let Some((movers, _)) = &hw.movers {
+                tlas.push((59, movers));
+            }
+        }
         self.binds = self
             .passes
             .iter()
             .map(|(pipeline, keep)| {
-                bind_group(device, pipeline, &all, tlas, Some(&self.textures), keep)
+                bind_group(device, pipeline, &all, &tlas, Some(&self.textures), keep)
             })
             .collect();
         let cache_binds = self.cache.as_ref().map(|cache| {
-            cache
+            let binds: Vec<wgpu::BindGroup> = cache
                 .passes
                 .iter()
                 .zip([
@@ -528,11 +812,27 @@ impl InstancedRenderer {
                     VC_BAKE_SKY_BINDINGS,
                     VC_FILL_BINDINGS,
                 ])
-                .map(|(pipeline, keep)| bind_group(device, pipeline, &all, None, None, keep))
-                .collect()
+                .map(|(pipeline, keep)| bind_group(device, pipeline, &all, &[], None, keep))
+                .collect();
+            let movers: Option<Vec<wgpu::BindGroup>> = cache.movers.as_ref().map(|(passes, _)| {
+                passes
+                    .iter()
+                    .zip([
+                        VC_STALE_BINDINGS,
+                        VC_ARGS_BINDINGS,
+                        VC_STALE_TEXELS_BINDINGS,
+                        VC_ARGS_BAKE_BINDINGS,
+                    ])
+                    .map(|(pipeline, keep)| bind_group(device, pipeline, &all, &[], None, keep))
+                    .collect()
+            });
+            (binds, movers)
         });
-        if let (Some(cache), Some(binds)) = (&mut self.cache, cache_binds) {
+        if let (Some(cache), Some((binds, movers))) = (&mut self.cache, cache_binds) {
             cache.binds = binds;
+            if let (Some((_, b)), Some(movers)) = (&mut cache.movers, movers) {
+                *b = movers;
+            }
         }
         self.display_bind = display_bind(device, &self.display, &self.colors, &self.dims_buf);
     }
@@ -652,6 +952,7 @@ impl InstancedRenderer {
             cache.state.begin_frame(&self.device);
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.apply_moves(&mut encoder);
         if let Some(cache) = &mut self.cache {
             // Before the bake, which may count its work in the counters.
             cache.state.encode_clear(&mut encoder);
@@ -728,6 +1029,7 @@ impl InstancedRenderer {
         profile.planning = start.elapsed();
         let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.apply_moves(&mut encoder);
         if let Some(cache) = &mut self.cache {
             cache.state.encode_clear(&mut encoder);
             let counts = cache.state.upload(
@@ -782,6 +1084,57 @@ impl InstancedRenderer {
         self.wait();
         profile.readback = start.elapsed();
         profile
+    }
+
+    /// Diagnostics (M9 gate 1): re-bakes every resident page that shading
+    /// may read (not marked stale) from scratch, with the scene as it is,
+    /// and compares every texel's every channel with what the cache held,
+    /// bit for bit. Waits for the GPU. The pages keep the re-baked values;
+    /// slot use is restored, so later frames run as they would have.
+    pub fn verify_cache(&mut self) -> CacheCheck {
+        let Some(cache) = &mut self.cache else {
+            return CacheCheck::default();
+        };
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let device = &self.device;
+        let before = cache.state.read_buffer(device, 37);
+        let marks = cache.state.read_buffer(device, 62);
+        let used = cache.state.read_buffer(device, 40);
+        let pages = cache.state.readable_pages(bytemuck::cast_slice(&marks));
+        let chunk = cache.state.rebake_chunk();
+        for part in pages.chunks(chunk) {
+            let counts = cache.state.upload_rebake(&self.queue, part);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            cache.state.encode_clear(&mut encoder);
+            cache.encode_bake(&mut encoder, counts);
+            self.queue.submit([encoder.finish()]);
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("GPU poll failed");
+        }
+        self.queue.write_buffer(cache.state.buffer(40), 0, &used);
+        let after = cache.state.read_buffer(device, 37);
+        let (before, after): (&[f32], &[f32]) =
+            (bytemuck::cast_slice(&before), bytemuck::cast_slice(&after));
+        let channels = self.lights + 1;
+        let per_page = PAGE_TEXELS as usize * channels;
+        let mut check = CacheCheck {
+            pages: pages.len() as u32,
+            ..Default::default()
+        };
+        for &slot in &pages {
+            let first = slot as usize * per_page;
+            for k in first..first + per_page {
+                check.values += 1;
+                if before[k].to_bits() != after[k].to_bits() {
+                    check.differing += 1;
+                    check.largest = check.largest.max((before[k] - after[k]).abs());
+                }
+            }
+        }
+        check
     }
 
     /// Diagnostics: every page resident in the lighting cache with channel

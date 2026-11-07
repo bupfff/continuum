@@ -301,11 +301,11 @@ impl LiveRenderer {
         });
         let camera_passes = if kernel.split.get() {
             vec![
-                kernel.visibility_pipeline.clone(),
-                kernel.shade_cached_pipeline.clone(),
+                kernel.entry("visibility"),
+                kernel.entry("shade_cached_pass"),
             ]
         } else {
-            vec![kernel.cached_pipeline.clone()]
+            vec![kernel.entry("render_cached")]
         };
         let (colors_buf, camera_binds, display_bind) = Self::targets(
             &device,
@@ -325,9 +325,9 @@ impl LiveRenderer {
             queue: kernel.queue.clone(),
             camera_passes,
             display,
-            mark: kernel.mark_pipeline.clone(),
-            rebake: kernel.rebake_pipeline.clone(),
-            gather: kernel.probe_gather_pipeline.clone(),
+            mark: kernel.entry("mark_blocks"),
+            rebake: kernel.entry("rebake"),
+            gather: kernel.entry("probe_gather"),
             scene,
             camera_buf,
             dims_buf,
@@ -391,7 +391,7 @@ impl LiveRenderer {
         let build_bind = bind_group(
             device,
             "probe build",
-            &kernel.probe_build_pipeline,
+            &kernel.entry("probe_build"),
             &[
                 (0, s(0)),
                 (2, s(2)),
@@ -412,13 +412,13 @@ impl LiveRenderer {
         let mut encoder = device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&kernel.probe_build_pipeline);
+            pass.set_pipeline(&kernel.entry("probe_build"));
             pass.set_bind_group(0, &build_bind, &[]);
             pass.dispatch_workgroups(bins / 64, static_probes, 1);
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&kernel.probe_gather_pipeline);
+            pass.set_pipeline(&kernel.entry("probe_gather"));
             pass.set_bind_group(0, &gather_bind, &[]);
             pass.dispatch_workgroups(probes, 1, 1);
         }
@@ -444,7 +444,7 @@ impl LiveRenderer {
         bind_group(
             &kernel.device,
             "probe gather",
-            &kernel.probe_gather_pipeline,
+            &kernel.entry("probe_gather"),
             &[
                 (0, s(0)),
                 (2, s(2)),
@@ -553,7 +553,7 @@ impl LiveRenderer {
         let mark_bind = bind_group(
             device,
             "mark",
-            &kernel.mark_pipeline,
+            &kernel.entry("mark_blocks"),
             &[(14, &uniform), (15, &planes), (16, &args), (17, &dirty)],
         );
         // Static coverage cache: a slot per block that can receive direct light
@@ -622,7 +622,7 @@ impl LiveRenderer {
         let rebake_bind = bind_group(
             device,
             "rebake",
-            &kernel.rebake_pipeline,
+            &kernel.entry("rebake"),
             &[
                 (0, s(0)),
                 (1, &receivers),
@@ -668,7 +668,7 @@ impl LiveRenderer {
         let bake_bind = bind_group(
             device,
             "bake static",
-            &kernel.bake_static_pipeline,
+            &kernel.entry("bake_static"),
             &[
                 (0, s(0)),
                 (1, &receivers),
@@ -688,7 +688,7 @@ impl LiveRenderer {
         let mut encoder = device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&kernel.bake_static_pipeline);
+            pass.set_pipeline(&kernel.entry("bake_static"));
             pass.set_bind_group(0, &bake_bind, &[]);
             pass.dispatch_workgroups(blocks, 1, 1);
         }

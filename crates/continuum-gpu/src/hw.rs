@@ -12,8 +12,47 @@ use crate::hierarchy::Placement;
 /// as custom data, its index.
 pub(crate) struct HwScene {
     pub tlas: wgpu::Tlas,
-    _blas: Vec<Option<wgpu::Blas>>,
+    /// The movable objects' own top-level structure (they are left out of
+    /// `tlas`), rebuilt as they move, and those objects.
+    pub movers: Option<(wgpu::Tlas, Vec<u32>)>,
+    blas: Vec<Option<wgpu::Blas>>,
     _vertices: wgpu::Buffer,
+}
+
+impl HwScene {
+    /// Rebuilds the movers' structure with their placements now (one per
+    /// mover, in the order given at build), in `encoder`.
+    pub(crate) fn update_movers(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        placements: &[Placement],
+    ) {
+        let Some((tlas, objects)) = &mut self.movers else {
+            return;
+        };
+        for (k, (o, &object)) in placements.iter().zip(objects.iter()).enumerate() {
+            if let Some(b) = &self.blas[o.geometry] {
+                tlas[k] = Some(wgpu::TlasInstance::new(
+                    b,
+                    instance_transform(o),
+                    object,
+                    0xff,
+                ));
+            }
+        }
+        encoder.build_acceleration_structures(std::iter::empty(), std::iter::once(&*tlas));
+    }
+}
+
+/// A placement as a top-level instance's 3×4 row-major transform.
+fn instance_transform(o: &Placement) -> [f32; 12] {
+    let m = o.rotation * o.scale;
+    let row = |r: usize| Vec3::new(m.x_axis[r], m.y_axis[r], m.z_axis[r]);
+    let (r0, r1, r2) = (row(0), row(1), row(2));
+    let t = o.translation;
+    [
+        r0.x, r0.y, r0.z, t.x, r1.x, r1.y, r1.z, t.y, r2.x, r2.y, r2.z, t.z,
+    ]
 }
 
 /// Builds and submits the acceleration structures. Objects are numbered as in
@@ -23,6 +62,7 @@ pub(crate) fn build(
     queue: &wgpu::Queue,
     geometries: &[Vec<Tri>],
     objects: &[Placement],
+    movable: &[usize],
 ) -> HwScene {
     use wgpu::util::DeviceExt;
     assert!(
@@ -103,24 +143,41 @@ pub(crate) fn build(
         flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
         update_mode: wgpu::AccelerationStructureUpdateMode::Build,
     });
+    let mut is_movable = vec![false; objects.len()];
+    for &m in movable {
+        is_movable[m] = true;
+    }
     for (k, o) in objects.iter().enumerate() {
         let Some(b) = &blas[o.geometry] else { continue };
-        let m = o.rotation * o.scale;
-        let row = |r: usize| Vec3::new(m.x_axis[r], m.y_axis[r], m.z_axis[r]);
-        let (r0, r1, r2) = (row(0), row(1), row(2));
-        let t = o.translation;
-        let transform = [
-            r0.x, r0.y, r0.z, t.x, r1.x, r1.y, r1.z, t.y, r2.x, r2.y, r2.z, t.z,
-        ];
-        tlas[k] = Some(wgpu::TlasInstance::new(b, transform, k as u32, 0xff));
+        if !is_movable[k] {
+            tlas[k] = Some(wgpu::TlasInstance::new(
+                b,
+                instance_transform(o),
+                k as u32,
+                0xff,
+            ));
+        }
     }
     let mut encoder = device.create_command_encoder(&Default::default());
     encoder.build_acceleration_structures(entries.iter(), std::iter::once(&tlas));
-    queue.submit([encoder.finish()]);
     drop(entries);
-    HwScene {
+    let movers = (!movable.is_empty()).then(|| {
+        let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
+            label: Some("movers"),
+            max_instances: movable.len() as u32,
+            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+        });
+        (tlas, movable.iter().map(|&m| m as u32).collect())
+    });
+    let mut scene = HwScene {
         tlas,
-        _blas: blas,
+        movers,
+        blas,
         _vertices: vertex_buffer,
-    }
+    };
+    let placements: Vec<Placement> = movable.iter().map(|&m| objects[m]).collect();
+    scene.update_movers(&mut encoder, &placements);
+    queue.submit([encoder.finish()]);
+    scene
 }
