@@ -594,8 +594,12 @@ impl MaskConeKernel {
         // The view cache's bakes walk alone: their texels can be far apart,
         // and packets made small bakes slower (M5 gate 5).
         let solo_constants = [constants[0], constants[1], ("PACKETS", 0.0)];
+        // CONTINUUM_PIPELINE_TIMES: print how long each pipeline takes to
+        // build (shader compilers differ by orders of magnitude).
+        let timed = std::env::var_os("CONTINUUM_PIPELINE_TIMES").is_some();
         let entry_with = |name: &str, constants: &[(&str, f64)]| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let start = Instant::now();
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(name),
                 layout: None,
                 module: &module,
@@ -605,7 +609,11 @@ impl MaskConeKernel {
                     ..Default::default()
                 },
                 cache: None,
-            })
+            });
+            if timed {
+                eprintln!("pipeline {name}: {:.2} s", start.elapsed().as_secs_f64());
+            }
+            pipeline
         };
         let entry = |name: &str| entry_with(name, &constants);
         let pipeline = entry("main");

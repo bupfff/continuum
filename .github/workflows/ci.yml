@@ -50,6 +50,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps $LIBRARY
+      - name: Kernel setup, timed per pipeline
+        timeout-minutes: 15
+        env:
+          CONTINUUM_PIPELINE_TIMES: 1
+        run: cargo run --release -p continuum-gpu --example kernel_setup
       - name: Tests
         run: cargo test --release $LIBRARY -- --nocapture
 
@@ -75,6 +80,13 @@ jobs:
           echo "$(cygpath -w "$PWD/dxc/bin/x64")" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Kernel setup, timed per pipeline
+        timeout-minutes: 20
+        shell: bash
+        env:
+          CONTINUUM_PIPELINE_TIMES: 1
+        run: cargo run --release -p continuum-gpu --example kernel_setup
       - name: Tests
+        timeout-minutes: 30
         shell: bash
         run: cargo test --release $LIBRARY -- --nocapture
