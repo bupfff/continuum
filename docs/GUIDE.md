@@ -52,8 +52,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   Cycles on a test scene (M10 gate 2, failed against 6%). glTF import still
   brings base color only; normal maps, alpha and emission are not done.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
-  1): 1.79% from Cycles with one bounce on a textured scene, at 1.07× the
-  warm frame. At most three lights; not with movers or moving lights.
+  1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
+  the warm frame; re-coloring stays free (M10 gate 4). At most three
+  lights; not with movers or moving lights.
 - **One ray per pixel for visibility,** so distant detail aliases.
   Textures are box-filtered over each pixel's footprint (M7 gate 2), which
   halves their error against the area-integrated image.
