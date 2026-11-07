@@ -479,14 +479,30 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
 }
 
 impl MaskConeKernel {
-    /// `None` if no GPU adapter is available.
+    /// A kernel on its own device: the high-performance adapter, unless
+    /// wgpu's environment variables choose another (`WGPU_BACKEND`, such as
+    /// `vulkan` or `dx12`; `WGPU_ADAPTER_NAME`, a part of the adapter's name;
+    /// `WGPU_POWER_PREF`; `WGPU_DX12_COMPILER`). `None` if no GPU adapter is
+    /// available.
+    ///
+    /// # Panics
+    ///
+    /// If `WGPU_ADAPTER_NAME` is set and no adapter's name contains it.
     pub fn new() -> Option<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .ok()?;
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter =
+            match pollster::block_on(wgpu::util::initialize_adapter_from_env(&instance, None)) {
+                Ok(adapter) => adapter,
+                Err(_) => pollster::block_on(
+                    instance.request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::from_env()
+                            .unwrap_or(wgpu::PowerPreference::HighPerformance),
+                        ..Default::default()
+                    }),
+                )
+                .ok()?,
+            };
         let adapter_name = adapter.get_info().name;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&device_descriptor(&adapter))).ok()?;
