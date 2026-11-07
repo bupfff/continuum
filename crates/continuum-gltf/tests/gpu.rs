@@ -104,6 +104,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         textures: vec![checker()],
         geometry_textures: vec![Some(0), None, None],
         geometry_materials: Vec::new(),
+        geometry_emission: Vec::new(),
     }
 }
 
@@ -431,15 +432,83 @@ fn gltf_round_trip_keeps_materials() {
         metallic: 1.0,
         roughness: 0.3,
     });
+    s.geometry_emission = vec![Vec3::ZERO; s.geometries.len()];
+    s.geometry_emission[2] = Vec3::new(4.0, 2.0, 0.5);
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
     let imported = continuum_gltf::load(&path).unwrap().scene;
     std::fs::remove_file(&path).ok();
-    for (a, b) in s.instances.iter().zip(&imported.instances) {
-        let of =
-            |scene: &InstancedScene, g: usize| scene.geometry_materials.get(g).copied().flatten();
+    // Instances come back in another order: matched by position.
+    let of = |scene: &InstancedScene, g: usize| scene.geometry_materials.get(g).copied().flatten();
+    let glow = |scene: &InstancedScene, g: usize| {
+        scene
+            .geometry_emission
+            .get(g)
+            .copied()
+            .unwrap_or(Vec3::ZERO)
+    };
+    for a in &s.instances {
+        let b = imported
+            .instances
+            .iter()
+            .min_by(|x, y| {
+                let d = |i: &Instance| (i.position - a.position).length();
+                d(x).total_cmp(&d(y))
+            })
+            .unwrap();
         assert_eq!(of(&s, a.geometry), of(&imported, b.geometry));
+        let (x, y) = (glow(&s, a.geometry), glow(&imported, b.geometry));
+        assert!((x - y).abs().max_element() < 1e-6, "{x} against {y}");
     }
+}
+
+/// Emission adds to what a surface reflects, exactly, in the cached path.
+#[test]
+fn emission_adds_to_the_cached_image() {
+    let s = scene(DVec3::ZERO);
+    let mut glowing = s.clone();
+    let glow = Vec3::new(0.5, 0.25, 0.0);
+    glowing.geometry_emission = vec![Vec3::ZERO; s.geometries.len()];
+    glowing.geometry_emission[0] = glow;
+    let settled = |scene: &InstancedScene| {
+        let mut r = renderer(
+            kernel(),
+            scene,
+            DVec3::ZERO,
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        r.read_colors()
+    };
+    let (plain, lit) = (settled(&s), settled(&glowing));
+    let (mut on, mut off) = (0, 0);
+    for (a, b) in plain.iter().zip(&lit) {
+        let d = Vec3::from_array(*b) - Vec3::from_array(*a);
+        if (d - glow).abs().max_element() < 1e-4 {
+            on += 1;
+        } else if d.abs().max_element() < 1e-4 {
+            off += 1;
+        }
+    }
+    let n = plain.len();
+    eprintln!("emission: {on} pixels +glow, {off} unchanged, of {n}");
+    assert!(on > n / 5, "too few pixels show the emission");
+    assert!(
+        on + off >= n * 99 / 100,
+        "pixels changed by other than the emission"
+    );
 }
 
 /// Camera rays through hardware ray queries and through the compute

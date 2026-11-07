@@ -16,8 +16,11 @@
 //!   (`InstancedScene::geometry_materials`). A primitive without a material,
 //!   or with metallic 0 and roughness 1 (what [`save`] writes for a
 //!   Lambertian surface), stays Lambertian: the difference is a rough 4%
-//!   specular layer. Metallic-roughness textures, emission, normal maps and
-//!   alpha are not imported yet.
+//!   specular layer. Metallic-roughness textures, normal maps and alpha are
+//!   not imported yet.
+//! - The emissive factor, times `KHR_materials_emissive_strength`, becomes
+//!   the geometry's emission (`InstancedScene::geometry_emission`; emissive
+//!   textures are not imported).
 //! - Punctual lights (`KHR_lights_punctual`) are imported
 //!   ([`Imported::lights`]): point and spot lights as small spheres,
 //!   directional lights as suns.
@@ -143,6 +146,7 @@ type GeometryKey = (
     Option<usize>,
     Option<u32>,
     Option<(u32, u32)>,
+    [u32; 3],
 );
 
 /// One primitive's geometry before placement.
@@ -154,6 +158,7 @@ struct Primitive {
     texture: Option<u32>,
     albedo: Vec3,
     material: Option<Material>,
+    emission: Vec3,
     key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
@@ -231,6 +236,8 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     metallic,
                     roughness,
                 });
+            let emission = Vec3::from_array(material.emissive_factor())
+                * material.emissive_strength().unwrap_or(1.0);
             // The base color texture, through the texture coordinate set it
             // names.
             let mut texture = None;
@@ -271,6 +278,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 texture,
                 albedo,
                 material: surface,
+                emission,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
                     accessor(gltf::Semantic::Normals),
@@ -278,6 +286,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     primitive.indices().map(|a| a.index()),
                     texture,
                     surface.map(|m| (m.metallic.to_bits(), m.roughness.to_bits())),
+                    emission.to_array().map(f32::to_bits),
                 ),
                 geometry: usize::MAX,
             });
@@ -313,6 +322,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             ));
             scene.geometry_textures.push(p.texture);
             scene.geometry_materials.push(p.material);
+            scene.geometry_emission.push(p.emission);
         }
     }
     // Nodes, with world matrices.
@@ -515,6 +525,8 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
         .geometries
         .push(Surface::from_mesh(triangles, normals, tex));
     scene.geometry_textures.push(p.texture);
+    scene.geometry_materials.push(p.material);
+    scene.geometry_emission.push(p.emission);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -615,6 +627,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     // Meshes per (geometry, albedo), materials per mesh, nodes per instance.
     let mut meshes: Vec<String> = Vec::new();
     let mut materials: Vec<String> = Vec::new();
+    let mut emissive_strength = false;
     let mut mesh_of: HashMap<(usize, [u32; 3]), usize> = HashMap::new();
     let mut nodes: Vec<String> = Vec::new();
     let (c, c_inv) = axes();
@@ -639,8 +652,30 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                     metallic: 0.0,
                     roughness: 1.0,
                 });
+            // Emission as a factor of at most 1 times a strength.
+            let e = scene
+                .geometry_emission
+                .get(i.geometry)
+                .copied()
+                .unwrap_or(Vec3::ZERO);
+            let strength = e.max_element().max(1.0);
+            let glow = if e.max_element() > 0.0 {
+                emissive_strength |= strength > 1.0;
+                let f = e / strength;
+                let mut g = format!(r#","emissiveFactor":[{:?},{:?},{:?}]"#, f.x, f.y, f.z);
+                if strength > 1.0 {
+                    write!(
+                        g,
+                        r#","extensions":{{"KHR_materials_emissive_strength":{{"emissiveStrength":{strength:?}}}}}"#
+                    )
+                    .unwrap();
+                }
+                g
+            } else {
+                String::new()
+            };
             materials.push(format!(
-                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}}}"#,
+                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}}}"#,
                 i.albedo.x, i.albedo.y, i.albedo.z, m.metallic, m.roughness
             ));
             meshes.push(format!(
@@ -686,6 +721,9 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
         views.join(","),
         bin.len()
     );
+    if emissive_strength {
+        json.push_str(r#","extensionsUsed":["KHR_materials_emissive_strength"]"#);
+    }
     if !images.is_empty() {
         write!(
             json,

@@ -251,8 +251,9 @@ Against the goal in §1, honestly:
   - The round trip reproduces the scene up to f32 rounding of its transforms,
     which flipped one edge pixel at one sample per pixel: 0.024% against a
     0.01% bound.
-  - Diffuse only: no metallic or roughness, normal maps, alpha, emission or
-    the file's lights yet.
+  - Imports base color, metallic and roughness factors, and emission
+    (factor times strength; not shown by other surfaces' lighting). No
+    normal maps, alpha or material textures yet.
 - **One bounce of light in the view cache** (M10 G1, failed on its
   re-coloring check only).
   - On M6's textured scene, the cached image with bounce light is 1.79%
@@ -272,8 +273,7 @@ Against the goal in §1, honestly:
     largest quality gap. Pixel cones (M7 G1, failed) cost 10–87 s per frame
     there; on the textured scene the larger error is texture filtering (mips
     chosen per pixel are blurrier than area integration);
-  - glossy reflections, materials beyond Lambert (imported PBR parameters are
-    ignored), more than one bounce;
+  - more than one bounce; normal maps and alpha;
   - the quality contract (§3.3) beyond the bake's frame-time target.
 - **Against UE5.** No direct comparison has been made, so none is claimed.
   - Our measured edge: exact soft shadows from area lights and noise-free
@@ -339,7 +339,10 @@ user's order:
    (2026-11-07), M10 G2 failed on accuracy** (`docs/results/m10-gate2.md`):
    8.94% from Cycles against 6% (12.71% without reflection rays), warm
    frame 1.82×. (With M10 G3's fix it settles in 1.12× the frames; still
-   9.01% from Cycles.)
+   9.01% from Cycles.) **Emission** added (2026-11-07, no gate: exact by
+   construction, tested in `emission_adds_to_the_cached_image`), and glTF
+   import of metallic, roughness and emission factors. Normal maps and
+   alpha remain.
 6. **Anti-aliasing, the narrower way** (M7 gate 2 onward): texture
    filtering for the area integral, then coverage only at silhouettes.
    **Texture filtering done (2026-11-07), M7 G2 passed**

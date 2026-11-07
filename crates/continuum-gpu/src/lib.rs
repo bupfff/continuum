@@ -1142,17 +1142,31 @@ impl MaskConeKernel {
             })
             .collect();
         // Per object, its material: metallic and roughness (roughness below
-        // zero: Lambertian).
-        let materials: Vec<[f32; 2]> = scene
+        // zero: Lambertian), and its emission as half floats.
+        let materials: Vec<[u32; 4]> = scene
             .instances
             .iter()
-            .map(
-                |i| match scene.geometry_materials.get(i.geometry).copied().flatten() {
-                    Some(m) => [m.metallic, m.roughness.clamp(0.0, 1.0)],
-                    None => [0.0, -1.0],
-                },
-            )
-            .chain(std::iter::once([0.0, -1.0]))
+            .map(|i| {
+                let [metallic, roughness] =
+                    match scene.geometry_materials.get(i.geometry).copied().flatten() {
+                        Some(m) => [m.metallic, m.roughness.clamp(0.0, 1.0)],
+                        None => [0.0, -1.0],
+                    };
+                let e = scene
+                    .geometry_emission
+                    .get(i.geometry)
+                    .copied()
+                    .unwrap_or(Vec3::ZERO)
+                    .to_array()
+                    .map(half_bits);
+                [
+                    metallic.to_bits(),
+                    roughness.to_bits(),
+                    e[0] | e[1] << 16,
+                    e[2],
+                ]
+            })
+            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0]))
             .collect();
         let mut tex: Vec<[f32; 2]> = Vec::new();
         for g in &scene.geometries {
@@ -1937,6 +1951,23 @@ pub struct InstancedScene {
     /// Each geometry's material, if any (empty or `None`: Lambertian). Used
     /// by the cache's shading (M10 gate 2).
     pub geometry_materials: Vec<Option<Material>>,
+    /// Each geometry's emitted radiance (linear RGB, added to what it
+    /// reflects; empty: none). Shown by the cache's shading, directly and in
+    /// reflections; it does not light other surfaces (use a light for that).
+    /// Stored as half floats (at most 65,504).
+    pub geometry_emission: Vec<Vec3>,
+}
+
+/// `x` (clamped to 0..=65,504) as half-float bits, truncated; values below
+/// the smallest normal half are zero.
+fn half_bits(x: f32) -> u32 {
+    let x = x.clamp(0.0, 65_504.0);
+    if x < 6.104e-5 {
+        return 0;
+    }
+    let b = x.to_bits();
+    let exponent = ((b >> 23) & 0xff) as i32 - 127 + 15;
+    (exponent as u32) << 10 | (b >> 13) & 0x3ff
 }
 
 /// glTF's metallic-roughness model (M10 gate 2): a dielectric (metallic 0,

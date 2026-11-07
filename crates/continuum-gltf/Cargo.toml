@@ -7,5 +7,5 @@ edition.workspace = true
 [dependencies]
 continuum = { path = "../continuum" }
 continuum-gpu = { path = "../continuum-gpu" }
-gltf = { version = "1.4.1", features = ["KHR_lights_punctual"] }
+gltf = { version = "1.4.1", features = ["KHR_lights_punctual", "KHR_materials_emissive_strength"] }
 png = "0.17"

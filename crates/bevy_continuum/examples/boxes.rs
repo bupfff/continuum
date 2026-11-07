@@ -82,6 +82,7 @@ fn scene() -> ContinuumScene {
             textures: vec![checker()],
             geometry_textures: vec![Some(0), None, None],
             geometry_materials: Vec::new(),
+            geometry_emission: Vec::new(),
         }),
         lights: vec![
             Light::sun(

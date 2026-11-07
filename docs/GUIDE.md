@@ -52,8 +52,14 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 - **Materials, experimental.** `InstancedScene::geometry_materials` takes
   metallic and roughness (glTF's model) for the cache's shading: specular
   from lights and one glossy reflection ray per pixel. It is 8.94% from
-  Cycles on a test scene (M10 gate 2, failed against 6%). glTF import still
-  brings base color only; normal maps, alpha and emission are not done.
+  Cycles on a test scene (M10 gate 2, failed against 6%). glTF import
+  brings the metallic and roughness factors (not their textures); a
+  material with metallic 0 and roughness 1 stays Lambertian.
+- **Emission.** `InstancedScene::geometry_emission` adds each geometry's
+  emitted radiance in the cache's shading, directly and in reflections.
+  It does not light other surfaces: use a light for that. glTF import
+  brings the emissive factor times `KHR_materials_emissive_strength` (not
+  emissive textures). Normal maps and alpha are not done.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
   1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
   the warm frame; re-coloring stays free (M10 gate 4). At most three

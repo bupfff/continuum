@@ -2474,7 +2474,19 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 @group(0) @binding(75) var<storage, read_write> incomplete: array<u32>;
 // Per object, its material (M10 gate 2): metallic and roughness; roughness
 // below zero is Lambertian.
-@group(0) @binding(76) var<storage, read> materials: array<vec2<f32>>;
+// Per object: metallic and roughness (f32 bits; roughness below zero:
+// Lambertian), then its emitted radiance as half floats (r, g; b).
+@group(0) @binding(76) var<storage, read> materials: array<vec4<u32>>;
+
+fn material_of(m: u32) -> vec2<f32> {
+    let v = materials[m];
+    return vec2<f32>(bitcast<f32>(v.x), bitcast<f32>(v.y));
+}
+
+fn emission_of(m: u32) -> vec3<f32> {
+    let v = materials[m];
+    return vec3<f32>(unpack2x16float(v.z), unpack2x16float(v.w).x);
+}
 // Movers under a sky (M9 gate 3). Per slot: the sky ledger (the charges
 // since the page's sky was baked), its threshold (ε × max(the page's
 // smallest sky value, 0.05π)), and 1 once listed for a re-bake.
@@ -4044,8 +4056,9 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
     let base = surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal);
     // A material (M10 gate 2): roughness below zero is Lambertian.
-    let mat = materials[hit.mesh];
+    let mat = material_of(hit.mesh);
     let pbr = mat.y >= 0.0;
+    let glow = emission_of(hit.mesh);
     var spec = vec3<f32>(0.0);
     if (found) {
         // Each light's cached shadowed share, times its unshadowed
@@ -4095,7 +4108,7 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         atomicAdd(&vc_stats[2], 1u);
         if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
     }
-    if (!pbr) { return base * e / 3.14159265; }
+    if (!pbr) { return base * e / 3.14159265 + glow; }
     // Metallic-roughness: the specular layer's directional albedo (the
     // split sum), glossy reflections along the mirror direction, and the
     // diffuse part less what the specular layer reflects.
@@ -4107,7 +4120,7 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         spec += albedo_spec * reflected_light(point, reflect(dir, normal), mat.y);
     }
     let diffuse = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
-    return diffuse * e / 3.14159265 + spec;
+    return diffuse * e / 3.14159265 + spec + glow;
 }
 
 // --- Materials (M10 gate 2): metallic-roughness, glossy reflections. ---
@@ -4227,9 +4240,9 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
         }
         if (vc.indirect.y == 1u) { e += indirect_light(slot, r); }
     }
-    let hm = materials[hit.mesh];
+    let hm = material_of(hit.mesh);
     let metal = select(0.0, hm.x, hm.y >= 0.0);
-    return bounce_albedo(hit.mesh, hit.tri, q, footprint) * (1.0 - metal) * e / 3.14159265;
+    return bounce_albedo(hit.mesh, hit.tri, q, footprint) * (1.0 - metal) * e / 3.14159265 + emission_of(hit.mesh);
 }
 
 
