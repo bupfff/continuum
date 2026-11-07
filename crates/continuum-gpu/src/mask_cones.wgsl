@@ -164,18 +164,22 @@ fn in_bound(c: Cone, p: vec3<f32>, r: f32) -> bool {
     return dot(c.bound.xyz, d) >= limit * len;
 }
 
-// Sets the cone's bounding circular cone around `axis` (unit), through the
-// directions of the window's corners.
-fn bound_cone(c: ptr<function, Cone>, axis: vec3<f32>) {
+// The cone with its bounding circular cone set around `axis` (unit), through
+// the directions of the window's corners. (By value: WGSL passes pointers
+// only to whole variables, and naga's SPIR-V output fails on a pointer to a
+// struct's member.)
+fn bound_cone(cone: Cone, axis: vec3<f32>) -> Cone {
+    var c = cone;
     var cos_half = 1.0;
     for (var k = 0u; k < 4u; k++) {
-        let d = normalize(direction(*c, f32(k & 1u), f32(k >> 1u)));
+        let d = normalize(direction(c, f32(k & 1u), f32(k >> 1u)));
         cos_half = min(cos_half, dot(axis, d));
     }
     // A little wider, for rounding.
     let cos_b = clamp(cos_half - 1e-5, -1.0, 1.0);
-    (*c).bound = vec4<f32>(axis, cos_b);
-    (*c).bound_sin = sqrt(max(1.0 - cos_b * cos_b, 0.0));
+    c.bound = vec4<f32>(axis, cos_b);
+    c.bound_sin = sqrt(max(1.0 - cos_b * cos_b, 0.0));
+    return c;
 }
 
 fn lambert_edge(n: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
@@ -801,7 +805,7 @@ fn light_cone_sphere(apex: vec3<f32>, r: LightRect) -> LightCone {
     out.c.window = vec4<f32>(-t, -t, t, t);
     out.c.far_normal = forward;
     out.c.far_offset = dot(forward, apex) + (d - radius * s) * (1.0 - 1e-5);
-    bound_cone(&out.c, forward);
+    out.c = bound_cone(out.c, forward);
     out.ok = true;
     return out;
 }
@@ -881,7 +885,7 @@ fn light_cone_rect(apex: vec3<f32>, r: LightRect) -> LightCone {
     out.c.far_normal = forward;
     out.c.far_offset = dot(forward, apex) + dist * (1.0 - 1e-5);
     // Around the direction to the light's center.
-    bound_cone(&out.c, normalize(rel + (edge_u + edge_v) * 0.5));
+    out.c = bound_cone(out.c, normalize(rel + (edge_u + edge_v) * 0.5));
     out.ok = true;
     return out;
 }
@@ -1245,7 +1249,7 @@ fn sky_face(on: bool, f: u32, apex: vec3<f32>, normal: vec3<f32>) -> SkyFace {
     // params.w bit 2: walk geometry below the horizon too (as before M5
     // gate 5).
     if ((u32(light.params.w) & 2u) == 0u) { face.c.horizon = normal; }
-    bound_cone(&face.c, forward);
+    face.c = bound_cone(face.c, forward);
     // The face's directions are linear in the window, so its corners decide
     // whether any lies above the horizon.
     var above = false;

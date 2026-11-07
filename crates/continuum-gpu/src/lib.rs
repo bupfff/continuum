@@ -478,6 +478,39 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
     }
 }
 
+/// The kernel's WGSL source as a device compiles it: with subgroup
+/// operations for packet traversal where `packets` is set, and the workgroup
+/// stack array shrunk unless `workgroup_stacks` (unused, it would still cost
+/// workgroup memory; an override cannot remove it). The kernel's entry points
+/// take the overrides `WORKGROUP_STACKS`, `COUNT_WORK` and `PACKETS`.
+#[doc(hidden)]
+pub fn kernel_source(packets: bool, workgroup_stacks: bool) -> String {
+    let mut source = include_str!("mask_cones.wgsl").to_string();
+    if packets {
+        let solo = "fn packet_any(x: bool) -> bool {\n    return x;\n}";
+        assert!(source.contains(solo), "packet_any not found");
+        // Naga takes subgroup built-ins without `enable subgroups;` (which
+        // it rejects in wgpu 30) once the device has the feature.
+        source = source.replace(
+            solo,
+            "fn packet_any(x: bool) -> bool {\n    if (PACKETS) { return subgroupAny(x); }\n    return x;\n}",
+        );
+        let first = "fn packet_first(x: bool) -> bool {\n    return x;\n}";
+        assert!(source.contains(first), "packet_first not found");
+        source = source.replace(
+            first,
+            "fn packet_first(x: bool) -> bool {\n    if (PACKETS) { return subgroupBroadcastFirst(select(0u, 1u, x)) == 1u; }\n    return x;\n}",
+        );
+    }
+    if !workgroup_stacks {
+        source = source.replace(
+            "var<workgroup> wg_stacks: array<u32, 3072>;",
+            "var<workgroup> wg_stacks: array<u32, 1>;",
+        );
+    }
+    source
+}
+
 impl MaskConeKernel {
     /// A kernel on its own device: the high-performance adapter, unless
     /// wgpu's environment variables choose another (`WGPU_BACKEND`, such as
@@ -534,33 +567,9 @@ impl MaskConeKernel {
         adapter_name: String,
         options: KernelOptions,
     ) -> Self {
-        // Without workgroup stacks, the workgroup array is never used; shrink it
-        // so it costs no workgroup memory (an override cannot remove it).
-        let mut source = include_str!("mask_cones.wgsl").to_string();
         let packets =
             !options.without_packets && device.features().contains(wgpu::Features::SUBGROUP);
-        if packets {
-            let solo = "fn packet_any(x: bool) -> bool {\n    return x;\n}";
-            assert!(source.contains(solo), "packet_any not found");
-            // Naga takes subgroup built-ins without `enable subgroups;` (which
-            // it rejects in wgpu 30) once the device has the feature.
-            source = source.replace(
-                solo,
-                "fn packet_any(x: bool) -> bool {\n    if (PACKETS) { return subgroupAny(x); }\n    return x;\n}",
-            );
-            let first = "fn packet_first(x: bool) -> bool {\n    return x;\n}";
-            assert!(source.contains(first), "packet_first not found");
-            source = source.replace(
-                first,
-                "fn packet_first(x: bool) -> bool {\n    if (PACKETS) { return subgroupBroadcastFirst(select(0u, 1u, x)) == 1u; }\n    return x;\n}",
-            );
-        }
-        if !options.workgroup_stacks {
-            source = source.replace(
-                "var<workgroup> wg_stacks: array<u32, 3072>;",
-                "var<workgroup> wg_stacks: array<u32, 1>;",
-            );
-        }
+        let source = kernel_source(packets, options.workgroup_stacks);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mask_cones"),
             source: wgpu::ShaderSource::Wgsl(source.clone().into()),

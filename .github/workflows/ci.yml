@@ -69,7 +69,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download --repo microsoft/DirectXShaderCompiler --pattern 'dxc_*.zip' --dir dxc
-          unzip -q dxc/*.zip -d dxc
+          # 7-Zip: the archive's backslash paths make unzip exit with an error.
+          7z x -y -odxc dxc/*.zip > /dev/null
+          ls dxc/bin/x64/dxcompiler.dll dxc/bin/x64/dxil.dll
           echo "$(cygpath -w "$PWD/dxc/bin/x64")" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
