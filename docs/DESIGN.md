@@ -204,8 +204,8 @@ Against the goal in §1, honestly:
   - The viewer's field and glTF scenes run on it.
   - A Bevy 0.20 plugin (`bevy_continuum`) renders a camera's view with it,
     on Bevy's own device.
-  - CI runs every test on Linux (Vulkan, lavapipe); Windows (DX12, WARP)
-    cannot build the kernel's pipelines yet (§3.8).
+  - CI runs every test on Linux (Vulkan, lavapipe) and compiles every
+    shader for Windows (DX12, DXC); WARP cannot run the kernel (§3.8).
 - **Imported content** (M6 G1, failed on round-trip precision only).
   - glTF 2.0 files load as instanced scenes, with automatic charts for any
     mesh and base color textures sampled per pixel at the pixel's footprint.
@@ -253,7 +253,7 @@ estimates, and gates fail often, so treat them as ranges.
 | 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes. **Done (M6 G1, failed on round-trip precision only):** a textured import is 0.43% from Cycles, automatic charts are within a point of hand-made ones in the cache, warm frames take 1.5 ms. Not yet: PBR parameters, normal maps, alpha, the file's lights | 2–3 (1 done) |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel. **Tried (M7 G1, failed on all three):** exact 8×8 coverage per pixel costs hundreds of node tests per pixel at scale (105 ms on the textured scene, 10–87 s on the field) and gains 0.76× only from 150 m up. Kept off by default; v0.1 ships with one ray per pixel | 2 (1 spent) |
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
-| 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI:** Linux (lavapipe) passes every test; Windows (WARP) cannot build the kernel's pipelines yet (about 30 s each, then out of memory). Not yet: the cloud GPU benchmark | 1–2 (1 spent) |
+| 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). Not yet: the cloud GPU benchmark | 1–2 (1 spent) |
 
 ### 3.8 Next steps, in order (2026-10-25, after M5 gate 7)
 
@@ -292,10 +292,11 @@ not fit.
      subgroups.
    - `continuum-gpu/tests/shaders.rs` translates every entry point to
      SPIR-V, HLSL and MSL on the CPU, on every machine.
-   - Windows, DX12 on WARP: open. Each large pipeline takes about 30 s to
-     build, and building the kernel ran out of memory at its fifth
-     pipeline. CI now times DXC alone, to tell whether the compiler (which
-     would also slow real Windows GPUs) or WARP is at fault.
+   - Windows, DX12: every entry point compiles with DXC as wgpu calls it
+     (0.05–4.8 s each, 23 s in all). The kernel cannot run on WARP, the
+     software adapter: 31–41 s per pipeline, then out of memory. That is
+     WARP's own shader compilation, so the GPU tests run on Linux only.
+     Real Windows GPUs are untested (`docs/results/ci-portability.md`).
 5. **Needs the user:**
    - a cloud GPU benchmark (NVIDIA) needs an account;
    - publishing is theirs to decide.

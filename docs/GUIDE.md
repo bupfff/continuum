@@ -52,10 +52,13 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   60 Hz while the machine is cool. After minutes of load, the GPU slows and
   frames take 20 ms or more (M5 G8).
 - **Measured on Apple Silicon (Metal) only.** CI checks correctness on Linux
-  (Vulkan, the lavapipe software adapter), where every test passes. On
-  Windows (DX12) the kernel's pipelines take about 30 s each to build on
-  the WARP software adapter, which then runs out of memory; real Windows
-  GPUs and NVIDIA are untested.
+  (Vulkan, the lavapipe software adapter), where every test passes, and
+  that every shader compiles for Windows (DX12, with DXC). Windows' WARP
+  software adapter cannot run the kernel (it runs out of memory building
+  it). Real Windows GPUs and NVIDIA are untested.
+- **On DX12, wgpu needs DXC** (`dxcompiler.dll` on the path and
+  `WGPU_DX12_COMPILER=dxc`, or wgpu's `static-dxc` feature); CI uses it.
+  The older FXC compiler is untested.
 - **No exposure control.** `Renderer::read_colors` returns linear light as
   it is. Drawn to a window, colors go through a fixed Reinhard curve; a
   float target (such as Bevy's HDR) gets linear light for the engine's own
