@@ -2388,11 +2388,11 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // or 8 texels (the page's stride) and interpolated; each sample is six jobs,
 // one per cube face, whose results land in `sky_partial` (six per sample) for
 // `vc_fill` to sum.
-@group(0) @binding(46) var<storage, read> sky_samples: array<vec2<u32>>;
+@group(0) @binding(46) var<storage, read_write> sky_samples: array<vec2<u32>>;
 @group(0) @binding(47) var<storage, read_write> sky_partial: array<f32>;
 // Per baked page: its first sky sample, and how many it has (low 24 bits)
 // with its sky stride (high 8 bits).
-@group(0) @binding(48) var<storage, read> page_sky: array<vec2<u32>>;
+@group(0) @binding(48) var<storage, read_write> page_sky: array<vec2<u32>>;
 // Own-object sky occlusion (M5 gate 5). An instance's coverage of its own sky,
 // seen through cube faces in its frame, is the same for every instance of its
 // geometry; it is baked once per geometry on a grid over each chart, as 64 bins
@@ -2431,13 +2431,16 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // texels re-baked, 9 texel jobs, 10 pages marked invalid, 11 pages read in
 // the frame before, 12 of those with mixed texels, 13 of those passed whole
 // (no mixed texel, within the guard), 14 texel jobs the ledger asked for
-// (its budget's count); 15 unused.
-@group(0) @binding(64) var<storage, read_write> mover_stats: array<atomic<u32>, 16>;
+// (its budget's count); 15 bounce samples incomplete. Movers under a sky
+// (M9 gate 3): 7 slots listed for a sky re-bake (`sky_list`), 16 pages
+// read in the frame before that sky charges touched, 17 pages the sky
+// ledger marked invalid.
+@group(0) @binding(64) var<storage, read_write> mover_stats: array<atomic<u32>, 24>;
 // Slots marked invalid this frame, for the CPU to evict.
 @group(0) @binding(65) var<storage, read_write> invalid_list: array<u32>;
 // Indirect dispatch sizes (x, y, z each): the texel test, the bake's texel
 // jobs, the fill's pages.
-@group(0) @binding(66) var<storage, read_write> dispatch_args: array<u32, 9>;
+@group(0) @binding(66) var<storage, read_write> dispatch_args: array<u32, 12>;
 // Candidate pages: the slot, and its entry in `bake_list` (NONE: not read
 // in the frame before, so marked invalid if any texel is stale).
 @group(0) @binding(67) var<storage, read_write> candidates: array<vec2<u32>>;
@@ -2472,6 +2475,13 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // Per object, its material (M10 gate 2): metallic and roughness; roughness
 // below zero is Lambertian.
 @group(0) @binding(76) var<storage, read> materials: array<vec2<f32>>;
+// Movers under a sky (M9 gate 3). Per slot: the sky ledger (the charges
+// since the page's sky was baked), its threshold (ε × max(the page's
+// smallest sky value, 0.05π)), and 1 once listed for a re-bake.
+@group(0) @binding(77) var<storage, read_write> sky_ledger: array<vec4<f32>>;
+// Slots listed for the CPU to re-bake their sky (top bit: a page on a
+// moved object); count in mover_stats[7].
+@group(0) @binding(78) var<storage, read_write> sky_list: array<u32>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -2480,6 +2490,9 @@ fn vc_hash(k: vec3<u32>) -> u32 {
     h ^= h >> 12u;
     return h;
 }
+
+// Whether the page `vc_find` last found shows its sky as a guess.
+var<private> sky_guess: bool = false;
 
 fn vc_find(k: vec3<u32>) -> u32 {
     let mask = vc.counts.x;
@@ -2492,7 +2505,9 @@ fn vc_find(k: vec3<u32>) -> u32 {
             // ledger set aside (2) is marked wanted, so the next frame
             // re-bakes it.
             let stale = atomicLoad(&slot_stale[e.w]);
-            if (stale != 0u) {
+            // 3: a page on a moved object, its sky a guess (M9 gate 3).
+            sky_guess = stale == 3u;
+            if (stale != 0u && stale != 3u) {
                 if (stale == 2u) { slot_used[e.w] = vc.counts.y; }
                 return NONE;
             }
@@ -2809,7 +2824,7 @@ fn mark() {}
 @compute @workgroup_size(64)
 fn vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     lane = li;
-    let count = vc.sky.x;
+    let count = vc.sky.x + appended_sky();
     let j = gid.x;
     // No early return: every invocation follows its packet's walks.
     let listed = j < 6u * count;
@@ -2876,7 +2891,7 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (bake_bounds[2u * p].w != 0.0) { return; }
     // Baked without bounce samples (for light at hits): clear what a
     // previous page in the slot left (M10).
-    if (bake_bounds[2u * p + 1u].w != 0.0 && vc.indirect.y == 1u) {
+    if (bake_bounds[2u * p + 1u].w == 1.0 && vc.indirect.y == 1u) {
         for (var q = 0u; q < 9u * IND_CH; q++) { indirect[e.w * 9u * IND_CH + q] = vec2<u32>(0u); }
     }
     // The page's key and box, for the stale pass (M9); a bake makes it
@@ -2884,19 +2899,34 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u);
     slot_info[3u * e.w + 1u] = bitcast<vec4<u32>>(bake_bounds[2u * p]);
     slot_info[3u * e.w + 2u] = bitcast<vec4<u32>>(bake_bounds[2u * p + 1u]);
-    atomicStore(&slot_stale[e.w], 0u);
+    // hi.w 2: re-baked for a move, its sky still the guess; hi.w 3 (planned)
+    // and 4 (appended): its sky alone re-baked, which clears a sky guess and
+    // leaves any other mark to the light channels' bakes (M9 gate 3).
+    let kind = bake_bounds[2u * p + 1u].w;
+    if (kind >= 3.0) {
+        loop {
+            let r = atomicCompareExchangeWeak(&slot_stale[e.w], 3u, 0u);
+            if (r.exchanged || r.old_value != 3u) { break; }
+        }
+    } else {
+        atomicStore(&slot_stale[e.w], select(0u, 3u, kind == 2.0));
+    }
     let c = e.y & 0xffffu;
     let mip = e.y >> 16u;
     let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
     let n = vc_grid(c, e.x, mip);
     let o = e.w * PAGE_TEXELS;
     let in_grid = min(n - min(page * PAGE, n), vec2<u32>(PAGE_STRIDE));
+    // hi.w 4: the stale pass appended the page's sky alone (M9 gate 3);
+    // its other appended pages re-bake light channels only.
     let range = page_sky[p];
     let stride = range.y >> 24u;
     let sky_ch = vc.sky.z;
+    let sky_baked = vc.sky.y == 1u && (p < vc.jobs.y || kind == 4.0) && (range.y & 0xffffffu) > 0u;
+    let light_baked = kind != 3.0 && kind != 4.0;
     if (vc.sky.y == 0u) {
         for (var k = 0u; k < PAGE_TEXELS; k++) { pool[pool_at(o + k, sky_ch)] = 0.0; }
-    } else {
+    } else if (sky_baked) {
         for (var q = range.x; q < range.x + (range.y & 0xffffffu); q++) {
             let k = sky_samples[q].y;
             if (k % PAGE_STRIDE < in_grid.x && k / PAGE_STRIDE < in_grid.y) {
@@ -2925,7 +2955,9 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
             let inside = min(texel, n - vec2<u32>(1u)) - page * PAGE;
             let nearest = o + inside.y * PAGE_STRIDE + inside.x;
             for (var ch = 0u; ch < vc_channels(); ch++) {
-                pool[pool_at(o + k, ch)] = pool[pool_at(nearest, ch)];
+                if (select(light_baked, sky_baked || vc.sky.y == 0u, ch == sky_ch)) {
+                    pool[pool_at(o + k, ch)] = pool[pool_at(nearest, ch)];
+                }
             }
         }
     }
@@ -2933,6 +2965,21 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     // the movers' stale pass re-baked keeps its last use, so it is re-baked
     // again only if pixels read it (M9).
     if (p < vc.jobs.y) { slot_used[e.w] = vc.counts.y; }
+    {
+        // A sky baked: a fresh ledger, its threshold from the page's
+        // smallest sky value, and its sample stride (M9 gate 3).
+        if (sky_baked) {
+            var least = 3.4e38;
+            for (var k = 0u; k < PAGE_TEXELS; k++) {
+                if (k % PAGE_STRIDE < in_grid.x && k / PAGE_STRIDE < in_grid.y) {
+                    least = min(least, pool[pool_at(o + k, sky_ch)]);
+                }
+            }
+            let eps = bitcast<f32>(vc.ledger.z);
+            sky_ledger[2u * e.w] = vec4<f32>(0.0, 0.0, eps * max(least, 0.05 * 3.14159265), 0.0);
+            sky_ledger[2u * e.w + 1u] = vec4<f32>(0.0, 0.0, 0.0, bitcast<f32>(stride));
+        }
+    }
 }
 
 // --- Movers in the view cache (M9 gate 1). ---
@@ -2959,6 +3006,12 @@ fn appended_jobs() -> u32 {
 }
 
 // The bake's pages and texel jobs: the CPU's plan, then the appended ones.
+// Sky samples the stale pass appended (M9 gate 3), after the CPU's.
+fn appended_sky() -> u32 {
+    if (vc.movers.x == 0u) { return 0u; }
+    return min(atomicLoad(&mover_stats[18]), arrayLength(&sky_samples) - vc.sky.x);
+}
+
 fn bake_page_count() -> u32 {
     return vc.jobs.y + appended_pages();
 }
@@ -3098,6 +3151,102 @@ fn fail_entry(entry: u32, s: u32) {
     if (q < arrayLength(&invalid_list)) { invalid_list[q] = s; }
 }
 
+// Lists slot `s` for the CPU to re-bake its sky (once; `own`: a page on a
+// moved object).
+fn list_sky(s: u32, own: bool) {
+    if (sky_ledger[2u * s].w != 0.0) { return; }
+    sky_ledger[2u * s].w = 1.0;
+    let q = atomicAdd(&mover_stats[7], 1u);
+    if (q < arrayLength(&sky_list)) { sky_list[q] = s | select(0u, 0x80000000u, own); }
+}
+
+// The solid angle a sphere of radius `r` around `c` subtends from the
+// nearest point of box `b` (π if it reaches the box): a bound on the sky
+// light per unit radiance it can block there.
+fn sphere_charge(b: Box3, c: vec3<f32>, r: f32) -> f32 {
+    let gap = max(vec3<f32>(0.0), max(b.lo - c, c - b.hi));
+    let d = length(gap);
+    if (d <= r) { return 3.14159265; }
+    let s = r / d;
+    return min(2.0 * 3.14159265 * (1.0 - sqrt(max(1.0 - s * s, 0.0))), 3.14159265);
+}
+
+// Charges slot `s` (box `page`) for the objects moved this frame (M9
+// gate 3). Since the page's bake, its sky can have changed only where a
+// mover covered it then or covers it now, so the charge is, per mover moved
+// since, its sphere's solid angle at the bake (fixed, x) plus now (current,
+// y; ledger z is the threshold, w the listed flag). Movers 96 and on are
+// charged both spheres every frame. Past the threshold, a page read in the
+// frame before re-bakes its sky in this frame's bake; any other is marked
+// invalid (and false returned).
+fn charge_sky(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>, page: Box3, visible: bool) -> bool {
+    let lights_n = vc.sky.z;
+    let first = 2u * lights_n + 2u;
+    let stride = 4u + 4u * lights_n;
+    var ledger = sky_ledger[2u * s];
+    var mask = bitcast<vec4<u32>>(sky_ledger[2u * s + 1u]);
+    for (var k = 0u; k < vc.movers.x; k++) {
+        let e = first + k * stride;
+        let old = moved_box(e);
+        let now = moved_box(e + 2u);
+        let o = sphere_charge(page, (old.lo + old.hi) * 0.5, 0.5 * length(old.hi - old.lo));
+        let n = sphere_charge(page, (now.lo + now.hi) * 0.5, 0.5 * length(now.hi - now.lo));
+        let id = bitcast<u32>(moved[e + 1u].w);
+        if (id < 96u) {
+            let bit = 1u << (id % 32u);
+            if ((mask[id / 32u] & bit) == 0u) {
+                mask[id / 32u] |= bit;
+                ledger.x += o;
+                ledger.y += n;
+            } else {
+                ledger.y += n - o;
+            }
+        } else {
+            ledger.x += o + n;
+        }
+    }
+    sky_ledger[2u * s] = ledger;
+    sky_ledger[2u * s + 1u] = bitcast<vec4<f32>>(mask);
+    if (visible) { atomicAdd(&mover_stats[16], 1u); }
+    let charge = ledger.x + max(ledger.y, 0.0);
+    if (charge > ledger.z) {
+        atomicAdd(&mover_stats[17], 1u);
+        if (visible && sky_rebake(s, key, lo, hi)) { return true; }
+        mark_invalid(s);
+        return false;
+    }
+    return true;
+}
+
+// Appends slot `s`'s page (key `key`, box lo..hi) to the frame's bake for
+// its sky alone, with its sky samples at the stride of its last bake; false
+// if the bake or the sample list is full.
+fn sky_rebake(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>) -> bool {
+    let stride = bitcast<u32>(sky_ledger[2u * s + 1u].w);
+    if (stride == 0u) { return false; }
+    let mip = key.y >> 16u;
+    let page = vec2<u32>(key.z & 0xffffu, key.z >> 16u);
+    let n = vc_grid(key.y & 0xffffu, key.x, mip);
+    let inside = min(n - min(page * PAGE, n), vec2<u32>(PAGE_STRIDE));
+    let listed = min(inside + vec2<u32>(1u), vec2<u32>(PAGE_STRIDE));
+    let count = ((listed.x + stride - 1u) / stride) * ((listed.y + stride - 1u) / stride);
+    let first = atomicAdd(&mover_stats[18], count);
+    if (first + count > arrayLength(&sky_samples) - vc.sky.x) { return false; }
+    let entry = append_page(s, key, lo, hi);
+    if (entry == NONE) { return false; }
+    var q = vc.sky.x + first;
+    for (var y = 0u; y < listed.y; y += stride) {
+        for (var x = 0u; x < listed.x; x += stride) {
+            sky_samples[q] = vec2<u32>(entry, y * PAGE_STRIDE + x);
+            q++;
+        }
+    }
+    page_sky[entry] = vec2<u32>(vc.sky.x + first, count | (stride << 24u));
+    bake_bounds[2u * entry + 1u].w = 4.0;
+    atomicAdd(&mover_stats[19], 1u);
+    return true;
+}
+
 // One thread per slot (dispatched in rows of 65,535 workgroups).
 @compute @workgroup_size(64)
 fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -3144,8 +3293,15 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
                 bake_jobs[j + l * PAGE_TEXELS + k] = vec2<u32>(entry, k | (l << 8u));
             }
         }
+        // With a sky: the page moved with its object, so its sky shows the
+        // guess until re-baked (listed; the CPU waits until it stops).
+        if (vc.sky.y == 1u) {
+            bake_bounds[2u * entry + 1u].w = 2.0;
+            list_sky(s, true);
+        }
         return;
     }
+    if (vc.sky.y == 1u && !charge_sky(s, info.xyz, lo, hi, page, visible)) { return; }
     var candidate = false;
     for (var l = 0u; l < lights_n && !candidate; l++) {
         candidate = may_be_shadowed(page, l);
@@ -3232,6 +3388,9 @@ fn vc_args_bake() {
     dispatch_args[6] = (bake_page_count() + 63u) / 64u;
     dispatch_args[7] = 1u;
     dispatch_args[8] = 1u;
+    dispatch_args[9] = (6u * (vc.sky.x + appended_sky()) + 63u) / 64u;
+    dispatch_args[10] = 1u;
+    dispatch_args[11] = 1u;
 }
 
 // --- Moving lights through the error ledger (M9 gate 2). ---
@@ -3856,6 +4015,7 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     var found_slot = NONE;
     var found_ref: PageRef;
     var found = false;
+    var found_guess = false;
     var mip = wanted;
     // The key of the page one mip finer than `mip` (the last missing one).
     var finer = vec3<u32>(0u);
@@ -3864,6 +4024,7 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         let slot = vc_find(r.key);
         if (slot != NONE) {
             slot_used[slot] = vc.counts.y;
+            found_guess = sky_guess;
             found_slot = slot;
             found_ref = r;
             found = true;
@@ -3904,7 +4065,12 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
                 e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
             }
         }
-        e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
+        if (found_guess) {
+            vc_fell_back = true;
+            e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + normal.z));
+        } else {
+            e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
+        }
         if (vc.indirect.y == 1u) {
             e += indirect_light(found_slot, found_ref);
             // A page shown without bounce samples (baked for a hit): ask for
@@ -4054,7 +4220,11 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
             if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
             e += lights[l].radiance.xyz * direct;
         }
-        e += light.sky.xyz * vc_bilinear(slot, r, count);
+        if (sky_guess) {
+            e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + hn.z));
+        } else {
+            e += light.sky.xyz * vc_bilinear(slot, r, count);
+        }
         if (vc.indirect.y == 1u) { e += indirect_light(slot, r); }
     }
     let hm = materials[hit.mesh];

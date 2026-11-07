@@ -531,6 +531,70 @@ fn movers_leave_no_stale_light() {
     );
 }
 
+/// Moving objects under a sky (M9 gate 3): light channels stay exact, and
+/// no page the cache may show has a sky further from a re-bake than its
+/// ledger, nor than its ε threshold.
+#[test]
+fn movers_under_a_sky_stay_within_the_ledger() {
+    let s = scene(DVec3::ZERO);
+    let movable: Vec<usize> = vec![1, 2, 6, 11];
+    let options = RendererOptions {
+        cache_options: CacheOptions {
+            frame_target_ms: 0.0,
+            pages: 1 << 15,
+            // Loose, so charges build up without invalidating: the bound is
+            // what is tested.
+            ledger_epsilon: 0.3,
+            ..Default::default()
+        },
+        sky: Some(SKY),
+        movable: movable.clone(),
+        ..Default::default()
+    };
+    let mut r = renderer(kernel(), &s, DVec3::ZERO, options);
+    let view = target(&r);
+    for _ in 0..30 {
+        r.render(camera(), &view);
+    }
+    let (mut charged, mut rebaked) = (0, 0);
+    for frame in 1..=40 {
+        for &m in &movable {
+            let (rotation, position) = mover_place(&s, m, frame);
+            r.set_transform(m, rotation, position);
+        }
+        r.render(camera(), &view);
+        if let Some(stats) = r.stats() {
+            charged += stats.sky_charged;
+            rebaked += stats.sky_rebaked;
+        }
+        if frame % 8 == 0 {
+            let check = r.verify_sky();
+            eprintln!("frame {frame}: {check:?}");
+            assert!(check.pages > 0, "no pages to check");
+            assert_eq!(check.light_differing, 0, "stale light: {check:?}");
+            assert_eq!(check.violations, 0, "sky beyond its ledger: {check:?}");
+            assert_eq!(check.over_threshold, 0, "sky beyond ε: {check:?}");
+        }
+    }
+    eprintln!("sky: {rebaked} pages re-baked, {charged} charged");
+    assert!(charged > 0, "nothing was charged");
+    // Once the movers stop, their pages' skies re-bake and it settles.
+    let mut frames = 0;
+    while frames < 2_000 && !r.is_settled(32) {
+        r.render(camera(), &view);
+        frames += 1;
+    }
+    assert!(r.is_settled(32), "not settled after {frames} frames");
+    let check = r.verify_sky();
+    eprintln!("settled: {check:?}");
+    assert_eq!(check.violations + check.over_threshold, 0, "{check:?}");
+    assert_eq!(
+        r.stats().map_or(1, |s| s.fallback_pixels),
+        0,
+        "sky guesses left"
+    );
+}
+
 fn view_for(r: &Renderer) -> wgpu::TextureView {
     target(r)
 }

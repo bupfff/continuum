@@ -87,7 +87,10 @@ impl Cache {
         } else if counts[1] > 0 {
             list.push((&self.passes[1], &self.binds[1], groups(counts[1])));
         }
-        if counts[2] > 0 {
+        // The stale pass may append sky samples (M9 gate 3).
+        if indirect && self.state.has_sky() {
+            list.push((&self.passes[2], &self.binds[2], Dispatch::Indirect(36)));
+        } else if counts[2] > 0 {
             list.push((&self.passes[2], &self.binds[2], groups(counts[2])));
         }
         let bounce = self.state.indirect_jobs();
@@ -193,6 +196,26 @@ pub struct LedgerCheck {
     pub largest_change: f32,
     /// The largest certified bound.
     pub largest_bound: f32,
+}
+
+/// What [`InstancedRenderer::verify_sky`] found with movers under a sky.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SkyCheck {
+    /// Pages shading may read.
+    pub pages: u32,
+    /// Light-channel values that changed when re-baked (should be none).
+    pub light_differing: u64,
+    /// Pages whose sky changed by more than its ledger's charge (plus 1e-5
+    /// for rounding): soundness violations.
+    pub violations: u32,
+    /// Pages whose sky changed by more than its ε threshold.
+    pub over_threshold: u32,
+    /// Pages whose sky changed at all.
+    pub changed: u32,
+    /// The largest change of a sky value.
+    pub largest_change: f32,
+    /// The largest charge.
+    pub largest_charge: f32,
 }
 
 /// Objects that may move (M9): where their subtree lives in the object
@@ -1389,6 +1412,100 @@ impl InstancedRenderer {
             if change > 0.0 {
                 check.changed += 1;
             }
+        }
+        check
+    }
+
+    /// Diagnostics (M9 gate 3): re-bakes every page shading may read from
+    /// scratch; compares its light channels bit for bit, and its sky's
+    /// largest change with the charge its sky ledger holds and its
+    /// threshold. Restores the cache afterwards. Waits for the GPU.
+    pub fn verify_sky(&mut self) -> SkyCheck {
+        let mut check = SkyCheck::default();
+        let Some(cache) = &mut self.cache else {
+            return check;
+        };
+        let device = self.device.clone();
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let keep: Vec<(u32, wgpu::Buffer)> = [37u32, 40, 61, 62, 77]
+            .iter()
+            .map(|&b| {
+                let source = cache.state.buffer(b);
+                let copy = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("sky check copy"),
+                    size: source.size(),
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let mut e = device.create_command_encoder(&Default::default());
+                e.copy_buffer_to_buffer(source, 0, &copy, 0, None);
+                self.queue.submit([e.finish()]);
+                (b, copy)
+            })
+            .collect();
+        let before = cache.state.read_buffer(&device, 37);
+        let marks = cache.state.read_buffer(&device, 62);
+        let ledger = cache.state.read_buffer(&device, 77);
+        let pages = cache.state.readable_pages(bytemuck::cast_slice(&marks));
+        let chunk = cache.state.rebake_chunk();
+        for part in pages.chunks(chunk) {
+            let counts = cache.state.upload_rebake(&self.queue, part);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            cache.state.encode_clear(&mut encoder);
+            cache.encode_bake(&mut encoder, counts);
+            self.queue.submit([encoder.finish()]);
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("GPU poll failed");
+        }
+        let after = cache.state.read_buffer(&device, 37);
+        let mut e = device.create_command_encoder(&Default::default());
+        for (b, copy) in &keep {
+            e.copy_buffer_to_buffer(copy, 0, cache.state.buffer(*b), 0, None);
+        }
+        self.queue.submit([e.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let (before, after): (&[f32], &[f32]) =
+            (bytemuck::cast_slice(&before), bytemuck::cast_slice(&after));
+        let ledger: &[f32] = bytemuck::cast_slice(&ledger);
+        let channels = self.lights + 1;
+        for &slot in &pages {
+            let first = slot as usize * PAGE_TEXELS as usize;
+            let mut change = 0.0f32;
+            for k in first..first + PAGE_TEXELS as usize {
+                for l in 0..self.lights {
+                    let at = k * channels + l;
+                    if before[at].to_bits() != after[at].to_bits() {
+                        check.light_differing += 1;
+                    }
+                }
+                let at = k * channels + self.lights;
+                change = change.max((before[at] - after[at]).abs());
+            }
+            let at = 8 * slot as usize;
+            let (charge, threshold) = (ledger[at] + ledger[at + 1].max(0.0), ledger[at + 2]);
+            check.pages += 1;
+            check.largest_change = check.largest_change.max(change);
+            check.largest_charge = check.largest_charge.max(charge);
+            check.violations += (change > charge + 1e-5) as u32;
+            check.over_threshold += (change > threshold) as u32;
+            if change > threshold && std::env::var_os("CONTINUUM_SKY_DEBUG").is_some() {
+                let w: &[u32] = bytemuck::cast_slice(ledger);
+                eprintln!(
+                    "slot {slot}: change {change}, ledger {:?}, mask {:x} {:x} {:x}, stride {}, frame {}",
+                    &ledger[at..at + 4],
+                    w[at + 4],
+                    w[at + 5],
+                    w[at + 6],
+                    w[at + 7],
+                    cache.state.slot_debug(slot)
+                );
+            }
+            check.changed += (change > 0.0) as u32;
         }
         check
     }

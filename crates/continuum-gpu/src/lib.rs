@@ -120,7 +120,7 @@ pub use vcache::{CacheOptions, CacheStats};
 #[doc(hidden)]
 pub use hierarchy::Hierarchy;
 #[doc(hidden)]
-pub use instanced::{CacheCheck, FrameProfile, InstancedRenderer, LedgerCheck};
+pub use instanced::{CacheCheck, FrameProfile, InstancedRenderer, LedgerCheck, SkyCheck};
 #[doc(hidden)]
 pub use lightmap::{BLOCK, BLOCK_PLANES, hemicube_weights};
 #[doc(hidden)]
@@ -463,12 +463,13 @@ pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 64, 68, 69, 70,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51, 64,
 ];
 pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
     &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 54, 49, 50, 51];
-pub(crate) const VC_FILL_BINDINGS: &[u32] =
-    &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64, 73];
+pub(crate) const VC_FILL_BINDINGS: &[u32] = &[
+    3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64, 73, 77,
+];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55,
     56, 57, 58, 62, 73, 76,
@@ -479,13 +480,14 @@ pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
     57, 58, 64, 73, 74, 75,
 ];
 /// The movers' stale passes (M9) and the dispatch sizes after each.
-pub(crate) const VC_STALE_BINDINGS: &[u32] =
-    &[3, 30, 38, 40, 41, 43, 52, 60, 61, 62, 63, 64, 65, 67];
+pub(crate) const VC_STALE_BINDINGS: &[u32] = &[
+    3, 30, 33, 38, 40, 41, 43, 46, 48, 52, 60, 61, 62, 63, 64, 65, 67, 77, 78,
+];
 pub(crate) const VC_ARGS_BINDINGS: &[u32] = &[64, 66, 67];
 pub(crate) const VC_STALE_TEXELS_BINDINGS: &[u32] = &[
     2, 3, 23, 24, 30, 33, 34, 41, 43, 52, 54, 60, 61, 62, 63, 64, 65, 67,
 ];
-pub(crate) const VC_ARGS_BAKE_BINDINGS: &[u32] = &[41, 64, 66];
+pub(crate) const VC_ARGS_BAKE_BINDINGS: &[u32] = &[41, 46, 64, 66];
 /// Moving lights' ledger (M9 gate 2): fresh records for planned pages, and
 /// the per-frame check.
 pub(crate) const VC_LEDGER_RESET_BINDINGS: &[u32] = &[38, 41, 69, 72];

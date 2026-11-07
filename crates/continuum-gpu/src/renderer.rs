@@ -234,6 +234,14 @@ impl Renderer {
         self.inner.verify_ledger(light)
     }
 
+    /// Diagnostics (M9 gate 3): re-bakes every page the cache may show;
+    /// compares its light channels bit for bit and its sky's change with its
+    /// sky ledger; restores the cache afterwards.
+    #[doc(hidden)]
+    pub fn verify_sky(&mut self) -> crate::SkyCheck {
+        self.inner.verify_sky()
+    }
+
     /// The kernel, for its device and adapter.
     pub fn kernel(&self) -> &MaskConeKernel {
         &self.kernel

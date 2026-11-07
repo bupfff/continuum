@@ -73,7 +73,12 @@ const INDIRECT_RETRY: u32 = 4;
 const SECONDARY: u32 = 0x8000_0000;
 const WANTS_SAMPLES: u32 = 0x4000_0000;
 /// The stale passes' and the ledger's counters (16 words) in each readback.
-const MOVER_STATS_BYTES: u64 = 64;
+const MOVER_STATS_BYTES: u64 = 96;
+/// Movers under a sky (M9 gate 3): slots listed for a sky re-bake per frame
+/// at most, and frames a moved object's page waits (re-listed while it
+/// moves) before its sky re-bakes.
+const SKY_LIST_CAP: u32 = 1 << 14;
+const SKY_SETTLE: u32 = 30;
 /// Moving lights (M9 gate 2): frames of light poses kept (a page older than
 /// this, or than 1,023 frames, re-bakes whole), and words of ledger record
 /// per page and moving light.
@@ -251,6 +256,14 @@ pub struct CacheStats {
     /// Pixels shaded with four rays at silhouettes (M7 gate 3; not counted
     /// with `KernelOptions::count_work`).
     pub edge_pixels: u32,
+    /// Movers under a sky (M9 gate 3): slots listed for a sky re-bake.
+    pub sky_listed: u32,
+    /// Pages read in the frame before that movers' sky charges touched.
+    pub sky_charged: u32,
+    /// Pages the sky ledger marked invalid.
+    pub sky_invalidated: u32,
+    /// Pages whose sky the plan re-baked (for movers).
+    pub sky_rebaked: u32,
     /// Stale pages marked invalid instead (evicted when read back).
     pub invalidated: u32,
     /// Pages read in the frame before (counted when something moved).
@@ -769,6 +782,12 @@ pub(crate) struct VirtualCache {
     indirect_jobs: Vec<[u32; 2]>,
     retry: std::collections::VecDeque<(u32, u32)>,
     retrying: std::collections::HashSet<u32>,
+    sky_rebaked: u32,
+    /// Stable indices of objects that have moved (for the sky ledger).
+    mover_ids: HashMap<u32, u32>,
+    /// Movers under a sky: slots whose sky to re-bake, each with the frame
+    /// it is due.
+    sky_due: HashMap<u32, u32>,
     append_pages: u32,
     alloc_frame: Vec<u32>,
     appended: f32,
@@ -863,16 +882,17 @@ impl VirtualCache {
         for (j, &l) in moving.iter().enumerate() {
             moving_index[l] = j as u32;
         }
-        assert!(
-            movers == 0 || !sky,
-            "moving objects with a sky in the cache are not supported yet"
-        );
         let append_pages = if movers > 0 || !moving.is_empty() {
             APPEND_PAGES.min(APPEND_JOBS / (PAGE_TEXELS * lights))
         } else {
             0
         };
         let append_jobs = (append_pages * PAGE_TEXELS * lights) as u64;
+        let sky_append = if movers > 0 && sky {
+            append_pages as u64 * PAGE_TEXELS as u64
+        } else {
+            0
+        };
         // So a frame's sky samples never outnumber the budget (their buffers'
         // size).
         assert!(
@@ -1009,7 +1029,7 @@ impl VirtualCache {
                     wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
-            (66, empty("dispatch args", 36, wgpu::BufferUsages::INDIRECT)),
+            (66, empty("dispatch args", 48, wgpu::BufferUsages::INDIRECT)),
             (
                 68,
                 empty("light poses", (POSE_RING * lights) as u64 * 64, copy_dst),
@@ -1067,6 +1087,26 @@ impl VirtualCache {
                 ),
             ),
             (
+                77,
+                empty(
+                    "sky ledger",
+                    if movers > 0 && sky {
+                        options.pages as u64 * 32
+                    } else {
+                        32
+                    },
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
+                ),
+            ),
+            (
+                78,
+                empty(
+                    "sky list",
+                    SKY_LIST_CAP as u64 * 4,
+                    wgpu::BufferUsages::COPY_SRC,
+                ),
+            ),
+            (
                 67,
                 empty(
                     "candidates",
@@ -1079,16 +1119,23 @@ impl VirtualCache {
                 ),
             ),
             // A plan never exceeds the budget but by its first page.
-            (46, empty("sky samples", (budget + 81) * 8, copy_dst)),
+            // With movers, the stale pass appends up to `sky_append` more.
+            (
+                46,
+                empty("sky samples", (budget + 81 + sky_append) * 8, copy_dst),
+            ),
             (
                 47,
                 empty(
                     "sky partials",
-                    (budget + 81) * 6 * 4,
+                    (budget + 81 + sky_append) * 6 * 4,
                     wgpu::BufferUsages::empty(),
                 ),
             ),
-            (48, empty("page sky", budget * 8, copy_dst)),
+            (
+                48,
+                empty("page sky", (budget + append_pages as u64) * 8, copy_dst),
+            ),
             (
                 49,
                 storage("self charts", bytemuck::cast_slice(&own.charts), copy_dst),
@@ -1163,6 +1210,9 @@ impl VirtualCache {
             indirect_jobs: Vec::new(),
             retry: Default::default(),
             retrying: Default::default(),
+            sky_due: HashMap::new(),
+            sky_rebaked: 0,
+            mover_ids: HashMap::new(),
             append_pages,
             alloc_frame: vec![0; options.pages as usize],
             appended: 0.0,
@@ -1250,7 +1300,8 @@ impl VirtualCache {
                         + TIMESTAMP_BYTES
                         + MOVER_STATS_BYTES
                         + INVALID_CAP as u64 * 4
-                        + INCOMPLETE_CAP as u64 * 4,
+                        + INCOMPLETE_CAP as u64 * 4
+                        + SKY_LIST_CAP as u64 * 4,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -1480,6 +1531,7 @@ impl VirtualCache {
             waiting: std::mem::take(&mut self.waiting),
             moved: moved.max(lit as u32),
             indirect_samples: self.indirect_jobs.len() as u32,
+            sky_rebaked: self.sky_rebaked,
             ..Default::default()
         });
         self.moved.clear();
@@ -1512,6 +1564,19 @@ impl VirtualCache {
     }
 
     /// The ledger's ε.
+    /// Diagnostics: the frame slot `slot` was allocated, and its key.
+    pub(crate) fn slot_debug(&self, slot: u32) -> String {
+        format!(
+            "alloc {} of {}, key {:?}",
+            self.alloc_frame[slot as usize], self.frame, self.slot_key[slot as usize]
+        )
+    }
+
+    /// Whether the cache holds a sky channel.
+    pub(crate) fn has_sky(&self) -> bool {
+        self.sky
+    }
+
     pub(crate) fn epsilon(&self) -> f32 {
         self.options.ledger_epsilon
     }
@@ -1526,7 +1591,8 @@ impl VirtualCache {
     ///
     /// Layout (vec4s): per light its union's lo and hi; the moved boxes'
     /// union's lo and hi; then per object: old lo (with the object's index
-    /// as bits in w), old hi, new lo, new hi, and per light the old and new
+    /// as bits in w), old hi (with a stable index among movers as bits in
+    /// w, for the sky ledger), new lo, new hi, and per light the old and new
     /// shadow regions' lo and hi.
     pub(crate) fn set_moved(
         &mut self,
@@ -1543,8 +1609,10 @@ impl VirtualCache {
         for (object, old, new) in moved {
             let (old, new) = ((old[0], old[1]), (new[0], new[1]));
             all = grow(grow(all, old), new);
+            let next = self.mover_ids.len() as u32;
+            let id = *self.mover_ids.entry(*object).or_insert(next);
             entries.push(v4(old.0, f32::from_bits(*object)));
-            entries.push(v4(old.1, 0.0));
+            entries.push(v4(old.1, f32::from_bits(id)));
             entries.push(v4(new.0, 0.0));
             entries.push(v4(new.1, 0.0));
             for (l, light) in lights.iter().enumerate() {
@@ -1602,6 +1670,8 @@ impl VirtualCache {
         let mut list = Vec::new();
         let mut bounds = Vec::new();
         let mut jobs = Vec::new();
+        self.sky_samples.clear();
+        self.page_sky.clear();
         for (index, &slot) in slots.iter().enumerate() {
             let k = self.slot_key[slot as usize];
             let (m, c, mip, page) = unpack(k);
@@ -1609,6 +1679,9 @@ impl VirtualCache {
             let b = self.page_bounds(m, c, mip, page);
             bounds.push([b[0], b[1], b[2], b[3]]);
             bounds.push([b[4], b[5], b[6], b[7]]);
+            if self.sky {
+                self.push_sky_samples(index as u32, k);
+            }
             for l in 0..self.lights {
                 for t in 0..PAGE_TEXELS {
                     jobs.push([index as u32, t | l << 8]);
@@ -1618,6 +1691,11 @@ impl VirtualCache {
         queue.write_buffer(self.buffer(38), 0, bytemuck::cast_slice(&list));
         queue.write_buffer(self.buffer(63), 0, bytemuck::cast_slice(&bounds));
         queue.write_buffer(self.buffer(43), 0, bytemuck::cast_slice(&jobs));
+        if self.sky && !self.sky_samples.is_empty() {
+            queue.write_buffer(self.buffer(46), 0, bytemuck::cast_slice(&self.sky_samples));
+            queue.write_buffer(self.buffer(48), 0, bytemuck::cast_slice(&self.page_sky));
+        }
+        let sky_samples = self.sky_samples.len() as u32;
         let mut params: VcParams = Zeroable::zeroed();
         params.counts = [self.table.entries.len() as u32 - 1, self.frame, 1, 1];
         params.jobs = [
@@ -1628,7 +1706,7 @@ impl VirtualCache {
         ];
         params.params = [self.inv_base, 0.0, self.options.pixels_per_texel, 0.0];
         params.sky = [
-            0,
+            sky_samples,
             self.sky as u32,
             self.lights,
             self.options.light_ratio as u32,
@@ -1641,7 +1719,14 @@ impl VirtualCache {
             0x7fff_ffff,
         ];
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        [0, jobs.len() as u32, 0, list.len() as u32, 0, 0]
+        [
+            0,
+            jobs.len() as u32,
+            6 * sky_samples,
+            list.len() as u32,
+            0,
+            0,
+        ]
     }
 
     /// The object-space box of the apexes of page `(m, c, mip, page)`'s
@@ -1703,6 +1788,15 @@ impl VirtualCache {
                     &r.buffer,
                     at + MOVER_STATS_BYTES + INVALID_CAP as u64 * 4,
                     INCOMPLETE_CAP as u64 * 4,
+                );
+            }
+            if self.sky {
+                encoder.copy_buffer_to_buffer(
+                    self.buffer(78),
+                    0,
+                    &r.buffer,
+                    at + MOVER_STATS_BYTES + (INVALID_CAP + INCOMPLETE_CAP) as u64 * 4,
+                    SKY_LIST_CAP as u64 * 4,
                 );
             }
         }
@@ -1842,12 +1936,13 @@ impl VirtualCache {
             .collect();
         // Movers (M9): the stale pass's counters and invalid slots.
         let moved = self.log[frame as usize - 1].moved > 0;
-        let mut mover = [0u32; 16];
+        let mut mover = [0u32; 24];
         let mut invalid: Vec<u32> = Vec::new();
         let mut incomplete: Vec<u32> = Vec::new();
+        let mut sky_listed: Vec<u32> = Vec::new();
         if moved || self.options.indirect {
             let at = 4 * tiles + (STATS_BYTES + TIMESTAMP_BYTES) as usize / 4;
-            mover.copy_from_slice(&words[at..at + 16]);
+            mover.copy_from_slice(&words[at..at + 24]);
             let listed = (mover[1] as usize).min(INVALID_CAP as usize);
             let first = at + MOVER_STATS_BYTES as usize / 4;
             invalid.extend_from_slice(&words[first..first + listed]);
@@ -1859,6 +1954,11 @@ impl VirtualCache {
                 let first = first + INVALID_CAP as usize;
                 let listed = (mover[15] as usize).min(INCOMPLETE_CAP as usize);
                 incomplete.extend_from_slice(&words[first..first + listed]);
+            }
+            if self.sky {
+                let first = first + (INVALID_CAP + INCOMPLETE_CAP) as usize;
+                let listed = (mover[7] as usize).min(SKY_LIST_CAP as usize);
+                sky_listed.extend_from_slice(&words[first..first + listed]);
             }
         }
         let appended = mover[5].min(self.append_jobs());
@@ -1876,6 +1976,10 @@ impl VirtualCache {
         record.ledger_mixed = mover[12];
         record.ledger_whole = mover[13];
         record.indirect_incomplete = mover[15];
+        record.sky_listed = mover[7];
+        record.sky_rebaked += mover[19];
+        record.sky_charged = mover[16];
+        record.sky_invalidated = mover[17];
         record.spent += appended;
         if let Some(timer) = &self.timer
             && record.timed
@@ -1907,6 +2011,13 @@ impl VirtualCache {
         record.edge_pixels = counters[15];
         self.appended = 0.8 * self.appended + 0.2 * appended as f32;
         self.evict_invalid(&invalid, frame);
+        // Sky re-bakes for movers (M9 gate 3): a receiver's now; a moved
+        // object's page (listed once per sky bake) a while later.
+        for entry in sky_listed {
+            let (slot, own) = (entry & 0x7fff_ffff, entry >> 31 == 1);
+            let due = if own { frame + SKY_SETTLE } else { frame };
+            self.sky_due.insert(slot, due);
+        }
         // Incomplete bounce samples: re-bake once the requested pages have
         // had time to arrive.
         for slot in incomplete {
@@ -2034,7 +2145,30 @@ impl VirtualCache {
 
     /// Chooses the frame's pages from the requested ones (each listed once by
     /// the shader, with its priority), within the bake budget.
+    /// Lists page `k` (entry `index`) for its sky samples, as the plan
+    /// does; their count.
+    fn push_sky_samples(&mut self, index: u32, k: [u32; 3]) -> u32 {
+        let (m, c, mip, page) = unpack(k);
+        let n = self.grid(c, m, mip);
+        let inside = [
+            (n[0] - (page[0] * PAGE).min(n[0])).min(STRIDE),
+            (n[1] - (page[1] * PAGE).min(n[1])).min(STRIDE),
+        ];
+        let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
+        let stride = self.sky_stride(m, mip);
+        let samples = listed[0].div_ceil(stride) * listed[1].div_ceil(stride);
+        let first = self.sky_samples.len() as u32;
+        for y in (0..listed[1]).step_by(stride as usize) {
+            for x in (0..listed[0]).step_by(stride as usize) {
+                self.sky_samples.push([index, y * STRIDE + x]);
+            }
+        }
+        self.page_sky.push([first, samples | stride << 24]);
+        samples
+    }
+
     fn plan(&mut self, device: &wgpu::Device, requests: Vec<([u32; 3], u32)>) {
+        self.sky_rebaked = 0;
         self.bake_list.clear();
         self.bake_bounds.clear();
         self.indirect_jobs.clear();
@@ -2149,6 +2283,35 @@ impl VirtualCache {
             }
             self.texels += inside[0] * inside[1];
             self.spent += cost;
+        }
+        // Skies to re-bake for movers, once due, within what is left.
+        if self.sky && !self.sky_due.is_empty() {
+            let due: Vec<u32> = self
+                .sky_due
+                .iter()
+                .filter(|&(_, &d)| d <= self.frame)
+                .map(|(&s, _)| s)
+                .collect();
+            for slot in due {
+                if self.spent >= budget || self.bake_list.len() >= budget as usize {
+                    break;
+                }
+                self.sky_due.remove(&slot);
+                let k = self.slot_key[slot as usize];
+                if k[0] == EMPTY {
+                    continue;
+                }
+                let (m, c, mip, page) = unpack(k);
+                let index = self.bake_list.len() as u32;
+                self.bake_list.push([k[0], k[1], k[2], slot]);
+                let b = self.page_bounds(m, c, mip, page);
+                self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
+                // w 3: the sky alone (the fill keeps an invalid mark).
+                self.bake_bounds.push([b[4], b[5], b[6], 3.0]);
+                let samples = self.push_sky_samples(index, k);
+                self.spent += samples * self.options.sky_sample_cost;
+                self.sky_rebaked += 1;
+            }
         }
         // Bounce samples of pages that met missing hits, once due, within
         // what is left of the budget.
