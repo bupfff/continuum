@@ -136,6 +136,22 @@ impl Renderer {
         self.inner.frame(camera, target);
     }
 
+    /// [`Renderer::render`] without drawing: the frame's colors stay in the
+    /// renderer, for [`Renderer::encode_display`]. For engines that order
+    /// their own passes (the Bevy plugin): this submits the frame's compute
+    /// work now, and the engine draws the result later in its own encoder.
+    pub fn compute(&mut self, camera: Camera) {
+        self.inner.frame_compute(camera);
+    }
+
+    /// Encodes the last frame drawn to `target` (a texture view of the
+    /// format and size given) into `encoder`. A float target (such as
+    /// `Rgba16Float`) receives linear light for the engine's own tone
+    /// mapping; other formats get the viewer's tone curve.
+    pub fn encode_display(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        self.inner.encode_display(encoder, target);
+    }
+
     /// Follows the target's new size.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.inner.resize(width, height);

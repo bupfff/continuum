@@ -112,6 +112,9 @@ pub struct InstancedRenderer {
     /// The scene's base color textures (bindings 55 and 56).
     textures: SceneTextures,
     srgb: bool,
+    /// The target holds floats: it gets linear light, for an engine's own
+    /// tone mapping.
+    float_target: bool,
     /// Where camera rays cross each pixel, from its center, in pixels
     /// (references that average many sub-pixel positions).
     pixel_offset: [f32; 2],
@@ -276,6 +279,17 @@ impl InstancedRenderer {
         )
     }
 
+    /// How the display pass writes colors (`display.wgsl`): 0 with the tone
+    /// curve to an sRGB target, 1 with the curve and gamma, 2 linear (float
+    /// targets).
+    fn display_mode(&self) -> u32 {
+        if self.float_target {
+            2
+        } else {
+            !self.srgb as u32
+        }
+    }
+
     /// Camera rays cross each pixel `(dx, dy)` pixels from its center (x
     /// right, y down) from the next frame: for supersampled references,
     /// which average frames over a grid of offsets. Pixel cones ignore it.
@@ -414,6 +428,12 @@ impl InstancedRenderer {
             lights: lights.len(),
             textures: kernel.scene_textures(&scene.textures),
             srgb: target_format.is_srgb(),
+            float_target: matches!(
+                target_format,
+                wgpu::TextureFormat::Rgba16Float
+                    | wgpu::TextureFormat::Rgba32Float
+                    | wgpu::TextureFormat::Rg11b10Ufloat
+            ),
             pixel_offset: [0.0; 2],
             footprint: 1.0,
         };
@@ -599,6 +619,23 @@ impl InstancedRenderer {
     /// With a lighting cache, this first plans the frame's bake from the page
     /// requests of two frames before (waiting for that frame only).
     pub fn frame(&mut self, camera: Camera, target: &wgpu::TextureView) {
+        self.frame_to(camera, Some(target));
+    }
+
+    /// [`Self::frame`] without drawing to a target: the frame's colors stay
+    /// in the renderer for [`Self::encode_display`] (or `read_colors`).
+    pub fn frame_compute(&mut self, camera: Camera) {
+        self.frame_to(camera, None);
+    }
+
+    /// Encodes the last frame's colors drawn to `target` (of the format the
+    /// renderer was made for) into `encoder`: for engines that order their
+    /// own passes, after [`Self::frame_compute`].
+    pub fn encode_display(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        crate::live::encode_display(encoder, &self.display, &self.display_bind, target, None);
+    }
+
+    fn frame_to(&mut self, camera: Camera, target: Option<&wgpu::TextureView>) {
         let mut cam = camera_uniform(camera, self.width, self.height, self.radiance);
         cam.right[3] = self.pixel_offset[0];
         cam.up[3] = self.pixel_offset[1];
@@ -607,7 +644,7 @@ impl InstancedRenderer {
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
         let dims = DisplayDims {
             size: [self.width, self.height],
-            flags: [!self.srgb as u32, self.scale],
+            flags: [self.display_mode(), self.scale],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
@@ -633,13 +670,15 @@ impl InstancedRenderer {
         if let Some(cache) = &mut self.cache {
             cache.state.encode_readback(&mut encoder);
         }
-        crate::live::encode_display(
-            &mut encoder,
-            &self.display,
-            &self.display_bind,
-            target,
-            None,
-        );
+        if let Some(target) = target {
+            crate::live::encode_display(
+                &mut encoder,
+                &self.display,
+                &self.display_bind,
+                target,
+                None,
+            );
+        }
         if let Some(cache) = &self.cache {
             cache.state.encode_timestamps(&mut encoder);
         }
@@ -676,7 +715,7 @@ impl InstancedRenderer {
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
         let dims = DisplayDims {
             size: [self.width, self.height],
-            flags: [!self.srgb as u32, self.scale],
+            flags: [self.display_mode(), self.scale],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));

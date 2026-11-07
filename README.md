@@ -186,6 +186,8 @@ relative RMSE (M3 gate 3).
   front door), mask cones in WGSL, the lighting caches, the live renderer.
 - `crates/continuum-gltf`: glTF 2.0 import and export, and the `render`
   example.
+- `crates/bevy_continuum`: a Bevy 0.20 plugin (a camera's view rendered by
+  Continuum) and the `boxes` example.
 - `apps/viewer`: the real-time viewer (instanced scenes through `Renderer`,
   the showcase and the room through the live renderer).
 - `experiments/flatland`: 2D experiments that test the core bets (milestone M0).

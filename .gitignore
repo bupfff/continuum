@@ -1,3 +1,4 @@
 /target
 experiments/*/out/
 .DS_Store
+crates/continuum-gpu/hlsl/

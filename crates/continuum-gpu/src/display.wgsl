@@ -5,8 +5,9 @@
 struct Dims {
     // The rendered image's size.
     size: vec2<u32>,
-    // x: 1 if the target is not sRGB and gamma must be applied here; y: the
-    // render scale (window pixels per rendered pixel; 0 means 1)
+    // x: 0 tone curve (an sRGB target applies gamma), 1 tone curve and
+    // gamma here, 2 linear light (float targets, which an engine tone-maps);
+    // y: the render scale (window pixels per rendered pixel; 0 means 1)
     flags: vec2<u32>,
 };
 
@@ -23,6 +24,9 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = min(vec2<u32>(pos.xy) / max(dims.flags.y, 1u), dims.size - vec2<u32>(1u));
     let c = colors[p.y * dims.size.x + p.x].rgb;
+    if (dims.flags.x == 2u) {
+        return vec4<f32>(c, 1.0);
+    }
     var t = c / (c + vec3<f32>(0.6));
     if (dims.flags.x == 1u) {
         t = pow(t, vec3<f32>(1.0 / 2.2));

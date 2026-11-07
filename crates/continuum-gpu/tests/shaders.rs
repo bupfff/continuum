@@ -61,6 +61,19 @@ fn translate(label: &str, source: &str, packets: bool, only: Option<&str>) -> Ve
             naga::back::hlsl::Writer::new(&mut hlsl, &hlsl_options, &pipeline)
                 .write(&m, &i, None)
                 .map_err(|e| format!("HLSL: {e}"))?;
+            // CONTINUUM_DUMP_HLSL=<dir>: each entry point's HLSL, for timing
+            // the DX12 shader compiler on its own (CI).
+            if let Some(dir) = std::env::var_os("CONTINUUM_DUMP_HLSL")
+                && packets
+                && only.is_none()
+            {
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                std::fs::write(
+                    std::path::Path::new(&dir).join(format!("{name}.hlsl")),
+                    &hlsl,
+                )
+                .map_err(|e| e.to_string())?;
+            }
             naga::back::msl::write_string(
                 &m,
                 &i,

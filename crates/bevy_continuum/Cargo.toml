@@ -1,0 +1,31 @@
+[package]
+name = "bevy_continuum"
+description = "Bevy plugin for Continuum: a camera's view rendered with mask cones."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+continuum = { path = "../continuum" }
+continuum-gpu = { path = "../continuum-gpu" }
+# Bevy 0.20 uses wgpu 30, as continuum-gpu does: one device serves both.
+bevy = { version = "0.20.1", default-features = false, features = [
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_camera",
+] }
+
+[dev-dependencies]
+bevy = { version = "0.20.1", default-features = false, features = [
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_camera",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_log",
+    "multi_threaded",
+    "std",
+    "x11",
+    "hdr",
+    "png",
+] }
+continuum-gltf = { path = "../continuum-gltf" }

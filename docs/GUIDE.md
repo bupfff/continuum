@@ -51,9 +51,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 - **Sustained speed on fanless laptops.** Flights with several lights hold
   60 Hz while the machine is cool. After minutes of load, the GPU slows and
   frames take 20 ms or more (M5 G8).
-- **Tested on Apple Silicon (Metal) only.** Windows and NVIDIA are untested.
-- **No exposure or tone mapping.** Colors are written as they are, so values
-  above 1 clip.
+- **Measured on Apple Silicon (Metal) only.** CI checks correctness on Linux
+  (Vulkan, the lavapipe software adapter), where every test passes. On
+  Windows (DX12) the kernel's pipelines take about 30 s each to build on
+  the WARP software adapter, which then runs out of memory; real Windows
+  GPUs and NVIDIA are untested.
+- **No exposure control.** `Renderer::read_colors` returns linear light as
+  it is. Drawn to a window, colors go through a fixed Reinhard curve; a
+  float target (such as Bevy's HDR) gets linear light for the engine's own
+  tone mapping.
 
 ## Setup
 
@@ -168,6 +174,36 @@ For a window, see `apps/viewer`, which flies through a file with
   - subgroups (packet traversal);
   - timestamp queries (the bake budget follows GPU time);
   - ray queries (hardware camera rays).
+
+## In Bevy
+
+`crates/bevy_continuum` renders a Bevy 0.20 camera's view with Continuum,
+on Bevy's own device (Bevy 0.20 uses wgpu 30, as Continuum does):
+
+```rust
+use bevy::prelude::*;
+use bevy_continuum::{ContinuumCamera, ContinuumPlugin, ContinuumScene};
+
+App::new()
+    .add_plugins((DefaultPlugins, ContinuumPlugin))
+    .insert_resource(ContinuumScene { scene, lights, origin, options })
+    .add_systems(Startup, |mut commands: Commands| {
+        commands.spawn((Camera3d::default(), bevy::camera::Hdr, ContinuumCamera));
+    })
+    .run();
+```
+
+- A point `(x, y, z)` in Bevy's Y-up world is `origin + (x, −z, y)` in
+  Continuum's Z-up scene, the same change of axes as glTF import.
+- The camera's image is Continuum's: Bevy's own meshes and lights do not
+  appear in it. Bevy's tone mapping, post-processing and UI apply on top.
+- Changing a light's radiance in `ContinuumScene::lights` costs nothing;
+  any other change to the resource rebuilds the renderer.
+- Run the example (a camera circling boxes and spheres, a pulsing lamp):
+
+  ```bash
+  cargo run --release -p bevy_continuum --example boxes
+  ```
 
 ## API reference
 

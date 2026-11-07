@@ -80,13 +80,28 @@ jobs:
           echo "$(cygpath -w "$PWD/dxc/bin/x64")" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Kernel setup, timed per pipeline
+      # On WARP each large pipeline took about 30 s to build, and building
+      # the kernel ran out of memory at its fifth (2026-11-07). This step
+      # times DXC alone on each entry point's HLSL, to tell the compiler's
+      # share from WARP's.
+      - name: Tests on the CPU (shader translation), and the HLSL
+        shell: bash
+        env:
+          CONTINUUM_DUMP_HLSL: hlsl
+        run: cargo test --release -p continuum -p continuum-gpu -- --nocapture
+      - name: DXC alone, timed per entry point
         timeout-minutes: 20
+        continue-on-error: true
+        shell: bash
+        run: |
+          for e in main render rebake vc_bake vc_shade render_cones; do
+            echo "== $e"
+            time dxc.exe -T cs_6_0 -E "$e" -HV 2021 "crates/continuum-gpu/hlsl/$e.hlsl" -Fo dxc_out.bin > /dev/null
+          done
+      - name: Kernel setup on WARP, timed per pipeline
+        timeout-minutes: 20
+        continue-on-error: true
         shell: bash
         env:
           CONTINUUM_PIPELINE_TIMES: 1
         run: cargo run --release -p continuum-gpu --example kernel_setup
-      - name: Tests
-        timeout-minutes: 30
-        shell: bash
-        run: cargo test --release $LIBRARY -- --nocapture

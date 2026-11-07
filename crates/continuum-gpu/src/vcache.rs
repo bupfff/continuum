@@ -1007,9 +1007,7 @@ impl VirtualCache {
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(pool, 0, &readback, 0, None);
         let index = self.queue.submit([encoder.finish()]);
-        readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| ());
         let raw = map_wait(device, &readback, index);
         let values: &[f32] = bytemuck::cast_slice(&raw);
         let channels = (self.lights + self.sky as u32) as usize;
@@ -1188,14 +1186,15 @@ impl VirtualCache {
     /// waiting.
     pub(crate) fn after_submit(&mut self, index: wgpu::SubmissionIndex) {
         let r = &mut self.readbacks[(self.frame % 2) as usize];
-        r.buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+        // A failed map is ignored: it happens when the device goes away
+        // (an engine shutting down), and a failure while running shows as a
+        // panic when the range is read.
+        r.buffer.slice(..).map_async(wgpu::MapMode::Read, |_| ());
         r.pending = Some((self.frame, index.clone()));
         if self.used_requested {
             self.used_readback
                 .slice(..)
-                .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+                .map_async(wgpu::MapMode::Read, |_| ());
             self.used_pending = Some((self.frame, index));
             self.used_requested = false;
         }
@@ -1376,7 +1375,7 @@ impl VirtualCache {
             let index = self.queue.submit([encoder.finish()]);
             self.used_readback
                 .slice(..)
-                .map_async(wgpu::MapMode::Read, |m| m.expect("map failed"));
+                .map_async(wgpu::MapMode::Read, |_| ());
             map_wait(device, &self.used_readback, index)
         };
         self.merge_used(bytemuck::cast_slice(&raw));

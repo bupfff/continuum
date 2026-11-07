@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-06, after M5 gate 8 and the library's surface)
+## 3.6 Where we stand (updated 2026-11-07, after M7 gate 1, CI and the Bevy plugin)
 
 Against the goal in §1, honestly:
 
@@ -202,6 +202,10 @@ Against the goal in §1, honestly:
   - `docs/GUIDE.md` covers setup, concepts and limits; rustdoc covers the
     public API, with experiment-only items hidden.
   - The viewer's field and glTF scenes run on it.
+  - A Bevy 0.20 plugin (`bevy_continuum`) renders a camera's view with it,
+    on Bevy's own device.
+  - CI runs every test on Linux (Vulkan, lavapipe); Windows (DX12, WARP)
+    cannot build the kernel's pipelines yet (§3.8).
 - **Imported content** (M6 G1, failed on round-trip precision only).
   - glTF 2.0 files load as instanced scenes, with automatic charts for any
     mesh and base color textures sampled per pixel at the pixel's footprint.
@@ -248,8 +252,8 @@ estimates, and gates fail often, so treat them as ranges.
 | 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes had black shadows. **Sky done per pixel and matched to Cycles (M5 G2–G3); in the view cache at frame rate (M5 G5), but slow to converge. Several colored rect lights done (M5 G6), cached as ratios (M5 G7); point and spot lights (M5 G8).** Not yet: sky warm-up; sustained speed with several lights | 3 (3 done) |
 | 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes. **Done (M6 G1, failed on round-trip precision only):** a textured import is 0.43% from Cycles, automatic charts are within a point of hand-made ones in the cache, warm frames take 1.5 ms. Not yet: PBR parameters, normal maps, alpha, the file's lights | 2–3 (1 done) |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel. **Tried (M7 G1, failed on all three):** exact 8×8 coverage per pixel costs hundreds of node tests per pixel at scale (105 ms on the textured scene, 10–87 s on the field) and gains 0.76× only from 150 m up. Kept off by default; v0.1 ships with one ray per pixel | 2 (1 spent) |
-| 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs. Not yet: a Bevy plugin | 2 (most done) |
-| 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement, untested so far | 1–2 |
+| 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
+| 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI:** Linux (lavapipe) passes every test; Windows (WARP) cannot build the kernel's pipelines yet (about 30 s each, then out of memory). Not yet: the cloud GPU benchmark | 1–2 (1 spent) |
 
 ### 3.8 Next steps, in order (2026-10-25, after M5 gate 7)
 
@@ -272,15 +276,30 @@ not fit.
      area integral (cheap, the larger error on textured content); coverage
      only at silhouette pixels; 3D clipping of huge triangles in narrow
      cones.
-3. **Bevy plugin**, if it fits. Bevy pins its own wgpu version, and we run a
-   patched wgpu-core.
-4. **Needs the user:**
-   - CI on Windows/NVIDIA: the repository exists (private,
-     `github.com/bupfff/continuum`, since 2026-11-06); workflows not yet
-     written;
-   - a cloud GPU benchmark needs an account;
+3. **Bevy plugin.** **Done** (2026-11-06, not gated): `bevy_continuum`
+   renders a Bevy 0.20 camera's view with `Renderer` on Bevy's own device.
+   Bevy 0.20 uses wgpu 30, so the workspace's patched wgpu-core serves
+   both. `Renderer::compute` and `encode_display` let the engine order the
+   draw; float targets get linear light for Bevy's tone mapping.
+4. **CI** (2026-11-06/07, `.github/workflows/ci.yml`, private repository
+   `github.com/bupfff/continuum`).
+   - Linux, Vulkan on lavapipe: passes. Format, clippy, rustdoc and every
+     test, the GPU tests included. The golden image is 0.09% from Apple
+     M4's, and cones match the CPU to 1.6e-5.
+   - It found two portability bugs, both fixed. Naga's SPIR-V output
+     panicked on a pointer to a struct's member (`bound_cone`). A Windows
+     checkout's CRLF line endings broke the shader's text patch for
+     subgroups.
+   - `continuum-gpu/tests/shaders.rs` translates every entry point to
+     SPIR-V, HLSL and MSL on the CPU, on every machine.
+   - Windows, DX12 on WARP: open. Each large pipeline takes about 30 s to
+     build, and building the kernel ran out of memory at its fifth
+     pipeline. CI now times DXC alone, to tell whether the compiler (which
+     would also slow real Windows GPUs) or WARP is at fault.
+5. **Needs the user:**
+   - a cloud GPU benchmark (NVIDIA) needs an account;
    - publishing is theirs to decide.
-5. **Known limitations for v0.1:**
+6. **Known limitations for v0.1:**
    - **Sustained speed** (M5 G8): flights with several lights exceed 16.7 ms
      after minutes of load on the fanless Air. A sustained-speed gate should
      state the thermal state; levers are a lower bake floor and cheaper
@@ -290,7 +309,7 @@ not fit.
      and packets for large bakes.
    - **Sky accuracy:** binned coverage is orientation-dependent and always
      too dark. Candidate: first moments per bin.
-6. **Open questions:**
+7. **Open questions:**
    - offering the wgpu-core TLAS-dependency fix upstream (needs the user's go
      ahead before posting anything);
    - the world-space lightmap path (`LiveRenderer`) still refuses a sky and
@@ -340,7 +359,8 @@ whose lighting is exact, stable and incremental, used inside other engines
   static instanced scenes, lights and sky, through the view cache
   (`docs/GUIDE.md`).
 - `continuum-gltf`: glTF import and export.
-- `bevy_continuum` (planned): Bevy integration.
+- `bevy_continuum`: Bevy 0.20 integration (a camera's view rendered by
+  `Renderer` on Bevy's device; `docs/GUIDE.md`).
 
 The direction for v1, once the ledger drives moving objects and lights (not
 final):
