@@ -34,11 +34,12 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 
 ## Limits, today
 
-- **Static scenes in the instanced renderer.** The camera moves freely, and
-  lights change color and intensity freely, but geometry and light positions
-  stay put. Moving objects are supported only in the older lightmap path
-  (`LiveRenderer` with `MaskConeKernel::bake`: one rectangular light, no
-  sky, no instancing; the viewer's showcase uses it).
+- **Moving objects, but not moving lights.** Instances listed in
+  `RendererOptions::movable` move rigidly (`Renderer::set_transform`; they
+  keep their scale). The cache re-bakes, within the frame, exactly what a
+  move can change and never shows stale light (M9 gate 1). With the cache,
+  movers and a sky do not mix yet. Lights change color and intensity
+  freely, but stay put.
 - **Diffuse materials only.** Base color and textures are used; metallic,
   roughness, normal maps, alpha and emission are not.
 - **Direct light only** in the instanced renderer: no bounce light yet.
@@ -168,6 +169,19 @@ For a window, see `apps/viewer`, which flies through a file with
   - Tuning lives in `CacheOptions`.
 - **Re-coloring.** `Renderer::set_light_radiance` changes a light's color
   and intensity from the next frame, exactly, with nothing re-baked.
+- **Moving objects.** List the instances that may move in
+  `RendererOptions::movable`, then call
+  `Renderer::set_transform(instance, rotation, position)` before a frame.
+  - Each frame something moves, the cache finds the texels whose light
+    cones a move can reach (the move's old and new boxes against each
+    cone's hull toward each light). It re-bakes those that were on screen
+    in the same frame, and drops the rest until they are needed. The
+    result equals a fresh cache, bit for bit (M9 gate 1).
+  - The cost follows the change: 0.84% of the pages on screen per frame
+    for 65 movers among a million boulders, 1.06–1.09× the frame time with
+    them still.
+  - Rigid motion only (the scale stays). With the cache, not yet with a
+    sky.
 
 ## Requirements
 

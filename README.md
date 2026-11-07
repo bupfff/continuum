@@ -14,7 +14,9 @@ renders:
 - a million-boulder field of ten billion triangles through a view-dependent
   lighting cache (M4);
 - area, sun, point and spot lights and a sky (M5);
-- glTF files with textures (M6).
+- glTF files with textures (M6);
+- objects moving among a million static ones, the cache updated exactly in
+  the frame they move, with no stale light (M9 gate 1).
 
 Every claim is measured against Blender's Cycles.
 

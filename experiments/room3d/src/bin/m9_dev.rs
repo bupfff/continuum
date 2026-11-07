@@ -110,6 +110,17 @@ fn main() {
     }
     r.finish();
     let total = begin.elapsed();
+    if args.iter().any(|a| a == "save") {
+        let pixels = r.read_colors();
+        let mut image = flatland::img::Image::new(w as usize, h as usize, [0; 3]);
+        for (i, p) in pixels.iter().enumerate() {
+            image.set(i % w as usize, i / w as usize, room3d::to_rgb(Vec3::from_array(*p)));
+        }
+        let name = format!("m9_dev_{}_{frames}.png", if moving { "moving" } else { "still" });
+        image
+            .save(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("out").join(name))
+            .unwrap();
+    }
     let log = r.cache_log();
     if args.iter().any(|a| a == "trace") {
         for s in log.iter().step_by(10) {
