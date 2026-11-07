@@ -61,6 +61,11 @@ pub struct RendererOptions {
     /// never shows stale light. With the cache, movers and a sky do not mix
     /// yet. Empty (the default): a static scene.
     pub movable: Vec<usize>,
+    /// Lights that may move ([`Renderer::set_light`]; not spots). With the
+    /// cache, an error ledger re-bakes only what may be more than
+    /// `CacheOptions::ledger_epsilon` off (M9 gate 2). Not yet with movers
+    /// or a sky in the cache.
+    pub moving_lights: Vec<usize>,
 }
 
 impl Default for RendererOptions {
@@ -72,6 +77,7 @@ impl Default for RendererOptions {
             cache_options: CacheOptions::default(),
             pixel_cones: false,
             movable: Vec::new(),
+            moving_lights: Vec::new(),
         }
     }
 }
@@ -121,8 +127,15 @@ impl Renderer {
             origin,
             options.cache.then_some(options.cache_options),
             &options.movable,
+            &options.moving_lights,
         );
         Renderer { kernel, inner }
+    }
+
+    /// Moves (and re-colors) light `index`, one of
+    /// [`RendererOptions::moving_lights`], from the next frame.
+    pub fn set_light(&mut self, index: usize, light: Light) {
+        self.inner.set_light(index, light);
     }
 
     /// Moves instance `instance` (one of [`RendererOptions::movable`]) to
@@ -211,6 +224,14 @@ impl Renderer {
     #[doc(hidden)]
     pub fn verify_cache(&mut self) -> crate::CacheCheck {
         self.inner.verify_cache()
+    }
+
+    /// Diagnostics (M9 gate 2): re-bakes every page the cache may show and
+    /// compares each page's change of moving light `light`'s ratios with the
+    /// bound the ledger certified; restores the cache afterwards.
+    #[doc(hidden)]
+    pub fn verify_ledger(&mut self, light: usize) -> crate::LedgerCheck {
+        self.inner.verify_ledger(light)
     }
 
     /// The kernel, for its device and adapter.

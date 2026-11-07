@@ -61,8 +61,13 @@ const INVALID_CAP: u32 = 1 << 14;
 /// marked invalid whole.
 const CANDIDATES: u32 = 1 << 16;
 const VISIBLE_WINDOW: u32 = 1;
-/// The stale pass's counters (eight words) in each readback.
-const MOVER_STATS_BYTES: u64 = 32;
+/// The stale passes' and the ledger's counters (16 words) in each readback.
+const MOVER_STATS_BYTES: u64 = 64;
+/// Moving lights (M9 gate 2): frames of light poses kept (a page older than
+/// this, or than 1,023 frames, re-bakes whole), and words of ledger record
+/// per page and moving light.
+const POSE_RING: u32 = 1024;
+const LEDGER_WORDS: u64 = 48;
 
 /// Settings of the lighting cache.
 #[derive(Clone, Copy, Debug)]
@@ -104,6 +109,9 @@ pub struct CacheOptions {
     /// What a sky sample counts against the bake budget, in sun texels (at
     /// least 1).
     pub sky_sample_cost: u32,
+    /// Moving lights (M9 gate 2): the largest change of a texel's ratio
+    /// (its light's shadowed share) the cache may show before re-baking it.
+    pub ledger_epsilon: f32,
     /// With a sky: the spacing (in each geometry's own units) of the grid on
     /// which its own sky occlusion is baked once, for all its instances (M5
     /// gate 5). Sky texels then walk only the other objects. 0: off. Only
@@ -132,6 +140,7 @@ impl Default for CacheOptions {
             pages: 1 << 19,
             sky_spacing: 0.0,
             sky_sample_cost: 10,
+            ledger_epsilon: 0.01,
             self_spacing: 0.01,
             light_ratio: true,
         }
@@ -190,6 +199,20 @@ pub struct CacheStats {
     pub rebaked_texels: u32,
     /// Pages whose boxes a move may touch, tested texel by texel.
     pub candidates: u32,
+    /// Moving lights (M9 gate 2), in frames where one moved: pages with
+    /// texels the ledger re-baked.
+    pub ledger_pages: u32,
+    /// Texel-light pairs the ledger re-baked.
+    pub ledger_texels: u32,
+    /// Pages the ledger marked invalid.
+    pub ledger_invalidated: u32,
+    /// Pages the ledger checked that were read in the frame before.
+    pub ledger_checked: u32,
+    /// Of those, pages with mixed texels.
+    pub ledger_mixed: u32,
+    /// Of those, pages passed whole (every texel fixed, clear or dark,
+    /// within the guard).
+    pub ledger_whole: u32,
     /// Stale pages marked invalid instead (evicted when read back).
     pub invalidated: u32,
     /// Pages read in the frame before (counted when something moved).
@@ -222,6 +245,7 @@ struct VcParams {
     params: [f32; 4],
     sky: [u32; 4],
     movers: [u32; 4],
+    ledger: [u32; 4],
 }
 
 /// Per-chart tables shared by every object with a geometry: the chart's size
@@ -695,6 +719,12 @@ pub(crate) struct VirtualCache {
     /// texels).
     moved: Vec<[f32; 4]>,
     moved_count: u32,
+    /// Moving lights (M9 gate 2): how many, the lights' poses now (written
+    /// into the ring each frame), and whether one moved since the last
+    /// frame.
+    moving: u32,
+    poses: Vec<crate::LightGpu>,
+    lights_moved: bool,
     append_pages: u32,
     alloc_frame: Vec<u32>,
     appended: f32,
@@ -765,13 +795,27 @@ impl VirtualCache {
         width: u32,
         height: u32,
         movers: u32,
+        moving: &[usize],
+        poses: &[crate::LightGpu],
     ) -> Self {
         let channels = lights + 1;
+        assert!(
+            moving.is_empty() || movers == 0,
+            "moving lights and moving objects together in the cache are not supported yet"
+        );
+        assert!(
+            moving.is_empty() || !sky,
+            "moving lights with a sky in the cache are not supported yet"
+        );
+        let mut moving_index = vec![u32::MAX; lights as usize];
+        for (j, &l) in moving.iter().enumerate() {
+            moving_index[l] = j as u32;
+        }
         assert!(
             movers == 0 || !sky,
             "moving objects with a sky in the cache are not supported yet"
         );
-        let append_pages = if movers > 0 {
+        let append_pages = if movers > 0 || !moving.is_empty() {
             APPEND_PAGES.min(APPEND_JOBS / (PAGE_TEXELS * lights))
         } else {
             0
@@ -858,11 +902,11 @@ impl VirtualCache {
             (
                 37,
                 // Per texel, a channel per light and the sky's.
-                // Copied out only by diagnostics (`read_pages`).
+                // Copied only by diagnostics (`read_pages`, the checks).
                 empty(
                     "page pool",
                     options.pages as u64 * PAGE_TEXELS as u64 * channels as u64 * 4,
-                    wgpu::BufferUsages::COPY_SRC,
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
                 ),
             ),
             (
@@ -886,7 +930,7 @@ impl VirtualCache {
                 empty(
                     "slot info",
                     options.pages as u64 * 48,
-                    wgpu::BufferUsages::empty(),
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
                 ),
             ),
             (
@@ -914,6 +958,34 @@ impl VirtualCache {
                 ),
             ),
             (66, empty("dispatch args", 36, wgpu::BufferUsages::INDIRECT)),
+            (
+                68,
+                empty("light poses", (POSE_RING * lights) as u64 * 64, copy_dst),
+            ),
+            (
+                69,
+                empty(
+                    "ledger",
+                    options.pages as u64 * moving.len() as u64 * LEDGER_WORDS * 4,
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
+                ),
+            ),
+            (
+                70,
+                storage(
+                    "moving index",
+                    bytemuck::cast_slice(&moving_index),
+                    copy_dst,
+                ),
+            ),
+            (
+                72,
+                empty(
+                    "ledger bound",
+                    options.pages as u64 * moving.len() as u64 * 4,
+                    wgpu::BufferUsages::COPY_SRC | copy_dst,
+                ),
+            ),
             (
                 67,
                 empty(
@@ -1005,6 +1077,9 @@ impl VirtualCache {
             bake_bounds: Vec::new(),
             moved: Vec::new(),
             moved_count: 0,
+            moving: moving.len() as u32,
+            poses: poses.to_vec(),
+            lights_moved: false,
             append_pages,
             alloc_frame: vec![0; options.pages as usize],
             appended: 0.0,
@@ -1204,14 +1279,15 @@ impl VirtualCache {
     /// Writes this frame's uniform and uploads its bake list, texel and sky
     /// sample lists and page table changes. Returns the passes' sizes: table
     /// updates, sun texels, sky face jobs, pages; then the objects moved (the
-    /// stale pass runs if any).
+    /// stale pass runs if any), and 1 if a moving light moved (the ledger
+    /// runs).
     pub(crate) fn upload(
         &mut self,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
         vertical_fov_degrees: f32,
-    ) -> [u32; 5] {
+    ) -> [u32; 6] {
         let mut updates: Vec<[u32; 4]> = Vec::new();
         let dirty = self.table.take_dirty();
         if dirty.len() > UPDATES_CAPACITY {
@@ -1244,6 +1320,14 @@ impl VirtualCache {
         if moved > 0 {
             queue.write_buffer(self.buffer(60), 0, bytemuck::cast_slice(&self.moved));
         }
+        let lit = std::mem::take(&mut self.lights_moved) && self.moving > 0;
+        if self.moving > 0 {
+            queue.write_buffer(
+                self.buffer(68),
+                (self.frame % POSE_RING) as u64 * self.lights as u64 * 64,
+                bytemuck::cast_slice(&self.poses),
+            );
+        }
         let tile = self.options.request_tile;
         let pixel_angle = 2.0 * (vertical_fov_degrees.to_radians() * 0.5).tan() / height as f32;
         let params = VcParams {
@@ -1272,6 +1356,18 @@ impl VirtualCache {
                 self.options.light_ratio as u32,
             ],
             movers: [moved, self.append_pages, self.append_jobs(), VISIBLE_WINDOW],
+            ledger: [
+                self.moving,
+                POSE_RING,
+                self.options.ledger_epsilon.to_bits(),
+                // A safety limit on the ledger's re-bakes: eight times the
+                // frame's budget (a page at least); the top bit tells whether
+                // a moving light moved.
+                (8 * self.budget as u32)
+                    .max(PAGE_TEXELS * self.lights)
+                    .min(0x7fff_ffff)
+                    | (lit as u32) << 31,
+            ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.log.push(CacheStats {
@@ -1287,7 +1383,7 @@ impl VirtualCache {
             timed: self.timer.is_some(),
             evicting: std::mem::take(&mut self.evicting),
             waiting: std::mem::take(&mut self.waiting),
-            moved,
+            moved: moved.max(lit as u32),
             ..Default::default()
         });
         self.moved.clear();
@@ -1297,7 +1393,26 @@ impl VirtualCache {
             6 * self.sky_samples.len() as u32,
             self.bake_list.len() as u32,
             moved,
+            // The ledger runs every frame with moving lights (it re-bakes
+            // pages it set aside once wanted).
+            (self.moving > 0) as u32,
         ]
+    }
+
+    /// Moving lights: light `index` is now `pose` (from the next frame).
+    pub(crate) fn set_light_pose(&mut self, index: usize, pose: crate::LightGpu) {
+        self.poses[index] = pose;
+        self.lights_moved = true;
+    }
+
+    /// Moving lights tracked by the ledger.
+    pub(crate) fn moving_lights(&self) -> u32 {
+        self.moving
+    }
+
+    /// The ledger's ε.
+    pub(crate) fn epsilon(&self) -> f32 {
+        self.options.ledger_epsilon
     }
 
     /// Objects moved since the last frame, each with its index and its old
@@ -1382,7 +1497,7 @@ impl VirtualCache {
     /// Diagnostics: lists slots `slots` (resident) for a bake of every
     /// texel and light, as the frame's plan would, with no table updates
     /// and no sky samples. Returns the bake's counts.
-    pub(crate) fn upload_rebake(&mut self, queue: &wgpu::Queue, slots: &[u32]) -> [u32; 5] {
+    pub(crate) fn upload_rebake(&mut self, queue: &wgpu::Queue, slots: &[u32]) -> [u32; 6] {
         let mut list = Vec::new();
         let mut bounds = Vec::new();
         let mut jobs = Vec::new();
@@ -1418,8 +1533,14 @@ impl VirtualCache {
             self.options.light_ratio as u32,
         ];
         params.movers = [0, self.append_pages, self.append_jobs(), VISIBLE_WINDOW];
+        params.ledger = [
+            self.moving,
+            POSE_RING,
+            self.options.ledger_epsilon.to_bits(),
+            0x7fff_ffff,
+        ];
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        [0, jobs.len() as u32, 0, list.len() as u32, 0]
+        [0, jobs.len() as u32, 0, list.len() as u32, 0, 0]
     }
 
     /// The object-space box of the apexes of page `(m, c, mip, page)`'s
@@ -1611,13 +1732,14 @@ impl VirtualCache {
             .collect();
         // Movers (M9): the stale pass's counters and invalid slots.
         let moved = self.log[frame as usize - 1].moved > 0;
-        let mut mover = [0u32; 8];
+        let mut mover = [0u32; 16];
         let mut invalid: Vec<u32> = Vec::new();
         if moved {
             let at = 4 * tiles + (STATS_BYTES + TIMESTAMP_BYTES) as usize / 4;
-            mover.copy_from_slice(&words[at..at + 8]);
+            mover.copy_from_slice(&words[at..at + 16]);
             let listed = (mover[1] as usize).min(INVALID_CAP as usize);
-            invalid.extend_from_slice(&words[at + 8..at + 8 + listed]);
+            let first = at + MOVER_STATS_BYTES as usize / 4;
+            invalid.extend_from_slice(&words[first..first + listed]);
             if mover[1] as usize > listed {
                 // More than the list holds: every slot's mark is read back.
                 self.overflowed = Some(frame);
@@ -1631,6 +1753,12 @@ impl VirtualCache {
         record.visible_pages = mover[2];
         record.missed = mover[3];
         record.candidates = mover[4];
+        record.ledger_pages = mover[8];
+        record.ledger_texels = mover[9];
+        record.ledger_invalidated = mover[10];
+        record.ledger_checked = mover[11];
+        record.ledger_mixed = mover[12];
+        record.ledger_whole = mover[13];
         record.spent += appended;
         if let Some(timer) = &self.timer
             && record.timed

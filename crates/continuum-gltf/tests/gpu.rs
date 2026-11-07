@@ -533,3 +533,65 @@ fn movers_leave_no_stale_light() {
 fn view_for(r: &Renderer) -> wgpu::TextureView {
     target(r)
 }
+
+/// A moving light through the error ledger (M9 gate 2): as the sun drifts,
+/// no page the cache may show is further from a re-bake than the bound the
+/// ledger certified, nor than ε.
+#[test]
+fn a_drifting_sun_stays_within_the_ledger() {
+    let s = scene(DVec3::ZERO);
+    let sun = |frame: u32| {
+        let a = 0.002 * frame as f64;
+        let toward = DVec3::new(
+            0.5 * a.cos() + 0.4 * a.sin(),
+            -0.4 * a.cos() + 0.5 * a.sin(),
+            0.75,
+        );
+        Light::sun(Vec3::ZERO, toward, 200.0, Vec3::new(2.4, 2.2, 1.9))
+    };
+    let mut r = renderer(
+        kernel(),
+        &s,
+        DVec3::ZERO,
+        RendererOptions {
+            cache_options: CacheOptions {
+                frame_target_ms: 0.0,
+                pages: 1 << 15,
+                ..Default::default()
+            },
+            moving_lights: vec![0],
+            ..Default::default()
+        },
+    );
+    let view = target(&r);
+    for _ in 0..30 {
+        r.render(camera(), &view);
+    }
+    let mut rebaked = 0;
+    for frame in 1..=60 {
+        r.set_light(0, sun(frame));
+        r.render(camera(), &view);
+        if let Some(stats) = r.stats() {
+            rebaked += stats.ledger_texels;
+            eprintln!(
+                "stats frame {}: moved {}, checked {}, whole {}, mixed {}, pages {}, texels {}, invalid {}",
+                stats.frame,
+                stats.moved,
+                stats.ledger_checked,
+                stats.ledger_whole,
+                stats.ledger_mixed,
+                stats.ledger_pages,
+                stats.ledger_texels,
+                stats.ledger_invalidated
+            );
+        }
+        if frame % 10 == 0 {
+            let check = r.verify_ledger(0);
+            eprintln!("frame {frame}: {check:?}");
+            assert!(check.pages > 0, "no pages to check");
+            assert_eq!(check.violations, 0, "a change beyond its bound: {check:?}");
+            assert_eq!(check.over_epsilon, 0, "a change beyond ε: {check:?}");
+        }
+    }
+    eprintln!("texels re-baked by the ledger: {rebaked}");
+}

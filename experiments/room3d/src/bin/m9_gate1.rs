@@ -360,6 +360,7 @@ fn main() -> std::io::Result<()> {
             origin,
             Some(CacheOptions::default()),
             &movable,
+            &[],
         )
     };
     let mut report = String::new();

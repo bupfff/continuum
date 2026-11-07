@@ -42,7 +42,24 @@ fn main() {
             view_formats: &[],
         })
         .create_view(&Default::default());
-    let movable: Vec<usize> = (1..=65).collect();
+    let sun_mode = args.iter().any(|a| a == "sun");
+    let movable: Vec<usize> = if sun_mode {
+        Vec::new()
+    } else {
+        (1..=65).collect()
+    };
+    let center = (field.scene.instances[0].position - origin).as_vec3();
+    let sun_at = |f: usize| {
+        let mut l = lights[0];
+        if let continuum_gpu::Emitter::Rect(mut rect) = l.emitter {
+            let r = Mat3::from_rotation_z((f as f32 / 240.0).to_radians());
+            rect.corner = center + r * (rect.corner - center);
+            rect.edge_u = r * rect.edge_u;
+            rect.edge_v = r * rect.edge_v;
+            l.emitter = continuum_gpu::Emitter::Rect(rect);
+        }
+        l
+    };
     let mut r = InstancedRenderer::with_movers(
         &kernel,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -54,6 +71,7 @@ fn main() {
         origin,
         cache.then(CacheOptions::default),
         &movable,
+        if sun_mode { &[0] } else { &[] },
     );
     let forward = (ground.target - ground.eye).normalize();
     let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
@@ -72,7 +90,10 @@ fn main() {
             vertical_fov_degrees: 50.0,
         };
         let s = Instant::now();
-        if moving {
+        if moving && sun_mode {
+            r.set_light(0, sun_at(f));
+        }
+        if moving && !sun_mode {
             for &m in &movable {
                 let i = &field.scene.instances[m];
                 let a = f as f64 * 0.02 + m as f64;
@@ -114,11 +135,22 @@ fn main() {
         let pixels = r.read_colors();
         let mut image = flatland::img::Image::new(w as usize, h as usize, [0; 3]);
         for (i, p) in pixels.iter().enumerate() {
-            image.set(i % w as usize, i / w as usize, room3d::to_rgb(Vec3::from_array(*p)));
+            image.set(
+                i % w as usize,
+                i / w as usize,
+                room3d::to_rgb(Vec3::from_array(*p)),
+            );
         }
-        let name = format!("m9_dev_{}_{frames}.png", if moving { "moving" } else { "still" });
+        let name = format!(
+            "m9_dev_{}_{frames}.png",
+            if moving { "moving" } else { "still" }
+        );
         image
-            .save(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("out").join(name))
+            .save(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("out")
+                    .join(name),
+            )
             .unwrap();
     }
     let log = r.cache_log();

@@ -120,7 +120,7 @@ pub use vcache::{CacheOptions, CacheStats};
 #[doc(hidden)]
 pub use hierarchy::Hierarchy;
 #[doc(hidden)]
-pub use instanced::{CacheCheck, FrameProfile, InstancedRenderer};
+pub use instanced::{CacheCheck, FrameProfile, InstancedRenderer, LedgerCheck};
 #[doc(hidden)]
 pub use lightmap::{BLOCK, BLOCK_PLANES, hemicube_weights};
 #[doc(hidden)]
@@ -441,6 +441,8 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_args",
     "vc_stale_texels",
     "vc_args_bake",
+    "vc_ledger_reset",
+    "vc_ledger",
 ];
 
 /// The hardware-ray module's entry points (`hw_visibility.wgsl`).
@@ -457,7 +459,7 @@ pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[3, 6, 31, 32, 52, 59]
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
 pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 64,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 64, 68, 69, 70,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51,
@@ -477,6 +479,11 @@ pub(crate) const VC_STALE_TEXELS_BINDINGS: &[u32] = &[
     2, 3, 23, 24, 30, 33, 34, 41, 43, 52, 54, 60, 61, 62, 63, 64, 65, 67,
 ];
 pub(crate) const VC_ARGS_BAKE_BINDINGS: &[u32] = &[41, 64, 66];
+/// Moving lights' ledger (M9 gate 2): fresh records for planned pages, and
+/// the per-frame check.
+pub(crate) const VC_LEDGER_RESET_BINDINGS: &[u32] = &[38, 41, 69, 72];
+pub(crate) const VC_LEDGER_BINDINGS: &[u32] =
+    &[3, 30, 38, 40, 41, 43, 52, 61, 62, 63, 64, 68, 69, 70, 72];
 /// Bindings of `vc_shade_cones`: the cache's shading with pixel cones for
 /// visibility (the scene's hierarchies instead of a visibility buffer).
 pub(crate) const VC_SHADE_CONES_BINDINGS: &[u32] = &[

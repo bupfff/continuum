@@ -562,6 +562,11 @@ fn cone_to_object(c: Cone, m: u32) -> Cone {
 // bits; 0 means 1).
 var<private> prefilter_bins: f32 = 0.0;
 
+// Whether the last light cone traced had no coverage at all, or every bin
+// fully covered (`cone_irradiance_rect`).
+var<private> last_empty: bool = false;
+var<private> last_full: bool = false;
+
 // How a bin's coverage by one mesh combines with other meshes': the maximum
 // (sun cones, whose tiny bins rarely hold two partial occluders), or as
 // independent occluders, 1 − Π(1 − c) (sky cones, whose 11° bins often do).
@@ -1094,6 +1099,12 @@ fn cone_irradiance_rect(on: bool, i: u32, apex: vec3<f32>, normal: vec3<f32>, r:
     for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
     var full = 0u;
     if (stage != 2u) { scene_coverage_if(traced, lc.c, i, &cov, &full); }
+    last_empty = true;
+    last_full = true;
+    for (var b = 0u; b < BINS; b++) {
+        if (cov[b] > 0.0) { last_empty = false; }
+        if (cov[b] < 1.0) { last_full = false; }
+    }
     if (!traced) { return 0.0; }
     if (is_sphere(r)) {
         return sphere_unshadowed(apex, normal, r) * sphere_open_share(lc.c, normal, &cov);
@@ -2239,6 +2250,11 @@ struct VcParams {
     // stale pass may append to the bake, z: 0, w: a page read within this
     // many frames is re-baked when stale (otherwise marked invalid)
     movers: vec4<u32>,
+    // Moving lights (M9 gate 2): x: how many (each with ledger records),
+    // y: frames in the pose ring, z: ε (f32 bits), w: the most texel jobs
+    // the ledger may add to a frame's bake; movers.z's top bit: 1 if a
+    // moving light moved this frame
+    ledger: vec4<u32>,
 };
 
 const PAGE: u32 = 8u;
@@ -2312,7 +2328,9 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // hi; floats as bits).
 @group(0) @binding(61) var<storage, read_write> slot_info: array<vec4<u32>>;
 // Per slot: 1 if its page is stale and was not re-baked (shading treats it
-// as missing until the CPU evicts it, or a bake replaces it).
+// as missing until the CPU evicts it, or a bake replaces it); 2 if the
+// moving lights' ledger set it aside (missing too, but kept: the ledger
+// re-bakes it once a pixel wants it).
 @group(0) @binding(62) var<storage, read_write> slot_stale: array<atomic<u32>>;
 // Per baked page (as `bake_list`): its texels' object-space box (lo, hi).
 @group(0) @binding(63) var<storage, read_write> bake_bounds: array<vec4<f32>>;
@@ -2320,8 +2338,12 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // invalid (listed in `invalid_list`), 2 pages read in the frame before
 // (visible), 3 visible stale pages that did not fit the bake, 4 candidate
 // pages (tested texel by texel), 5 texel jobs appended to the bake, 6 pages
-// with any texel re-baked; 7 unused.
-@group(0) @binding(64) var<storage, read_write> mover_stats: array<atomic<u32>, 8>;
+// with any texel re-baked; 7 unused. Moving lights' ledger: 8 pages with
+// texels re-baked, 9 texel jobs, 10 pages marked invalid, 11 pages read in
+// the frame before, 12 of those with mixed texels, 13 of those passed whole
+// (no mixed texel, within the guard), 14 texel jobs the ledger asked for
+// (its budget's count); 15 unused.
+@group(0) @binding(64) var<storage, read_write> mover_stats: array<atomic<u32>, 16>;
 // Slots marked invalid this frame, for the CPU to evict.
 @group(0) @binding(65) var<storage, read_write> invalid_list: array<u32>;
 // Indirect dispatch sizes (x, y, z each): the texel test, the bake's texel
@@ -2330,6 +2352,24 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // Candidate pages: the slot, and its entry in `bake_list` (NONE: not read
 // in the frame before, so marked invalid if any texel is stale).
 @group(0) @binding(67) var<storage, read_write> candidates: array<vec2<u32>>;
+// Moving lights (M9 gate 2). Each light's pose by frame, in a ring:
+// `light_poses[(frame % ring) * lights + l]`.
+@group(0) @binding(68) var<storage, read> light_poses: array<LightRect>;
+// Per slot and moving light, LEDGER_WORDS words: 0 the frame the page was
+// baked (its version), 1 the smallest slack of its texels that are not
+// mixed: a texel's guard less the light's shift from the version's pose to
+// the pose it was baked at (angle, f32 bits; while the light, seen from the
+// page, stays within it of the version's pose, every such texel holds), 2–3
+// unused, 4 flags (1: a mixed texel, 2: a texel baked after the version),
+// then per texel 16 bits (two per word): the frames since the version it
+// was baked (10 bits), 4 unused, and its state (2 bits: 2 clear, 3 mixed,
+// 0 fixed: facing away, or never shown).
+@group(0) @binding(69) var<storage, read_write> ledger: array<atomic<u32>>;
+// Per light: its index among the moving lights, or NONE.
+@group(0) @binding(70) var<storage, read> moving_index: array<u32>;
+// Per slot and moving light: the certified bound on its texels' ratios, as
+// of the last ledger pass (diagnostics).
+@group(0) @binding(72) var<storage, read_write> ledger_bound: array<f32>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -2346,8 +2386,14 @@ fn vc_find(k: vec3<u32>) -> u32 {
         let e = page_table[i];
         if (e.x == EMPTY_KEY) { return NONE; }
         if (e.x == k.x && e.y == k.y && e.z == k.z) {
-            // A stale page that was not re-baked is missing (M9).
-            if (atomicLoad(&slot_stale[e.w]) != 0u) { return NONE; }
+            // A stale page that was not re-baked is missing (M9). One the
+            // ledger set aside (2) is marked wanted, so the next frame
+            // re-bakes it.
+            let stale = atomicLoad(&slot_stale[e.w]);
+            if (stale != 0u) {
+                if (stale == 2u) { slot_used[e.w] = vc.counts.y; }
+                return NONE;
+            }
             return e.w;
         }
         i = (i + 1u) & mask;
@@ -2539,9 +2585,28 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // whatever the ratio; a ratio of one leaves pixels nearby that face the
     // light unshadowed, as on a convex object's terminator.
     let open = unshadowed_rect(s.apex, s.normal, lights[l]);
-    let ratio = select(select(1.0, clamp(value / open, 0.0, 1.0), open > 0.0), 0.0, !on);
+    var ratio = select(select(1.0, clamp(value / open, 0.0, 1.0), open > 0.0), 0.0, !on);
+    // A cone that nothing covers sees all its light, one wholly covered
+    // none: exactly, whatever the estimators' rounding at the horizon (M9
+    // gate 2: so a ratio cannot drift while its guard holds).
+    if (on && open > 0.0 && last_empty) { ratio = 1.0; }
+    if (on && open > 0.0 && last_full) { ratio = 0.0; }
+    // A moving light's ratio within ε of 0 or 1 is that (M9 gate 2): a
+    // nearly covered cone's estimate wavers by a few thousandths as its bins
+    // realign, which no bound on the light's motion covers. Mixed texels'
+    // bounds add ε for it, so they re-bake whenever the light moves.
+    if (moving_index[l] != NONE) {
+        let snap = bitcast<f32>(vc.ledger.z);
+        if (ratio < snap) { ratio = 0.0; }
+        if (ratio > 1.0 - snap) { ratio = 1.0; }
+    }
     if (listed && t.inside) {
         pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(select(0.0, value, on), ratio, vc.sky.w == 1u);
+    }
+    // A moving light's ledger record for this texel (M9 gate 2).
+    let mj = moving_index[l];
+    if (mj != NONE && listed && t.inside) {
+        ledger_texel(on, t.e.w, mj, l, k, s.apex, s.normal, lights[l], open);
     }
     if (COUNT_WORK) {
         for (var k = 0u; k < 4u; k++) {
@@ -3046,6 +3111,322 @@ fn vc_args_bake() {
     dispatch_args[6] = (bake_page_count() + 63u) / 64u;
     dispatch_args[7] = 1u;
     dispatch_args[8] = 1u;
+}
+
+// --- Moving lights through the error ledger (M9 gate 2). ---
+//
+// Texels keep a light's shadowed share of its unshadowed light; shading
+// multiplies by the unshadowed light where the light is now. When a light
+// moves, a cached ratio is stale by at most what the ledger certifies:
+// - Each texel also traces a guard cone, three times the light's angular
+//   radius around its center. If nothing meets it (clear), the ratio stays
+//   exactly 1 while the light, seen from the texel, stays inside it: while
+//   its shift stays within the guard (twice the light's radius). A texel
+//   facing away from the light by at least twice its radius (fixed) cannot
+//   change while the light's center stays below its horizon. Only texels
+//   whose whole guard lies well above their horizon can be clear.
+// - Otherwise a texel is mixed. Its bound, the band of width δ the light's
+//   edge sweeps (at most 4π δ α + 4π δ² of solid angle) over its unshadowed
+//   light, plus ε for snapping (a moving light's ratios within ε of 0 or 1
+//   are stored as 0 or 1), exceeds ε once the light moves: mixed texels
+//   re-bake, alone and without a guard cone, whenever it does.
+// - Each page keeps its slack: the smallest guard of its clear and fixed
+//   texels, less the light's shift since the page's version. Past a hashed
+//   share (a half to all) of it the page re-bakes whole, with fresh guards.
+// Pages not read in the frame before that need a re-bake are set aside:
+// kept, but shown as missing until a pixel wants one, when the next frame
+// re-bakes it.
+
+const LEDGER_WORDS: u32 = 48u;
+const GUARD: f32 = 3.0;
+const MAX_OFFSET: u32 = 1023u;
+
+fn ledger_base(slot: u32, j: u32) -> u32 {
+    return (slot * vc.ledger.x + j) * LEDGER_WORDS;
+}
+
+struct GuardCone {
+    c: Cone,
+    // The light's angular radius around its center, seen from the apex.
+    alpha: f32,
+};
+
+// The guard cone from `apex` toward light `r`: around the direction to its
+// center, its window the square around a circle of GUARD times the light's
+// angular radius, reaching beyond the scene (geometry behind the light
+// counts too, so a light moving away stays covered).
+fn guard_cone(apex: vec3<f32>, r: LightRect) -> GuardCone {
+    var out: GuardCone;
+    prefilter_bins = light.params.x;
+    let to = light_center(r) - apex;
+    let d = max(length(to), 1e-6);
+    let forward = to / d;
+    var alpha = 0.0;
+    if (is_sphere(r)) {
+        alpha = asin(min(r.edge_u.x / d, 1.0));
+    } else {
+        for (var k = 0u; k < 4u; k++) {
+            let corner = r.corner.xyz + r.edge_u.xyz * f32(k & 1u) + r.edge_v.xyz * f32((k >> 1u) & 1u);
+            alpha = max(alpha, acos(clamp(dot(forward, normalize(corner - apex)), -1.0, 1.0)));
+        }
+    }
+    let wide = min(GUARD * alpha, 1.4);
+    let t = tan(wide);
+    let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(forward.x) > 0.9);
+    let right = normalize(cross(helper, forward));
+    out.c.apex = apex;
+    out.c.right = right;
+    out.c.up = cross(forward, right);
+    out.c.forward = forward;
+    out.c.window = vec4<f32>(-t, -t, t, t);
+    out.c.far_normal = forward;
+    out.c.far_offset = dot(forward, apex) + SKY_FAR;
+    out.c = bound_cone(out.c, forward);
+    out.alpha = alpha;
+    return out;
+}
+
+// How far below `apex`'s horizon (normal `n`) light `r`'s center lies, as
+// an angle (`faces_light` is false while it is positive).
+fn below_horizon(apex: vec3<f32>, n: vec3<f32>, r: LightRect) -> f32 {
+    let to = light_center(r) - apex;
+    let d = max(length(to), 1e-6);
+    var below = -dot(n, to);
+    if (is_sphere(r)) { below -= r.edge_u.x; }
+    return asin(clamp(below / d, -1.0, 1.0));
+}
+
+// Records texel `k` of slot `slot` for moving light `j` (bake pass): its
+// state and frame, and the page's guard, unshadowed light and radius.
+fn ledger_texel(on: bool, slot: u32, j: u32, light_index: u32, k: u32, apex: vec3<f32>, n: vec3<f32>, r: LightRect, open: f32) {
+    let base = ledger_base(slot, j);
+    let version = atomicLoad(&ledger[base]);
+    let offset = min(vc.counts.y - version, MAX_OFFSET);
+    var state = 0u;
+    var guard = 3.4e38;
+    if (on && open > 0.0 && offset != 0u) {
+        // Re-baked alone after the page's version: only mixed texels are
+        // (the ledger re-bakes a page whole once its slack runs out), and
+        // it stays mixed, with no guard cone traced.
+        state = 3u;
+    } else if (on && open > 0.0) {
+        let g = guard_cone(apex, r);
+        var cov: array<f32, 64>;
+        for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
+        var full = 0u;
+        scene_coverage_if(true, g.c, 0u, &cov, &full);
+        var any = false;
+        for (var b = 0u; b < BINS; b++) {
+            if (cov[b] > 0.0) { any = true; }
+        }
+        // Clear if nothing meets the guard; otherwise mixed. (Dark, a guard
+        // wholly covered, is not used: with one mesh covering the whole
+        // guard and the light's own cone wholly covered at the bake, a
+        // re-bake 0.37° later still saw 1% of the light in a development
+        // test, so shadowed texels count as mixed.)
+        state = select(2u, 3u, any);
+        // Clear or dark only with the whole guard above the horizon: near
+        // it, the estimates of grazing light waver as bins realign.
+        if (-below_horizon(apex, n, r) <= max(2.0 * min(GUARD * g.alpha, 1.4), 0.1)) { state = 3u; }
+        guard = min(GUARD * g.alpha, 1.4) - g.alpha;
+    } else if (on) {
+        // Facing away: fixed while the light's center stays below the
+        // horizon, if it lies well below (twice the light's radius);
+        // otherwise mixed, so a page's slack is not a sliver.
+        let margin = below_horizon(apex, n, r);
+        let alpha = guard_cone(apex, r).alpha;
+        if (margin >= 2.0 * alpha) {
+            guard = margin;
+        } else {
+            state = 3u;
+        }
+    }
+    if (state != 3u && guard < 3.0e38) {
+        // Its slack: the guard less the light's shift since the version, as
+        // seen from the apex.
+        var slack = guard;
+        if (offset != 0u) {
+            let point = Box3(apex, apex);
+            let then = light_poses[(version % vc.ledger.y) * arrayLength(&lights) + light_index];
+            slack = guard - light_shift(then, r, point);
+        }
+        atomicMin(&ledger[base + 1u], bitcast<u32>(max(slack, 0.0)));
+    }
+    let shift = 16u * (k % 2u);
+    let word = base + 5u + k / 2u;
+    atomicAnd(&ledger[word], ~(0xffffu << shift));
+    atomicOr(&ledger[word], ((offset << 6u) | state) << shift);
+    // Page flags: 1 a mixed texel, 2 a texel baked after the version.
+    let flags = select(0u, 1u, state == 3u) | select(0u, 2u, offset != 0u);
+    if (flags != 0u) { atomicOr(&ledger[base + 4u], flags); }
+}
+
+// Resets slot `slot`'s records for moving light `j`: version `frame`, no
+// texel recorded.
+fn ledger_reset(slot: u32, j: u32) {
+    let base = ledger_base(slot, j);
+    atomicStore(&ledger[base], vc.counts.y);
+    atomicStore(&ledger[base + 1u], 0x7f7fffffu);
+    atomicStore(&ledger[base + 2u], 0x7f7fffffu);
+    atomicStore(&ledger[base + 3u], 0u);
+    atomicStore(&ledger[base + 4u], 0u);
+    for (var w = 5u; w < LEDGER_WORDS; w++) { atomicStore(&ledger[base + w], 0u); }
+    ledger_bound[slot * vc.ledger.x + j] = 0.0;
+}
+
+// One thread per page in the CPU's plan: fresh ledger records for it.
+@compute @workgroup_size(64)
+fn vc_ledger_reset(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = gid.x;
+    if (p >= vc.jobs.y) { return; }
+    let slot = bake_list[p].w;
+    for (var j = 0u; j < vc.ledger.x; j++) { ledger_reset(slot, j); }
+}
+
+// The largest angle a point of light pose `a` moves to reach pose `b`, seen
+// from anywhere in box `page`: twice the arcsine of half the largest
+// displacement over the distance to the light (4: unbounded).
+fn light_shift(a: LightRect, b: LightRect, page: Box3) -> f32 {
+    var moved = 0.0;
+    if (is_sphere(a)) {
+        moved = length(b.corner.xyz - a.corner.xyz) + abs(b.edge_u.x - a.edge_u.x);
+    } else {
+        for (var k = 0u; k < 4u; k++) {
+            let u = f32(k & 1u);
+            let v = f32((k >> 1u) & 1u);
+            let pa = a.corner.xyz + a.edge_u.xyz * u + a.edge_v.xyz * v;
+            let pb = b.corner.xyz + b.edge_u.xyz * u + b.edge_v.xyz * v;
+            moved = max(moved, length(pb - pa));
+        }
+    }
+    if (moved <= 0.0) { return 0.0; }
+    let la = light_box(a);
+    let lb = light_box(b);
+    let span = Box3(min(la.lo, lb.lo), max(la.hi, lb.hi));
+    let gap = max(vec3<f32>(0.0), max(page.lo - span.hi, span.lo - page.hi));
+    let d = length(gap);
+    if (moved >= 2.0 * d) { return 4.0; }
+    return 2.0 * asin(moved / (2.0 * d)) * 1.0001;
+}
+
+// One thread per slot (rows of 65,535 workgroups): checks each moving
+// light's ledger. A page read in the frame before re-bakes its texels whose
+// bound exceeds ε (the whole page past its guard or its ring); another page
+// with such a texel is marked invalid.
+@compute @workgroup_size(64)
+fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let s = gid.x + gid.y * 65535u * 64u;
+    if (s >= arrayLength(&slot_stale)) { return; }
+    let info = slot_info[3u * s];
+    let set_aside = atomicLoad(&slot_stale[s]);
+    if (info.w == 0u || set_aside == 1u) { return; }
+    let visible = slot_used[s] + 1u >= vc.counts.y;
+    // A page set aside is re-baked whole once wanted; nothing else changes
+    // unless a light moved this frame.
+    let lit = vc.ledger.w >> 31u == 1u;
+    if (set_aside == 2u && !visible) { return; }
+    if (set_aside == 0u && !lit) { return; }
+    if (visible) { atomicAdd(&mover_stats[11], 1u); }
+    let lo = bitcast<vec3<f32>>(slot_info[3u * s + 1u].xyz);
+    let hi = bitcast<vec3<f32>>(slot_info[3u * s + 2u].xyz);
+    let page = world_box(info.x, lo, hi);
+    let ring = vc.ledger.y;
+    let lights_n = arrayLength(&lights);
+    var entry = NONE;
+    var counted = false;
+    for (var l = 0u; l < lights_n; l++) {
+        let j = moving_index[l];
+        if (j == NONE) { continue; }
+        let base = ledger_base(s, j);
+        let version = atomicLoad(&ledger[base]);
+        if (version == 0u) { continue; }
+        let now = lights[l];
+        let slack = bitcast<f32>(atomicLoad(&ledger[base + 1u]));
+        let page_flags = atomicLoad(&ledger[base + 4u]);
+        let mixed_page = (page_flags & 1u) != 0u;
+        let age = vc.counts.y - version;
+        var whole = age + 1u >= min(ring, MAX_OFFSET) || set_aside == 2u;
+        var stale = array<u32, 3>(0u, 0u, 0u);
+        var count = 0u;
+        var bound = 0.0;
+        if (!whole) {
+            let d0 = light_shift(light_poses[(version % ring) * lights_n + l], now, page);
+            // Within the slack every texel that is not mixed holds; past it,
+            // the page re-bakes whole, with fresh guards. Pages re-bake at a
+            // share of their slack between a half and all of it, hashed, so
+            // pages baked together do not all re-bake in one frame (early is
+            // always allowed).
+            let share = 0.5 + 0.5 * f32(vc_hash(vec3<u32>(s, version, 0x5bd1e995u)) & 0xffffu) / 65535.0;
+            if (d0 > slack * share) {
+                whole = true;
+            } else if (!mixed_page) {
+                if (visible) { atomicAdd(&mover_stats[13], 1u); }
+                ledger_bound[s * vc.ledger.x + j] = 0.0;
+                continue;
+            } else {
+                if (visible) { atomicAdd(&mover_stats[12], 1u); }
+                // Mixed texels: their bound, the band the light's edge swept
+                // over the unshadowed light plus ε for snapping, exceeds ε
+                // once the light has moved (this pass runs only then), so
+                // they re-bake.
+                for (var k = 0u; k < PAGE_TEXELS; k++) {
+                    let half = (atomicLoad(&ledger[base + 5u + k / 2u]) >> (16u * (k % 2u))) & 0xffffu;
+                    if ((half & 3u) == 3u) {
+                        stale[k / 32u] |= 1u << (k % 32u);
+                        count++;
+                    }
+                }
+                whole = count == PAGE_TEXELS;
+            }
+        }
+        if (whole) { count = PAGE_TEXELS; }
+        ledger_bound[s * vc.ledger.x + j] = bound;
+        if (count == 0u) { continue; }
+        if (!visible) {
+            // Set aside, kept: re-baked once a pixel wants it.
+            if (atomicExchange(&slot_stale[s], 2u) == 0u) { atomicAdd(&mover_stats[10], 1u); }
+            return;
+        }
+        if (entry == NONE) {
+            entry = append_page(s, info.xyz, lo, hi);
+            if (entry == NONE) {
+                atomicStore(&slot_stale[s], 2u);
+                atomicAdd(&mover_stats[10], 1u);
+                return;
+            }
+        }
+        // Within the safety limit on the ledger's work; past it, the page
+        // is set aside (its pixels fall back for a frame).
+        var first = NONE;
+        if (atomicAdd(&mover_stats[14], count) + count <= (vc.ledger.w & 0x7fffffffu)) {
+            first = append_jobs(count);
+        }
+        if (first == NONE) {
+            atomicAdd(&mover_stats[10], 1u);
+            bake_bounds[2u * entry].w = 1.0;
+            atomicStore(&slot_stale[s], 2u);
+            return;
+        }
+        if (whole) {
+            ledger_reset(s, j);
+            for (var k = 0u; k < PAGE_TEXELS; k++) {
+                bake_jobs[first + k] = vec2<u32>(entry, k | (l << 8u));
+            }
+        } else {
+            var n = 0u;
+            for (var k = 0u; k < PAGE_TEXELS; k++) {
+                if ((stale[k / 32u] & (1u << (k % 32u))) != 0u) {
+                    bake_jobs[first + n] = vec2<u32>(entry, k | (l << 8u));
+                    n++;
+                }
+            }
+        }
+        atomicAdd(&mover_stats[9], count);
+        if (!counted) {
+            counted = true;
+            atomicAdd(&mover_stats[8], 1u);
+        }
+    }
 }
 
 var<workgroup> fallback_count: atomic<u32>;

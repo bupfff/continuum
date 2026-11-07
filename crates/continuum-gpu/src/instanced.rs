@@ -14,9 +14,10 @@ use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_VISIBILITY_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
     MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
-    VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_STALE_BINDINGS,
-    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS,
+    VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS,
+    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
+    uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -46,35 +47,50 @@ enum Dispatch {
 
 impl Cache {
     /// The bake passes for `counts` (table updates, sun texels, sky face
-    /// jobs, pages; then objects moved), skipping empty ones, timed on the
-    /// GPU where the device has timestamps: the first pass that runs writes
-    /// query 0, the last query 1. With movers moved, the stale pass runs
-    /// after the table updates and sizes the bake and the fill.
-    fn encode_bake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 5]) {
+    /// jobs, pages; then objects moved, and 1 with moving lights), skipping
+    /// empty ones, timed on the GPU where the device has timestamps: the
+    /// first pass that runs writes the first query, the last the second.
+    /// With movers moved, the stale passes run after the table updates;
+    /// with moving lights, the ledger does; either sizes the bake and the
+    /// fill.
+    fn encode_bake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 6]) {
         let groups = |n: u32| Dispatch::Groups(n.div_ceil(64), 1);
+        let slots = |n: u32| {
+            let g = n.div_ceil(64);
+            Dispatch::Groups(g.min(65_535), g.div_ceil(65_535))
+        };
         let mut list: Vec<(&wgpu::ComputePipeline, &wgpu::BindGroup, Dispatch)> = Vec::new();
         if counts[0] > 0 {
             list.push((&self.passes[0], &self.binds[0], groups(counts[0])));
         }
-        let moved = counts[4] > 0 && self.movers.is_some();
-        if let (true, Some((passes, binds))) = (moved, &self.movers) {
-            let g = self.state.pages().div_ceil(64);
-            list.push((
-                &passes[0],
-                &binds[0],
-                Dispatch::Groups(g.min(65_535), g.div_ceil(65_535)),
-            ));
-            list.push((&passes[1], &binds[1], Dispatch::Groups(1, 1)));
-            list.push((&passes[2], &binds[2], Dispatch::Indirect(0)));
-            list.push((&passes[3], &binds[3], Dispatch::Groups(1, 1)));
-            list.push((&self.passes[1], &self.binds[1], Dispatch::Indirect(12)));
+        let moved = counts[4] > 0 && self.has_movers;
+        let lit = counts[5] > 0 && self.moving_lights;
+        let indirect = moved || lit;
+        if let Some((passes, binds)) = &self.movers {
+            if self.moving_lights && counts[3] > 0 {
+                list.push((&passes[4], &binds[4], groups(counts[3])));
+            }
+            if moved {
+                list.push((&passes[0], &binds[0], slots(self.state.pages())));
+                list.push((&passes[1], &binds[1], Dispatch::Groups(1, 1)));
+                list.push((&passes[2], &binds[2], Dispatch::Indirect(0)));
+            }
+            if lit {
+                list.push((&passes[5], &binds[5], slots(self.state.pages())));
+            }
+            if indirect {
+                list.push((&passes[3], &binds[3], Dispatch::Groups(1, 1)));
+                list.push((&self.passes[1], &self.binds[1], Dispatch::Indirect(12)));
+            }
+        }
+        if indirect {
         } else if counts[1] > 0 {
             list.push((&self.passes[1], &self.binds[1], groups(counts[1])));
         }
         if counts[2] > 0 {
             list.push((&self.passes[2], &self.binds[2], groups(counts[2])));
         }
-        if moved {
+        if indirect {
             list.push((&self.passes[3], &self.binds[3], Dispatch::Indirect(24)));
         } else if counts[3] > 0 {
             list.push((&self.passes[3], &self.binds[3], groups(counts[3])));
@@ -121,9 +137,13 @@ struct Cache {
     state: VirtualCache,
     passes: [wgpu::ComputePipeline; 4],
     binds: Vec<wgpu::BindGroup>,
-    /// With movers: the stale passes (pages, then candidates' texels), each
-    /// followed by a dispatch-size pass, and their bind groups.
-    movers: Option<([wgpu::ComputePipeline; 4], Vec<wgpu::BindGroup>)>,
+    /// With movers or moving lights: the stale passes (pages, then
+    /// candidates' texels), each followed by a dispatch-size pass, then the
+    /// ledger's reset and check passes, and their bind groups.
+    movers: Option<([wgpu::ComputePipeline; 6], Vec<wgpu::BindGroup>)>,
+    /// Movers in the scene, moving lights tracked.
+    has_movers: bool,
+    moving_lights: bool,
 }
 
 /// What [`InstancedRenderer::verify_cache`] found: resident pages that
@@ -139,6 +159,24 @@ pub struct CacheCheck {
     pub differing: u64,
     /// The largest change.
     pub largest: f32,
+}
+
+/// What [`InstancedRenderer::verify_ledger`] found for a moving light.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LedgerCheck {
+    /// Pages shading may read.
+    pub pages: u32,
+    /// Pages whose largest change of a texel's ratio exceeded the certified
+    /// bound (plus 1e-5 for rounding): soundness violations.
+    pub violations: u32,
+    /// Pages with a change above ε.
+    pub over_epsilon: u32,
+    /// Pages with any change at all.
+    pub changed: u32,
+    /// The largest change.
+    pub largest_change: f32,
+    /// The largest certified bound.
+    pub largest_bound: f32,
 }
 
 /// Objects that may move (M9): where their subtree lives in the object
@@ -218,6 +256,8 @@ pub struct InstancedRenderer {
     /// pixel; 1/16 for references at 16×16 samples per pixel).
     footprint: f32,
     movers: Option<Movers>,
+    /// Lights that may move (`set_light`).
+    moving: Vec<usize>,
 }
 
 fn bind_group(
@@ -291,6 +331,7 @@ impl InstancedRenderer {
             origin,
             None,
             &[],
+            &[],
         )
     }
 
@@ -321,6 +362,7 @@ impl InstancedRenderer {
             origin,
             Some(options),
             &[],
+            &[],
         )
     }
 
@@ -347,6 +389,7 @@ impl InstancedRenderer {
             scene,
             origin,
             None,
+            &[],
             &[],
         )
     }
@@ -377,6 +420,7 @@ impl InstancedRenderer {
             origin,
             Some(options),
             &[],
+            &[],
         )
     }
 
@@ -397,6 +441,7 @@ impl InstancedRenderer {
         origin: DVec3,
         cache: Option<CacheOptions>,
         movable: &[usize],
+        moving_lights: &[usize],
     ) -> Self {
         Self::build(
             kernel,
@@ -409,7 +454,41 @@ impl InstancedRenderer {
             origin,
             cache,
             movable,
+            moving_lights,
         )
+    }
+
+    /// Moves (and re-colors) light `index`, one of the moving lights given
+    /// at construction, from the next frame: per pixel, the next frame is
+    /// exact; with the cache, the ledger re-bakes what may be more than
+    /// `CacheOptions::ledger_epsilon` off (M9 gate 2). Spots cannot move.
+    pub fn set_light(&mut self, index: usize, light: Light) {
+        assert!(
+            self.moving.contains(&index),
+            "light {index} is not a moving light"
+        );
+        assert!(
+            !matches!(
+                light.emitter,
+                crate::Emitter::Sphere(crate::SphereLight { spot: Some(_), .. })
+            ),
+            "moving spots are not supported"
+        );
+        let gpu = LightGpu::from(&light);
+        let buffer = &self
+            .scene
+            .iter()
+            .find(|(b, _)| *b == 52)
+            .expect("lights buffer")
+            .1;
+        self.queue.write_buffer(
+            buffer,
+            (index * std::mem::size_of::<LightGpu>()) as u64,
+            bytemuck::bytes_of(&gpu),
+        );
+        if let Some(cache) = &mut self.cache {
+            cache.state.set_light_pose(index, gpu);
+        }
     }
 
     /// Moves movable instance `instance` (given at construction) to
@@ -556,6 +635,7 @@ impl InstancedRenderer {
         origin: DVec3,
         cache: Option<CacheOptions>,
         movable: &[usize],
+        moving_lights: &[usize],
     ) -> Self {
         let device = kernel.device.clone();
         let scale = scale.max(1);
@@ -662,18 +742,24 @@ impl InstancedRenderer {
                 width,
                 height,
                 movable.len() as u32,
+                moving_lights,
+                &lights.iter().map(LightGpu::from).collect::<Vec<_>>(),
             ),
-            movers: (!movable.is_empty()).then(|| {
+            movers: (!movable.is_empty() || !moving_lights.is_empty()).then(|| {
                 (
                     [
                         kernel.entry("vc_stale"),
                         kernel.entry("vc_args"),
                         kernel.entry("vc_stale_texels"),
                         kernel.entry("vc_args_bake"),
+                        kernel.entry("vc_ledger_reset"),
+                        kernel.entry("vc_ledger"),
                     ],
                     Vec::new(),
                 )
             }),
+            has_movers: !movable.is_empty(),
+            moving_lights: !moving_lights.is_empty(),
             passes: [
                 kernel.entry("vc_update"),
                 kernel.entry("vc_bake"),
@@ -714,6 +800,7 @@ impl InstancedRenderer {
             pixel_offset: [0.0; 2],
             footprint: 1.0,
             movers,
+            moving: moving_lights.to_vec(),
         };
         renderer.targets();
         renderer.bake_self_masks(kernel);
@@ -822,6 +909,8 @@ impl InstancedRenderer {
                         VC_ARGS_BINDINGS,
                         VC_STALE_TEXELS_BINDINGS,
                         VC_ARGS_BAKE_BINDINGS,
+                        VC_LEDGER_RESET_BINDINGS,
+                        VC_LEDGER_BINDINGS,
                     ])
                     .map(|(pipeline, keep)| bind_group(device, pipeline, &all, &[], None, keep))
                     .collect()
@@ -1132,6 +1221,124 @@ impl InstancedRenderer {
                     check.differing += 1;
                     check.largest = check.largest.max((before[k] - after[k]).abs());
                 }
+            }
+        }
+        check
+    }
+
+    /// Diagnostics (M9 gate 2): for moving light `light`, re-bakes every
+    /// page shading may read from scratch and compares each page's largest
+    /// change of a texel's ratio with the bound the ledger certified for it.
+    /// Restores the cache afterwards, so later frames run as they would
+    /// have. Waits for the GPU.
+    pub fn verify_ledger(&mut self, light: usize) -> LedgerCheck {
+        let mut check = LedgerCheck::default();
+        let Some(j) = self.moving.iter().position(|&l| l == light) else {
+            return check;
+        };
+        let Some(cache) = &mut self.cache else {
+            return check;
+        };
+        let device = self.device.clone();
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        // Kept on the GPU, restored at the end.
+        let keep: Vec<(u32, wgpu::Buffer)> = [37u32, 40, 61, 62, 69, 72]
+            .iter()
+            .map(|&b| {
+                let source = cache.state.buffer(b);
+                let copy = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ledger check copy"),
+                    size: source.size(),
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let mut e = device.create_command_encoder(&Default::default());
+                e.copy_buffer_to_buffer(source, 0, &copy, 0, None);
+                self.queue.submit([e.finish()]);
+                (b, copy)
+            })
+            .collect();
+        let before = cache.state.read_buffer(&device, 37);
+        let marks = cache.state.read_buffer(&device, 62);
+        let bounds = cache.state.read_buffer(&device, 72);
+        let records = cache.state.read_buffer(&device, 69);
+        let pages = cache.state.readable_pages(bytemuck::cast_slice(&marks));
+        let chunk = cache.state.rebake_chunk();
+        for part in pages.chunks(chunk) {
+            let counts = cache.state.upload_rebake(&self.queue, part);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            cache.state.encode_clear(&mut encoder);
+            cache.encode_bake(&mut encoder, counts);
+            self.queue.submit([encoder.finish()]);
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("GPU poll failed");
+        }
+        let after = cache.state.read_buffer(&device, 37);
+        let mut e = device.create_command_encoder(&Default::default());
+        for (b, copy) in &keep {
+            e.copy_buffer_to_buffer(copy, 0, cache.state.buffer(*b), 0, None);
+        }
+        self.queue.submit([e.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let (before, after): (&[f32], &[f32]) =
+            (bytemuck::cast_slice(&before), bytemuck::cast_slice(&after));
+        let bounds: &[f32] = bytemuck::cast_slice(&bounds);
+        let channels = self.lights + 1;
+        let moving = cache.state.moving_lights() as usize;
+        let epsilon = cache.state.epsilon();
+        for &slot in &pages {
+            let first = slot as usize * PAGE_TEXELS as usize;
+            let mut change = 0.0f32;
+            for k in first..first + PAGE_TEXELS as usize {
+                let at = k * channels + light;
+                change = change.max((before[at] - after[at]).abs());
+            }
+            let bound = bounds[slot as usize * moving + j];
+            check.pages += 1;
+            check.largest_change = check.largest_change.max(change);
+            check.largest_bound = check.largest_bound.max(bound);
+            if change > bound + 1e-5 {
+                check.violations += 1;
+                if std::env::var_os("CONTINUUM_LEDGER_DEBUG").is_some()
+                    && (check.violations <= 3 || change > 0.01)
+                {
+                    let words: &[u32] = bytemuck::cast_slice(&records);
+                    let base = (slot as usize * moving + j) * 48;
+                    let r = &words[base..base + 48];
+                    eprintln!(
+                        "slot {slot}: version {}, guard {:e}, u_min {:e}, alpha {:e}, flags {}, bound {bound}",
+                        r[0],
+                        f32::from_bits(r[1]),
+                        f32::from_bits(r[2]),
+                        f32::from_bits(r[3]),
+                        r[4]
+                    );
+                    for k in 0..PAGE_TEXELS as usize {
+                        let at = (first + k) * channels + light;
+                        if before[at] != after[at] {
+                            let half = (r[5 + k / 2] >> (16 * (k % 2))) & 0xffff;
+                            eprintln!(
+                                "  texel {k}: state {}, code {}, offset {}: {} -> {}",
+                                half & 3,
+                                (half >> 2) & 15,
+                                half >> 6,
+                                before[at],
+                                after[at]
+                            );
+                        }
+                    }
+                }
+            }
+            if change > epsilon {
+                check.over_epsilon += 1;
+            }
+            if change > 0.0 {
+                check.changed += 1;
             }
         }
         check
