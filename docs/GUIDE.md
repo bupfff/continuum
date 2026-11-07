@@ -37,8 +37,11 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 - **Moving objects.** Instances listed in `RendererOptions::movable` move
   rigidly (`Renderer::set_transform`; they keep their scale). The cache
   re-bakes, within the frame, exactly what a move can change and never
-  shows stale light (M9 gate 1). With the cache, movers and a sky do not
-  mix yet.
+  shows stale light (M9 gate 1). With a sky, experimental: sky light near
+  movers stays within ε of a re-bake, but nearly every page in view
+  re-bakes its sky while objects move, about 4× the frame time in a dense
+  field (M9 gate 3). Movers' own pages show a guessed sky (as fallback)
+  until about 30 frames after they move.
 - **Moving lights, experimental.** Lights listed in
   `RendererOptions::moving_lights` move (`Renderer::set_light`; not
   spots). The cache's ledger never shows stale light (M9 gate 2). But

@@ -19,6 +19,9 @@ renders:
   the frame they move, with no stale light (M9 gate 1);
 - moving lights through an error ledger, experimental: never stale, but
   with heavy fallback while a light moves (M9 gate 2, failed on that);
+- moving objects under a sky, experimental: never stale, but slow, since
+  nearly every page re-bakes its sky while objects move (M9 gate 3,
+  failed on that);
 - one bounce of light in the cache, 1.79% from Cycles with one bounce
   (M10 gate 1).
 

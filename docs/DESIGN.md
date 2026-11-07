@@ -195,8 +195,15 @@ Against the goal in §1, honestly:
     whenever it moves; pages keep a slack and re-bake whole past it.
   - What it certified was exactness: the ε went into snapping estimator
     noise, and no texel was kept with a non-zero bound. Bounded deferral
-    within ε (the invention proper) is still unshown in 3D. Movers under a
-    sky, and movers with moving lights, are not supported yet.
+    within ε (the invention proper) is still unshown in 3D. Movers with
+    moving lights are not supported yet.
+- **Movers under a sky** (M9 G3, failed on work and speed). The cache now
+  accepts movers with a sky. Sky charges are a telescoping bound (each
+  mover's sphere's solid angle at the page's bake plus now); a page read
+  past ε re-bakes its sky in the same frame. It was sound in 30 checks, but
+  99.7% of pages read re-baked their sky every moving frame: 53–58 ms
+  against 14.7 ms still, with 30% fallback. The per-page sphere bound is
+  about 5,000× loose; texel-level charges with the cosine are next.
 - **Several colored lights** (M5 G6, passed): a list of RGB rect lights per
   pixel and in the cache, flights at 14–15 ms with three lights. A cache
   texel stores light per unit radiance, so re-coloring a light bakes nothing
@@ -313,7 +320,11 @@ user's order:
    limit; `docs/results/m9-gate4.md`) kept soundness and cut fallback to
    about 5%, but costs 1.6× at a real sun's speed: mixed texels re-bake
    every frame the light moves, as their bound (with ε for snapping, 7.5×
-   loose) always exceeds ε. A tight bound for them is next.
+   loose) always exceeds ε. A tight bound for them is next. **Movers under
+   a sky tried (2026-11-07), M9 G3 failed on work and speed**
+   (`docs/results/m9-gate3.md`): sound, but the per-page sphere bound
+   re-bakes 99.7% of pages' sky each moving frame (3.6–4.0× the still
+   flights).
 3. **Tag v0.1.** **Done** (2026-11-07): `v0.1.0` on commit `41c0df2`, CI
    green on Linux and Windows.
 4. **Bounce light in the view cache** (M10). **Tried (2026-11-07), M10 G1
@@ -472,7 +483,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M6 content (v0.1 item 3) | glTF import, base-color textures, automatic charts | G1 glTF import with automatic charts and textures (**failed** on criterion 1 only: the `.glb` round trip is 0.024% from the original per pixel against 0.01%, all in one edge pixel flipped by f32 rounding of instance transforms; the imported textured scene is 0.43% from Cycles with textures at 16×16 per pixel, its automatic charts give 2.37% cached vs per-pixel against the hand-made charts' 1.52%, warm frame 1.53 ms at 720p; real assets reported: a 28k-triangle textured pack warms in 1,317 frames at 1.43 ms, `docs/results/m6-gate1.md`) |
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | G1 pixel cones for primary visibility (**failed** all three: against the 16×16 reference the textured scene is 7.15% vs one ray's 7.11%, the field from 150 m 17.91% vs 23.49% (0.76× against ≤ 0.35×), from standing height 34.61% vs 12.49% with a banding artifact on the 2.1 km ground triangles; half a pixel's turn changes the image 1.67× as much as the reference's (≤ 1.5×); warm cached frames 105 ms on the textured scene (≤ 16.7 ms), per-pixel frames 10–87 s on the field; the textured scene's error is texture filtering, not silhouettes, `docs/results/m7-gate1.md`); G2 texture filtering for the area integral (**passed**: a box filter over the pixel's footprint from ray differentials, 3.99% from the 16×16 reference against 7.11%, warm frame 1.03×, `docs/results/m7-gate2.md`); G3 silhouette rays (**failed**: field from 150 m 0.49× the error but 13× the frame; textured scene 0.91×, 1.66×, `docs/results/m7-gate3.md`); no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 (**done**: `v0.1.0`, 2026-11-07; the cloud benchmark is still open) |
-| M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G4 the ledger without its work limit (**failed** on speed: sound in 30 checks; at a real sun's speed fallback 4.9–5.0% but means 24.7–25.3 ms against 15.8 ms still, mixed texels re-baked every frame, `docs/results/m9-gate4.md`); G3 movers under a sky; a light switch with no lag |
+| M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G4 the ledger without its work limit (**failed** on speed: sound in 30 checks; at a real sun's speed fallback 4.9–5.0% but means 24.7–25.3 ms against 15.8 ms still, mixed texels re-baked every frame, `docs/results/m9-gate4.md`); G3 movers under a sky (**failed** on work and speed: sound in 30 checks, but 99.73% of pages read re-baked their sky every moving frame; means 53.0–58.3 ms against 14.66 ms still; fallback 30%, 21–22% even still from slow sky streaming; the per-page sphere bound about 5,000× loose, `docs/results/m9-gate3.md`); a light switch with no lag |
 | M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`) |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
