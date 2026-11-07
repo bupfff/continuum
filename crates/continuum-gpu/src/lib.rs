@@ -102,6 +102,7 @@ struct Frame<'a> {
     hierarchy: Hierarchy,
 }
 
+mod cutout;
 mod hierarchy;
 mod hw;
 mod instanced;
@@ -110,6 +111,7 @@ mod live;
 mod renderer;
 mod vcache;
 
+pub use cutout::cut_out;
 pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 pub use renderer::{Renderer, RendererOptions};
@@ -2020,9 +2022,41 @@ pub struct InstancedScene {
     /// metallic in blue), multiplying its material's factors. Ignored for a
     /// geometry without a material.
     pub geometry_metallic_roughness: Vec<Option<u32>>,
+    /// Each geometry's alpha cutoff, if any (empty: none; M10 gate 6): where
+    /// its base color texture's alpha is below it, the geometry is cut
+    /// away, as geometry, before upload ([`cut_out`]), so camera rays,
+    /// shadows, sky, the cache and bounce light all see the cut. Ignored
+    /// for a geometry without a texture.
+    pub geometry_alpha_cutoff: Vec<Option<f32>>,
 }
 
 impl InstancedScene {
+    /// This scene with its alpha cutouts made geometry ([`cut_out`]):
+    /// borrowed when it has none.
+    pub fn with_cutouts(&self) -> std::borrow::Cow<'_, InstancedScene> {
+        let masked: Vec<(usize, f32, u32)> = (0..self.geometries.len())
+            .filter_map(|g| {
+                let cutoff = self.geometry_alpha_cutoff.get(g).copied().flatten()?;
+                let texture = self.geometry_textures.get(g).copied().flatten()?;
+                let s = &self.geometries[g];
+                (s.tex.len() == s.triangles.len()).then_some((g, cutoff, texture))
+            })
+            .collect();
+        if masked.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut scene = self.clone();
+        for (g, cutoff, texture) in masked {
+            scene.geometries[g] = cut_out(
+                &self.geometries[g],
+                &self.textures[texture as usize],
+                cutoff,
+            );
+        }
+        scene.geometry_alpha_cutoff.clear();
+        std::borrow::Cow::Owned(scene)
+    }
+
     /// The textures read linearly (normal maps and metallic-roughness
     /// textures), each once, in order.
     pub(crate) fn linear_textures(&self) -> Vec<u32> {

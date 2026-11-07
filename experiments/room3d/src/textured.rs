@@ -87,6 +87,69 @@ fn normal_texture(f: impl Fn(f32, f32) -> Vec3) -> Texture {
     }
 }
 
+/// A texture from a function of (u, v) in [0, 1)² giving linear RGB and
+/// alpha (M10 gate 6).
+fn texture_alpha(f: impl Fn(f32, f32) -> (Vec3, f32)) -> Texture {
+    let encode = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let s = if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round() as u8
+    };
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (c, a) = f(
+                (x as f32 + 0.5) / SIZE as f32,
+                (y as f32 + 0.5) / SIZE as f32,
+            );
+            rgba.extend([
+                encode(c.x),
+                encode(c.y),
+                encode(c.z),
+                (a.clamp(0.0, 1.0) * 255.0).round() as u8,
+            ]);
+        }
+    }
+    Texture {
+        width: SIZE,
+        height: SIZE,
+        rgba,
+    }
+}
+
+/// Vertical double-sided cards through the origin, each `width` wide and
+/// `height` tall, at the given angles about the vertical (the back faces 1 mm
+/// behind the front ones: exactly back-to-back faces make the cache's bakes
+/// about 100× slower, cause not yet established);
+/// texture coordinates over the whole texture times `repeat`, v down from
+/// the top (M10 gate 6).
+fn cards(angles: &[f32], width: f32, height: f32, repeat: Vec2) -> Surface {
+    let mut tris = Vec::new();
+    let mut tex = Vec::new();
+    for &a in angles {
+        let d = Vec3::new(a.cos(), a.sin(), 0.0) * (width * 0.5);
+        let p = [-d, d, d + Vec3::Z * height, -d + Vec3::Z * height];
+        let uv = [
+            Vec2::new(0.0, repeat.y),
+            Vec2::new(repeat.x, repeat.y),
+            Vec2::new(repeat.x, 0.0),
+            Vec2::new(0.0, 0.0),
+        ];
+        let windings = [(0, 1, 2), (0, 2, 3), (0, 2, 1), (0, 3, 2)];
+        let normal = (p[1] - p[0]).cross(p[2] - p[0]).normalize();
+        for (k, &(a, b, c)) in windings.iter().enumerate() {
+            let shift = if k >= 2 { -normal * 0.001 } else { Vec3::ZERO };
+            tris.push([p[a] + shift, p[b] + shift, p[c] + shift]);
+            tex.push([uv[a], uv[b], uv[c]]);
+        }
+    }
+    Surface::from_mesh(tris, None, Some(tex))
+}
+
 /// A beveled tile's tangent-space normal at (fu, fv) in [0, 1)² within it
 /// (v down the image): flat in the mortar (half-widths `mu`, `mv` from the
 /// edges) and inside; within `bevel` of the mortar, tilted 30° toward the
@@ -220,6 +283,8 @@ impl Textured {
             geometry_materials: Vec::new(),
             geometry_emission: Vec::new(),
             geometry_normal_maps: Vec::new(),
+            geometry_metallic_roughness: Vec::new(),
+            geometry_alpha_cutoff: Vec::new(),
         };
         // The camera stands at 1.5 m looking along +y, slightly down; the sun
         // is 30° up behind and to the left, 1 km away, 0.5° across.
@@ -277,6 +342,90 @@ impl Textured {
                 roughness: 0.4,
             }),
         ];
+        self
+    }
+
+    /// M10 gate 6's foliage: three shrubs of crossed double-sided leaf
+    /// cards and a lattice fence panel, alpha-masked at 0.5.
+    pub fn with_foliage(mut self) -> Textured {
+        // Leaves: pointed ellipses in a cluster, on a transparent ground of
+        // the same green (so filtering at the cut adds no dark fringe).
+        let mut rng = Pcg32::new(41, 7);
+        let leaves: Vec<(Vec2, f32, Vec2)> = (0..60)
+            .map(|_| {
+                let r = 0.38 * rng.next_f32().sqrt();
+                let a = rng.next_f32() * TAU;
+                let center = Vec2::new(0.5 + r * a.cos(), 0.55 + 0.9 * r * a.sin());
+                let size = Vec2::new(0.05 + 0.03 * rng.next_f32(), 0.018 + 0.01 * rng.next_f32());
+                (center, rng.next_f32() * TAU, size)
+            })
+            .collect();
+        let leaf_texture = texture_alpha(|u, v| {
+            let q = Vec2::new(u, v);
+            let mut inside = false;
+            for (c, angle, size) in &leaves {
+                let d = q - *c;
+                let (s, co) = angle.sin_cos();
+                let local = Vec2::new(d.x * co + d.y * s, -d.x * s + d.y * co);
+                let x = local.x / size.x;
+                // Narrowing toward both tips.
+                let half = size.y * (1.0 - x * x).max(0.0).sqrt() * (1.0 - 0.3 * x.abs());
+                if x.abs() < 1.0 && local.y.abs() < half {
+                    inside = true;
+                    break;
+                }
+            }
+            let tone = 0.75 + 0.5 * noise(u * 32.0, v * 32.0, 32, 6);
+            (
+                Vec3::new(0.16, 0.34, 0.09) * tone,
+                if inside { 1.0 } else { 0.0 },
+            )
+        });
+        // A diagonal lattice, four diamonds a tile.
+        let lattice = texture_alpha(|u, v| {
+            let (a, b) = (((u + v) * 4.0).fract(), ((u - v) * 4.0).rem_euclid(1.0));
+            let bar = a < 0.12 || a > 0.88 || b < 0.12 || b > 0.88;
+            (Vec3::new(0.45, 0.32, 0.2), if bar { 1.0 } else { 0.0 })
+        });
+        let first = self.scene.textures.len() as u32;
+        self.scene.textures.extend([leaf_texture, lattice]);
+        let shrub = self.scene.geometries.len();
+        self.scene
+            .geometries
+            .push(cards(&[0.0, TAU / 6.0, TAU / 3.0], 1.4, 1.2, Vec2::ONE));
+        self.scene
+            .geometries
+            .push(cards(&[0.0], 4.0, 1.5, Vec2::new(2.0, 0.75)));
+        let n = self.scene.geometries.len();
+        let mut textures = self.scene.geometry_textures.clone();
+        textures.resize(n, None);
+        textures[shrub] = Some(first);
+        textures[shrub + 1] = Some(first + 1);
+        self.scene.geometry_textures = textures;
+        let mut cutoff = vec![None; n];
+        cutoff[shrub] = Some(0.5);
+        cutoff[shrub + 1] = Some(0.5);
+        self.scene.geometry_alpha_cutoff = cutoff;
+        for (x, y, angle, scale) in [
+            (2.5, 5.0, 0.3, 1.0),
+            (-0.5, 6.5, 1.1, 1.2),
+            (4.0, 8.5, 2.0, 0.9),
+        ] {
+            self.scene.instances.push(Instance {
+                geometry: shrub,
+                rotation: Mat3::from_rotation_z(angle),
+                scale,
+                position: DVec3::new(x, y, 0.0),
+                albedo: Vec3::ONE,
+            });
+        }
+        self.scene.instances.push(Instance {
+            geometry: shrub + 1,
+            rotation: Mat3::IDENTITY,
+            scale: 1.0,
+            position: DVec3::new(0.5, 12.0, 0.0),
+            albedo: Vec3::ONE,
+        });
         self
     }
 

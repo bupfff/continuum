@@ -107,6 +107,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_emission: Vec::new(),
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
+        geometry_alpha_cutoff: Vec::new(),
     }
 }
 

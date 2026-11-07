@@ -98,7 +98,22 @@ for g, path in enumerate(job["geometries"]):
         nmap.inputs["Strength"].default_value = 1.0
         mat.node_tree.links.new(nimage.outputs["Color"], nmap.inputs["Color"])
         mat.node_tree.links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
-    mat.node_tree.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    cutoff = (job.get("alpha") or [None] * len(job["geometries"]))[g]
+    if cutoff is not None and texture:
+        # An alpha cutout (M10 gate 6): transparent where the texture's
+        # alpha (bilinear) is below the cutoff.
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        test = nodes.new("ShaderNodeMath")
+        test.operation = "GREATER_THAN"
+        test.inputs[1].default_value = cutoff - 1e-6
+        mix = nodes.new("ShaderNodeMixShader")
+        mat.node_tree.links.new(image.outputs["Alpha"], test.inputs[0])
+        mat.node_tree.links.new(test.outputs[0], mix.inputs["Fac"])
+        mat.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
+        mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[2])
+        mat.node_tree.links.new(mix.outputs["Shader"], out.inputs["Surface"])
+    else:
+        mat.node_tree.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     source.data.materials.clear()
     source.data.materials.append(mat)
 
@@ -276,7 +291,7 @@ cy.diffuse_bounces = job["bounces"]
 cy.glossy_bounces = job["bounces"]
 cy.transmission_bounces = 0
 cy.volume_bounces = 0
-cy.transparent_max_bounces = 0
+cy.transparent_max_bounces = 64 if any(c is not None for c in (job.get("alpha") or [])) else 0
 cy.caustics_reflective = False
 cy.caustics_refractive = False
 cy.sample_clamp_direct = 0.0

@@ -694,6 +694,8 @@ impl InstancedRenderer {
         movable: &[usize],
         moving_lights: &[usize],
     ) -> Self {
+        let cut = scene.with_cutouts();
+        let scene: &InstancedScene = &cut;
         let device = kernel.device.clone();
         let scale = scale.max(1);
         let (width, height) = (target_width.div_ceil(scale), target_height.div_ceil(scale));
