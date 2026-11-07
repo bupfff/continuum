@@ -255,7 +255,24 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). Not yet: the cloud GPU benchmark | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (2026-10-25, after M5 gate 7)
+### 3.8 Next steps, in order (updated 2026-11-07)
+
+**Decided 2026-11-07: a more complete paradigm before the tag.** The
+user's order:
+
+1. **Moving objects in the view cache** (M9 gate 1): the second rule
+   (exact incremental updates) in `Renderer`, not only the lightmap path.
+2. **Moving lights, and movers' effect on sky light, through the error
+   ledger** (M9 gates 2–3): the third rule, the invention (§3.1), on the
+   GPU in 3D.
+3. **Tag v0.1.**
+4. **Bounce light in the view cache** (M10).
+5. **Glossy reflections and PBR materials** (M10): roughness cones,
+   metallic and roughness, normal maps, emission, alpha.
+6. **Anti-aliasing, the narrower way** (M7 gate 2 onward): texture
+   filtering for the area integral, then coverage only at silhouettes.
+
+The steps below are the earlier v0.1 plan (2026-10-25, after M5 gate 7).
 
 The user's budget allows about a third again of the work so far (about 5–7
 sessions). That fits a v0.1 release (§3.7) with the scope below; v1.0 does
@@ -388,7 +405,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M6 content (v0.1 item 3) | glTF import, base-color textures, automatic charts | G1 glTF import with automatic charts and textures (**failed** on criterion 1 only: the `.glb` round trip is 0.024% from the original per pixel against 0.01%, all in one edge pixel flipped by f32 rounding of instance transforms; the imported textured scene is 0.43% from Cycles with textures at 16×16 per pixel, its automatic charts give 2.37% cached vs per-pixel against the hand-made charts' 1.52%, warm frame 1.53 ms at 720p; real assets reported: a 28k-triangle textured pack warms in 1,317 frames at 1.43 ms, `docs/results/m6-gate1.md`) |
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | G1 pixel cones for primary visibility (**failed** all three: against the 16×16 reference the textured scene is 7.15% vs one ray's 7.11%, the field from 150 m 17.91% vs 23.49% (0.76× against ≤ 0.35×), from standing height 34.61% vs 12.49% with a banding artifact on the 2.1 km ground triangles; half a pixel's turn changes the image 1.67× as much as the reference's (≤ 1.5×); warm cached frames 105 ms on the textured scene (≤ 16.7 ms), per-pixel frames 10–87 s on the field; the textured scene's error is texture filtering, not silhouettes, `docs/results/m7-gate1.md`); no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 |
-| M9 ledger on GPU | Moving lights, ledger-bounded deferral | G2/G3 on GPU; light switch with no lag |
+| M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache, no stale light (`experiments/room3d/src/bin/m9_gate1.rs`); G2/G3 the ledger's bounded deferral on the GPU; a light switch with no lag |
 | M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | FLIP vs reference |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
