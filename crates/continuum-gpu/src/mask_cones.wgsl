@@ -1556,6 +1556,11 @@ fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n
     let e2 = (t2 - t0) * size;
     let texel_area = 0.5 * abs(e1.x * e2.y - e1.y * e2.x);
     let texel = sqrt(world_area / max(texel_area, 1e-12));
+    // forward.w 1: a box filter over the pixel's footprint (M7 gate 2).
+    if (camera.forward.w > 0.5) {
+        let boxed = texture_box(m, t, dir, distance, uv, size, layer);
+        if (boxed.w > 0.0) { return base * boxed.xyz; }
+    }
     // A pixel's footprint there, stretched by the viewing angle; times
     // eye.w where set (a reference's sub-pixel samples: their own share of
     // the pixel).
@@ -1563,6 +1568,57 @@ fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n
     let pixel = footprint * distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
     let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
     return base * textureSampleLevel(base_color, base_sampler, uv, i32(layer), lod).xyz;
+}
+
+// The texture over a pixel's footprint (M7 gate 2): the camera ray's change
+// per pixel projected onto triangle `t`'s plane (ray differentials), mapped
+// to texture space, and read with four bilinear taps at the centers of the
+// footprint's 2×2 quarters, each at the mip of a quarter's longest axis. w
+// is 0 where the footprint is degenerate (the caller falls back).
+fn texture_box(m: u32, t: u32, dir: vec3<f32>, distance: f32, uv: vec2<f32>, size: f32, layer: u32) -> vec4<f32> {
+    let share = select(1.0, camera.eye.w, camera.eye.w > 0.0);
+    let per_pixel = 2.0 * camera.params.z / camera.params.y * share;
+    let ddx = camera.right.xyz * per_pixel;
+    let ddy = -camera.up.xyz * per_pixel;
+    // The unnormalized ray direction (its component along forward is 1).
+    let along = dot(dir, camera.forward.xyz);
+    if (along <= 1e-6) { return vec4<f32>(0.0); }
+    let d = dir / along;
+    let s = distance / length(d);
+    let v0 = tris[3u * t].xyz;
+    let e1 = tris[3u * t + 1u].xyz - v0;
+    let e2 = tris[3u * t + 2u].xyz - v0;
+    let gn = normalize(normal_to_world(m, cross(e1, e2)));
+    let dn = dot(d, gn);
+    if (abs(dn) < 1e-6) { return vec4<f32>(0.0); }
+    var dpx = s * (ddx - d * (dot(ddx, gn) / dn));
+    var dpy = s * (ddy - d * (dot(ddy, gn) / dn));
+    let x = meshes[m].w;
+    if (x != NONE) {
+        let inv = xforms[4u * x + 3u].y;
+        dpx = rotate_to_object(x, dpx) * inv;
+        dpy = rotate_to_object(x, dpy) * inv;
+    }
+    let g11 = dot(e1, e1);
+    let g12 = dot(e1, e2);
+    let g22 = dot(e2, e2);
+    let det = g11 * g22 - g12 * g12;
+    if (abs(det) < 1e-30) { return vec4<f32>(0.0); }
+    let u1 = tri_tex[3u * t + 1u] - tri_tex[3u * t];
+    let u2 = tri_tex[3u * t + 2u] - tri_tex[3u * t];
+    let ax = (g22 * dot(dpx, e1) - g12 * dot(dpx, e2)) / det;
+    let bx = (g11 * dot(dpx, e2) - g12 * dot(dpx, e1)) / det;
+    let ay = (g22 * dot(dpy, e1) - g12 * dot(dpy, e2)) / det;
+    let by = (g11 * dot(dpy, e2) - g12 * dot(dpy, e1)) / det;
+    let dux = ax * u1 + bx * u2;
+    let duy = ay * u1 + by * u2;
+    let lod = log2(max(0.5 * max(length(dux), length(duy)) * size, 1e-6));
+    var sum = vec3<f32>(0.0);
+    for (var q = 0u; q < 4u; q++) {
+        let o = (f32(q & 1u) - 0.5) * 0.5 * dux + (f32(q >> 1u) - 0.5) * 0.5 * duy;
+        sum += textureSampleLevel(base_color, base_sampler, uv + o, i32(layer), lod).xyz;
+    }
+    return vec4<f32>(sum * 0.25, 1.0);
 }
 
 // Interpolated shading normal (world space) at world point `p` on triangle `t`

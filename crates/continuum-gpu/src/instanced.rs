@@ -271,6 +271,9 @@ pub struct InstancedRenderer {
     /// Textures are sampled for this share of a pixel's width (1: the
     /// pixel; 1/16 for references at 16×16 samples per pixel).
     footprint: f32,
+    /// Textures box-filtered over the pixel's footprint (M7 gate 2; the
+    /// default), or isotropic trilinear (as before).
+    texture_box: bool,
     movers: Option<Movers>,
     /// Lights that may move (`set_light`).
     moving: Vec<usize>,
@@ -620,6 +623,13 @@ impl InstancedRenderer {
         self.footprint = share;
     }
 
+    /// Experiments: textures box-filtered over each pixel's footprint (the
+    /// default, M7 gate 2) or isotropic trilinear, from the next frame.
+    #[doc(hidden)]
+    pub fn set_texture_box(&mut self, on: bool) {
+        self.texture_box = on;
+    }
+
     /// Changes light `index`'s RGB radiance from the next frame. Lighting is
     /// linear in emitted power: per-pixel frames shade with it, and the cache
     /// re-weights its stored channels, baking nothing.
@@ -818,6 +828,7 @@ impl InstancedRenderer {
             ),
             pixel_offset: [0.0; 2],
             footprint: 1.0,
+            texture_box: true,
             movers,
             moving: moving_lights.to_vec(),
         };
@@ -1065,6 +1076,7 @@ impl InstancedRenderer {
         cam.right[3] = self.pixel_offset[0];
         cam.up[3] = self.pixel_offset[1];
         cam.eye[3] = self.footprint;
+        cam.forward[3] = self.texture_box as u32 as f32;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
         let dims = DisplayDims {
@@ -1137,6 +1149,7 @@ impl InstancedRenderer {
         cam.right[3] = self.pixel_offset[0];
         cam.up[3] = self.pixel_offset[1];
         cam.eye[3] = self.footprint;
+        cam.forward[3] = self.texture_box as u32 as f32;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
         let dims = DisplayDims {
