@@ -23,9 +23,8 @@
 //!   (`InstancedScene::geometry_alpha_cutoff`: cut away as geometry before
 //!   upload), divided by the base color factor's alpha. BLEND is treated as
 //!   MASK at 0.5: no blending.
-//! - A double-sided material's triangles are doubled, the back faces 1 mm
-//!   behind the front ones (exactly back-to-back faces slow the cache's
-//!   bakes; M10 gate 6).
+//! - A double-sided material's triangles are doubled, the back faces
+//!   reversed on the same plane.
 //! - A normal texture, through the same texture coordinates as the base
 //!   color (or alone), becomes the geometry's normal map
 //!   (`InstancedScene::geometry_normal_maps`; its scale is ignored).
@@ -348,11 +347,10 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 }
             }
             if double_sided {
-                // Back faces: reversed, 1 mm behind.
+                // Back faces: reversed, on the same plane.
                 for f in 0..triangles.len() {
                     let t = triangles[f];
-                    let behind = -(t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero() * 0.001;
-                    triangles.push([t[0] + behind, t[2] + behind, t[1] + behind]);
+                    triangles.push([t[0], t[2], t[1]]);
                     if normals.is_some() {
                         let n = corner_normals[f];
                         corner_normals.push([-n[0], -n[2], -n[1]]);

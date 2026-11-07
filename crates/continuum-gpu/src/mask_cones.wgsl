@@ -1369,8 +1369,19 @@ fn hit_triangle(eye: vec3<f32>, dir: vec3<f32>, m: u32, t: u32, best: Hit) -> Hi
     let v0 = tris[3u * t].xyz;
     let v1 = tris[3u * t + 1u].xyz;
     let v2 = tris[3u * t + 2u].xyz;
-    if (cull_back && dot(cross(v1 - v0, v2 - v0), dir) > 0.0) { return best; }
+    let n = cross(v1 - v0, v2 - v0);
+    if (cull_back && dot(n, dir) > 0.0) { return best; }
     let d = ray_triangle(eye, dir, v0, v1, v2);
+    // Coincident faces of one mesh (a double-sided card's front and back,
+    // whose distances differ only by rounding): the one facing the ray wins,
+    // as a back face counts as inside geometry (M10 gate 8).
+    if (d > 0.0 && m == best.mesh && abs(d - best.distance) <= 2e-6 * d) {
+        let facing = dot(n, dir) < 0.0;
+        if (facing != (dot(best.normal, dir) < 0.0)) {
+            if (facing) { return Hit(d, m, t, normalize(n)); }
+            return best;
+        }
+    }
     // Ties (coplanar faces, shared edges) go to the lower mesh, then the lower
     // triangle, so the result does not depend on traversal order.
     if (d > 0.0 && (d < best.distance || (d == best.distance
@@ -1701,9 +1712,12 @@ fn texture_box(m: u32, t: u32, dir: vec3<f32>, distance: f32, uv: vec2<f32>, siz
 // of object `m`, on the side `toward` points to.
 fn shading_normal(m: u32, t: u32, p: vec3<f32>, toward: vec3<f32>) -> vec3<f32> {
     let b = barycentric(m, t, p);
-    var n = normalize(normal_to_world(m, normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z));
     let v0 = tris[3u * t].xyz;
-    let geometric = normal_to_world(m, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
+    let face = cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0);
+    let s = normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z;
+    // A degenerate interpolated normal (zero or NaN): the face's.
+    var n = normalize(normal_to_world(m, select(face, s, dot(s, s) > 1e-20)));
+    let geometric = normal_to_world(m, face);
     // Seen from behind (back face): flip, like the geometric normal.
     if (dot(geometric, toward) < 0.0) { n = -n; }
     return n;
@@ -2737,7 +2751,10 @@ fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
     let b = b0 / max(b0.x + b0.y + b0.z, 1e-20);
     let t = select(0u, best_t, best_t != NONE);
     let p = tris[3u * t].xyz * b.x + tris[3u * t + 1u].xyz * b.y + tris[3u * t + 2u].xyz * b.z;
-    let nrm = normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z;
+    let interpolated = normals[3u * t].xyz * b.x + normals[3u * t + 1u].xyz * b.y + normals[3u * t + 2u].xyz * b.z;
+    // A degenerate interpolated normal (zero or NaN): the face's (M10 gate 8).
+    let face = cross(tris[3u * t + 1u].xyz - tris[3u * t].xyz, tris[3u * t + 2u].xyz - tris[3u * t].xyz);
+    let nrm = select(face, interpolated, dot(interpolated, interpolated) > 1e-20);
     var pw = p;
     var nw = normalize(nrm);
     let x = meshes[m].w;

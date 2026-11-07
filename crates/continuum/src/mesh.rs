@@ -102,7 +102,8 @@ impl Surface {
     ///   no triangle flips, and chart coordinates stretch distances by at
     ///   most 1 / cos 45°.
     /// - Shading normals are `normals` where given (per triangle corner), or
-    ///   smooth normals merged by position.
+    ///   smooth normals merged by position over the triangles there that
+    ///   face the same side (back-to-back faces stay apart).
     ///
     /// Degenerate triangles are dropped.
     pub fn from_mesh(
@@ -308,23 +309,39 @@ impl Surface {
     }
 }
 
-/// Per-vertex normals: area-weighted face normals summed over every triangle
-/// sharing the vertex's position.
+/// Per-vertex normals: area-weighted face normals summed over the triangles
+/// sharing the vertex's position that face the same side as the corner's
+/// own (a positive dot of face normals). Back-to-back faces (a double-sided
+/// card's front and back) stay apart instead of cancelling to zero (M10
+/// gate 8).
 fn smooth_normals(triangles: &[Tri]) -> Vec<[Vec3; 3]> {
     let key = |p: Vec3| {
         let q = (p * 1e5).round();
         (q.x as i64, q.y as i64, q.z as i64)
     };
-    let mut sums: HashMap<(i64, i64, i64), Vec3> = HashMap::new();
-    for t in triangles {
-        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+    let face: Vec<Vec3> = triangles
+        .iter()
+        .map(|t| (t[1] - t[0]).cross(t[2] - t[0]))
+        .collect();
+    let mut at: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    for (k, t) in triangles.iter().enumerate() {
         for &p in t {
-            *sums.entry(key(p)).or_default() += n;
+            at.entry(key(p)).or_default().push(k as u32);
         }
     }
     triangles
         .iter()
-        .map(|t| t.map(|p| sums[&key(p)].normalize_or_zero()))
+        .zip(&face)
+        .map(|(t, n)| {
+            t.map(|p| {
+                at[&key(p)]
+                    .iter()
+                    .map(|&u| face[u as usize])
+                    .filter(|f| f.dot(*n) > 0.0)
+                    .sum::<Vec3>()
+                    .normalize_or_zero()
+            })
+        })
         .collect()
 }
 
