@@ -98,10 +98,12 @@ pub struct CacheOptions {
     /// holds at most 2^20 (384 MB). A geometry whose grid would exceed 1,024
     /// texels along a chart walks itself.
     pub self_spacing: f32,
-    /// Each light's texels hold the shadowed share of its unshadowed light,
+    /// Experiments only. Each light's texels hold the shadowed share of its
+    /// unshadowed light,
     /// and shading multiplies that by the unshadowed light at the pixel, with
     /// the pixel's own normal (M5 gate 7); otherwise they hold irradiance,
     /// interpolated as it is (as before).
+    #[doc(hidden)]
     pub light_ratio: bool,
 }
 
@@ -132,13 +134,15 @@ pub struct CacheStats {
     /// Distinct pages requested (each by at least one sample pixel that lacked
     /// its wanted page).
     pub requests: u32,
-    /// Sample pixels on a surface (one per request tile), and of those, the
-    /// ones that found the page of their wanted mip.
+    /// Sample pixels on a surface (one per request tile).
     pub samples: u32,
+    /// Of `samples`, the ones that found the page of their wanted mip.
     pub at_wanted: u32,
-    /// Pages, texels and sky samples baked in the frame.
+    /// Pages baked in the frame.
     pub pages_baked: u32,
+    /// Texels baked in the frame.
     pub texels_baked: u32,
+    /// Sky samples baked in the frame.
     pub sky_samples: u32,
     /// Pages resident after the frame's bake.
     pub resident: u32,
@@ -149,14 +153,14 @@ pub struct CacheStats {
     pub planning: Duration,
     /// Of that work, eviction (merging slot use, freeing pages).
     pub evicting: Duration,
-    /// The bake budget the frame planned with (sun texels, or their worth),
-    /// and what its plan used.
+    /// The bake budget the frame planned with (sun texels, or their worth).
     pub budget: u32,
+    /// Of `budget`, what the frame's plan used.
     pub spent: u32,
-    /// GPU time of the frame's bake passes and of its camera passes, in
-    /// milliseconds, where the device has timestamp queries and the frame
-    /// was not profiled (else 0).
+    /// GPU time of the frame's bake passes, in milliseconds, where the device
+    /// has timestamp queries and the frame was not profiled (else 0).
     pub gpu_bake_ms: f32,
+    /// GPU time of the frame's camera passes, likewise.
     pub gpu_render_ms: f32,
     /// Whether the frame's GPU timings count (not a profiled frame).
     pub timed: bool,
@@ -388,6 +392,7 @@ fn hash(k: [u32; 3]) -> u32 {
 
 /// A resident page as read back for diagnostics
 /// ([`crate::InstancedRenderer::read_cache_pages`]).
+#[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct CachePage {
     pub object: u32,

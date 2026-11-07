@@ -28,7 +28,9 @@ const BINS: usize = GRID * GRID;
 /// `normal · x <= offset` is the kept side.
 #[derive(Clone, Copy, Debug)]
 pub struct Plane {
+    /// The plane's normal, pointing away from the kept side.
     pub normal: Vec3,
+    /// `normal · x` on the plane.
     pub offset: f32,
 }
 
@@ -39,14 +41,21 @@ impl Plane {
     }
 }
 
+/// A rectangular pyramid of 8×8 direction bins from an apex (see the
+/// module's documentation).
 #[derive(Clone, Debug)]
 pub struct PyramidCone {
+    /// Where the cone starts (a receiver point).
     pub apex: Vec3,
+    /// The frame's first axis across the window.
     pub right: Vec3,
+    /// The frame's second axis across the window.
     pub up: Vec3,
+    /// The axis the cone looks along.
     pub forward: Vec3,
     /// `[u0, v0, u1, v1]` on the plane one unit along `forward`.
     pub window: [f32; 4],
+    /// Geometry nearer than this along `forward` does not occlude.
     pub near: f32,
     /// Geometry beyond this plane (for a light cone, the light itself) does not occlude.
     pub far: Plane,
@@ -243,6 +252,7 @@ impl PyramidCone {
         self.forward + self.right * (u0 + s * (u1 - u0)) + self.up * (v0 + t * (v1 - v0))
     }
 
+    /// The bins' summed weight: the cone's projected solid angle.
     pub fn total_weight(&self) -> f32 {
         self.weights.iter().sum()
     }

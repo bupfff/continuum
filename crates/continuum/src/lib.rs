@@ -6,6 +6,8 @@
 //! they could have changed by more than a chosen bound.
 //! See `docs/DESIGN.md` for the full design.
 
+#![warn(missing_docs)]
+
 pub mod bvh;
 pub mod cone3;
 pub mod coverage;

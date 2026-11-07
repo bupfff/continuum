@@ -37,7 +37,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 - **Static scenes in the instanced renderer.** The camera moves freely, and
   lights change color and intensity freely, but geometry and light positions
   stay put. Moving objects are supported only in the older lightmap path
-  (`LiveRenderer`).
+  (`LiveRenderer` with `MaskConeKernel::bake`: one rectangular light, no
+  sky, no instancing; the viewer's showcase uses it).
 - **Diffuse materials only.** Base color and textures are used; metallic,
   roughness, normal maps, alpha and emission are not.
 - **Direct light only** in the instanced renderer: no bounce light yet.
@@ -165,6 +166,17 @@ For a window, see `apps/viewer`, which flies through a file with
   - subgroups (packet traversal);
   - timestamp queries (the bake budget follows GPU time);
   - ray queries (hardware camera rays).
+
+## API reference
+
+```bash
+cargo doc --no-deps -p continuum -p continuum-gpu -p continuum-gltf --open
+```
+
+Items used only by the experiments in `experiments/` (the instanced
+renderer underneath `Renderer`, the kernel's tuning switches, diagnostics)
+are public so the experiments compile, but hidden from the documentation.
+They may change without notice.
 
 ## Where things are
 

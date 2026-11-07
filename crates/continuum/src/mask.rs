@@ -13,8 +13,11 @@ use std::ops::{BitOr, BitOrAssign};
 pub struct ConeMask(pub u64);
 
 impl ConeMask {
+    /// Direction bins per cone.
     pub const BINS: u32 = 64;
+    /// No bin blocked.
     pub const EMPTY: Self = Self(0);
+    /// Every bin blocked.
     pub const FULL: Self = Self(u64::MAX);
 
     /// Mask with bins `lo..=hi` set. Empty when `lo > hi`; `hi` is clamped to the last bin.
@@ -47,10 +50,12 @@ impl ConeMask {
         Self::range(lo as u32, hi as u32)
     }
 
+    /// How many bins are blocked.
     pub fn blocked_bins(self) -> u32 {
         self.0.count_ones()
     }
 
+    /// Whether every bin is blocked.
     pub fn is_full(self) -> bool {
         self.0 == u64::MAX
     }

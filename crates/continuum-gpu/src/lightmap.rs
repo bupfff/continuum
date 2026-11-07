@@ -192,6 +192,7 @@ impl Lightmap {
         Self::new(&surfaces, texel_size, is_static)
     }
 
+    /// Texels in the lightmap.
     pub fn texels(&self) -> usize {
         self.receivers.len()
     }
@@ -246,7 +247,7 @@ impl Lightmap {
         self
     }
 
-    /// For each block, [`BLOCK_PLANES`] planes `[n.x, n.y, n.z, w]` (inside:
+    /// For each block, `BLOCK_PLANES` planes `[n.x, n.y, n.z, w]` (inside:
     /// `n · p <= w`) of a convex volume enclosing every one of its texels' cones
     /// toward `light`: the hull of the block's texels and the light, pushed out by
     /// a small margin. Unused planes are zero (they exclude nothing). A block

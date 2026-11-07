@@ -12,11 +12,13 @@ use glam::{Mat3, Vec2, Vec3};
 
 use crate::cone3::box_mesh;
 
+/// A triangle's three vertices.
 pub type Tri = [Vec3; 3];
 
 /// A triangle mesh with shading normals and a chart layout.
 #[derive(Clone, Debug, Default)]
 pub struct Surface {
+    /// The triangles, in the mesh's own coordinates.
     pub triangles: Vec<Tri>,
     /// Shading normal at each vertex of each triangle (unit length).
     pub normals: Vec<[Vec3; 3]>,

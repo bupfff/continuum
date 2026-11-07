@@ -12,10 +12,12 @@
 //! with their own normals. No frame blends in earlier frames.
 //!
 //! One kernel family underneath: mask cones from receivers to a light, a port
-//! of `continuum::cone3` (see `mask_cones.wgsl`), used for receivers, camera
-//! renders, a world-space lighting cache ([`Lightmap`]), live rendering with
-//! moving meshes ([`LiveRenderer`]) and instanced scenes
-//! ([`InstancedRenderer`], which [`Renderer`] wraps).
+//! of `continuum::cone3` (see `mask_cones.wgsl`), used by [`Renderer`] and by
+//! the older lightmap path: [`LiveRenderer`] renders meshes that move, with
+//! exact soft shadows from one rectangular light and one bounce of indirect
+//! light, from a world-space [`Lightmap`] (no instancing, no sky).
+
+#![warn(missing_docs)]
 
 use std::time::{Duration, Instant};
 
@@ -52,6 +54,10 @@ struct ReceiverGpu {
     normal: [f32; 4],
 }
 
+/// The GPU kernel: compiled pipelines on a device, shared by every renderer
+/// built on it. Make one with [`MaskConeKernel::new`] (its own device) or
+/// [`MaskConeKernel::with_device`] (yours), and hand it to
+/// [`Renderer::new`].
 pub struct MaskConeKernel {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -88,6 +94,7 @@ pub struct MaskConeKernel {
     nearest_first: std::cell::Cell<bool>,
     profile_stage: std::cell::Cell<u32>,
     split: std::cell::Cell<bool>,
+    /// The GPU's name, as the adapter reports it.
     pub adapter_name: String,
 }
 
@@ -111,12 +118,21 @@ mod live;
 mod renderer;
 mod vcache;
 
-pub use hierarchy::Hierarchy;
-pub use instanced::{FrameProfile, InstancedRenderer};
-pub use lightmap::{BLOCK, BLOCK_PLANES, Lightmap, hemicube_weights};
+pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 pub use renderer::{Renderer, RendererOptions};
-pub use vcache::{CacheOptions, CachePage, CacheStats};
+pub use vcache::{CacheOptions, CacheStats};
+
+// Experiment-only: used by the gates in `experiments/`, not part of the
+// library's surface.
+#[doc(hidden)]
+pub use hierarchy::Hierarchy;
+#[doc(hidden)]
+pub use instanced::{FrameProfile, InstancedRenderer};
+#[doc(hidden)]
+pub use lightmap::{BLOCK, BLOCK_PLANES, hemicube_weights};
+#[doc(hidden)]
+pub use vcache::CachePage;
 
 use hierarchy::{Placement, flatten, flatten_instanced, mesh_hierarchy, object_hierarchy};
 
@@ -130,7 +146,8 @@ struct CameraUniform {
     params: [f32; 4],
 }
 
-/// Compile-time choices for a [`MaskConeKernel`].
+/// Compile-time choices for a [`MaskConeKernel`] (experiments only).
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KernelOptions {
     /// Traversal stacks in workgroup memory, or in per-thread arrays (the
@@ -151,16 +168,22 @@ pub struct KernelOptions {
 /// A pinhole camera looking from `eye` toward `target`, with `+Z` up.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
+    /// Where the camera is, relative to the render origin.
     pub eye: Vec3,
+    /// A point it looks at, relative to the render origin.
     pub target: Vec3,
+    /// The full vertical field of view, in degrees.
     pub vertical_fov_degrees: f32,
 }
 
 /// A rectangular light: a corner and two perpendicular edges.
 #[derive(Clone, Copy, Debug)]
 pub struct RectLight {
+    /// One corner, relative to the render origin.
     pub corner: Vec3,
+    /// The edge from `corner` to the next corner.
     pub edge_u: Vec3,
+    /// The other edge from `corner`, perpendicular to `edge_u`.
     pub edge_v: Vec3,
     /// One-sided: emits only toward `edge_u × edge_v`, and camera rays see its
     /// front as a surface of the light's radiance. Otherwise (the M2 scenes) it
@@ -168,11 +191,14 @@ pub struct RectLight {
     pub one_sided: bool,
 }
 
-/// A light with RGB radiance (linear), for scenes with several colored
-/// lights (M5).
+/// A light: what emits, and its RGB radiance (linear). Make one with
+/// [`Light::rect`], [`Light::sun`], [`Light::point`] or [`Light::spot`].
 #[derive(Clone, Copy, Debug)]
 pub struct Light {
+    /// Its shape and position.
     pub emitter: Emitter,
+    /// Radiance over the emitter's surface (linear RGB), in the scene's
+    /// units of light.
     pub radiance: Vec3,
 }
 
@@ -189,8 +215,11 @@ pub enum Emitter {
 /// outside as a disk, optionally narrowed to a spot.
 #[derive(Clone, Copy, Debug)]
 pub struct SphereLight {
+    /// The center, relative to the render origin.
     pub center: Vec3,
+    /// The sphere's radius: larger lights cast softer shadows.
     pub radius: f32,
+    /// A spot's cone, or `None` for light in every direction.
     pub spot: Option<Spot>,
 }
 
@@ -200,8 +229,11 @@ pub struct SphereLight {
 /// falloff applies to the direction from the light's center.
 #[derive(Clone, Copy, Debug)]
 pub struct Spot {
+    /// The direction the spot shines.
     pub axis: Vec3,
+    /// Full radiance within this half-angle of `axis` (radians).
     pub inner: f32,
+    /// No light beyond this half-angle of `axis` (radians).
     pub outer: f32,
 }
 
@@ -467,6 +499,7 @@ impl MaskConeKernel {
     }
 
     /// [`Self::new`] with options.
+    #[doc(hidden)]
     pub fn new_with(options: KernelOptions) -> Option<Self> {
         let kernel = Self::new()?;
         Some(Self::with_options(
@@ -478,6 +511,7 @@ impl MaskConeKernel {
     }
 
     /// [`Self::with_device`] with options.
+    #[doc(hidden)]
     pub fn with_options(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -617,6 +651,7 @@ impl MaskConeKernel {
         }
     }
 
+    /// The device the kernel runs on.
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
@@ -625,6 +660,7 @@ impl MaskConeKernel {
     /// nodes that project to at most `bins` bins and splats their precomputed
     /// coverage instead. 0 (the default) is exact. Applies to work set up after
     /// the call, including [`LiveRenderer`]s created after it.
+    #[doc(hidden)]
     pub fn set_prefilter(&self, bins: f32) {
         self.prefilter.set(bins.max(0.0));
     }
@@ -636,10 +672,13 @@ impl MaskConeKernel {
     /// ([`InstancedRenderer::with_cache`]) support it; the world-space
     /// lightmaps ([`Lightmap`], [`LiveRenderer`]) refuse a sky so far. Applies
     /// to work set up after the call.
+    #[doc(hidden)]
     pub fn set_sky(&self, rgb: Vec3) {
         self.sky.set(rgb.max(Vec3::ZERO));
     }
 
+    /// The sky set with [`Self::set_sky`].
+    #[doc(hidden)]
     pub fn sky(&self) -> Vec3 {
         self.sky.get()
     }
@@ -648,6 +687,7 @@ impl MaskConeKernel {
     /// default): with prefiltering on, cones splat small object-hierarchy
     /// nodes (whole groups of objects) instead of descending into them.
     /// Applies to work set up after the call.
+    #[doc(hidden)]
     pub fn set_object_prefilter(&self, on: bool) {
         self.object_prefilter.set(on);
     }
@@ -655,6 +695,7 @@ impl MaskConeKernel {
     /// Sky cones prefilter `factor` times as coarsely as the light's cones
     /// (default 1): their bins are 11° wide, so coarser splats cost little
     /// accuracy and much time. Applies to work set up after the call.
+    #[doc(hidden)]
     pub fn set_sky_prefilter(&self, factor: f32) {
         self.sky_prefilter.set(factor.max(0.0));
     }
@@ -664,6 +705,7 @@ impl MaskConeKernel {
     /// horizon, which carry no light to the receiver; walking it only made
     /// the binned coverage of bins the horizon crosses darker. Applies to work
     /// set up after the call.
+    #[doc(hidden)]
     pub fn set_sky_horizon_cull(&self, on: bool) {
         self.sky_horizon_cull.set(on);
     }
@@ -675,22 +717,27 @@ impl MaskConeKernel {
     /// on the cube's orientation, but binned coverage does: on the boulder
     /// field, turning the cube moves the sky 1.9–4.2% from Cycles (M5 gate 5).
     /// Applies to work set up after the call.
+    #[doc(hidden)]
     pub fn set_sky_object_frame(&self, on: bool) {
         self.sky_object_frame.set(on);
     }
 
     /// Diagnostic: sky cones combine coverage across meshes by the maximum,
     /// like sun cones, instead of as independent occluders.
+    #[doc(hidden)]
     pub fn set_sky_combination_max(&self, on: bool) {
         self.sky_max.set(on);
     }
 
+    /// The prefilter set with [`Self::set_prefilter`].
+    #[doc(hidden)]
     pub fn prefilter(&self) -> f32 {
         self.prefilter.get()
     }
 
     /// Ray traversal order: nearest child first (the default), or a fixed child
     /// order (as before M4 gate 3). Results are the same; only speed differs.
+    #[doc(hidden)]
     pub fn set_nearest_first(&self, on: bool) {
         self.nearest_first.set(on);
     }
@@ -701,8 +748,8 @@ impl MaskConeKernel {
     }
 
     /// Camera rays for instanced scenes through hardware ray queries (the
-    /// default where available) or the compute hierarchy. Applies to renders and
-    /// [`InstancedRenderer`]s set up after the call.
+    /// default where available) or the compute hierarchy. Applies to
+    /// renderers created after the call.
     pub fn set_hardware_rays(&self, on: bool) {
         self.hardware_rays.set(on && self.has_hardware_rays());
     }
@@ -722,6 +769,7 @@ impl MaskConeKernel {
     /// Camera frames as a visibility pass then a shading pass, or as one pass
     /// (the default: M4 gate 4 found the split slower). Results are the same;
     /// only speed differs. Applies to [`LiveRenderer`]s created after the call.
+    #[doc(hidden)]
     pub fn set_visibility_buffer(&self, on: bool) {
         self.split.set(on);
     }
@@ -729,6 +777,7 @@ impl MaskConeKernel {
     /// Irradiance per unit radiance at each receiver `(point, normal)`, and the
     /// fastest of `runs` GPU executions (submit to completion, excluding uploads
     /// and readback). Every receiver tests every mesh.
+    #[doc(hidden)]
     pub fn irradiance(
         &self,
         receivers: &[(Vec3, Vec3)],
@@ -740,6 +789,7 @@ impl MaskConeKernel {
     }
 
     /// [`Self::irradiance`], optionally culling through the mesh hierarchy.
+    #[doc(hidden)]
     pub fn irradiance_with(
         &self,
         receivers: &[(Vec3, Vec3)],
@@ -756,6 +806,7 @@ impl MaskConeKernel {
     /// triangle, and a mask cone gives that point's direct irradiance from the
     /// light. Returns linear RGB (albedo per mesh × radiance × irradiance / π)
     /// and the fastest of `runs` GPU executions.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
@@ -785,6 +836,7 @@ impl MaskConeKernel {
     /// Like [`Self::render`] (mask cones at every pixel, with the hierarchy),
     /// but shading with the lightmap's interpolated normals: the reference for
     /// [`Self::render_cached`] on smooth meshes. The lightmap's texels are unused.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn render_per_pixel(
         &self,
@@ -814,6 +866,7 @@ impl MaskConeKernel {
     /// Like [`Self::render`] (with the hierarchy), but static faces read their
     /// irradiance from a baked [`Lightmap`]; only dynamic geometry gets a cone
     /// per pixel.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn render_cached(
         &self,
@@ -848,6 +901,7 @@ impl MaskConeKernel {
     /// times. Instance positions (f64) are uploaded relative to `origin`; the
     /// camera and light are given relative to `origin` too. Returns linear RGB,
     /// the fastest of `runs` executions, and the scene's GPU memory in bytes.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn render_instanced(
         &self,
@@ -873,6 +927,7 @@ impl MaskConeKernel {
 
     /// [`Self::render_instanced`] lit by several lights, each with RGB
     /// radiance (at most [`MAX_LIGHTS`]), and the sky if set.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn render_instanced_lights(
         &self,
@@ -1159,7 +1214,8 @@ impl MaskConeKernel {
         hw::build(&self.device, &self.queue, &geometries, &placements)
     }
 
-    /// Bakes a lightmap: one mask cone per texel (through the hierarchy).
+    /// Bakes a lightmap for [`LiveRenderer::new`]: one mask cone per texel
+    /// toward `light`, through the meshes' hierarchy.
     /// Returns the bake time.
     pub fn bake(&self, lightmap: &mut Lightmap, light: RectLight, meshes: &[Vec<Tri>]) -> Duration {
         assert!(
@@ -1481,6 +1537,7 @@ impl MaskConeKernel {
     }
 
     /// Per-bin coverage (64 per receiver) as the kernel computed it, for debugging.
+    #[doc(hidden)]
     pub fn coverage(
         &self,
         receivers: &[(Vec3, Vec3)],
@@ -1755,6 +1812,7 @@ fn camera_uniform(camera: Camera, width: u32, height: u32, radiance: f32) -> Cam
 pub struct InstancedScene {
     /// Unique geometries, each with per-vertex shading normals.
     pub geometries: Vec<Surface>,
+    /// Placements of the geometries.
     pub instances: Vec<Instance>,
     /// Base color textures (M6), multiplying instances' albedo where their
     /// geometry has one and texture coordinates (`Surface::tex`).
@@ -1767,8 +1825,11 @@ pub struct InstancedScene {
 /// images), sampled with repeat.
 #[derive(Clone, Debug)]
 pub struct Texture {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
+    /// `width × height` pixels of four bytes each.
     pub rgba: Vec<u8>,
 }
 
@@ -1784,12 +1845,16 @@ pub(crate) struct SceneTextures {
 /// One placement of a geometry: `world = scale · rotation · p + position`.
 #[derive(Clone, Copy, Debug)]
 pub struct Instance {
+    /// Index into [`InstancedScene::geometries`].
     pub geometry: usize,
     /// Orthonormal.
     pub rotation: Mat3,
+    /// Uniform scale.
     pub scale: f32,
     /// World position (f64).
     pub position: DVec3,
+    /// Diffuse reflectance (linear RGB), multiplying the geometry's texture
+    /// where it has one.
     pub albedo: Vec3,
 }
 

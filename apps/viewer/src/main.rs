@@ -8,6 +8,10 @@
 //! light, gathered each frame through cached G-buffers (probes on moving
 //! objects are traced from scratch).
 //!
+//! The field and glTF scenes go through the library's front door,
+//! `continuum_gpu::Renderer`; the showcase and the room through the
+//! lightmap path (`LiveRenderer`), which supports moving objects.
+//!
 //! Scenes: `--scene showcase` (the default: a gallery with a sculpture,
 //! columns and an arch), `--scene room` (the M2 test room), or `--scene field`
 //! (a million instanced boulders, about ten billion triangles, lit by a sun
@@ -34,8 +38,8 @@ use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum::mesh::Surface;
 use continuum_gpu::wgpu;
 use continuum_gpu::{
-    CacheOptions, Camera, Instance, InstancedRenderer, InstancedScene, Light, Lightmap,
-    LiveRenderer, MaskConeKernel, RectLight,
+    Camera, Instance, InstancedScene, Light, Lightmap, LiveRenderer, MaskConeKernel, RectLight,
+    Renderer, RendererOptions,
 };
 use room3d::field::Field;
 use room3d::showcase::{self, PATH_FRAMES, Showcase};
@@ -63,26 +67,27 @@ struct World {
     speed: f32,
     start: (Vec3, Vec3),
     showcase: Option<Showcase>,
-    /// The instanced boulder field.
-    field: Option<Field>,
-    /// An imported glTF scene.
-    gltf: Option<Gltf>,
-    /// Window pixels per rendered pixel (field and glTF scenes only).
+    /// An instanced scene (the boulder field or a glTF file), rendered
+    /// through the library's `Renderer`.
+    instanced: Option<Instanced>,
+    /// Window pixels per rendered pixel (instanced scenes only).
     scale: u32,
-    /// Light the field through the view-dependent lighting cache (otherwise a
-    /// mask cone per pixel every frame).
+    /// Light instanced scenes through the view-dependent lighting cache
+    /// (otherwise a mask cone per pixel every frame).
     cache: bool,
-    /// Add a sky to the field (with the cache only).
+    /// Add the scene's sky (instanced scenes only).
     sky: bool,
 }
 
-/// An imported glTF scene with its lights and sky.
-struct Gltf {
+/// An instanced scene with its lights and sky, positioned relative to
+/// `origin`.
+struct Instanced {
     scene: InstancedScene,
     lights: Vec<Light>,
     sky: Vec3,
     origin: DVec3,
-    triangles: u64,
+    /// What the scene holds, for the startup line.
+    summary: String,
 }
 
 impl World {
@@ -102,8 +107,7 @@ impl World {
             speed: 1.2,
             start: (camera.eye, camera.target),
             showcase: Some(scene),
-            field: None,
-            gltf: None,
+            instanced: None,
             scale: 1,
             cache: true,
             sky: false,
@@ -114,6 +118,11 @@ impl World {
         let field = Field::new(boulders, DVec3::ZERO);
         let origin = field.origin_near_camera();
         let (camera, light) = field.relative(origin);
+        let summary = format!(
+            "{} boulders, {} triangles",
+            field.boulders(),
+            field.triangles()
+        );
         World {
             name: "field",
             surfaces: Vec::new(),
@@ -127,8 +136,15 @@ impl World {
             speed: 5.0,
             start: (camera.eye, camera.target),
             showcase: None,
-            field: Some(field),
-            gltf: None,
+            instanced: Some(Instanced {
+                lights: vec![Light::white(light, field.radiance)],
+                // `--sky`: a blue-white sky (M5), slow to warm up in the cache
+                // (M5 gate 5).
+                sky: field.sky(),
+                origin,
+                summary,
+                scene: field.scene,
+            }),
             scale: 1,
             cache: true,
             sky: false,
@@ -216,7 +232,7 @@ impl World {
         } else {
             println!("Lit by the file's {} lights.", lights.len());
         }
-        let triangles = scene
+        let triangles: u64 = scene
             .instances
             .iter()
             .map(|i| scene.geometries[i.geometry].triangles.len() as u64)
@@ -234,13 +250,12 @@ impl World {
             speed: (0.4 * radius as f32).max(0.2),
             start: (eye, target),
             showcase: None,
-            field: None,
-            gltf: Some(Gltf {
+            instanced: Some(Instanced {
                 scene,
                 lights,
                 sky: Vec3::new(0.6, 0.75, 1.0) * 0.3,
                 origin,
-                triangles,
+                summary: format!("{triangles} triangles"),
             }),
             scale: 1,
             cache: true,
@@ -275,8 +290,7 @@ impl World {
             speed: 0.5,
             start: (scene.eye, scene.target),
             showcase: None,
-            field: None,
-            gltf: None,
+            instanced: None,
             scale: 1,
             cache: true,
             sky: false,
@@ -285,7 +299,7 @@ impl World {
 
     /// The moving surfaces at `time` (60 Hz frames), with their mesh indices.
     fn movers(&mut self, time: f32) -> Vec<(usize, Surface)> {
-        if self.field.is_some() || self.gltf.is_some() {
+        if self.instanced.is_some() {
             return Vec::new();
         }
         let first = self.first_mover;
@@ -350,26 +364,26 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    renderer: Renderer,
+    backend: Backend,
 }
 
-/// The lit scene with its caches, or an instanced scene (the field or a
-/// glTF file).
-enum Renderer {
+/// The lightmap renderer with moving objects (the showcase and the room), or
+/// the library's renderer for instanced scenes (the field or a glTF file).
+enum Backend {
     Live(Box<LiveRenderer>),
-    Instanced(Box<InstancedRenderer>),
+    Instanced(Box<Renderer>),
 }
 
-impl Renderer {
+impl Backend {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
-            Renderer::Live(r) => r.resize(width, height),
-            Renderer::Instanced(r) => r.resize(width, height),
+            Backend::Live(r) => r.resize(width, height),
+            Backend::Instanced(r) => r.resize(width, height),
         }
     }
 
     fn update_surfaces(&mut self, changes: &[(usize, &Surface)]) {
-        if let Renderer::Live(r) = self
+        if let Backend::Live(r) = self
             && !changes.is_empty()
         {
             r.update_surfaces(changes);
@@ -378,8 +392,8 @@ impl Renderer {
 
     fn frame(&mut self, camera: Camera, view: &wgpu::TextureView) {
         match self {
-            Renderer::Live(r) => r.frame(camera, camera.vertical_fov_degrees, view),
-            Renderer::Instanced(r) => r.frame(camera, view),
+            Backend::Live(r) => r.frame(camera, camera.vertical_fov_degrees, view),
+            Backend::Instanced(r) => r.render(camera, view),
         }
     }
 }
@@ -446,51 +460,32 @@ impl App {
 
         let kernel =
             MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
-        if let Some(field) = &world.field {
-            kernel.set_prefilter(1.0);
-            // `--sky`: a blue-white sky (M5), baked into the view cache, sky
-            // cones prefiltered 8× as coarsely. Experimental: sky texels cost
-            // about 100× sun texels, and the cache's budget floor makes
-            // warm-up slow (M5 gate 4).
-            if world.cache && world.sky {
-                kernel.set_sky(field.sky());
-                kernel.set_sky_prefilter(8.0);
-            }
+        if let Some(scene) = &world.instanced {
             let start = Instant::now();
-            let origin = field.origin_near_camera();
-            let renderer = if world.cache {
-                InstancedRenderer::with_cache(
-                    &kernel,
-                    format,
-                    config.width,
-                    config.height,
-                    world.scale,
-                    world.light,
-                    &field.scene,
-                    origin,
-                    field.radiance,
-                    CacheOptions::default(),
-                )
-            } else {
-                InstancedRenderer::new(
-                    &kernel,
-                    format,
-                    config.width,
-                    config.height,
-                    world.scale,
-                    world.light,
-                    &field.scene,
-                    origin,
-                    field.radiance,
-                )
+            let options = RendererOptions {
+                scale: world.scale,
+                cache: world.cache,
+                // The sky only with the cache: per pixel, sky cones every
+                // frame take seconds.
+                sky: (world.sky && world.cache).then_some(scene.sky),
+                ..Default::default()
             };
+            let renderer = Renderer::new(
+                kernel,
+                format,
+                (config.width, config.height),
+                &scene.scene,
+                scene.origin,
+                &scene.lights,
+                options,
+            );
             renderer.wait();
             println!(
-                "{} (field scene): {} boulders, {} triangles, {:.0} MB on the GPU ({}), ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
-                kernel.adapter_name,
-                field.boulders(),
-                field.triangles(),
-                (renderer.scene_bytes() + renderer.cache_bytes()) as f64 / 1e6,
+                "{} ({} scene): {}, {:.0} MB on the GPU ({}), ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
+                renderer.kernel().adapter_name,
+                world.name,
+                scene.summary,
+                renderer.gpu_bytes() as f64 / 1e6,
                 if world.cache {
                     "with the lighting cache"
                 } else {
@@ -512,68 +507,7 @@ impl App {
                 config,
                 device,
                 queue,
-                renderer: Renderer::Instanced(Box::new(renderer)),
-            };
-        }
-        if let Some(g) = &world.gltf {
-            kernel.set_prefilter(1.0);
-            if world.cache && world.sky {
-                kernel.set_sky(g.sky);
-                kernel.set_sky_prefilter(8.0);
-            }
-            let start = Instant::now();
-            let renderer = if world.cache {
-                InstancedRenderer::with_cache_lights(
-                    &kernel,
-                    format,
-                    config.width,
-                    config.height,
-                    world.scale,
-                    &g.lights,
-                    &g.scene,
-                    g.origin,
-                    CacheOptions::default(),
-                )
-            } else {
-                InstancedRenderer::new_lights(
-                    &kernel,
-                    format,
-                    config.width,
-                    config.height,
-                    world.scale,
-                    &g.lights,
-                    &g.scene,
-                    g.origin,
-                )
-            };
-            renderer.wait();
-            println!(
-                "{} (glTF scene): {} triangles, {:.0} MB on the GPU ({}), ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
-                kernel.adapter_name,
-                g.triangles,
-                (renderer.scene_bytes() + renderer.cache_bytes()) as f64 / 1e6,
-                if world.cache {
-                    "with the lighting cache"
-                } else {
-                    "a cone per pixel"
-                },
-                start.elapsed().as_secs_f64(),
-                config.width,
-                config.height,
-                world.scale,
-                if renderer.hardware_rays() {
-                    "hardware"
-                } else {
-                    "compute"
-                }
-            );
-            return Gpu {
-                window,
-                surface,
-                config,
-                device,
-                queue,
-                renderer: Renderer::Instanced(Box::new(renderer)),
+                backend: Backend::Instanced(Box::new(renderer)),
             };
         }
         let meshes: Vec<_> = world.surfaces.iter().map(|s| s.triangles.clone()).collect();
@@ -611,7 +545,7 @@ impl App {
             config,
             device,
             queue,
-            renderer: Renderer::Live(Box::new(renderer)),
+            backend: Backend::Live(Box::new(renderer)),
         }
     }
 
@@ -671,7 +605,7 @@ impl ApplicationHandler for App {
                 {
                     (gpu.config.width, gpu.config.height) = (size.width, size.height);
                     gpu.surface.configure(&gpu.device, &gpu.config);
-                    gpu.renderer.resize(size.width, size.height);
+                    gpu.backend.resize(size.width, size.height);
                 }
             }
             WindowEvent::KeyboardInput {
@@ -744,7 +678,7 @@ impl ApplicationHandler for App {
                 let changes: Vec<_> = moved.iter().map(|(m, s)| (*m, s)).collect();
                 let fov = self.world.fov;
                 let Some(gpu) = &mut self.gpu else { return };
-                gpu.renderer.update_surfaces(&changes);
+                gpu.backend.update_surfaces(&changes);
                 let texture = match gpu.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -755,7 +689,7 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = texture.texture.create_view(&Default::default());
-                gpu.renderer.frame(self.camera.camera(fov), &view);
+                gpu.backend.frame(self.camera.camera(fov), &view);
                 gpu.queue.present(texture);
 
                 self.frame_times.push(dt * 1000.0);

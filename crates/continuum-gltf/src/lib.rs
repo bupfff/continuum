@@ -16,6 +16,8 @@
 //!   ([`Imported::lights`]): point and spot lights as small spheres,
 //!   directional lights as suns.
 
+#![warn(missing_docs)]
+
 use std::path::Path;
 
 use continuum::glam::{DMat4, DVec3, Mat3, Vec2, Vec3};
@@ -25,12 +27,17 @@ use continuum_gpu::{Instance, InstancedScene, Light, Spot, Texture};
 /// What kind of punctual light.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ImportedLightKind {
+    /// Shines equally in every direction from its position.
     Point,
-    /// Half-angles in radians.
+    /// A point light limited to a cone around its direction, fading between
+    /// two half-angles (radians).
     Spot {
+        /// Full intensity inside this half-angle.
         inner: f32,
+        /// No light outside this half-angle.
         outer: f32,
     },
+    /// Parallel light from infinitely far away, like the sun.
     Directional,
 }
 
@@ -38,51 +45,70 @@ pub enum ImportedLightKind {
 /// units: candela for point and spot lights, lux for directional ones.
 #[derive(Clone, Copy, Debug)]
 pub struct ImportedLight {
+    /// Point, spot or directional.
     pub kind: ImportedLightKind,
+    /// Where the light's node is (unused for directional lights).
     pub position: DVec3,
     /// Where it shines (the node's −Z): a spot's axis, a directional light's
     /// direction of travel.
     pub direction: DVec3,
     /// Linear RGB.
     pub color: Vec3,
+    /// Candela (point and spot) or lux (directional), scaling `color`.
     pub intensity: f32,
 }
 
 /// A camera from the file, in Continuum's Z-up world.
 #[derive(Clone, Copy, Debug)]
 pub struct ImportedCamera {
+    /// The camera's position.
     pub eye: DVec3,
+    /// A point it looks at, one unit ahead.
     pub target: DVec3,
+    /// The full vertical field of view.
     pub vertical_fov_degrees: f32,
 }
 
 /// What [`load`] found.
 #[derive(Clone, Debug, Default)]
 pub struct ImportStats {
+    /// Meshes in the file.
     pub meshes: usize,
+    /// Mesh primitives in the file.
     pub primitives: usize,
     /// Primitives that are not triangle lists, skipped.
     pub skipped_primitives: usize,
+    /// Triangles placed in the scene, counted once per instance.
     pub triangles: u64,
+    /// Instances placed.
     pub instances: usize,
     /// Instances whose transform was baked into a copy of their geometry.
     pub baked: usize,
+    /// Charts made for the lighting cache, over all geometries.
     pub charts: usize,
     /// Punctual lights placed by nodes.
     pub lights: usize,
-    /// Base color textures imported, and images skipped (pixel formats other
-    /// than 8 bits per channel).
+    /// Base color textures imported.
     pub textures: usize,
+    /// Images skipped: pixel formats other than 8 bits per channel.
     pub textures_skipped: usize,
 }
 
 /// An imported scene: geometry, instances (world positions), the file's first
 /// camera if it has one, and the instances' world bounds.
 pub struct Imported {
+    /// Geometry, instances at world positions, and textures, ready for
+    /// `continuum_gpu::Renderer`.
     pub scene: InstancedScene,
+    /// The first perspective camera a node places, if any (orthographic
+    /// cameras are skipped).
     pub camera: Option<ImportedCamera>,
+    /// The punctual lights nodes place, in the file's units;
+    /// [`Imported::lights`] turns them into Continuum's lights.
     pub lights: Vec<ImportedLight>,
+    /// The instances' world bounds (low and high corners).
     pub bounds: (DVec3, DVec3),
+    /// What was imported and what was skipped.
     pub stats: ImportStats,
 }
 

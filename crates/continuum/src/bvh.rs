@@ -21,6 +21,7 @@ struct Node {
     count: u32,
 }
 
+/// Triangles from several meshes under one hierarchy of boxes.
 pub struct Bvh {
     nodes: Vec<Node>,
     tris: Vec<Tri>,
@@ -103,6 +104,7 @@ impl Bvh {
         Self::split(nodes, left + 1, items, mid, end);
     }
 
+    /// Triangles in the hierarchy, over all meshes.
     pub fn triangles(&self) -> usize {
         self.tris.len()
     }

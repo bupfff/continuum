@@ -18,7 +18,8 @@ renders:
 
 Every claim is measured against Blender's Cycles.
 
-- [docs/GUIDE.md](docs/GUIDE.md): using it as a library.
+- [docs/GUIDE.md](docs/GUIDE.md): using it as a library; API reference with
+  `cargo doc --no-deps -p continuum-gpu -p continuum-gltf --open`.
 - [docs/DESIGN.md](docs/DESIGN.md): the design and an honest status (§3.6).
 - [docs/results/](docs/results/): every measured result.
 
@@ -68,8 +69,8 @@ Flags:
   view takes 1,400 frames to sharpen standing and up to 12,000 from above.
   Until then it is lit from coarser pages.
 
-Scenes can have several colored rectangular lights
-(`InstancedRenderer::with_cache_lights`). The cache stores light per unit
+Scenes can have several colored rectangular lights (`Renderer::new` takes a
+list). The cache stores light per unit
 radiance, so `set_light_radiance` re-colors a light with no bake. Three
 lights on the field, a warm sun, a cool fill and an orange lamp, are within
 1.2% of Cycles, and flights over them average 14–15 ms (M5 gate 6).
@@ -185,7 +186,8 @@ relative RMSE (M3 gate 3).
   front door), mask cones in WGSL, the lighting caches, the live renderer.
 - `crates/continuum-gltf`: glTF 2.0 import and export, and the `render`
   example.
-- `apps/viewer`: the real-time viewer.
+- `apps/viewer`: the real-time viewer (instanced scenes through `Renderer`,
+  the showcase and the room through the live renderer).
 - `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
 - `experiments/room3d`: 3D experiments on triangle scenes (milestones M1–M3),
   the showcase scene, and the Cycles reference pipeline (`cycles/`).

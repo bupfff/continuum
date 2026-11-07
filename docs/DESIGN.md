@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-10-25, after M5 gate 8 and the library's front door)
+## 3.6 Where we stand (updated 2026-11-06, after M5 gate 8 and the library's surface)
 
 Against the goal in §1, honestly:
 
@@ -199,7 +199,9 @@ Against the goal in §1, honestly:
   - `continuum_gpu::Renderer` wraps the kernel and the instanced renderer
     with the measured defaults.
   - `continuum-gltf`'s `render` example turns a glTF file into a PNG.
-  - `docs/GUIDE.md` covers setup, concepts and limits.
+  - `docs/GUIDE.md` covers setup, concepts and limits; rustdoc covers the
+    public API, with experiment-only items hidden.
+  - The viewer's field and glTF scenes run on it.
 - **Imported content** (M6 G1, failed on round-trip precision only).
   - glTF 2.0 files load as instanced scenes, with automatic charts for any
     mesh and base color textures sampled per pixel at the pixel's footprint.
@@ -244,7 +246,7 @@ estimates, and gates fail often, so treat them as ranges.
 | 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes had black shadows. **Sky done per pixel and matched to Cycles (M5 G2–G3); in the view cache at frame rate (M5 G5), but slow to converge. Several colored rect lights done (M5 G6), cached as ratios (M5 G7); point and spot lights (M5 G8).** Not yet: sky warm-up; sustained speed with several lights | 3 (3 done) |
 | 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes. **Done (M6 G1, failed on round-trip precision only):** a textured import is 0.43% from Cycles, automatic charts are within a point of hand-made ones in the cache, warm frames take 1.5 ms. Not yet: PBR parameters, normal maps, alpha, the file's lights | 2–3 (1 done) |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel | 2 |
-| 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Started:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`. Not yet: the viewer on `Renderer`, rustdoc for the rest of the public API, a Bevy plugin | 2 (half done) |
+| 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs. Not yet: a Bevy plugin | 2 (most done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement, untested so far | 1–2 |
 
 ### 3.8 Next steps, in order (2026-10-25, after M5 gate 7)
@@ -253,10 +255,13 @@ The user's budget allows about a third again of the work so far (about 5–7
 sessions). That fits a v0.1 release (§3.7) with the scope below; v1.0 does
 not fit.
 
-1. **Finish the library's surface** (item 5).
-   - Done: `Renderer`, the `render` example, `docs/GUIDE.md`.
-   - Left: move the viewer's glTF and field paths onto `Renderer`, document
-     the rest of the public API, and hide experiment-only knobs.
+1. **Finish the library's surface** (item 5). **Done** (2026-11-06):
+   `Renderer`, the `render` example, `docs/GUIDE.md`; the viewer's field and
+   glTF scenes run on `Renderer`; every public item has rustdoc
+   (`#![warn(missing_docs)]` in the three library crates); experiment-only
+   items (`InstancedRenderer`, the kernel's tuning switches, diagnostics)
+   are `#[doc(hidden)]`. `LiveRenderer` stays public as the only path with
+   moving objects.
 2. **Pixel-footprint cones for primary visibility** (item 4), if the budget
    allows: the largest visible quality gap (aliasing).
    - Measure against area-integrated references.
@@ -265,7 +270,9 @@ not fit.
 3. **Bevy plugin**, if it fits. Bevy pins its own wgpu version, and we run a
    patched wgpu-core.
 4. **Needs the user:**
-   - CI on Windows/NVIDIA needs a GitHub repository;
+   - CI on Windows/NVIDIA: the repository exists (private,
+     `github.com/bupfff/continuum`, since 2026-11-06); workflows not yet
+     written;
    - a cloud GPU benchmark needs an account;
    - publishing is theirs to decide.
 5. **Known limitations for v0.1:**

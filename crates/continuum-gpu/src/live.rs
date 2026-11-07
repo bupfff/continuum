@@ -233,7 +233,9 @@ fn bind_group(
 }
 
 impl LiveRenderer {
-    /// Uploads a scene and its baked lightmap. `target_format` is the surface's format.
+    /// Uploads a scene and its lightmap, baked with
+    /// [`crate::MaskConeKernel::bake`]. `target_format` is the surface's
+    /// format.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         kernel: &MaskConeKernel,

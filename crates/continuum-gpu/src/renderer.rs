@@ -45,7 +45,9 @@ pub struct RendererOptions {
     /// mask cone per light every frame (exact for the frame, slow).
     pub cache: bool,
     /// A uniform sky (linear RGB radiance), lighting what it can see of it.
-    /// With the cache, sky light converges slowly (M5 gate 5).
+    /// With the cache, sky light converges slowly (M5 gate 5). Without it,
+    /// every pixel traces sky cones every frame, which is far slower than
+    /// lights alone.
     pub sky: Option<Vec3>,
     /// The cache's tuning.
     pub cache_options: CacheOptions,
@@ -155,6 +157,12 @@ impl Renderer {
                 .all(|s| s.requests == 0 && s.pages_baked == 0)
     }
 
+    /// Blocks until the GPU has finished everything submitted so far (the
+    /// upload after [`Renderer::new`], or the frames rendered).
+    pub fn wait(&self) {
+        self.inner.wait();
+    }
+
     /// Waits for the GPU and returns the last frame's linear RGB colors, row
     /// by row from the top.
     pub fn read_colors(&mut self) -> Vec<[f32; 3]> {
@@ -172,7 +180,7 @@ impl Renderer {
         self.inner.hardware_rays()
     }
 
-    /// The kernel, for its device and finer settings.
+    /// The kernel, for its device and adapter.
     pub fn kernel(&self) -> &MaskConeKernel {
         &self.kernel
     }

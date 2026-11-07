@@ -16,6 +16,8 @@ use crate::ConeMask;
 
 const BINS: usize = ConeMask::BINS as usize;
 
+/// Visibility across a cone as a covered fraction per bin (see the module's
+/// documentation).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoverageMask {
     full: ConeMask,
@@ -29,6 +31,7 @@ impl Default for CoverageMask {
 }
 
 impl CoverageMask {
+    /// Nothing covered.
     pub const EMPTY: Self = Self {
         full: ConeMask::EMPTY,
         partial: [0.0; BINS],
@@ -70,6 +73,7 @@ impl CoverageMask {
         }
     }
 
+    /// Whether every bin is wholly covered.
     pub fn is_full(&self) -> bool {
         self.full.is_full()
     }
