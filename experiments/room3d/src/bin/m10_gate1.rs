@@ -211,6 +211,33 @@ fn main() -> std::io::Result<()> {
     ));
     if std::env::var_os("M10_DEV").is_some() {
         println!("DEVELOPMENT RUN: not the gate's numbers");
+        if std::env::var_os("M10_TRACE").is_some() {
+            if std::env::var_os("M10_SUPER").is_some() {
+                supersampled(&mut bounce, t.camera, &target);
+            }
+            settle(&mut bounce, t.camera, &target);
+            let before = bounce.cache_log().len();
+            if std::env::var_os("M10_RECOLOR").is_some() {
+                bounce.set_light_radiance(0, t.lights[0].radiance * Vec3::new(1.0, 0.7, 0.5));
+            }
+            for _ in 0..200 {
+                bounce.frame(t.camera, &target);
+            }
+            bounce.finish();
+            for s in &bounce.cache_log()[before..] {
+                if s.pages_baked > 0 || s.requests > 0 {
+                    println!(
+                        "frame {}: baked {} pages, {} requests, {} samples, {} incomplete, evicted {}",
+                        s.frame,
+                        s.pages_baked,
+                        s.requests,
+                        s.indirect_samples,
+                        s.indirect_incomplete,
+                        s.evicted
+                    );
+                }
+            }
+        }
         return Ok(());
     }
 

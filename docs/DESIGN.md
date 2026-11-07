@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-07, after M9 gates 1–2)
+## 3.6 Where we stand (updated 2026-11-07, after M10 gate 1)
 
 Against the goal in §1, honestly:
 
@@ -246,6 +246,17 @@ Against the goal in §1, honestly:
     0.01% bound.
   - Diffuse only: no metallic or roughness, normal maps, alpha, emission or
     the file's lights yet.
+- **One bounce of light in the view cache** (M10 G1, failed on its
+  re-coloring check only).
+  - On M6's textured scene, the cached image with bounce light is 1.79%
+    from Cycles with one bounce, against 7.09% without it.
+  - Warm frames cost 1.07×, and views settle in 1.21× the frames.
+  - Method: 3×3 hemicube samples per page (192 rays each), reading the
+    direct light the cache holds at the hits; hits with no page request
+    one and re-bake later.
+  - Re-coloring alone bakes nothing, but after supersampling the cache did
+    not stay settled, and that failed the check. Not yet with movers or
+    moving lights.
 - **Not started:**
   - sharing the sky's far field across texels (cascades of wide cones), which
     is what sky warm-up needs;
@@ -302,7 +313,9 @@ user's order:
    gate 2 go after the tag.
 3. **Tag v0.1.** **Done** (2026-11-07): `v0.1.0` on commit `41c0df2`, CI
    green on Linux and Windows.
-4. **Bounce light in the view cache** (M10).
+4. **Bounce light in the view cache** (M10). **Tried (2026-11-07), M10 G1
+   failed on its re-coloring check only** (`docs/results/m10-gate1.md`):
+   1.79% from Cycles with one bounce (7.09% without), warm frames 1.07×.
 5. **Glossy reflections and PBR materials** (M10): roughness cones,
    metallic and roughness, normal maps, emission, alpha.
 6. **Anti-aliasing, the narrower way** (M7 gate 2 onward): texture
@@ -442,7 +455,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | G1 pixel cones for primary visibility (**failed** all three: against the 16×16 reference the textured scene is 7.15% vs one ray's 7.11%, the field from 150 m 17.91% vs 23.49% (0.76× against ≤ 0.35×), from standing height 34.61% vs 12.49% with a banding artifact on the 2.1 km ground triangles; half a pixel's turn changes the image 1.67× as much as the reference's (≤ 1.5×); warm cached frames 105 ms on the textured scene (≤ 16.7 ms), per-pixel frames 10–87 s on the field; the textured scene's error is texture filtering, not silhouettes, `docs/results/m7-gate1.md`); no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 (**done**: `v0.1.0`, 2026-11-07; the cloud benchmark is still open) |
 | M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G3 movers under a sky; a light switch with no lag |
-| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | FLIP vs reference |
+| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); glossy reflections next |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
 

@@ -18,7 +18,9 @@ renders:
 - objects moving among a million static ones, the cache updated exactly in
   the frame they move, with no stale light (M9 gate 1);
 - moving lights through an error ledger, experimental: never stale, but
-  with heavy fallback while a light moves (M9 gate 2, failed on that).
+  with heavy fallback while a light moves (M9 gate 2, failed on that);
+- one bounce of light in the cache, 1.79% from Cycles with one bounce
+  (M10 gate 1).
 
 Every claim is measured against Blender's Cycles.
 

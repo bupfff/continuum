@@ -48,7 +48,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   change color and intensity freely either way.
 - **Diffuse materials only.** Base color and textures are used; metallic,
   roughness, normal maps, alpha and emission are not.
-- **Direct light only** in the instanced renderer: no bounce light yet.
+- **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
+  1): 1.79% from Cycles with one bounce on a textured scene, at 1.07× the
+  warm frame. At most three lights; not with movers or moving lights.
 - **One ray per pixel for visibility,** so distant detail aliases.
   `RendererOptions::pixel_cones` (off by default) traces a cone through each
   pixel instead; it is experimental and far from real time on large scenes
