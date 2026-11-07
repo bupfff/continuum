@@ -127,7 +127,7 @@ fn texture_alpha(f: impl Fn(f32, f32) -> (Vec3, f32)) -> Texture {
 /// about 100× slower, cause not yet established);
 /// texture coordinates over the whole texture times `repeat`, v down from
 /// the top (M10 gate 6).
-fn cards(angles: &[f32], width: f32, height: f32, repeat: Vec2) -> Surface {
+fn cards(angles: &[f32], width: f32, height: f32, repeat: Vec2, back: f32) -> Surface {
     let mut tris = Vec::new();
     let mut tex = Vec::new();
     for &a in angles {
@@ -142,7 +142,7 @@ fn cards(angles: &[f32], width: f32, height: f32, repeat: Vec2) -> Surface {
         let windings = [(0, 1, 2), (0, 2, 3), (0, 2, 1), (0, 3, 2)];
         let normal = (p[1] - p[0]).cross(p[2] - p[0]).normalize();
         for (k, &(a, b, c)) in windings.iter().enumerate() {
-            let shift = if k >= 2 { -normal * 0.001 } else { Vec3::ZERO };
+            let shift = if k >= 2 { -normal * back } else { Vec3::ZERO };
             tris.push([p[a] + shift, p[b] + shift, p[c] + shift]);
             tex.push([uv[a], uv[b], uv[c]]);
         }
@@ -347,7 +347,13 @@ impl Textured {
 
     /// M10 gate 6's foliage: three shrubs of crossed double-sided leaf
     /// cards and a lattice fence panel, alpha-masked at 0.5.
-    pub fn with_foliage(mut self) -> Textured {
+    pub fn with_foliage(self) -> Textured {
+        self.with_foliage_back(0.001)
+    }
+
+    /// `with_foliage` with the cards' back faces `back` metres behind the
+    /// front ones (0: exactly back-to-back).
+    pub fn with_foliage_back(mut self, back: f32) -> Textured {
         // Leaves: pointed ellipses in a cluster, on a transparent ground of
         // the same green (so filtering at the cut adds no dark fringe).
         let mut rng = Pcg32::new(41, 7);
@@ -392,10 +398,10 @@ impl Textured {
         let shrub = self.scene.geometries.len();
         self.scene
             .geometries
-            .push(cards(&[0.0, TAU / 6.0, TAU / 3.0], 1.4, 1.2, Vec2::ONE));
+            .push(cards(&[0.0, TAU / 6.0, TAU / 3.0], 1.4, 1.2, Vec2::ONE, back));
         self.scene
             .geometries
-            .push(cards(&[0.0], 4.0, 1.5, Vec2::new(2.0, 0.75)));
+            .push(cards(&[0.0], 4.0, 1.5, Vec2::new(2.0, 0.75), back));
         let n = self.scene.geometries.len();
         let mut textures = self.scene.geometry_textures.clone();
         textures.resize(n, None);
