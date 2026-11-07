@@ -435,6 +435,7 @@ fn gltf_round_trip_keeps_materials() {
     });
     s.geometry_emission = vec![Vec3::ZERO; s.geometries.len()];
     s.geometry_emission[2] = Vec3::new(4.0, 2.0, 0.5);
+    s.geometry_normal_maps = vec![Some(0), None, None];
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
     let imported = continuum_gltf::load(&path).unwrap().scene;
@@ -460,6 +461,15 @@ fn gltf_round_trip_keeps_materials() {
         assert_eq!(of(&s, a.geometry), of(&imported, b.geometry));
         let (x, y) = (glow(&s, a.geometry), glow(&imported, b.geometry));
         assert!((x - y).abs().max_element() < 1e-6, "{x} against {y}");
+        let bumps = |scene: &InstancedScene, g: usize| {
+            scene
+                .geometry_normal_maps
+                .get(g)
+                .copied()
+                .flatten()
+                .is_some()
+        };
+        assert_eq!(bumps(&s, a.geometry), bumps(&imported, b.geometry));
     }
 }
 

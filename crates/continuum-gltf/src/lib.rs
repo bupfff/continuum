@@ -16,8 +16,11 @@
 //!   (`InstancedScene::geometry_materials`). A primitive without a material,
 //!   or with metallic 0 and roughness 1 (what [`save`] writes for a
 //!   Lambertian surface), stays Lambertian: the difference is a rough 4%
-//!   specular layer. Metallic-roughness textures, normal maps and alpha are
-//!   not imported yet.
+//!   specular layer. Metallic-roughness textures and alpha are not imported
+//!   yet.
+//! - A normal texture, through the same texture coordinates as the base
+//!   color (or alone), becomes the geometry's normal map
+//!   (`InstancedScene::geometry_normal_maps`; its scale is ignored).
 //! - The emissive factor, times `KHR_materials_emissive_strength`, becomes
 //!   the geometry's emission (`InstancedScene::geometry_emission`; emissive
 //!   textures are not imported).
@@ -147,6 +150,7 @@ type GeometryKey = (
     Option<u32>,
     Option<(u32, u32)>,
     [u32; 3],
+    Option<u32>,
 );
 
 /// One primitive's geometry before placement.
@@ -159,6 +163,8 @@ struct Primitive {
     albedo: Vec3,
     material: Option<Material>,
     emission: Vec3,
+    /// Its normal map's index in the scene's textures.
+    normal_map: Option<u32>,
     key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
@@ -257,6 +263,29 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
                 }
             }
+            // The normal texture, through the base color's coordinates or
+            // alone.
+            let mut normal_map = None;
+            let mut tex_set = pbr.base_color_texture().map_or(0, |i| i.tex_coord());
+            if let Some(info) = material.normal_texture()
+                && (texcoords.is_none() || info.tex_coord() == tex_set)
+            {
+                if texcoords.is_none()
+                    && let Some(t) = reader.read_tex_coords(info.tex_coord())
+                {
+                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
+                    tex_set = info.tex_coord();
+                }
+                if texcoords.is_some() {
+                    let image = info.texture().source().index();
+                    normal_map = *texture_of_image[image].get_or_insert_with(|| {
+                        to_rgba(&images[image]).map(|t| {
+                            textures.push(t);
+                            textures.len() as u32 - 1
+                        })
+                    });
+                }
+            }
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
             let mut corner_tex = Vec::with_capacity(indices.len() / 3);
@@ -270,7 +299,6 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     corner_tex.push(k.map(|i| tc[i]));
                 }
             }
-            let tex_set = pbr.base_color_texture().map_or(0, |i| i.tex_coord());
             list.push(Primitive {
                 triangles,
                 normals: normals.is_some().then_some(corner_normals),
@@ -279,14 +307,18 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 albedo,
                 material: surface,
                 emission,
+                normal_map,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
                     accessor(gltf::Semantic::Normals),
-                    texture.and(accessor(gltf::Semantic::TexCoords(tex_set))),
+                    texcoords
+                        .as_ref()
+                        .and(accessor(gltf::Semantic::TexCoords(tex_set))),
                     primitive.indices().map(|a| a.index()),
                     texture,
                     surface.map(|m| (m.metallic.to_bits(), m.roughness.to_bits())),
                     emission.to_array().map(f32::to_bits),
+                    normal_map,
                 ),
                 geometry: usize::MAX,
             });
@@ -323,6 +355,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             scene.geometry_textures.push(p.texture);
             scene.geometry_materials.push(p.material);
             scene.geometry_emission.push(p.emission);
+            scene.geometry_normal_maps.push(p.normal_map);
         }
     }
     // Nodes, with world matrices.
@@ -527,6 +560,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_textures.push(p.texture);
     scene.geometry_materials.push(p.material);
     scene.geometry_emission.push(p.emission);
+    scene.geometry_normal_maps.push(p.normal_map);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -643,6 +677,13 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
             let base = texture.map_or(String::new(), |t| {
                 format!(r#","baseColorTexture":{{"index":{t}}}"#)
             });
+            let bumps = scene
+                .geometry_normal_maps
+                .get(i.geometry)
+                .copied()
+                .flatten()
+                .filter(|_| scene.geometries[i.geometry].tex.len() == scene.geometries[i.geometry].triangles.len())
+                .map_or(String::new(), |t| format!(r#","normalTexture":{{"index":{t}}}"#));
             let m = scene
                 .geometry_materials
                 .get(i.geometry)
@@ -675,7 +716,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 String::new()
             };
             materials.push(format!(
-                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}}}"#,
+                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}{bumps}}}"#,
                 i.albedo.x, i.albedo.y, i.albedo.z, m.metallic, m.roughness
             ));
             meshes.push(format!(
