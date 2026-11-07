@@ -12,6 +12,12 @@
 //!   texture, where it has one and the primitive has the texture coordinates
 //!   it names, is imported and sampled when shading
 //!   (`InstancedScene::textures`).
+//! - Metallic and roughness factors become the geometry's [`Material`]
+//!   (`InstancedScene::geometry_materials`). A primitive without a material,
+//!   or with metallic 0 and roughness 1 (what [`save`] writes for a
+//!   Lambertian surface), stays Lambertian: the difference is a rough 4%
+//!   specular layer. Metallic-roughness textures, emission, normal maps and
+//!   alpha are not imported yet.
 //! - Punctual lights (`KHR_lights_punctual`) are imported
 //!   ([`Imported::lights`]): point and spot lights as small spheres,
 //!   directional lights as suns.
@@ -22,7 +28,7 @@ use std::path::Path;
 
 use continuum::glam::{DMat4, DVec3, Mat3, Vec2, Vec3};
 use continuum::mesh::{Surface, Tri};
-use continuum_gpu::{Instance, InstancedScene, Light, Spot, Texture};
+use continuum_gpu::{Instance, InstancedScene, Light, Material, Spot, Texture};
 
 /// What kind of punctual light.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,6 +142,7 @@ type GeometryKey = (
     Option<usize>,
     Option<usize>,
     Option<u32>,
+    Option<(u32, u32)>,
 );
 
 /// One primitive's geometry before placement.
@@ -146,6 +153,7 @@ struct Primitive {
     /// Its base color texture's index in the scene.
     texture: Option<u32>,
     albedo: Vec3,
+    material: Option<Material>,
     key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
@@ -217,6 +225,12 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             let pbr = material.pbr_metallic_roughness();
             let factor = pbr.base_color_factor();
             let albedo = Vec3::new(factor[0], factor[1], factor[2]);
+            let (metallic, roughness) = (pbr.metallic_factor(), pbr.roughness_factor());
+            let surface = (material.index().is_some() && (metallic != 0.0 || roughness != 1.0))
+                .then_some(Material {
+                    metallic,
+                    roughness,
+                });
             // The base color texture, through the texture coordinate set it
             // names.
             let mut texture = None;
@@ -256,12 +270,14 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 tex: texcoords.is_some().then_some(corner_tex),
                 texture,
                 albedo,
+                material: surface,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
                     accessor(gltf::Semantic::Normals),
                     texture.and(accessor(gltf::Semantic::TexCoords(tex_set))),
                     primitive.indices().map(|a| a.index()),
                     texture,
+                    surface.map(|m| (m.metallic.to_bits(), m.roughness.to_bits())),
                 ),
                 geometry: usize::MAX,
             });
@@ -296,6 +312,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 p.tex.clone(),
             ));
             scene.geometry_textures.push(p.texture);
+            scene.geometry_materials.push(p.material);
         }
     }
     // Nodes, with world matrices.
@@ -613,9 +630,18 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
             let base = texture.map_or(String::new(), |t| {
                 format!(r#","baseColorTexture":{{"index":{t}}}"#)
             });
+            let m = scene
+                .geometry_materials
+                .get(i.geometry)
+                .copied()
+                .flatten()
+                .unwrap_or(Material {
+                    metallic: 0.0,
+                    roughness: 1.0,
+                });
             materials.push(format!(
-                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":0.0,"roughnessFactor":1.0{base}}}}}"#,
-                i.albedo.x, i.albedo.y, i.albedo.z
+                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}}}"#,
+                i.albedo.x, i.albedo.y, i.albedo.z, m.metallic, m.roughness
             ));
             meshes.push(format!(
                 r#"{{"primitives":[{{"attributes":{{{}}},"material":{}}}]}}"#,

@@ -421,6 +421,27 @@ fn gltf_round_trip_renders_the_same() {
     );
 }
 
+/// Metallic and roughness survive a glTF round trip, per instance; a
+/// Lambertian geometry stays Lambertian.
+#[test]
+fn gltf_round_trip_keeps_materials() {
+    let mut s = scene(DVec3::ZERO);
+    s.geometry_materials = vec![None; s.geometries.len()];
+    s.geometry_materials[1] = Some(continuum_gpu::Material {
+        metallic: 1.0,
+        roughness: 0.3,
+    });
+    let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
+    continuum_gltf::save(&s, &path).unwrap();
+    let imported = continuum_gltf::load(&path).unwrap().scene;
+    std::fs::remove_file(&path).ok();
+    for (a, b) in s.instances.iter().zip(&imported.instances) {
+        let of =
+            |scene: &InstancedScene, g: usize| scene.geometry_materials.get(g).copied().flatten();
+        assert_eq!(of(&s, a.geometry), of(&imported, b.geometry));
+    }
+}
+
 /// Camera rays through hardware ray queries and through the compute
 /// hierarchy give the same image (where the adapter has ray queries).
 #[test]
