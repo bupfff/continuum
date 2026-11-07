@@ -1,0 +1,5 @@
+# Shaders are patched as text with `\n` patterns (continuum_gpu::kernel_source):
+# keep LF on every platform.
+*.wgsl text eol=lf
+# Golden images and other raw data.
+*.f32 binary

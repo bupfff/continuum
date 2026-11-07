@@ -485,7 +485,9 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
 /// take the overrides `WORKGROUP_STACKS`, `COUNT_WORK` and `PACKETS`.
 #[doc(hidden)]
 pub fn kernel_source(packets: bool, workgroup_stacks: bool) -> String {
-    let mut source = include_str!("mask_cones.wgsl").to_string();
+    // Line endings as written: a Windows checkout may have converted them,
+    // and the patterns below match `\n`.
+    let mut source = include_str!("mask_cones.wgsl").replace("\r\n", "\n");
     if packets {
         let solo = "fn packet_any(x: bool) -> bool {\n    return x;\n}";
         assert!(source.contains(solo), "packet_any not found");
