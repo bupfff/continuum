@@ -103,6 +103,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         instances,
         textures: vec![checker()],
         geometry_textures: vec![Some(0), None, None],
+        geometry_materials: Vec::new(),
     }
 }
 

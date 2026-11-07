@@ -315,14 +315,25 @@ pub fn render_instanced_lights(
         work.join(format!("{tag}.exr")),
         work.join(format!("{tag}.f32")),
     );
+    // Each geometry's material (M10 gate 2): metallic and roughness, or
+    // null for Lambertian.
+    let materials: Vec<String> = (0..scene.geometries.len())
+        .map(
+            |g| match scene.geometry_materials.get(g).copied().flatten() {
+                Some(m) => format!("[{}, {}]", m.metallic, m.roughness),
+                None => "null".to_string(),
+            },
+        )
+        .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
   "width": {width}, "height": {height}, "samples": {samples}, "bounces": {bounces}, "seed": {seed}}}"#,
         geometries.join(", "),
         geometry_textures.join(", "),
+        materials.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),

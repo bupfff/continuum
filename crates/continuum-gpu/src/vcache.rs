@@ -127,6 +127,10 @@ pub struct CacheOptions {
     pub indirect: bool,
     /// What a bounce sample counts against the bake budget, in sun texels.
     pub indirect_sample_cost: u32,
+    /// Experiments only: glossy reflection rays for materials (M10 gate 2;
+    /// on by default).
+    #[doc(hidden)]
+    pub glossy_rays: bool,
     /// With a sky: the spacing (in each geometry's own units) of the grid on
     /// which its own sky occlusion is baked once, for all its instances (M5
     /// gate 5). Sky texels then walk only the other objects. 0: off. Only
@@ -158,6 +162,7 @@ impl Default for CacheOptions {
             ledger_epsilon: 0.01,
             indirect: false,
             indirect_sample_cost: 8,
+            glossy_rays: true,
             self_spacing: 0.01,
             light_ratio: true,
         }
@@ -1446,7 +1451,7 @@ impl VirtualCache {
             indirect: [
                 self.indirect_jobs.len() as u32,
                 self.options.indirect as u32,
-                0,
+                !self.options.glossy_rays as u32,
                 0,
             ],
         };

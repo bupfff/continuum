@@ -2255,7 +2255,8 @@ struct VcParams {
     // the ledger may add to a frame's bake; movers.z's top bit: 1 if a
     // moving light moved this frame
     ledger: vec4<u32>,
-    // Bounce light (M10 gate 1): x: samples to bake, y: 1 if on, z, w: 0
+    // Bounce light (M10 gate 1): x: samples to bake, y: 1 if on; z: 1 to
+    // skip glossy reflection rays (M10 gate 2's diagnostic); w: 0
     indirect: vec4<u32>,
 };
 
@@ -2382,6 +2383,9 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // Slots whose samples met hits with no page resident (requested), for the
 // CPU to re-bake later; count in mover_stats[15].
 @group(0) @binding(75) var<storage, read_write> incomplete: array<u32>;
+// Per object, its material (M10 gate 2): metallic and roughness; roughness
+// below zero is Lambertian.
+@group(0) @binding(76) var<storage, read> materials: array<vec2<f32>>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -3755,6 +3759,11 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     let count = arrayLength(&lights);
     let point = surface + hit.normal * surface_offset(hit.distance);
     let normal = shading_normal(hit.mesh, hit.tri, surface, -dir);
+    let base = surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal);
+    // A material (M10 gate 2): roughness below zero is Lambertian.
+    let mat = materials[hit.mesh];
+    let pbr = mat.y >= 0.0;
+    var spec = vec3<f32>(0.0);
     if (found) {
         // Each light's cached shadowed share, times its unshadowed
         // light here.
@@ -3763,7 +3772,11 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
                 // Shadowed pixels need no unshadowed light.
                 let share = vc_bilinear(found_slot, found_ref, l);
                 if (share > 0.0) {
-                    e += lights[l].radiance.xyz * share * unshadowed_rect(point, normal, lights[l]);
+                    let open = unshadowed_rect(point, normal, lights[l]);
+                    e += lights[l].radiance.xyz * share * open;
+                    if (pbr) {
+                        spec += lights[l].radiance.xyz * share * open * specular_light(point, normal, -dir, lights[l], base, mat);
+                    }
                 }
             } else {
                 e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
@@ -3787,7 +3800,137 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         atomicAdd(&vc_stats[2], 1u);
         if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
     }
-    return surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal) * e / 3.14159265;
+    if (!pbr) { return base * e / 3.14159265; }
+    // Metallic-roughness: the specular layer's directional albedo (the
+    // split sum), glossy reflections along the mirror direction, and the
+    // diffuse part less what the specular layer reflects.
+    let nv = max(dot(normal, -dir), 1e-4);
+    let ab = env_brdf(nv, mat.y);
+    let f0 = mix(vec3<f32>(0.04), base, mat.x);
+    let albedo_spec = f0 * ab.x + ab.y;
+    if (vc.indirect.z == 0u && max(albedo_spec.x, max(albedo_spec.y, albedo_spec.z)) > 0.005) {
+        spec += albedo_spec * reflected_light(point, reflect(dir, normal), mat.y);
+    }
+    let diffuse = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
+    return diffuse * e / 3.14159265 + spec;
+}
+
+// --- Materials (M10 gate 2): metallic-roughness, glossy reflections. ---
+
+fn ggx_d(nh: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let d = nh * nh * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159265 * d * d);
+}
+
+// Smith's height-correlated visibility, G / (4 n·l n·v).
+fn smith_visibility(nv: f32, nl: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let gv = nl * sqrt(nv * nv * (1.0 - a2) + a2);
+    let gl = nv * sqrt(nl * nl * (1.0 - a2) + a2);
+    return 0.5 / max(gv + gl, 1e-7);
+}
+
+fn fresnel(f0: vec3<f32>, vh: f32) -> vec3<f32> {
+    return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - vh, 0.0, 1.0), 5.0);
+}
+
+// The split sum's scale and bias on F0 (Karis's analytic fit, 2014).
+fn env_brdf(nv: f32, roughness: f32) -> vec2<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+}
+
+// GGX specular per unit of the light's unshadowed irradiance at `p`
+// (normal `n`, toward the viewer `v`): toward light `r`'s point nearest the
+// mirror direction, the lobe widened by the light's angular radius (Karis
+// 2013's representative point, normalized).
+fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: vec3<f32>, mat: vec2<f32>) -> vec3<f32> {
+    let refl = reflect(-v, n);
+    var aim = light_center(r);
+    var radius = 0.0;
+    if (is_sphere(r)) {
+        let c = r.corner.xyz - p;
+        let along = c - dot(c, refl) * refl;
+        aim = r.corner.xyz - along * clamp(r.edge_u.x / max(length(along), 1e-9), 0.0, 1.0);
+        radius = r.edge_u.x;
+    } else {
+        let nr = normalize(cross(r.edge_u.xyz, r.edge_v.xyz));
+        let denom = dot(nr, refl);
+        var q = light_center(r);
+        if (abs(denom) > 1e-6) {
+            let t = dot(nr, r.corner.xyz - p) / denom;
+            if (t > 0.0) { q = p + refl * t; }
+        }
+        let d = q - r.corner.xyz;
+        let s = clamp(dot(d, r.edge_u.xyz) / dot(r.edge_u.xyz, r.edge_u.xyz), 0.0, 1.0);
+        let u = clamp(dot(d, r.edge_v.xyz) / dot(r.edge_v.xyz, r.edge_v.xyz), 0.0, 1.0);
+        aim = r.corner.xyz + r.edge_u.xyz * s + r.edge_v.xyz * u;
+        radius = 0.5 * length(r.edge_u.xyz + r.edge_v.xyz);
+    }
+    let to = aim - p;
+    let dist = max(length(to), 1e-6);
+    let l = to / dist;
+    let nl = dot(n, l);
+    let nv = max(dot(n, v), 1e-4);
+    if (nl <= 0.0) { return vec3<f32>(0.0); }
+    let h = normalize(v + l);
+    let a = max(mat.y * mat.y, 1e-3);
+    let wide = min(a + 0.5 * radius / max(length(light_center(r) - p), 1e-6), 1.0);
+    let norm = (a / wide) * (a / wide);
+    let f0 = mix(vec3<f32>(0.04), base, mat.x);
+    return ggx_d(max(dot(n, h), 0.0), wide) * smith_visibility(nv, nl, wide) * fresnel(f0, max(dot(v, h), 0.0)) * norm;
+}
+
+// The light arriving at `p` along `refl`: what the cache holds for the
+// surface it meets (its diffuse light, read at the mip matching the lobe's
+// width there), or the sky.
+fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let hit = primary_hit(p, refl);
+    if (hit.mesh == NONE) { return light.sky.xyz; }
+    let q = p + refl * hit.distance;
+    // The lobe's width there: about α radians.
+    let footprint = hit.distance * max(roughness * roughness, 0.002);
+    let hc = tri_vchart[hit.tri];
+    let uv = chart_uv(hit.mesh, hit.tri, q);
+    let top = vc_top_mip(hc, hit.mesh);
+    let ratio = footprint * vc.params.x / object_scale(hit.mesh);
+    var want = 0u;
+    if (ratio > 1.0) { want = min(u32(round(log2(ratio))), top); }
+    var slot = NONE;
+    var r: PageRef;
+    for (var m = want; m <= top; m++) {
+        r = vc_page(hit.mesh, hc, uv, m);
+        slot = vc_find(r.key);
+        if (slot != NONE) { break; }
+    }
+    let hn = shading_normal(hit.mesh, hit.tri, q, -refl);
+    let hp = q + hit.normal * surface_offset(length(q));
+    let count = arrayLength(&lights);
+    var e = vec3<f32>(0.0);
+    if (slot == NONE) {
+        vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u);
+        for (var l = 0u; l < count; l++) {
+            e += lights[l].radiance.xyz * unshadowed_rect(hp, hn, lights[l]);
+        }
+        e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + hn.z));
+    } else {
+        // A page seen in reflections is in use: kept, not evicted.
+        slot_used[slot] = vc.counts.y;
+        for (var l = 0u; l < count; l++) {
+            var direct = vc_bilinear(slot, r, l);
+            if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
+            e += lights[l].radiance.xyz * direct;
+        }
+        e += light.sky.xyz * vc_bilinear(slot, r, count);
+        if (vc.indirect.y == 1u) { e += indirect_light(slot, r); }
+    }
+    let hm = materials[hit.mesh];
+    let metal = select(0.0, hm.x, hm.y >= 0.0);
+    return bounce_albedo(hit.mesh, hit.tri, q, footprint) * (1.0 - metal) * e / 3.14159265;
 }
 
 

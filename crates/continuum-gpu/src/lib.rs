@@ -470,8 +470,8 @@ pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
 pub(crate) const VC_FILL_BINDINGS: &[u32] =
     &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
-    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58, 62,
-    73,
+    0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55,
+    56, 57, 58, 62, 73, 76,
 ];
 /// Bounce light's samples (M10 gate 1).
 pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
@@ -1139,6 +1139,19 @@ impl MaskConeKernel {
                 }
             })
             .collect();
+        // Per object, its material: metallic and roughness (roughness below
+        // zero: Lambertian).
+        let materials: Vec<[f32; 2]> = scene
+            .instances
+            .iter()
+            .map(
+                |i| match scene.geometry_materials.get(i.geometry).copied().flatten() {
+                    Some(m) => [m.metallic, m.roughness.clamp(0.0, 1.0)],
+                    None => [0.0, -1.0],
+                },
+            )
+            .chain(std::iter::once([0.0, -1.0]))
+            .collect();
         let mut tex: Vec<[f32; 2]> = Vec::new();
         for g in &scene.geometries {
             if g.tex.len() == g.triangles.len() {
@@ -1209,6 +1222,7 @@ impl MaskConeKernel {
                 58,
                 storage("texture coordinates", bytemuck::cast_slice(&tex)),
             ),
+            (76, storage("materials", bytemuck::cast_slice(&materials))),
         ];
         (buffers, movers)
     }
@@ -1918,6 +1932,20 @@ pub struct InstancedScene {
     pub textures: Vec<Texture>,
     /// Each geometry's texture, if any (empty: none).
     pub geometry_textures: Vec<Option<u32>>,
+    /// Each geometry's material, if any (empty or `None`: Lambertian). Used
+    /// by the cache's shading (M10 gate 2).
+    pub geometry_materials: Vec<Option<Material>>,
+}
+
+/// glTF's metallic-roughness model (M10 gate 2): a dielectric (metallic 0,
+/// specular reflectance 0.04) or a metal (metallic 1, reflecting its base
+/// color), with GGX microfacets of α = roughness².
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Material {
+    /// 0 for a dielectric, 1 for a metal (between: a blend).
+    pub metallic: f32,
+    /// Perceptual roughness, 0 (a mirror) to 1.
+    pub roughness: f32,
 }
 
 /// A base color texture: sRGB-encoded RGBA8, rows from the top (as glTF

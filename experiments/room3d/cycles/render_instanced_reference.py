@@ -48,8 +48,18 @@ for g, path in enumerate(job["geometries"]):
     nodes = mat.node_tree.nodes
     nodes.clear()
     out = nodes.new("ShaderNodeOutputMaterial")
-    bsdf = nodes.new("ShaderNodeBsdfDiffuse")
-    bsdf.inputs["Roughness"].default_value = 0.0
+    material = (job.get("materials") or [None] * len(job["geometries"]))[g]
+    if material:
+        # Metallic-roughness (M10 gate 2): the Principled BSDF with
+        # single-scattering GGX, glTF's model.
+        bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+        bsdf.distribution = "GGX"
+        bsdf.inputs["Metallic"].default_value = material[0]
+        bsdf.inputs["Roughness"].default_value = material[1]
+        bsdf.inputs["IOR"].default_value = 1.5
+    else:
+        bsdf = nodes.new("ShaderNodeBsdfDiffuse")
+        bsdf.inputs["Roughness"].default_value = 0.0
     attr = nodes.new("ShaderNodeAttribute")
     attr.attribute_type = "INSTANCER"
     attr.attribute_name = "albedo"
@@ -68,9 +78,11 @@ for g, path in enumerate(job["geometries"]):
         multiply.inputs["Factor"].default_value = 1.0
         mat.node_tree.links.new(image.outputs["Color"], multiply.inputs["A"])
         mat.node_tree.links.new(attr.outputs["Color"], multiply.inputs["B"])
-        mat.node_tree.links.new(multiply.outputs["Result"], bsdf.inputs["Color"])
+        color_in = bsdf.inputs["Base Color"] if material else bsdf.inputs["Color"]
+        mat.node_tree.links.new(multiply.outputs["Result"], color_in)
     else:
-        mat.node_tree.links.new(attr.outputs["Color"], bsdf.inputs["Color"])
+        color_in = bsdf.inputs["Base Color"] if material else bsdf.inputs["Color"]
+        mat.node_tree.links.new(attr.outputs["Color"], color_in)
     mat.node_tree.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     source.data.materials.clear()
     source.data.materials.append(mat)
@@ -246,7 +258,7 @@ cy.use_adaptive_sampling = False
 cy.use_denoising = False
 cy.max_bounces = job["bounces"]
 cy.diffuse_bounces = job["bounces"]
-cy.glossy_bounces = 0
+cy.glossy_bounces = job["bounces"]
 cy.transmission_bounces = 0
 cy.volume_bounces = 0
 cy.transparent_max_bounces = 0

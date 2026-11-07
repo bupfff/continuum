@@ -177,6 +177,7 @@ impl Textured {
             instances,
             textures: vec![tiles, lichen, bricks],
             geometry_textures: vec![Some(0), Some(1), Some(2)],
+            geometry_materials: Vec::new(),
         };
         // The camera stands at 1.5 m looking along +y, slightly down; the sun
         // is 30° up behind and to the left, 1 km away, 0.5° across.
@@ -215,6 +216,28 @@ impl Textured {
 }
 
 impl Textured {
+    /// M10 gate 2's materials: the ground dielectric (roughness 0.6), the
+    /// boulders metallic (roughness 0.3), the brick block dielectric
+    /// (roughness 0.4).
+    pub fn with_materials(mut self) -> Textured {
+        use continuum_gpu::Material;
+        self.scene.geometry_materials = vec![
+            Some(Material {
+                metallic: 0.0,
+                roughness: 0.6,
+            }),
+            Some(Material {
+                metallic: 1.0,
+                roughness: 0.3,
+            }),
+            Some(Material {
+                metallic: 0.0,
+                roughness: 0.4,
+            }),
+        ];
+        self
+    }
+
     /// Night lights for the scene (M5 gate 8): a warm point light 10 cm
     /// across, 2 m up near the brick block, and a cool spot 5 cm across, 4 m
     /// up, aimed down the scene with 20° inner and 30° outer half-angles.
