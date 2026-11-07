@@ -84,6 +84,7 @@ fn scene() -> ContinuumScene {
             geometry_materials: Vec::new(),
             geometry_emission: Vec::new(),
             geometry_normal_maps: Vec::new(),
+            geometry_metallic_roughness: Vec::new(),
         }),
         lights: vec![
             Light::sun(

@@ -16,7 +16,9 @@
 //!   (`InstancedScene::geometry_materials`). A primitive without a material,
 //!   or with metallic 0 and roughness 1 (what [`save`] writes for a
 //!   Lambertian surface), stays Lambertian: the difference is a rough 4%
-//!   specular layer. Metallic-roughness textures and alpha are not imported
+//!   specular layer. A metallic-roughness texture (through the base
+//!   color's texture coordinates, or alone) becomes the geometry's
+//!   (`InstancedScene::geometry_metallic_roughness`). Alpha is not imported
 //!   yet.
 //! - A normal texture, through the same texture coordinates as the base
 //!   color (or alone), becomes the geometry's normal map
@@ -151,6 +153,7 @@ type GeometryKey = (
     Option<(u32, u32)>,
     [u32; 3],
     Option<u32>,
+    Option<u32>,
 );
 
 /// One primitive's geometry before placement.
@@ -165,6 +168,8 @@ struct Primitive {
     emission: Vec3,
     /// Its normal map's index in the scene's textures.
     normal_map: Option<u32>,
+    /// Its metallic-roughness texture's index in the scene's textures.
+    metallic_roughness: Option<u32>,
     key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
@@ -237,11 +242,14 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             let factor = pbr.base_color_factor();
             let albedo = Vec3::new(factor[0], factor[1], factor[2]);
             let (metallic, roughness) = (pbr.metallic_factor(), pbr.roughness_factor());
-            let surface = (material.index().is_some() && (metallic != 0.0 || roughness != 1.0))
-                .then_some(Material {
-                    metallic,
-                    roughness,
-                });
+            let surface = (material.index().is_some()
+                && (metallic != 0.0
+                    || roughness != 1.0
+                    || pbr.metallic_roughness_texture().is_some()))
+            .then_some(Material {
+                metallic,
+                roughness,
+            });
             let emission = Vec3::from_array(material.emissive_factor())
                 * material.emissive_strength().unwrap_or(1.0);
             // The base color texture, through the texture coordinate set it
@@ -286,6 +294,28 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     });
                 }
             }
+            // The metallic-roughness texture, likewise.
+            let mut metallic_roughness = None;
+            if let Some(info) = pbr.metallic_roughness_texture()
+                && surface.is_some()
+                && (texcoords.is_none() || info.tex_coord() == tex_set)
+            {
+                if texcoords.is_none()
+                    && let Some(t) = reader.read_tex_coords(info.tex_coord())
+                {
+                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
+                    tex_set = info.tex_coord();
+                }
+                if texcoords.is_some() {
+                    let image = info.texture().source().index();
+                    metallic_roughness = *texture_of_image[image].get_or_insert_with(|| {
+                        to_rgba(&images[image]).map(|t| {
+                            textures.push(t);
+                            textures.len() as u32 - 1
+                        })
+                    });
+                }
+            }
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
             let mut corner_tex = Vec::with_capacity(indices.len() / 3);
@@ -308,6 +338,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 material: surface,
                 emission,
                 normal_map,
+                metallic_roughness,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
                     accessor(gltf::Semantic::Normals),
@@ -319,6 +350,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     surface.map(|m| (m.metallic.to_bits(), m.roughness.to_bits())),
                     emission.to_array().map(f32::to_bits),
                     normal_map,
+                    metallic_roughness,
                 ),
                 geometry: usize::MAX,
             });
@@ -356,6 +388,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             scene.geometry_materials.push(p.material);
             scene.geometry_emission.push(p.emission);
             scene.geometry_normal_maps.push(p.normal_map);
+            scene.geometry_metallic_roughness.push(p.metallic_roughness);
         }
     }
     // Nodes, with world matrices.
@@ -561,6 +594,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_materials.push(p.material);
     scene.geometry_emission.push(p.emission);
     scene.geometry_normal_maps.push(p.normal_map);
+    scene.geometry_metallic_roughness.push(p.metallic_roughness);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -674,9 +708,19 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 .copied()
                 .flatten()
                 .filter(|_| scene.geometries[i.geometry].tex.len() == scene.geometries[i.geometry].triangles.len());
-            let base = texture.map_or(String::new(), |t| {
+            let has_tex = scene.geometries[i.geometry].tex.len() == scene.geometries[i.geometry].triangles.len();
+            let mut base = texture.map_or(String::new(), |t| {
                 format!(r#","baseColorTexture":{{"index":{t}}}"#)
             });
+            if let Some(t) = scene
+                .geometry_metallic_roughness
+                .get(i.geometry)
+                .copied()
+                .flatten()
+                .filter(|_| has_tex && scene.geometry_materials.get(i.geometry).copied().flatten().is_some())
+            {
+                write!(base, r#","metallicRoughnessTexture":{{"index":{t}}}"#).unwrap();
+            }
             let bumps = scene
                 .geometry_normal_maps
                 .get(i.geometry)

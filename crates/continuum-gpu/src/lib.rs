@@ -1038,7 +1038,7 @@ impl MaskConeKernel {
             height,
             buffers,
             hw_scene.as_ref().map(|h| &h.tlas),
-            &self.scene_textures(&scene.textures, &scene.normal_map_textures()),
+            &self.scene_textures(&scene.textures, &scene.linear_textures()),
             runs,
         );
         (pixels, time, bytes)
@@ -1143,23 +1143,24 @@ impl MaskConeKernel {
             .collect();
         // Per object, its material: metallic and roughness (roughness below
         // zero: Lambertian), and its emission as half floats.
-        let normal_maps = scene.normal_map_textures();
+        let linear = scene.linear_textures();
+        let layer_of = |maps: &[Option<u32>], i: &Instance| {
+            let g = &scene.geometries[i.geometry];
+            maps.get(i.geometry)
+                .copied()
+                .flatten()
+                .filter(|_| g.tex.len() == g.triangles.len())
+                .and_then(|k| linear.iter().position(|&m| m == k))
+                .map_or(0, |p| p as u32 + 1)
+        };
         let materials: Vec<[u32; 4]> = scene
             .instances
             .iter()
-            .map(|i| {
-                // Its normal map's layer plus one (0: none), M10 gate 5.
-                let layer = scene
-                    .geometry_normal_maps
-                    .get(i.geometry)
-                    .copied()
-                    .flatten()
-                    .filter(|_| {
-                        let g = &scene.geometries[i.geometry];
-                        g.tex.len() == g.triangles.len()
-                    })
-                    .and_then(|k| normal_maps.iter().position(|&m| m == k))
-                    .map_or(0, |p| p as u32 + 1);
+            .map(|i| -> [u32; 5] {
+                // Its normal map's and metallic-roughness texture's
+                // layers plus one (0: none).
+                let layer = layer_of(&scene.geometry_normal_maps, i);
+                let mr = layer_of(&scene.geometry_metallic_roughness, i);
                 let [metallic, roughness] =
                     match scene.geometry_materials.get(i.geometry).copied().flatten() {
                         Some(m) => [m.metallic, m.roughness.clamp(0.0, 1.0)],
@@ -1177,9 +1178,11 @@ impl MaskConeKernel {
                     roughness.to_bits(),
                     e[0] | e[1] << 16,
                     e[2] | layer << 16,
+                    mr,
                 ]
             })
-            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0]))
+            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0, 0]))
+            .flat_map(|[a, b, c, d, mr]| [[a, b, c, d], [mr, 0, 0, 0]])
             .collect();
         let mut tex: Vec<[f32; 2]> = Vec::new();
         for g in &scene.geometries {
@@ -2012,14 +2015,27 @@ pub struct InstancedScene {
     /// shading for light from lights, specular and reflections; the cached
     /// sky and bounce light keep the interpolated normal.
     pub geometry_normal_maps: Vec<Option<u32>>,
+    /// Each geometry's metallic-roughness texture, if any (empty: none): an
+    /// index into `textures` (linear; glTF's layout, roughness in green and
+    /// metallic in blue), multiplying its material's factors. Ignored for a
+    /// geometry without a material.
+    pub geometry_metallic_roughness: Vec<Option<u32>>,
 }
 
 impl InstancedScene {
-    /// The textures used as normal maps, each once, in order.
-    pub(crate) fn normal_map_textures(&self) -> Vec<u32> {
+    /// The textures read linearly (normal maps and metallic-roughness
+    /// textures), each once, in order.
+    pub(crate) fn linear_textures(&self) -> Vec<u32> {
         let mut used: Vec<u32> = (0..self.geometries.len())
             .filter(|&g| self.geometries[g].tex.len() == self.geometries[g].triangles.len())
-            .filter_map(|g| self.geometry_normal_maps.get(g).copied().flatten())
+            .flat_map(|g| {
+                [
+                    &self.geometry_normal_maps,
+                    &self.geometry_metallic_roughness,
+                ]
+                .map(|maps| maps.get(g).copied().flatten())
+            })
+            .flatten()
             .collect();
         used.sort_unstable();
         used.dedup();

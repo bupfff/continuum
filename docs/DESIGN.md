@@ -253,8 +253,8 @@ Against the goal in §1, honestly:
     0.01% bound.
   - Imports base color, metallic and roughness factors, emission (factor
     times strength; not shown by other surfaces' lighting) and normal maps
-    (M10 G5: 3.63% from Cycles with them). No alpha or metallic-roughness
-    textures yet.
+    (M10 G5: 3.63% from Cycles with them), and metallic-roughness
+    textures. No alpha yet.
 - **One bounce of light in the view cache** (M10 G1, failed on its
   re-coloring check only).
   - On M6's textured scene, the cached image with bounce light is 1.79%

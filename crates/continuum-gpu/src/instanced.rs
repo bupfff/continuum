@@ -849,7 +849,7 @@ impl InstancedRenderer {
             // Shading reads the lights' buffer; the camera's radiance is unused.
             radiance: lights[0].radiance.x,
             lights: lights.len(),
-            textures: kernel.scene_textures(&scene.textures, &scene.normal_map_textures()),
+            textures: kernel.scene_textures(&scene.textures, &scene.linear_textures()),
             srgb: target_format.is_srgb(),
             float_target: matches!(
                 target_format,

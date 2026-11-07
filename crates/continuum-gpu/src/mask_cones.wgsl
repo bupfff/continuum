@@ -1562,8 +1562,8 @@ fn barycentric(m: u32, t: u32, world_p: vec3<f32>) -> vec3<f32> {
 @group(0) @binding(56) var base_sampler: sampler;
 @group(0) @binding(57) var<storage, read> object_texture: array<u32>;
 @group(0) @binding(58) var<storage, read> tri_tex: array<vec2<f32>>;
-// Normal maps (M10 gate 5): linear, a layer per map; an object's layer plus
-// one is in the high half of its material's w (0: none).
+// Linear textures: normal maps (M10 gate 5) and metallic-roughness
+// textures, a layer each; objects name theirs in `materials`.
 @group(0) @binding(79) var normal_maps: texture_2d_array<f32>;
 
 // Normal `n` (the interpolated shading normal at world point `p` on
@@ -1574,7 +1574,7 @@ fn barycentric(m: u32, t: u32, world_p: vec3<f32>) -> vec3<f32> {
 // orthogonalized against `n`. Read at the mip matching the pixel's
 // footprint.
 fn mapped_normal(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: vec3<f32>) -> vec3<f32> {
-    let layer = materials[m].w >> 16u;
+    let layer = materials[2u * m].w >> 16u;
     if (layer == 0u) { return n; }
     let b = barycentric(m, t, p);
     let t0 = tri_tex[3u * t];
@@ -2521,18 +2521,48 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 @group(0) @binding(75) var<storage, read_write> incomplete: array<u32>;
 // Per object, its material (M10 gate 2): metallic and roughness; roughness
 // below zero is Lambertian.
-// Per object: metallic and roughness (f32 bits; roughness below zero:
-// Lambertian), then its emitted radiance as half floats (r, g; b).
+// Per object, two entries: metallic and roughness (f32 bits; roughness
+// below zero: Lambertian), its emitted radiance as half floats (r, g; b),
+// its normal map's layer plus one in w's high half; then its
+// metallic-roughness texture's layer plus one (0: none).
 @group(0) @binding(76) var<storage, read> materials: array<vec4<u32>>;
 
 fn material_of(m: u32) -> vec2<f32> {
-    let v = materials[m];
+    let v = materials[2u * m];
     return vec2<f32>(bitcast<f32>(v.x), bitcast<f32>(v.y));
 }
 
 fn emission_of(m: u32) -> vec3<f32> {
-    let v = materials[m];
+    let v = materials[2u * m];
     return vec3<f32>(unpack2x16float(v.z), unpack2x16float(v.w).x);
+}
+
+// Object `m`'s material at world point `p` on triangle `t` (seen at
+// `distance` along `dir`, geometric normal `n`): its factors times its
+// metallic-roughness texture (glTF's: roughness in green, metallic in
+// blue), read at the mip matching the pixel's footprint.
+fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: vec3<f32>) -> vec2<f32> {
+    let mat = material_of(m);
+    let layer = materials[2u * m + 1u].x;
+    if (layer == 0u || mat.y < 0.0) { return mat; }
+    let b = barycentric(m, t, p);
+    let t0 = tri_tex[3u * t];
+    let t1 = tri_tex[3u * t + 1u];
+    let t2 = tri_tex[3u * t + 2u];
+    let uv = t0 * b.x + t1 * b.y + t2 * b.z;
+    let v0 = tris[3u * t].xyz;
+    let d1 = t1 - t0;
+    let d2 = t2 - t0;
+    let size = f32(textureDimensions(normal_maps).x);
+    let scale = object_scale(m);
+    let world_area = 0.5 * length(cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0)) * scale * scale;
+    let texel_area = 0.5 * abs(d1.x * d2.y - d1.y * d2.x) * size * size;
+    let texel = sqrt(world_area / max(texel_area, 1e-12));
+    let footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share;
+    let pixel = footprint * distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
+    let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
+    let s = textureSampleLevel(normal_maps, base_sampler, uv, i32(layer - 1u), lod);
+    return vec2<f32>(mat.x * s.z, mat.y * s.y);
 }
 // Movers under a sky (M9 gate 3). Per slot: the sky ledger (the charges
 // since the page's sky was baked), its threshold (ε × max(the page's
@@ -4103,7 +4133,7 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     let normal = mapped_normal(hit.mesh, hit.tri, surface, shading_normal(hit.mesh, hit.tri, surface, -dir), hit.distance, dir);
     let base = surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal);
     // A material (M10 gate 2): roughness below zero is Lambertian.
-    let mat = material_of(hit.mesh);
+    let mat = material_at(hit.mesh, hit.tri, surface, hit.normal, hit.distance, dir);
     let pbr = mat.y >= 0.0;
     let glow = emission_of(hit.mesh);
     var spec = vec3<f32>(0.0);

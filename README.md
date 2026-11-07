@@ -113,7 +113,7 @@ A textured scene imported this way is within 0.43% of Cycles with the same
 textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Metallic and
 roughness factors, emission and normal maps are imported too (normal maps
 3.63% from Cycles, M10 gate 5; metallic-roughness 8.94%, M10 gate 2, which
-failed against 6%). Alpha and metallic-roughness textures are ignored.
+failed against 6%), with metallic-roughness textures. Alpha is ignored.
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb

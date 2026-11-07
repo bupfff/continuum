@@ -106,6 +106,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_materials: Vec::new(),
         geometry_emission: Vec::new(),
         geometry_normal_maps: Vec::new(),
+        geometry_metallic_roughness: Vec::new(),
     }
 }
 
@@ -436,6 +437,11 @@ fn gltf_round_trip_keeps_materials() {
     s.geometry_emission = vec![Vec3::ZERO; s.geometries.len()];
     s.geometry_emission[2] = Vec3::new(4.0, 2.0, 0.5);
     s.geometry_normal_maps = vec![Some(0), None, None];
+    s.geometry_materials[0] = Some(continuum_gpu::Material {
+        metallic: 0.0,
+        roughness: 0.7,
+    });
+    s.geometry_metallic_roughness = vec![Some(0), None, None];
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
     let imported = continuum_gltf::load(&path).unwrap().scene;
@@ -470,7 +476,78 @@ fn gltf_round_trip_keeps_materials() {
                 .is_some()
         };
         assert_eq!(bumps(&s, a.geometry), bumps(&imported, b.geometry));
+        let mr = |scene: &InstancedScene, g: usize| {
+            scene
+                .geometry_metallic_roughness
+                .get(g)
+                .copied()
+                .flatten()
+                .is_some()
+        };
+        assert_eq!(mr(&s, a.geometry), mr(&imported, b.geometry));
     }
+}
+
+/// The cache's settled image of `scene`.
+fn settled(scene: &InstancedScene) -> Image {
+    let mut r = renderer(
+        kernel(),
+        scene,
+        DVec3::ZERO,
+        RendererOptions {
+            cache_options: CacheOptions {
+                frame_target_ms: 0.0,
+                pages: 1 << 15,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let view = target(&r);
+    let mut frames = 0;
+    while frames < 2_000 && !r.is_settled(32) {
+        r.render(camera(), &view);
+        frames += 1;
+    }
+    r.read_colors()
+}
+
+/// A metallic-roughness texture multiplies its material's factors: a white
+/// one changes nothing; a darker green (rougher scale) changes the image.
+#[test]
+fn metallic_roughness_texture_multiplies_the_factors() {
+    let mut s = scene(DVec3::ZERO);
+    s.geometry_materials = vec![
+        Some(continuum_gpu::Material {
+            metallic: 0.0,
+            roughness: 0.5,
+        }),
+        None,
+        None,
+    ];
+    let plain = settled(&s);
+    let with = |green: u8| {
+        let mut t = s.clone();
+        t.textures.push(Texture {
+            width: 1,
+            height: 1,
+            rgba: vec![255, green, 255, 255],
+        });
+        t.geometry_metallic_roughness = vec![Some(t.textures.len() as u32 - 1), None, None];
+        settled(&t)
+    };
+    let white = difference(&with(255), &plain);
+    eprintln!("white texture against none: {white:?}");
+    assert!(
+        white.relative_rmse < 1e-5,
+        "a white texture changed the image: {white:?}"
+    );
+    let smoother = difference(&with(40), &plain);
+    eprintln!("smoother against none: {smoother:?}");
+    assert!(
+        smoother.relative_rmse > 1e-3,
+        "the texture had no effect: {smoother:?}"
+    );
 }
 
 /// Emission adds to what a surface reflects, exactly, in the cached path.
@@ -481,28 +558,6 @@ fn emission_adds_to_the_cached_image() {
     let glow = Vec3::new(0.5, 0.25, 0.0);
     glowing.geometry_emission = vec![Vec3::ZERO; s.geometries.len()];
     glowing.geometry_emission[0] = glow;
-    let settled = |scene: &InstancedScene| {
-        let mut r = renderer(
-            kernel(),
-            scene,
-            DVec3::ZERO,
-            RendererOptions {
-                cache_options: CacheOptions {
-                    frame_target_ms: 0.0,
-                    pages: 1 << 15,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        let view = target(&r);
-        let mut frames = 0;
-        while frames < 2_000 && !r.is_settled(32) {
-            r.render(camera(), &view);
-            frames += 1;
-        }
-        r.read_colors()
-    };
     let (plain, lit) = (settled(&s), settled(&glowing));
     let (mut on, mut off) = (0, 0);
     for (a, b) in plain.iter().zip(&lit) {
