@@ -14,10 +14,10 @@ use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_VISIBILITY_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
     MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
-    VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS,
-    VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
+    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
+    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS,
+    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -90,10 +90,24 @@ impl Cache {
         if counts[2] > 0 {
             list.push((&self.passes[2], &self.binds[2], groups(counts[2])));
         }
+        let bounce = self.state.indirect_jobs();
+        let bounce_pass = self
+            .indirect
+            .as_ref()
+            .and_then(|(p, b)| b.as_ref().map(|b| (p, b)))
+            .filter(|_| bounce > 0);
         if indirect {
             list.push((&self.passes[3], &self.binds[3], Dispatch::Indirect(24)));
         } else if counts[3] > 0 {
             list.push((&self.passes[3], &self.binds[3], groups(counts[3])));
+        }
+        // Bounce samples read the direct light just baked: after the fill.
+        if let Some((pipeline, bind)) = bounce_pass {
+            list.push((
+                pipeline,
+                bind,
+                Dispatch::Groups(bounce.min(65_535), bounce.div_ceil(65_535)),
+            ));
         }
         let set = self.state.timer.as_ref().map(|t| &t.set);
         let ran: Vec<usize> = (0..list.len()).collect();
@@ -144,6 +158,8 @@ struct Cache {
     /// Movers in the scene, moving lights tracked.
     has_movers: bool,
     moving_lights: bool,
+    /// Bounce light's sample pass and its bind group (M10 gate 1).
+    indirect: Option<(wgpu::ComputePipeline, Option<wgpu::BindGroup>)>,
 }
 
 /// What [`InstancedRenderer::verify_cache`] found: resident pages that
@@ -760,6 +776,9 @@ impl InstancedRenderer {
             }),
             has_movers: !movable.is_empty(),
             moving_lights: !moving_lights.is_empty(),
+            indirect: options
+                .indirect
+                .then(|| (kernel.entry("vc_bake_indirect"), None)),
             passes: [
                 kernel.entry("vc_update"),
                 kernel.entry("vc_bake"),
@@ -917,6 +936,23 @@ impl InstancedRenderer {
             });
             (binds, movers)
         });
+        let bounce_bind = self.cache.as_ref().and_then(|cache| {
+            cache.indirect.as_ref().map(|(pipeline, _)| {
+                bind_group(
+                    device,
+                    pipeline,
+                    &all,
+                    &[],
+                    Some(&self.textures),
+                    VC_BAKE_INDIRECT_BINDINGS,
+                )
+            })
+        });
+        if let (Some(cache), Some(bind)) = (&mut self.cache, bounce_bind)
+            && let Some((_, b)) = &mut cache.indirect
+        {
+            *b = Some(bind);
+        }
         if let (Some(cache), Some((binds, movers))) = (&mut self.cache, cache_binds) {
             cache.binds = binds;
             if let (Some((_, b)), Some(movers)) = (&mut cache.movers, movers) {

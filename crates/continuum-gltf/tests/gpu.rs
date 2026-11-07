@@ -595,3 +595,68 @@ fn a_drifting_sun_stays_within_the_ledger() {
     }
     eprintln!("texels re-baked by the ledger: {rebaked}");
 }
+
+/// Bounce light in the view cache (M10 gate 1): it settles, adds light (most
+/// where direct light is weakest), and re-coloring a light still bakes
+/// nothing.
+#[test]
+fn bounce_light_settles_and_recolors_free() {
+    let s = scene(DVec3::ZERO);
+    let settle = |indirect: bool| {
+        let mut r = renderer(
+            kernel(),
+            &s,
+            DVec3::ZERO,
+            RendererOptions {
+                sky: Some(SKY),
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    indirect,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 4_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        assert!(r.is_settled(32), "not settled after {frames} frames");
+        (r, view, frames)
+    };
+    let (mut plain, _, plain_frames) = settle(false);
+    let (mut bounce, view, bounce_frames) = settle(true);
+    let a = plain.read_colors();
+    let b = bounce.read_colors();
+    dump("bounce_off", &a);
+    dump("bounce_on", &b);
+    assert_finite_and_lit(&b);
+    let mean = |img: &Image| img.iter().map(|p| p[0] + p[1] + p[2]).sum::<f32>() / img.len() as f32;
+    let darker = b
+        .iter()
+        .zip(&a)
+        .filter(|(x, y)| x[0] + x[1] + x[2] < y[0] + y[1] + y[2] - 1e-4)
+        .count();
+    eprintln!(
+        "settled in {plain_frames} and {bounce_frames} frames; mean {} without bounce light, {} with; {darker} pixels darker",
+        mean(&a),
+        mean(&b)
+    );
+    assert!(mean(&b) > mean(&a) * 1.01, "bounce light added nothing");
+    assert!(
+        darker < b.len() / 100,
+        "bounce light darkened {darker} pixels"
+    );
+    bounce.set_light_radiance(0, Vec3::new(1.0, 0.8, 0.6) * 3.0);
+    for _ in 0..30 {
+        bounce.render(camera(), &view);
+    }
+    bounce.wait();
+    assert!(
+        bounce.is_settled(20),
+        "re-coloring a light made the cache bake"
+    );
+}

@@ -443,6 +443,7 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_args_bake",
     "vc_ledger_reset",
     "vc_ledger",
+    "vc_bake_indirect",
 ];
 
 /// The hardware-ray module's entry points (`hw_visibility.wgsl`).
@@ -470,6 +471,12 @@ pub(crate) const VC_FILL_BINDINGS: &[u32] =
     &[3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58, 62,
+    73,
+];
+/// Bounce light's samples (M10 gate 1).
+pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
+    0, 2, 3, 8, 9, 10, 23, 24, 25, 26, 30, 33, 34, 35, 36, 37, 38, 39, 41, 42, 45, 52, 54, 55, 56,
+    57, 58, 64, 73, 74, 75,
 ];
 /// The movers' stale passes (M9) and the dispatch sizes after each.
 pub(crate) const VC_STALE_BINDINGS: &[u32] =

@@ -61,6 +61,14 @@ const INVALID_CAP: u32 = 1 << 14;
 /// marked invalid whole.
 const CANDIDATES: u32 = 1 << 16;
 const VISIBLE_WINDOW: u32 = 1;
+/// Bounce light: samples per page, channels kept per sample (three lights
+/// and the sky), slots listed incomplete per frame at most, and frames to
+/// wait before re-baking an incomplete page's samples (its requested pages
+/// arrive in about that).
+const INDIRECT_SAMPLES: u32 = 9;
+const INDIRECT_CHANNELS: u64 = 4;
+const INCOMPLETE_CAP: u32 = 1 << 14;
+const INDIRECT_RETRY: u32 = 4;
 /// The stale passes' and the ledger's counters (16 words) in each readback.
 const MOVER_STATS_BYTES: u64 = 64;
 /// Moving lights (M9 gate 2): frames of light poses kept (a page older than
@@ -112,6 +120,13 @@ pub struct CacheOptions {
     /// Moving lights (M9 gate 2): the largest change of a texel's ratio
     /// (its light's shadowed share) the cache may show before re-baking it.
     pub ledger_epsilon: f32,
+    /// Bounce light (M10 gate 1): one bounce of diffuse light, sampled on a
+    /// 3×3 grid per page (192 rays each), from the direct light the cache
+    /// holds at the hits. At most three lights; not with movers or moving
+    /// lights. Off by default.
+    pub indirect: bool,
+    /// What a bounce sample counts against the bake budget, in sun texels.
+    pub indirect_sample_cost: u32,
     /// With a sky: the spacing (in each geometry's own units) of the grid on
     /// which its own sky occlusion is baked once, for all its instances (M5
     /// gate 5). Sky texels then walk only the other objects. 0: off. Only
@@ -141,6 +156,8 @@ impl Default for CacheOptions {
             sky_spacing: 0.0,
             sky_sample_cost: 10,
             ledger_epsilon: 0.01,
+            indirect: false,
+            indirect_sample_cost: 8,
             self_spacing: 0.01,
             light_ratio: true,
         }
@@ -213,6 +230,11 @@ pub struct CacheStats {
     /// Of those, pages passed whole (every texel fixed, clear or dark,
     /// within the guard).
     pub ledger_whole: u32,
+    /// Bounce light (M10 gate 1): samples baked in the frame.
+    pub indirect_samples: u32,
+    /// Of those, samples that met hits with no page resident (re-baked
+    /// later).
+    pub indirect_incomplete: u32,
     /// Stale pages marked invalid instead (evicted when read back).
     pub invalidated: u32,
     /// Pages read in the frame before (counted when something moved).
@@ -246,6 +268,7 @@ struct VcParams {
     sky: [u32; 4],
     movers: [u32; 4],
     ledger: [u32; 4],
+    indirect: [u32; 4],
 }
 
 /// Per-chart tables shared by every object with a geometry: the chart's size
@@ -725,6 +748,11 @@ pub(crate) struct VirtualCache {
     moving: u32,
     poses: Vec<crate::LightGpu>,
     lights_moved: bool,
+    /// Bounce light: this frame's samples (entry in `bake_list`, sample),
+    /// and slots whose samples to re-bake, each with the frame it is due.
+    indirect_jobs: Vec<[u32; 2]>,
+    retry: std::collections::VecDeque<(u32, u32)>,
+    retrying: std::collections::HashSet<u32>,
     append_pages: u32,
     alloc_frame: Vec<u32>,
     appended: f32,
@@ -806,6 +834,14 @@ impl VirtualCache {
         assert!(
             moving.is_empty() || !sky,
             "moving lights with a sky in the cache are not supported yet"
+        );
+        assert!(
+            !options.indirect || (movers == 0 && moving.is_empty()),
+            "bounce light with moving objects or lights is not supported yet"
+        );
+        assert!(
+            !options.indirect || (lights as u64) < INDIRECT_CHANNELS,
+            "bounce light takes at most three lights"
         );
         let mut moving_index = vec![u32::MAX; lights as usize];
         for (j, &l) in moving.iter().enumerate() {
@@ -987,6 +1023,34 @@ impl VirtualCache {
                 ),
             ),
             (
+                73,
+                empty(
+                    "bounce samples",
+                    if options.indirect {
+                        options.pages as u64 * INDIRECT_SAMPLES as u64 * INDIRECT_CHANNELS * 8
+                    } else {
+                        16
+                    },
+                    wgpu::BufferUsages::empty(),
+                ),
+            ),
+            (
+                74,
+                empty(
+                    "bounce jobs",
+                    (budget + 81) * INDIRECT_SAMPLES as u64 * 8,
+                    copy_dst,
+                ),
+            ),
+            (
+                75,
+                empty(
+                    "incomplete",
+                    INCOMPLETE_CAP as u64 * 4,
+                    wgpu::BufferUsages::COPY_SRC,
+                ),
+            ),
+            (
                 67,
                 empty(
                     "candidates",
@@ -1080,6 +1144,9 @@ impl VirtualCache {
             moving: moving.len() as u32,
             poses: poses.to_vec(),
             lights_moved: false,
+            indirect_jobs: Vec::new(),
+            retry: Default::default(),
+            retrying: Default::default(),
             append_pages,
             alloc_frame: vec![0; options.pages as usize],
             appended: 0.0,
@@ -1166,7 +1233,8 @@ impl VirtualCache {
                         + STATS_BYTES
                         + TIMESTAMP_BYTES
                         + MOVER_STATS_BYTES
-                        + INVALID_CAP as u64 * 4,
+                        + INVALID_CAP as u64 * 4
+                        + INCOMPLETE_CAP as u64 * 4,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -1316,6 +1384,13 @@ impl VirtualCache {
         if !self.sky_samples.is_empty() {
             queue.write_buffer(self.buffer(46), 0, bytemuck::cast_slice(&self.sky_samples));
         }
+        if !self.indirect_jobs.is_empty() {
+            queue.write_buffer(
+                self.buffer(74),
+                0,
+                bytemuck::cast_slice(&self.indirect_jobs),
+            );
+        }
         let moved = std::mem::take(&mut self.moved_count);
         if moved > 0 {
             queue.write_buffer(self.buffer(60), 0, bytemuck::cast_slice(&self.moved));
@@ -1368,6 +1443,12 @@ impl VirtualCache {
                     .min(0x7fff_ffff)
                     | (lit as u32) << 31,
             ],
+            indirect: [
+                self.indirect_jobs.len() as u32,
+                self.options.indirect as u32,
+                0,
+                0,
+            ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.log.push(CacheStats {
@@ -1384,6 +1465,7 @@ impl VirtualCache {
             evicting: std::mem::take(&mut self.evicting),
             waiting: std::mem::take(&mut self.waiting),
             moved: moved.max(lit as u32),
+            indirect_samples: self.indirect_jobs.len() as u32,
             ..Default::default()
         });
         self.moved.clear();
@@ -1403,6 +1485,11 @@ impl VirtualCache {
     pub(crate) fn set_light_pose(&mut self, index: usize, pose: crate::LightGpu) {
         self.poses[index] = pose;
         self.lights_moved = true;
+    }
+
+    /// Bounce samples to bake this frame (after `upload`).
+    pub(crate) fn indirect_jobs(&self) -> u32 {
+        self.indirect_jobs.len() as u32
     }
 
     /// Moving lights tracked by the ledger.
@@ -1585,7 +1672,7 @@ impl VirtualCache {
         let bytes = r.tiles as u64 * 16;
         encoder.copy_buffer_to_buffer(self.buffer(39), 0, &r.buffer, 0, bytes);
         encoder.copy_buffer_to_buffer(self.buffer(42), 0, &r.buffer, bytes, STATS_BYTES);
-        if self.log.last().is_some_and(|l| l.moved > 0) {
+        if self.log.last().is_some_and(|l| l.moved > 0) || self.options.indirect {
             let at = bytes + STATS_BYTES + TIMESTAMP_BYTES;
             encoder.copy_buffer_to_buffer(self.buffer(64), 0, &r.buffer, at, MOVER_STATS_BYTES);
             encoder.copy_buffer_to_buffer(
@@ -1595,6 +1682,15 @@ impl VirtualCache {
                 at + MOVER_STATS_BYTES,
                 INVALID_CAP as u64 * 4,
             );
+            if self.options.indirect {
+                encoder.copy_buffer_to_buffer(
+                    self.buffer(75),
+                    0,
+                    &r.buffer,
+                    at + MOVER_STATS_BYTES + INVALID_CAP as u64 * 4,
+                    INCOMPLETE_CAP as u64 * 4,
+                );
+            }
         }
         self.used_requested = self.frame.is_multiple_of(32) && self.used_pending.is_none();
         if self.used_requested {
@@ -1734,7 +1830,8 @@ impl VirtualCache {
         let moved = self.log[frame as usize - 1].moved > 0;
         let mut mover = [0u32; 16];
         let mut invalid: Vec<u32> = Vec::new();
-        if moved {
+        let mut incomplete: Vec<u32> = Vec::new();
+        if moved || self.options.indirect {
             let at = 4 * tiles + (STATS_BYTES + TIMESTAMP_BYTES) as usize / 4;
             mover.copy_from_slice(&words[at..at + 16]);
             let listed = (mover[1] as usize).min(INVALID_CAP as usize);
@@ -1743,6 +1840,11 @@ impl VirtualCache {
             if mover[1] as usize > listed {
                 // More than the list holds: every slot's mark is read back.
                 self.overflowed = Some(frame);
+            }
+            if self.options.indirect {
+                let first = first + INVALID_CAP as usize;
+                let listed = (mover[15] as usize).min(INCOMPLETE_CAP as usize);
+                incomplete.extend_from_slice(&words[first..first + listed]);
             }
         }
         let appended = mover[5].min(self.append_jobs());
@@ -1759,6 +1861,7 @@ impl VirtualCache {
         record.ledger_checked = mover[11];
         record.ledger_mixed = mover[12];
         record.ledger_whole = mover[13];
+        record.indirect_incomplete = mover[15];
         record.spent += appended;
         if let Some(timer) = &self.timer
             && record.timed
@@ -1789,6 +1892,13 @@ impl VirtualCache {
         record.work.copy_from_slice(&counters[4..16]);
         self.appended = 0.8 * self.appended + 0.2 * appended as f32;
         self.evict_invalid(&invalid, frame);
+        // Incomplete bounce samples: re-bake once the requested pages have
+        // had time to arrive.
+        for slot in incomplete {
+            if self.retrying.insert(slot) {
+                self.retry.push_back((slot, frame + INDIRECT_RETRY));
+            }
+        }
         self.latest = self.latest.max(frame);
         requests
     }
@@ -1912,6 +2022,7 @@ impl VirtualCache {
     fn plan(&mut self, device: &wgpu::Device, requests: Vec<([u32; 3], u32)>) {
         self.bake_list.clear();
         self.bake_bounds.clear();
+        self.indirect_jobs.clear();
         self.jobs.clear();
         self.sky_samples.clear();
         self.page_sky.clear();
@@ -1954,7 +2065,14 @@ impl VirtualCache {
             } else {
                 0
             };
-            let cost = inside[0] * inside[1] * self.lights + samples * self.options.sky_sample_cost;
+            let bounce = if self.options.indirect {
+                INDIRECT_SAMPLES * self.options.indirect_sample_cost
+            } else {
+                0
+            };
+            let cost = inside[0] * inside[1] * self.lights
+                + samples * self.options.sky_sample_cost
+                + bounce;
             // The first page always fits, so a page costlier than the whole
             // budget still gets baked.
             if self.spent + cost > budget && !self.bake_list.is_empty() {
@@ -1995,8 +2113,46 @@ impl VirtualCache {
                 }
                 self.page_sky.push([first, samples | stride << 24]);
             }
+            if self.options.indirect {
+                for k in 0..INDIRECT_SAMPLES {
+                    self.indirect_jobs.push([index, k]);
+                }
+            }
             self.texels += inside[0] * inside[1];
             self.spent += cost;
+        }
+        // Bounce samples of pages that met missing hits, once due, within
+        // what is left of the budget.
+        let bounce = INDIRECT_SAMPLES * self.options.indirect_sample_cost;
+        while self.options.indirect
+            && self.spent + bounce <= budget
+            && self.bake_list.len() < budget as usize
+            && self
+                .retry
+                .front()
+                .is_some_and(|&(_, due)| due <= self.frame)
+        {
+            let (slot, _) = self.retry.pop_front().expect("a retry");
+            self.retrying.remove(&slot);
+            let k = self.slot_key[slot as usize];
+            if k[0] == EMPTY {
+                continue;
+            }
+            let (m, c, mip, page) = unpack(k);
+            let index = self.bake_list.len() as u32;
+            self.bake_list.push([k[0], k[1], k[2], slot]);
+            let b = self.page_bounds(m, c, mip, page);
+            self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
+            self.bake_bounds.push([b[4], b[5], b[6], b[7]]);
+            if self.sky {
+                let stride = self.sky_stride(m, mip);
+                let first = self.sky_samples.len() as u32;
+                self.page_sky.push([first, stride << 24]);
+            }
+            for s in 0..INDIRECT_SAMPLES {
+                self.indirect_jobs.push([index, s]);
+            }
+            self.spent += bounce;
         }
     }
 }

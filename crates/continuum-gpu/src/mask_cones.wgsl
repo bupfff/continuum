@@ -2255,6 +2255,8 @@ struct VcParams {
     // the ledger may add to a frame's bake; movers.z's top bit: 1 if a
     // moving light moved this frame
     ledger: vec4<u32>,
+    // Bounce light (M10 gate 1): x: samples to bake, y: 1 if on, z, w: 0
+    indirect: vec4<u32>,
 };
 
 const PAGE: u32 = 8u;
@@ -2370,6 +2372,16 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // Per slot and moving light: the certified bound on its texels' ratios, as
 // of the last ledger pass (diagnostics).
 @group(0) @binding(72) var<storage, read_write> ledger_bound: array<f32>;
+// Bounce light (M10 gate 1). Per slot, a 3×3 grid of samples (at the page's
+// texels 0, 4 and 8 along each axis), each with one entry per channel (a
+// light's, then the sky's): bounce irradiance per unit radiance, RGB as
+// half floats (r, g in x; b in y).
+@group(0) @binding(73) var<storage, read_write> indirect: array<vec2<u32>>;
+// Samples to bake this frame: entry in `bake_list`, and the sample (0–8).
+@group(0) @binding(74) var<storage, read> indirect_jobs: array<vec2<u32>>;
+// Slots whose samples met hits with no page resident (requested), for the
+// CPU to re-bake later; count in mover_stats[15].
+@group(0) @binding(75) var<storage, read_write> incomplete: array<u32>;
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -2396,6 +2408,20 @@ fn vc_find(k: vec3<u32>) -> u32 {
             }
             return e.w;
         }
+        i = (i + 1u) & mask;
+    }
+    return NONE;
+}
+
+// `vc_find` without stale marks, for bounce light (which movers and moving
+// lights, the only markers, do not run with): two fewer buffers.
+fn vc_find_any(k: vec3<u32>) -> u32 {
+    let mask = vc.counts.x;
+    var i = vc_hash(k) & mask;
+    for (var probe = 0u; probe < 64u; probe++) {
+        let e = page_table[i];
+        if (e.x == EMPTY_KEY) { return NONE; }
+        if (e.x == k.x && e.y == k.y && e.z == k.z) { return e.w; }
         i = (i + 1u) & mask;
     }
     return NONE;
@@ -3429,6 +3455,197 @@ fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
+// --- Bounce light in the view cache (M10 gate 1). ---
+//
+// A page's 3×3 samples each gather a hemicube (192 bins, M2 gate 6's) of
+// rays: a hit's light is its albedo over π times its direct light, read
+// from the cache's page there at a mip matched to the bin's footprint. A
+// hit with no page resident requests one and counts as missing; the CPU
+// re-bakes such pages' samples once the pages arrive.
+
+const IND_R: u32 = 8u;
+const IND_BINS: u32 = 192u;
+// Channels kept per sample: up to three lights and the sky.
+const IND_CH: u32 = 4u;
+// A bin's width, in radians, about: its footprint at a hit is this times
+// the distance.
+const IND_BIN_ANGLE: f32 = 0.25;
+
+fn indirect_at(slot: u32, sample: u32, ch: u32) -> u32 {
+    return (slot * 9u + sample) * IND_CH + ch;
+}
+
+// A hit's base color, its texture read at a footprint of `footprint` meters.
+fn bounce_albedo(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
+    let base = albedo[m].xyz;
+    let layer = object_texture[m];
+    if (layer == NONE) { return base; }
+    let b = barycentric(m, t, p);
+    let t0 = tri_tex[3u * t];
+    let t1 = tri_tex[3u * t + 1u];
+    let t2 = tri_tex[3u * t + 2u];
+    let uv = t0 * b.x + t1 * b.y + t2 * b.z;
+    let size = f32(textureDimensions(base_color).x);
+    let v0 = tris[3u * t].xyz;
+    let scale = object_scale(m);
+    let world_area = 0.5 * length(cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0)) * scale * scale;
+    let e1 = (t1 - t0) * size;
+    let e2 = (t2 - t0) * size;
+    let texel_area = 0.5 * abs(e1.x * e2.y - e1.y * e2.x);
+    let texel = sqrt(world_area / max(texel_area, 1e-12));
+    let lod = log2(max(footprint / max(texel, 1e-12), 1e-6));
+    return base * textureSampleLevel(base_color, base_sampler, uv, i32(layer), lod).xyz;
+}
+
+// Bin `b`'s corner `q` (0–3, around it) in the hemicube's frame (z along
+// the normal), as `bin_local` lays bins out.
+fn hemicube_corner(b: u32, q: u32) -> vec3<f32> {
+    let g = f32(IND_R);
+    let du = f32(q == 1u || q == 2u);
+    let dv = f32(q >= 2u);
+    if (b < IND_R * IND_R) {
+        return vec3<f32>(-1.0 + 2.0 * (f32(b % IND_R) + du) / g, -1.0 + 2.0 * (f32(b / IND_R) + dv) / g, 1.0);
+    }
+    let half = IND_R * IND_R / 2u;
+    let side = (b - IND_R * IND_R) / half;
+    let k = (b - IND_R * IND_R) % half;
+    let a = -1.0 + 2.0 * (f32(k % IND_R) + du) / g;
+    let z = 2.0 * (f32(k / IND_R) + dv) / g;
+    switch side {
+        case 0u: { return vec3<f32>(1.0, a, z); }
+        case 1u: { return vec3<f32>(-1.0, a, z); }
+        case 2u: { return vec3<f32>(a, 1.0, z); }
+        default: { return vec3<f32>(a, -1.0, z); }
+    }
+}
+
+// Bin `b`'s projected solid angle (Lambert's edge integrals; the 192 sum
+// to π), as `hemicube_weights` on the CPU.
+fn hemicube_weight(b: u32) -> f32 {
+    let n = vec3<f32>(0.0, 0.0, 1.0);
+    var sum = 0.0;
+    for (var q = 0u; q < 4u; q++) {
+        sum += lambert_edge(n, hemicube_corner(b, q), hemicube_corner(b, (q + 1u) % 4u));
+    }
+    return abs(0.5 * sum);
+}
+
+var<workgroup> ind_partial: array<vec4<f32>, 256>;
+var<workgroup> ind_missing: array<f32, 64>;
+
+// One workgroup per sample (rows of 65,535 workgroups); each invocation
+// traces three of the 192 bins, then a fixed tree reduction.
+@compute @workgroup_size(64)
+fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let j = wg.x + wg.y * 65535u;
+    let listed = j < vc.indirect.x;
+    let job = indirect_jobs[min(j, max(vc.indirect.x, 1u) - 1u)];
+    let e = bake_list[job.x];
+    let m = e.x;
+    let c = e.y & 0xffffu;
+    let mip = e.y >> 16u;
+    let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
+    let n = vc_grid(c, m, mip);
+    let k = job.y;
+    let texel = min(page * PAGE + vec2<u32>(4u * (k % 3u), 4u * (k / 3u)), n - vec2<u32>(1u));
+    let surf = vc_surface(m, c, n, texel);
+    let lights_n = min(arrayLength(&lights), IND_CH - 1u);
+    let sky_ch = vc.sky.z;
+    var sum = array<vec3<f32>, 4>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    var missing = 0.0;
+    if (listed && surf.ok) {
+        for (var b = li; b < IND_BINS; b += 64u) {
+            let dir = normalize(bin_world(surf.normal, bin_local(b, IND_R)));
+            let hit = primary_hit(surf.apex, dir);
+            if (hit.mesh == NONE) { continue; }
+            let p = surf.apex + dir * hit.distance;
+            // A back face: the sample sees inside geometry; no light.
+            let tv = 3u * hit.tri;
+            let geometric = normal_to_world(hit.mesh, cross(tris[tv + 1u].xyz - tris[tv].xyz, tris[tv + 2u].xyz - tris[tv].xyz));
+            if (dot(geometric, dir) > 0.0) { continue; }
+            let w = hemicube_weight(b);
+            // The page at the hit, at the mip of the bin's footprint or the
+            // finest coarser one resident.
+            let footprint = hit.distance * IND_BIN_ANGLE;
+            let hc = tri_vchart[hit.tri];
+            let uv = chart_uv(hit.mesh, hit.tri, p);
+            let top = vc_top_mip(hc, hit.mesh);
+            let ratio = footprint * vc.params.x / object_scale(hit.mesh);
+            var want = 0u;
+            if (ratio > 1.0) { want = min(u32(round(log2(ratio))), top); }
+            var slot = NONE;
+            var r: PageRef;
+            for (var q = want; q <= top; q++) {
+                r = vc_page(hit.mesh, hc, uv, q);
+                slot = vc_find_any(r.key);
+                if (slot != NONE) { break; }
+            }
+            if (slot == NONE) {
+                vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u);
+                missing += w;
+                continue;
+            }
+            let hn = shading_normal(hit.mesh, hit.tri, p, -dir);
+            let hp = p + hit.normal * surface_offset(length(p));
+            let reflect = bounce_albedo(hit.mesh, hit.tri, p, footprint) * (w / 3.14159265);
+            for (var l = 0u; l < lights_n; l++) {
+                var direct = vc_bilinear(slot, r, l);
+                if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
+                sum[l] += reflect * direct;
+            }
+            sum[IND_CH - 1u] += reflect * vc_bilinear(slot, r, sky_ch);
+        }
+    }
+    for (var ch = 0u; ch < IND_CH; ch++) { ind_partial[li * IND_CH + ch] = vec4<f32>(sum[ch], 0.0); }
+    ind_missing[li] = missing;
+    workgroupBarrier();
+    for (var h = 32u; h > 0u; h >>= 1u) {
+        if (li < h) {
+            for (var ch = 0u; ch < IND_CH; ch++) {
+                ind_partial[li * IND_CH + ch] += ind_partial[(li + h) * IND_CH + ch];
+            }
+            ind_missing[li] += ind_missing[li + h];
+        }
+        workgroupBarrier();
+    }
+    if (li == 0u && listed) {
+        for (var ch = 0u; ch < IND_CH; ch++) {
+            let v = ind_partial[ch].xyz;
+            indirect[indirect_at(e.w, k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, 0.0)));
+        }
+        // Missing more than a hundredth of the hemisphere: re-bake later.
+        if (ind_missing[0] > 0.01 * 3.14159265) {
+            let q = atomicAdd(&mover_stats[15], 1u);
+            if (q < arrayLength(&incomplete)) { incomplete[q] = e.w; }
+        }
+    }
+}
+
+// Bounce irradiance (RGB, scaled by each channel's radiance) at a cached
+// lookup `r` in slot `slot`: the page's 3×3 samples, bilinearly.
+fn indirect_light(slot: u32, r: PageRef) -> vec3<f32> {
+    let g = (vec2<f32>(r.base) + r.frac) * 0.25;
+    let i0 = min(vec2<u32>(floor(g)), vec2<u32>(1u));
+    let f = clamp(g - vec2<f32>(i0), vec2<f32>(0.0), vec2<f32>(1.0));
+    let lights_n = min(arrayLength(&lights), IND_CH - 1u);
+    var total = vec3<f32>(0.0);
+    for (var ch = 0u; ch < IND_CH; ch++) {
+        var radiance = light.sky.xyz;
+        if (ch < lights_n) { radiance = lights[ch].radiance.xyz; } else if (ch < IND_CH - 1u) { continue; }
+        var v = vec3<f32>(0.0);
+        for (var q = 0u; q < 4u; q++) {
+            let ix = i0.x + (q & 1u);
+            let iy = i0.y + (q >> 1u);
+            let wq = select(1.0 - f.x, f.x, (q & 1u) == 1u) * select(1.0 - f.y, f.y, (q >> 1u) == 1u);
+            let raw = indirect[indirect_at(slot, iy * 3u + ix, ch)];
+            v += wq * vec3<f32>(unpack2x16float(raw.x), unpack2x16float(raw.y).x);
+        }
+        total += radiance * v;
+    }
+    return total;
+}
+
 var<workgroup> fallback_count: atomic<u32>;
 
 // Lists page `k` with `priority` unless it is already listed this frame. Two
@@ -3553,6 +3770,7 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
             }
         }
         e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
+        if (vc.indirect.y == 1u) { e += indirect_light(found_slot, found_ref); }
     } else {
         vc_fell_back = true;
         vc_request_key = finer;
