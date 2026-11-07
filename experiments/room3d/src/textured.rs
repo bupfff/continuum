@@ -178,6 +178,7 @@ impl Textured {
             textures: vec![tiles, lichen, bricks],
             geometry_textures: vec![Some(0), Some(1), Some(2)],
             geometry_materials: Vec::new(),
+            geometry_emission: Vec::new(),
         };
         // The camera stands at 1.5 m looking along +y, slightly down; the sun
         // is 30° up behind and to the left, 1 km away, 0.5° across.
