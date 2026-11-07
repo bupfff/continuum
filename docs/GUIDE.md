@@ -68,7 +68,14 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   keep the interpolated normal. 3.63% from Cycles on a beveled-tile scene
   (M10 gate 5). glTF import brings normal textures (scale ignored).
   Tangents come from texture coordinates per triangle (MikkTSpace differs on
-  curved meshes). Alpha is not done.
+  curved meshes).
+- **Alpha cutouts.** `InstancedScene::geometry_alpha_cutoff` cuts each
+  geometry where its base color texture's alpha is below the cutoff, as
+  geometry, before upload (`cut_out`), so shadows, sky and bounce light see
+  the cut exactly. 3.29% from Cycles on a foliage scene (M10 gate 7). glTF
+  import maps MASK (and BLEND, treated as MASK at 0.5). Double-sided
+  geometry needs its back faces offset slightly (glTF import uses 1 mm):
+  exactly back-to-back faces slow the cache's bakes.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
   1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
   the warm frame; re-coloring stays free (M10 gate 4). At most three

@@ -253,8 +253,8 @@ Against the goal in §1, honestly:
     0.01% bound.
   - Imports base color, metallic and roughness factors, emission (factor
     times strength; not shown by other surfaces' lighting) and normal maps
-    (M10 G5: 3.63% from Cycles with them), and metallic-roughness
-    textures. No alpha yet.
+    (M10 G5: 3.63% from Cycles with them), metallic-roughness textures,
+    and alpha masks cut into geometry (M10 G7: 3.29% from Cycles).
 - **One bounce of light in the view cache** (M10 G1, failed on its
   re-coloring check only).
   - On M6's textured scene, the cached image with bounce light is 1.79%
@@ -274,7 +274,7 @@ Against the goal in §1, honestly:
     largest quality gap. Pixel cones (M7 G1, failed) cost 10–87 s per frame
     there; on the textured scene the larger error is texture filtering (mips
     chosen per pixel are blurrier than area integration);
-  - more than one bounce; alpha (cutouts);
+  - more than one bounce; alpha blending;
   - the quality contract (§3.3) beyond the bake's frame-time target.
 - **Against UE5.** No direct comparison has been made, so none is claimed.
   - Our measured edge: exact soft shadows from area lights and noise-free
@@ -344,8 +344,10 @@ user's order:
    construction, tested in `emission_adds_to_the_cached_image`), and glTF
    import of metallic, roughness and emission factors. **Normal maps done
    (2026-11-07), M10 G5 passed** (`docs/results/m10-gate5.md`): 3.63% from
-   Cycles with the maps (26.42% ignoring them), warm frame 1.04×. Alpha
-   remains.
+   Cycles with the maps (26.42% ignoring them), warm frame 1.04×. **Alpha
+   cutouts done (2026-11-07), M10 G7 passed** (`docs/results/m10-gate7.md`;
+   gate 6 reached no criterion from a cache bug, now fixed): cut into
+   geometry, 3.29% from Cycles (34.07% with opaque cards), 1.15× the frame.
 6. **Anti-aliasing, the narrower way** (M7 gate 2 onward): texture
    filtering for the area integral, then coverage only at silhouettes.
    **Texture filtering done (2026-11-07), M7 G2 passed**
@@ -490,7 +492,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | G1 pixel cones for primary visibility (**failed** all three: against the 16×16 reference the textured scene is 7.15% vs one ray's 7.11%, the field from 150 m 17.91% vs 23.49% (0.76× against ≤ 0.35×), from standing height 34.61% vs 12.49% with a banding artifact on the 2.1 km ground triangles; half a pixel's turn changes the image 1.67× as much as the reference's (≤ 1.5×); warm cached frames 105 ms on the textured scene (≤ 16.7 ms), per-pixel frames 10–87 s on the field; the textured scene's error is texture filtering, not silhouettes, `docs/results/m7-gate1.md`); G2 texture filtering for the area integral (**passed**: a box filter over the pixel's footprint from ray differentials, 3.99% from the 16×16 reference against 7.11%, warm frame 1.03×, `docs/results/m7-gate2.md`); G3 silhouette rays (**failed**: field from 150 m 0.49× the error but 13× the frame; textured scene 0.91×, 1.66×, `docs/results/m7-gate3.md`); no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 (**done**: `v0.1.0`, 2026-11-07; the cloud benchmark is still open) |
 | M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G4 the ledger without its work limit (**failed** on speed: sound in 30 checks; at a real sun's speed fallback 4.9–5.0% but means 24.7–25.3 ms against 15.8 ms still, mixed texels re-baked every frame, `docs/results/m9-gate4.md`); G3 movers under a sky (**failed** on work and speed: sound in 30 checks, but 99.73% of pages read re-baked their sky every moving frame; means 53.0–58.3 ms against 14.66 ms still; fallback 30%, 21–22% even still from slow sky streaming; the per-page sphere bound about 5,000× loose, `docs/results/m9-gate3.md`); a light switch with no lag |
-| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run |
+| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run (**passed**: 3.29% from Cycles masking the cards, 34.07% with them opaque; warm frame 1.15×, `docs/results/m10-gate7.md`) |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
 

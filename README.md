@@ -24,7 +24,8 @@ renders:
   failed on that);
 - one bounce of light in the cache, 1.79% from Cycles with one bounce
   (M10 gate 1);
-- normal maps, 3.63% from Cycles (M10 gate 5), and emission.
+- normal maps, 3.63% from Cycles (M10 gate 5), alpha cutouts, 3.29% (M10
+  gate 7), and emission.
 
 Every claim is measured against Blender's Cycles.
 
@@ -113,7 +114,8 @@ A textured scene imported this way is within 0.43% of Cycles with the same
 textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Metallic and
 roughness factors, emission and normal maps are imported too (normal maps
 3.63% from Cycles, M10 gate 5; metallic-roughness 8.94%, M10 gate 2, which
-failed against 6%), with metallic-roughness textures. Alpha is ignored.
+failed against 6%), with metallic-roughness textures; alpha masks are cut
+into geometry (3.29% from Cycles, M10 gate 7).
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb
