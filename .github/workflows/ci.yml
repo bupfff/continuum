@@ -1,6 +1,7 @@
 # Correctness on the platforms the dev machine (Metal) does not cover: Vulkan
-# on Linux through lavapipe and DX12 on Windows through WARP, both software
-# adapters. No GPU here, so no timings: those come from the benchmark protocol
+# on Linux through lavapipe (a software adapter; every test, the GPU's
+# included), and on Windows the DX12 shaders through DXC (WARP, the software
+# adapter, cannot build the kernel: see the Windows job). No GPU here, so no timings: those come from the benchmark protocol
 # (docs/DESIGN.md §7).
 
 name: CI
@@ -59,13 +60,9 @@ jobs:
         run: cargo test --release $LIBRARY -- --nocapture
 
   windows-dx12:
-    name: Windows, DX12 (WARP)
+    name: Windows, DX12 shaders (DXC)
     runs-on: windows-2025
-    timeout-minutes: 60
-    env:
-      WGPU_BACKEND: dx12
-      WGPU_ADAPTER_NAME: Microsoft Basic Render Driver
-      WGPU_DX12_COMPILER: dxc
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install DXC (wgpu's DX12 shader compiler for shader model 6)
@@ -80,28 +77,27 @@ jobs:
           echo "$(cygpath -w "$PWD/dxc/bin/x64")" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # On WARP each large pipeline took about 30 s to build, and building
-      # the kernel ran out of memory at its fifth (2026-11-07). This step
-      # times DXC alone on each entry point's HLSL, to tell the compiler's
-      # share from WARP's.
+      # The kernel's GPU tests cannot run on WARP: each large pipeline takes
+      # 33-41 s to build there and the kernel runs out of memory at its fifth,
+      # while DXC alone compiles each entry point in 0.7-5.2 s (CI run 5,
+      # 2026-11-07). So Windows checks the shaders compile for DX12: naga's
+      # HLSL for every entry point, through DXC as wgpu calls it (HLSL 2018).
       - name: Tests on the CPU (shader translation), and the HLSL
         shell: bash
         env:
           CONTINUUM_DUMP_HLSL: hlsl
         run: cargo test --release -p continuum -p continuum-gpu -- --nocapture
-      - name: DXC alone, timed per entry point
-        timeout-minutes: 20
-        continue-on-error: true
+      - name: DXC compiles every entry point
         shell: bash
         run: |
-          for e in main render rebake vc_bake vc_shade render_cones; do
-            echo "== $e"
-            time dxc.exe -T cs_6_0 -E "$e" -HV 2021 "crates/continuum-gpu/hlsl/$e.hlsl" -Fo dxc_out.bin > /dev/null
+          failed=0
+          for f in crates/continuum-gpu/hlsl/*.hlsl; do
+            e=$(basename "$f" .hlsl)
+            start=$(date +%s%N)
+            if dxc.exe -T cs_6_0 -E "$e" -HV 2018 "$f" -Fo dxc_out.bin > dxc_log.txt 2>&1; then
+              echo "$e: $(( ($(date +%s%N) - start) / 1000000 )) ms"
+            else
+              echo "$e: FAILED"; grep -i error dxc_log.txt | head -5; failed=1
+            fi
           done
-      - name: Kernel setup on WARP, timed per pipeline
-        timeout-minutes: 20
-        continue-on-error: true
-        shell: bash
-        env:
-          CONTINUUM_PIPELINE_TIMES: 1
-        run: cargo run --release -p continuum-gpu --example kernel_setup
+          exit $failed
