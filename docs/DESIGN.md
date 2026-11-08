@@ -391,9 +391,10 @@ place, for a new conversation:
      lights. Not measured: flights.
   3. *Movers under a sky.* Deferred: a per-sample bound with the cosine and
      horizon would clear ground beyond about 10 m from the movers but not
-     nearer, and M9 G3's fallback criterion would still fail because the
-     sky later is off with movers. Making the sky later work with movers
-     comes first.
+     nearer. The sky later now works with movers (M9 G5, development
+     only), but does not help flights: both caches are 25–30% from the
+     settled image in motion (`docs/results/m9-gate5.md`), so it does not
+     unblock M9 G3's criteria.
   4. *Moving lights' mixed texels.* 97.5% of texels are stored as exactly 0
      or 1, so a tighter band bound helps almost none. A dark state cut the
      cost to 1.25× but failed soundness; coverage summed within a mesh can
@@ -401,8 +402,9 @@ place, for a new conversation:
   5. *Materials accuracy.* Done (M10 G10, passed, 5.85%).
   6. *Silhouette rays through ray queries.* Built (M7 G4, failed on the
      field's speed, 3.03×). Next: fewer quarters or a cap per frame.
-- **Next candidates, in the order I would take them:** the sky later with
-  movers (unblocks 3); two-ray or capped silhouette rays (a new M7 gate);
+- **Next candidates, in the order I would take them:** ~~the sky later with
+  movers~~ (done, development only: sound, cost 1.01×, no quality gain in
+  flights; M9 G5); two-ray or capped silhouette rays (a new M7 gate);
   over-count-free coverage for a dark state (unblocks 4); the sky later in
   flights (measure); bounce light with movers.
 - **Known issues:** the total sky work is still large (the sky later orders

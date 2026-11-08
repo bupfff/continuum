@@ -156,12 +156,14 @@ pub struct CacheOptions {
     pub self_spacing: f32,
     /// With a sky (M5 gate 9; on by default): a page the pixels ask for bakes
     /// its lights first, its sky shown as the open sky over each pixel's
-    /// normal until a later frame bakes the sky alone, within what the
-    /// budget leaves after new pages. Views come within 5% of their warm
+    /// normal until a later frame bakes the sky alone (up to half of each
+    /// frame's budget before new pages, then what they leave; M9 gate 5). Views come within 5% of their warm
     /// image 10–20× sooner and warm in 0.6× the frames; the warm image is
     /// the same. Ignored with bounce light (its samples keep whatever
-    /// coarser pages they find, so another bake order settles differently),
-    /// movers or moving lights.
+    /// coarser pages they find, so another bake order settles differently)
+    /// or moving lights. With movers (M9 gate 5), a page whose sky is still
+    /// a guess is not charged for its sky, and one whose light a mover may
+    /// change is marked invalid and baked anew.
     pub sky_later: bool,
     /// Experiments only. Each light's texels hold the shadowed share of its
     /// unshadowed light,
@@ -2187,6 +2189,52 @@ impl VirtualCache {
 
     /// Chooses the frame's pages from the requested ones (each listed once by
     /// the shader, with its priority), within the bake budget.
+    /// Lists skies due to be re-baked alone (for movers, and pages planned
+    /// with the sky later), oldest first, until the frame's work reaches
+    /// `limit`. A listed page counts as used this frame, so the frame's
+    /// eviction keeps it.
+    fn plan_due_skies(&mut self, limit: u32) {
+        if !self.sky || self.sky_due.is_empty() {
+            return;
+        }
+        let mut due: Vec<(u32, u32)> = self
+            .sky_due
+            .iter()
+            .filter(|&(_, &d)| d <= self.frame)
+            .map(|(&s, &d)| (d, s))
+            .collect();
+        // Oldest first, then by slot: the same order every run.
+        due.sort_unstable();
+        for (_, slot) in due {
+            if self.spent >= limit || self.bake_list.len() >= limit.max(PAGE_TEXELS) as usize {
+                break;
+            }
+            let k = self.slot_key[slot as usize];
+            if k[0] == EMPTY {
+                self.sky_due.remove(&slot);
+                continue;
+            }
+            // Only within the limit (M5 gate 9: a sky that does not fit
+            // waits, as a new page's would).
+            let cost = self.sky_layout(k).2 * self.options.sky_sample_cost;
+            if self.spent + cost > limit && !self.bake_list.is_empty() {
+                break;
+            }
+            self.sky_due.remove(&slot);
+            self.last_used[slot as usize] = self.frame;
+            let (m, c, mip, page) = unpack(k);
+            let index = self.bake_list.len() as u32;
+            self.bake_list.push([k[0], k[1], k[2], slot]);
+            let b = self.page_bounds(m, c, mip, page);
+            self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
+            // w 3: the sky alone (the fill keeps an invalid mark).
+            self.bake_bounds.push([b[4], b[5], b[6], 3.0]);
+            let samples = self.push_sky_samples(index, k);
+            self.spent += samples * self.options.sky_sample_cost;
+            self.sky_rebaked += 1;
+        }
+    }
+
     /// Page `k`'s texels listed along each axis, its sky stride, and its sky
     /// samples, as the plan lists them.
     fn sky_layout(&self, k: [u32; 3]) -> ([u32; 2], u32, u32) {
@@ -2252,13 +2300,18 @@ impl VirtualCache {
             order.truncate(budget as usize);
         }
         order.sort_unstable();
+        // Skies to re-bake alone (for movers, and pages planned with the sky
+        // later), once due: up to half the budget before new pages, so a
+        // moving view cannot starve them (M9 gate 5), and then whatever new
+        // pages leave.
+        self.plan_due_skies(budget / 2);
         let mut evicted_now = false;
-        // The sky later (M5 gate 9): not with movers or moving lights, whose
-        // passes use the same sky guess, nor with bounce light, whose
-        // samples keep the coarser pages they find, so a different bake
-        // order would settle to a different image.
+        // The sky later (M5 gate 9; with movers, M9 gate 5): not with moving
+        // lights, whose ledger re-bakes would clear the sky's guess, nor with
+        // bounce light, whose samples keep the coarser pages they find, so a
+        // different bake order would settle to a different image.
         let sky_later =
-            self.sky && self.options.sky_later && self.append_pages == 0 && !self.options.indirect;
+            self.sky && self.options.sky_later && self.moving == 0 && !self.options.indirect;
         for (priority, k) in order {
             let secondary = priority & SECONDARY != 0;
             let later = sky_later && !secondary;
@@ -2354,45 +2407,8 @@ impl VirtualCache {
             self.texels += inside[0] * inside[1];
             self.spent += cost;
         }
-        // Skies to re-bake alone (for movers, and pages baked with the sky
-        // later), once due, within what is left of the budget.
-        if self.sky && !self.sky_due.is_empty() {
-            let mut due: Vec<(u32, u32)> = self
-                .sky_due
-                .iter()
-                .filter(|&(_, &d)| d <= self.frame)
-                .map(|(&s, &d)| (d, s))
-                .collect();
-            // Oldest first, then by slot: the same order every run.
-            due.sort_unstable();
-            for (_, slot) in due {
-                if self.spent >= budget || self.bake_list.len() >= budget as usize {
-                    break;
-                }
-                let k = self.slot_key[slot as usize];
-                if k[0] == EMPTY {
-                    self.sky_due.remove(&slot);
-                    continue;
-                }
-                // Only within the budget (M5 gate 9: a sky that does not fit
-                // waits, as a new page's would).
-                let cost = self.sky_layout(k).2 * self.options.sky_sample_cost;
-                if self.spent + cost > budget && !self.bake_list.is_empty() {
-                    break;
-                }
-                self.sky_due.remove(&slot);
-                let (m, c, mip, page) = unpack(k);
-                let index = self.bake_list.len() as u32;
-                self.bake_list.push([k[0], k[1], k[2], slot]);
-                let b = self.page_bounds(m, c, mip, page);
-                self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
-                // w 3: the sky alone (the fill keeps an invalid mark).
-                self.bake_bounds.push([b[4], b[5], b[6], 3.0]);
-                let samples = self.push_sky_samples(index, k);
-                self.spent += samples * self.options.sky_sample_cost;
-                self.sky_rebaked += 1;
-            }
-        }
+        // Then skies to re-bake alone with what is left.
+        self.plan_due_skies(budget);
         // Bounce samples of pages that met missing hits, once due, within
         // what is left of the budget.
         let bounce = INDIRECT_SAMPLES * self.options.indirect_sample_cost;

@@ -3015,6 +3015,12 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     // and 4 (appended): its sky alone re-baked, which clears a sky guess and
     // leaves any other mark to the light channels' bakes (M9 gate 3).
     let kind = bake_bounds[2u * p + 1u].w;
+    // Planned with the sky later (M5 gate 9): with movers, its sky ledger
+    // says "never baked" (stride 0) until its sky is baked alone (M9 gate 5).
+    if (kind == 2.0 && p < vc.jobs.y && arrayLength(&sky_ledger) > 2u * e.w + 1u) {
+        sky_ledger[2u * e.w] = vec4<f32>(0.0);
+        sky_ledger[2u * e.w + 1u] = vec4<f32>(0.0);
+    }
     if (kind >= 3.0) {
         loop {
             let r = atomicCompareExchangeWeak(&slot_stale[e.w], 3u, 0u);
@@ -3413,12 +3419,21 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         return;
     }
-    if (vc.sky.y == 1u && !charge_sky(s, info.xyz, lo, hi, page, visible)) { return; }
+    // A page whose sky is still a guess (the sky later, M9 gate 5: stride 0
+    // in its sky ledger) shows no sky to charge. If a mover may change its
+    // light, it is marked invalid and baked anew: re-baking its light in
+    // place would clear the guess's mark.
+    let unknown_sky = vc.sky.y == 1u && bitcast<u32>(sky_ledger[2u * s + 1u].w) == 0u;
+    if (vc.sky.y == 1u && !unknown_sky && !charge_sky(s, info.xyz, lo, hi, page, visible)) { return; }
     var candidate = false;
     for (var l = 0u; l < lights_n && !candidate; l++) {
         candidate = may_be_shadowed(page, l);
     }
     if (!candidate) { return; }
+    if (unknown_sky) {
+        mark_invalid(s);
+        return;
+    }
     let c = atomicAdd(&mover_stats[4], 1u);
     if (c >= arrayLength(&candidates)) {
         mark_invalid(s);

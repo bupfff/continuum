@@ -62,6 +62,14 @@ Prior art: progressive refinement, coarse to fine, and shading with an
 approximation until the exact value arrives, are standard in light caches
 and texture streaming. No novelty is claimed.
 
+## Changed since
+
+M9 gate 5 gave queued skies half of each frame's budget before new pages
+(in flight they starved). M5 gate 9's development check with that change
+(100,000 boulders, standing): error while warming 0.24× the baseline's
+(0.17× before), warm in 0.73× the frames (0.65×), the same warm image. The
+full-size numbers above are with new pages first.
+
 ## Not measured
 
 - Flights. The still views above are the case M9 gate 3 found weakest
