@@ -438,6 +438,12 @@ place, for a new conversation:
   own frames already agree (11.80% against 11.75% where they differ). A
   fair test needs a map baked from a high-poly model
   (`docs/results/m10-gate13.md`).
+- **Emissive textures** (M10 G14–G15, passed on the re-run): glTF's
+  emissive maps times the emissive factor, directly, in reflections and in
+  bounce light; 6.35% from Cycles over surfaces on a striped sign at night
+  (the texture ignored: 491%), no cost. G14 failed from its reference
+  scene: Cycles lit the double-sided sign from its coincident back faces
+  (`docs/results/m10-gate15.md`).
 - **Tried after the list (development only, reverted):** a guessed sky
   from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
   is the cache's softness in motion, not the sky;

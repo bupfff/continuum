@@ -64,9 +64,13 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   With bounce light on (`CacheOptions::indirect`; `emission_bounce`, on by
   default) it also lights other surfaces, one bounce deep: 7.46% from
   Cycles near a glowing panel at night (18% without; M10 gate 12), coarse
-  near the emitter. For sharp shadows from an emitter, use a light. glTF import
-  brings the emissive factor times `KHR_materials_emissive_strength` (not
-  emissive textures).
+  near the emitter. For sharp shadows from an emitter, use a light.
+  `InstancedScene::geometry_emissive_textures` multiplies a geometry's
+  emission by a texture (sRGB, through its texture coordinates; glTF's
+  emissive maps are imported): 6.35% from Cycles on a striped sign at
+  night (M10 gate 15). glTF import
+  brings the emissive factor times `KHR_materials_emissive_strength`, and
+  the emissive texture (not saved back).
 - **Normal maps.** `InstancedScene::geometry_normal_maps` takes, per
   geometry, a tangent-space normal map (an index into `textures`; linear,
   OpenGL's convention as glTF specifies). The cache's shading uses it for
