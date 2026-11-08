@@ -75,6 +75,9 @@ pub struct MaskConeKernel {
     count_work: bool,
     pipelines: std::cell::RefCell<std::collections::HashMap<&'static str, wgpu::ComputePipeline>>,
     hardware_rays: std::cell::Cell<bool>,
+    /// MikkTSpace tangents for normal maps (M10 gate 13; else each
+    /// triangle's own frame).
+    mikktspace: std::cell::Cell<bool>,
     pixel_cones: std::cell::Cell<bool>,
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
@@ -656,6 +659,7 @@ impl MaskConeKernel {
             count_work: options.count_work,
             pipelines: Default::default(),
             hardware_rays: std::cell::Cell::new(ray_queries),
+            mikktspace: std::cell::Cell::new(true),
             pixel_cones: std::cell::Cell::new(false),
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
@@ -841,6 +845,13 @@ impl MaskConeKernel {
     /// renderers created after the call.
     pub fn set_hardware_rays(&self, on: bool) {
         self.hardware_rays.set(on && self.has_hardware_rays());
+    }
+
+    /// Experiments: MikkTSpace tangents for normal maps (on), or each
+    /// triangle's own frame (M10 gate 13). Read when a scene is uploaded.
+    #[doc(hidden)]
+    pub fn set_mikktspace(&self, on: bool) {
+        self.mikktspace.set(on);
     }
 
     /// Debugging: cut cones short to time their stages (0: off, 1: no cone,

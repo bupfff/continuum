@@ -439,6 +439,67 @@ impl Textured {
         self
     }
 
+    /// M10 gate 13's scene: M10 gate 5's normal maps, and three low-poly
+    /// spheres (16 × 8 segments, radius 0.5 m, smooth normals) on the ground
+    /// wearing the beveled tiles' map 4 × 2 times around (a texture of light
+    /// grey), where a triangle's own frame and MikkTSpace's interpolated
+    /// tangents differ.
+    pub fn with_curved_normal_maps(self) -> Textured {
+        let mut t = self.with_normal_maps();
+        let (nu, nv) = (16usize, 8usize);
+        let at = |i: usize, j: usize| {
+            let (u, v) = (i as f32 / nu as f32, j as f32 / nv as f32);
+            let (phi, theta) = (u * TAU, v * std::f32::consts::PI);
+            let n = Vec3::new(
+                theta.sin() * phi.cos(),
+                theta.sin() * phi.sin(),
+                -theta.cos(),
+            );
+            (n, Vec2::new(u * 4.0, (1.0 - v) * 2.0))
+        };
+        let (mut tris, mut normals, mut tex) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..nu {
+            for j in 0..nv {
+                let quad = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
+                for [a, b, c] in [[0, 1, 2], [0, 2, 3]] {
+                    let corners = [quad[a], quad[b], quad[c]];
+                    tris.push(corners.map(|(n, _)| n * 0.5));
+                    normals.push(corners.map(|(n, _)| n));
+                    tex.push(corners.map(|(_, uv)| uv));
+                }
+            }
+        }
+        let sphere = t.scene.geometries.len();
+        t.scene
+            .geometries
+            .push(Surface::from_mesh(tris, Some(normals), Some(tex)));
+        let grey = Texture {
+            width: 1,
+            height: 1,
+            rgba: vec![200, 200, 200, 255],
+        };
+        let n = t.scene.geometries.len();
+        t.scene.textures.push(grey);
+        let mut textures = t.scene.geometry_textures.clone();
+        textures.resize(n, None);
+        textures[sphere] = Some(t.scene.textures.len() as u32 - 1);
+        t.scene.geometry_textures = textures;
+        let mut maps = t.scene.geometry_normal_maps.clone();
+        maps.resize(n, None);
+        maps[sphere] = maps[0];
+        t.scene.geometry_normal_maps = maps;
+        for (x, y) in [(-0.8, 3.5), (1.4, 4.5), (-2.2, 5.5)] {
+            t.scene.instances.push(Instance {
+                geometry: sphere,
+                rotation: Mat3::from_rotation_z(0.3),
+                scale: 1.0,
+                position: DVec3::new(x, y, 0.5),
+                albedo: Vec3::ONE,
+            });
+        }
+        t
+    }
+
     /// M10 gate 5's normal maps: the ground's tiles and the block's bricks
     /// beveled toward their mortar (bevels 12% of a tile, sloped 30°).
     pub fn with_normal_maps(mut self) -> Textured {
