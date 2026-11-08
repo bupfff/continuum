@@ -202,7 +202,15 @@ fn main() -> std::io::Result<()> {
         settle(&mut r, t.camera, &target);
         let px = supersampled(&mut r, t.camera, &target);
         let reference = render_instanced_lights(
-            &t.scene, t.origin, &t.lights, t.sky, t.camera, (W, H), 4096, 1, 1,
+            &t.scene,
+            t.origin,
+            &t.lights,
+            t.sky,
+            t.camera,
+            (W, H),
+            4096,
+            1,
+            1,
             &out_dir.join("m10_gate2_cycles"),
         )?;
         let mean = |px: &[[f32; 3]]| px.iter().map(|p| (p[0] + p[1] + p[2]) as f64).sum::<f64>();
@@ -213,18 +221,34 @@ fn main() -> std::io::Result<()> {
             reference.device
         );
         save("diag", &px)?;
-        std::fs::write(out_dir.join("m10_gate2_diag.f32"), px.iter().flatten().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())?;
+        std::fs::write(
+            out_dir.join("m10_gate2_diag.f32"),
+            px.iter()
+                .flatten()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        )?;
         // Where the error is: pixels whose reference exceeds 1 in a channel
         // (highlights), and per row band.
-        let err = |a: &[f32; 3], b: &[f32; 3]| (0..3).map(|c| ((a[c] - b[c]) as f64).powi(2)).sum::<f64>();
-        let total: f64 = px.iter().zip(&reference.pixels).map(|(a, b)| err(a, b)).sum();
+        let err = |a: &[f32; 3], b: &[f32; 3]| {
+            (0..3).map(|c| ((a[c] - b[c]) as f64).powi(2)).sum::<f64>()
+        };
+        let total: f64 = px
+            .iter()
+            .zip(&reference.pixels)
+            .map(|(a, b)| err(a, b))
+            .sum();
         let bright: f64 = px
             .iter()
             .zip(&reference.pixels)
             .filter(|(_, b)| b[0].max(b[1]).max(b[2]) > 1.0)
             .map(|(a, b)| err(a, b))
             .sum();
-        let n_bright = reference.pixels.iter().filter(|b| b[0].max(b[1]).max(b[2]) > 1.0).count();
+        let n_bright = reference
+            .pixels
+            .iter()
+            .filter(|b| b[0].max(b[1]).max(b[2]) > 1.0)
+            .count();
         let rest: Vec<([f32; 3], [f32; 3])> = px
             .iter()
             .zip(&reference.pixels)
@@ -239,8 +263,16 @@ fn main() -> std::io::Result<()> {
             100.0 * bright / total,
             100.0 * relative_rmse(&ra, &rb),
             100.0 * {
-                let (s_o, s_r) = px.iter().zip(&reference.pixels).filter(|(_, b)| b[0].max(b[1]).max(b[2]) > 1.0)
-                    .fold((0.0f64, 0.0f64), |acc, (a, b)| (acc.0 + (a[0] + a[1] + a[2]) as f64, acc.1 + (b[0] + b[1] + b[2]) as f64));
+                let (s_o, s_r) = px
+                    .iter()
+                    .zip(&reference.pixels)
+                    .filter(|(_, b)| b[0].max(b[1]).max(b[2]) > 1.0)
+                    .fold((0.0f64, 0.0f64), |acc, (a, b)| {
+                        (
+                            acc.0 + (a[0] + a[1] + a[2]) as f64,
+                            acc.1 + (b[0] + b[1] + b[2]) as f64,
+                        )
+                    });
                 s_o / s_r - 1.0
             }
         );

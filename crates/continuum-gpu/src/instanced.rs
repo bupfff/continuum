@@ -12,12 +12,13 @@ use crate::live::{DisplayDims, display_bind, display_pipeline};
 use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
-    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
-    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
-    VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
-    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
-    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS,
-    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    HW_EDGES_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene,
+    Light, LightGpu, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
+    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
+    VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
+    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
+    uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -762,6 +763,11 @@ impl InstancedRenderer {
                 )
             }
         });
+        // Silhouette rays through ray queries (M7 gate 4): with the cache's
+        // edge rays and hardware camera rays (not with movers, whose own
+        // structure the pass does not trace).
+        let hw_edges = cache.as_ref().is_some_and(|o| o.edge_rays)
+            && hw.as_ref().is_some_and(|hw| hw.movers.is_none());
         let shade_bindings = |list: &[u32]| {
             let mut keep = list.to_vec();
             keep.push(31);
@@ -780,6 +786,15 @@ impl InstancedRenderer {
                 (kernel.entry("shade"), shade_bindings(RECT_LIGHT_BINDINGS)),
             ],
             (false, None) => vec![(kernel.entry("render"), RECT_LIGHT_BINDINGS.to_vec())],
+            (true, Some(v)) if hw_edges => vec![
+                v,
+                (kernel.entry("hw_edges"), HW_EDGES_BINDINGS.to_vec()),
+                (kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()),
+                (
+                    kernel.entry("vc_shade_edges"),
+                    VC_SHADE_EDGES_BINDINGS.to_vec(),
+                ),
+            ],
             (true, v) => vec![
                 v.unwrap_or_else(|| {
                     (
@@ -830,6 +845,10 @@ impl InstancedRenderer {
             ],
             binds: Vec::new(),
         });
+        let mut cache = cache;
+        if hw_edges && let Some(c) = &mut cache {
+            c.state.set_hardware_edges();
+        }
         let colors = Self::colors_buffer(&device, width, height);
         let mut renderer = InstancedRenderer {
             device: device.clone(),

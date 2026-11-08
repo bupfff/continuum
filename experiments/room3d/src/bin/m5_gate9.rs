@@ -231,7 +231,9 @@ fn main() -> std::io::Result<()> {
         };
         let same = relative_rmse(&later.image, &reference.image);
         let c1 = same <= 0.001;
-        let c2 = later.frames.is_some_and(|f| f as f64 <= 1.2 * base_frames as f64);
+        let c2 = later
+            .frames
+            .is_some_and(|f| f as f64 <= 1.2 * base_frames as f64);
         let (e_base, e_later) = (mean(&base, |s| s.1), mean(&later, |s| s.1));
         let c3 = e_later <= 0.5 * e_base;
         pass[0] &= c1;
@@ -244,7 +246,9 @@ fn main() -> std::io::Result<()> {
             verdict(c1),
             later.frames.map_or("never".into(), |f| f.to_string()),
             base_frames,
-            later.frames.map_or(f64::NAN, |f| f as f64 / base_frames as f64),
+            later
+                .frames
+                .map_or(f64::NAN, |f| f as f64 / base_frames as f64),
             base.frames.map_or("never".into(), |f| f.to_string()),
             verdict(c2),
             100.0 * e_later,

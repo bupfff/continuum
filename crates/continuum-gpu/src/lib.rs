@@ -458,6 +458,8 @@ const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31, 52];
 pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52];
 /// `hw_visibility_movers` adds the movers' acceleration structure (59).
 pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52, 59];
+/// `hw_edges` (M7 gate 4): silhouette rays through ray queries.
+pub(crate) const HW_EDGES_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 42, 81];
 
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
@@ -475,6 +477,12 @@ pub(crate) const VC_FILL_BINDINGS: &[u32] = &[
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     79, 0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52,
     55, 56, 57, 58, 62, 73, 76,
+];
+/// `vc_shade_edges` (M7 gate 4): the cache's shading of listed edge
+/// pixels.
+pub(crate) const VC_SHADE_EDGES_BINDINGS: &[u32] = &[
+    79, 0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55,
+    56, 57, 58, 62, 73, 76, 81,
 ];
 /// Bounce light's samples (M10 gate 1).
 pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[

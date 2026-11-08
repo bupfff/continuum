@@ -1889,6 +1889,12 @@ fn visibility(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invo
 // pixel sees the light.
 fn recorded_hit(pixel: u32, dir: vec3<f32>) -> Hit {
     let v = vis[pixel];
+    return hit_from(v.xyz, dir);
+}
+
+// A hit from its object, triangle and distance (bits), its normal facing
+// the ray `dir`.
+fn hit_from(v: vec3<u32>, dir: vec3<f32>) -> Hit {
     var hit = Hit(bitcast<f32>(v.z), v.x, v.y, vec3<f32>(0.0));
     if (v.x != 0xffffffffu) {
         let v0 = tris[3u * v.y].xyz;
@@ -4013,6 +4019,39 @@ fn indirect_light(slot: u32, r: PageRef) -> vec3<f32> {
     return total;
 }
 
+// Silhouette rays through hardware ray queries (M7 gate 4): the edge pixels
+// `hw_edges` found, counted in the stats' last counter (as the compute path
+// counts edge pixels; so not with COUNT_WORK), each with its four
+// quarter-rays' hits (object, triangle, distance bits; w: the pixel).
+@group(0) @binding(81) var<storage, read_write> edge_hits: array<vec4<u32>>;
+
+// After `vc_shade`: each listed edge pixel averages its four quarter-rays,
+// each shaded from the cache with textures read for half a pixel, as
+// `vc_shade`'s compute path does. One thread per list entry (over the
+// screen's grid).
+@compute @workgroup_size(8, 8)
+fn vc_shade_edges(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let w = u32(camera.params.x);
+    let i = gid.y * w + gid.x;
+    let count = min(atomicLoad(&vc_stats[15]), arrayLength(&edge_hits) / 4u);
+    if (gid.x >= w || i >= count) { return; }
+    let pixel = edge_hits[4u * i].w;
+    let at = vec3<u32>(pixel % w, pixel / w, 0u);
+    sub_share = 0.5;
+    var sum = vec3<f32>(0.0);
+    for (var q = 0u; q < 4u; q++) {
+        let sd = camera_dir_at(at, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
+        let e = edge_hits[4u * i + q];
+        if (e.x == NONE) {
+            sum += light.sky.xyz;
+        } else {
+            sum += vc_hit_color(sd, hit_from(e.xyz, sd), false);
+        }
+    }
+    colors[pixel] = vec4<f32>(sum * 0.25, 1.0);
+}
+
 var<workgroup> fallback_count: atomic<u32>;
 
 // Lists page `k` with `priority` unless it is already listed this frame. Two
@@ -4066,6 +4105,7 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
         }
         // At a silhouette, four rays through the pixel's quarters (M7 gate
         // 3), textures read for half a pixel.
+        // (w 2: hardware silhouette rays, shaded by `vc_shade_edges`.)
         if (vc.indirect.w == 1u && is_edge(gid, w, h)) {
             // Counted in the last work counter (unused without
             // COUNT_WORK).

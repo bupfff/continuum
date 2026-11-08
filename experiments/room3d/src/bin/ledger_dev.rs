@@ -6,7 +6,9 @@
 //! a gate.
 
 use continuum::glam::{DVec3, Mat3, Vec3};
-use continuum_gpu::{CacheOptions, Camera, Emitter, InstancedRenderer, Light, MaskConeKernel, wgpu};
+use continuum_gpu::{
+    CacheOptions, Camera, Emitter, InstancedRenderer, Light, MaskConeKernel, wgpu,
+};
 use room3d::field::Field;
 
 const W: u32 = 640;
@@ -40,7 +42,11 @@ fn main() {
         .device()
         .create_texture(&wgpu::TextureDescriptor {
             label: None,
-            size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -50,14 +56,31 @@ fn main() {
         })
         .create_view(&Default::default());
     let mut r = InstancedRenderer::with_movers(
-        &kernel, format, W, H, 1, &lights, &field.scene, origin, Some(CacheOptions::default()), &[], &[0],
+        &kernel,
+        format,
+        W,
+        H,
+        1,
+        &lights,
+        &field.scene,
+        origin,
+        Some(CacheOptions::default()),
+        &[],
+        &[0],
     );
     let camera: Camera = ground;
     for _ in 0..20_000 {
         r.frame(camera, &target);
         let log = r.cache_log();
-        let latest = r.cache_stats().map_or(0, |s| s.frame as usize).min(log.len());
-        if latest >= 32 && log[latest - 32..latest].iter().all(|s| s.requests == 0 && s.pages_baked == 0) {
+        let latest = r
+            .cache_stats()
+            .map_or(0, |s| s.frame as usize)
+            .min(log.len());
+        if latest >= 32
+            && log[latest - 32..latest]
+                .iter()
+                .all(|s| s.requests == 0 && s.pages_baked == 0)
+        {
             break;
         }
     }
@@ -74,8 +97,12 @@ fn main() {
                     one += 1;
                 } else {
                     mid += 1;
-                    if v < 0.05 { near0 += 1; }
-                    if v > 0.95 { near1 += 1; }
+                    if v < 0.05 {
+                        near0 += 1;
+                    }
+                    if v > 0.95 {
+                        near1 += 1;
+                    }
                 }
             }
         }
@@ -83,21 +110,35 @@ fn main() {
     let all = (zero + one + mid) as f64;
     println!(
         "{} pages, {} texels: 0 {:.1}%, 1 {:.1}%, between {:.1}% (below 0.05: {:.1}%, above 0.95: {:.1}%)",
-        pages.len(), all, 100.0 * zero as f64 / all, 100.0 * one as f64 / all, 100.0 * mid as f64 / all,
-        100.0 * near0 as f64 / all, 100.0 * near1 as f64 / all
+        pages.len(),
+        all,
+        100.0 * zero as f64 / all,
+        100.0 * one as f64 / all,
+        100.0 * mid as f64 / all,
+        100.0 * near0 as f64 / all,
+        100.0 * near1 as f64 / all
     );
     let start = r.cache_stats().map_or(0, |s| s.frame as usize);
     for f in 1..=60 {
-        r.set_light(0, turned(lights[0], center, (f as f32 / 14_400.0).to_radians()));
+        r.set_light(
+            0,
+            turned(lights[0], center, (f as f32 / 14_400.0).to_radians()),
+        );
         r.frame(camera, &target);
     }
     r.finish();
     let log = r.cache_log();
     let moving = &log[start..];
     let n = moving.len() as f64;
-    let avg = |f: fn(&continuum_gpu::CacheStats) -> u32| moving.iter().map(|s| f(s) as f64).sum::<f64>() / n;
+    let avg = |f: fn(&continuum_gpu::CacheStats) -> u32| {
+        moving.iter().map(|s| f(s) as f64).sum::<f64>() / n
+    };
     println!(
         "moving 60 frames: ledger texels {:.0}, pages checked {:.0}, mixed {:.0}, whole {:.0}, fallback {:.0} px",
-        avg(|s| s.ledger_texels), avg(|s| s.ledger_checked), avg(|s| s.ledger_mixed), avg(|s| s.ledger_whole), avg(|s| s.fallback_pixels)
+        avg(|s| s.ledger_texels),
+        avg(|s| s.ledger_checked),
+        avg(|s| s.ledger_mixed),
+        avg(|s| s.ledger_whole),
+        avg(|s| s.fallback_pixels)
     );
 }

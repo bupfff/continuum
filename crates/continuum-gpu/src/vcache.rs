@@ -798,6 +798,9 @@ pub(crate) struct VirtualCache {
     /// Movers under a sky: slots whose sky to re-bake, each with the frame
     /// it is due.
     sky_due: HashMap<u32, u32>,
+    /// Silhouette rays through ray queries (M7 gate 4): `hw_edges` lists
+    /// edge pixels for `vc_shade_edges` (buffer 81; counted in the stats).
+    hardware_edges: bool,
     append_pages: u32,
     alloc_frame: Vec<u32>,
     appended: f32,
@@ -1221,6 +1224,7 @@ impl VirtualCache {
             retry: Default::default(),
             retrying: Default::default(),
             sky_due: HashMap::new(),
+            hardware_edges: false,
             sky_rebaked: 0,
             mover_ids: HashMap::new(),
             append_pages,
@@ -1287,6 +1291,18 @@ impl VirtualCache {
     /// Request buffers for a `width × height` image. Requests in flight are
     /// dropped.
     pub(crate) fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if self.hardware_edges {
+            self.buffers.retain(|(b, _)| *b != 81);
+            self.buffers.push((
+                81,
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("edge hits"),
+                    size: (width as u64 * height as u64 * 64).max(64),
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                }),
+            ));
+        }
         let tile = self.options.request_tile;
         let tiles = width.div_ceil(tile) * height.div_ceil(tile);
         self.buffers.retain(|(b, _)| *b != 39);
@@ -1522,7 +1538,11 @@ impl VirtualCache {
                 self.indirect_jobs.len() as u32,
                 self.options.indirect as u32,
                 !self.options.glossy_rays as u32,
-                self.options.edge_rays as u32,
+                if self.hardware_edges {
+                    2
+                } else {
+                    self.options.edge_rays as u32
+                },
             ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
@@ -1765,6 +1785,14 @@ impl VirtualCache {
             (lo, hi) = (Vec3::ZERO, Vec3::ZERO);
         }
         [lo.x, lo.y, lo.z, 0.0, hi.x, hi.y, hi.z, 0.0]
+    }
+
+    /// Edge rays through ray queries (M7 gate 4), with `edge_rays` on: the
+    /// renderer's `hw_edges` and `vc_shade_edges` passes trace and shade
+    /// them instead of the shading pass's compute rays. Before the first
+    /// `resize`, which makes their buffers.
+    pub(crate) fn set_hardware_edges(&mut self) {
+        self.hardware_edges = self.options.edge_rays;
     }
 
     /// Clears the request tiles and counters before shading.
@@ -2167,7 +2195,11 @@ impl VirtualCache {
         ];
         let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
         let stride = self.sky_stride(m, mip);
-        (listed, stride, listed[0].div_ceil(stride) * listed[1].div_ceil(stride))
+        (
+            listed,
+            stride,
+            listed[0].div_ceil(stride) * listed[1].div_ceil(stride),
+        )
     }
 
     /// Lists page `k` (entry `index`) for its sky samples, as the plan
@@ -2222,10 +2254,8 @@ impl VirtualCache {
         // passes use the same sky guess, nor with bounce light, whose
         // samples keep the coarser pages they find, so a different bake
         // order would settle to a different image.
-        let sky_later = self.sky
-            && self.options.sky_later
-            && self.append_pages == 0
-            && !self.options.indirect;
+        let sky_later =
+            self.sky && self.options.sky_later && self.append_pages == 0 && !self.options.indirect;
         for (priority, k) in order {
             let secondary = priority & SECONDARY != 0;
             let later = sky_later && !secondary;

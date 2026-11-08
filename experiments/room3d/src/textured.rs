@@ -396,9 +396,13 @@ impl Textured {
         let first = self.scene.textures.len() as u32;
         self.scene.textures.extend([leaf_texture, lattice]);
         let shrub = self.scene.geometries.len();
-        self.scene
-            .geometries
-            .push(cards(&[0.0, TAU / 6.0, TAU / 3.0], 1.4, 1.2, Vec2::ONE, back));
+        self.scene.geometries.push(cards(
+            &[0.0, TAU / 6.0, TAU / 3.0],
+            1.4,
+            1.2,
+            Vec2::ONE,
+            back,
+        ));
         self.scene
             .geometries
             .push(cards(&[0.0], 4.0, 1.5, Vec2::new(2.0, 0.75), back));

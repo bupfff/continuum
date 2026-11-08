@@ -242,7 +242,10 @@ fn main() -> std::io::Result<()> {
         && base_cold.frames.is_some()
         && ours_cold.bake_ms <= 1.5 * base_cold.bake_ms
         && ms(ours_warm) <= 1.25 * ms(base_warm);
-    let frames = |c: &Cold| c.frames.map_or("did not settle in 5000".into(), |f| f.to_string());
+    let frames = |c: &Cold| {
+        c.frames
+            .map_or("did not settle in 5000".into(), |f| f.to_string())
+    };
     say(format!(
         "1. speed: bake to settle {:.0} ms GPU exactly back-to-back, {:.0} ms with 1 mm ({:.2}×, at most 1.5×); warm {:.2} ms and {:.2} ms ({:.2}×, at most 1.25×); settled in {} and {} frames ({:.1} s and {:.1} s; untimed frames {} and {}): {}",
         ours_cold.bake_ms,
