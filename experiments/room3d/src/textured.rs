@@ -282,6 +282,7 @@ impl Textured {
             geometry_textures: vec![Some(0), Some(1), Some(2)],
             geometry_materials: Vec::new(),
             geometry_emission: Vec::new(),
+            geometry_emissive_textures: Vec::new(),
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
@@ -516,6 +517,73 @@ impl Textured {
         let first = self.scene.textures.len() as u32;
         self.scene.textures.extend([tiles, bricks]);
         self.scene.geometry_normal_maps = vec![Some(first), None, Some(first + 1)];
+        self
+    }
+
+    /// M10 gate 14's scene: the scene at night (as `with_glow`) with a
+    /// sign: a double-sided panel 1.2 m wide and 0.9 m tall standing 5 m
+    /// ahead, its emission (4, 4, 4) times an emissive texture of three
+    /// vertical stripes (red, green, blue) between dark margins.
+    pub fn with_sign(mut self) -> Textured {
+        self.lights = Self::night_lights().to_vec();
+        self.sky *= 0.02;
+        let (w, h) = (1.2f32, 0.9f32);
+        let p = [
+            Vec3::new(-w / 2.0, 0.0, 0.0),
+            Vec3::new(w / 2.0, 0.0, 0.0),
+            Vec3::new(w / 2.0, 0.0, h),
+            Vec3::new(-w / 2.0, 0.0, h),
+        ];
+        let uv = [
+            Vec2::new(0.0, 1.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(0.0, 0.0),
+        ];
+        // Front faces toward -y (the camera), back faces toward +y.
+        let (mut tris, mut tex) = (Vec::new(), Vec::new());
+        for [a, b, c] in [[0, 1, 2], [0, 2, 3], [0, 2, 1], [0, 3, 2]] {
+            tris.push([p[a], p[b], p[c]]);
+            tex.push([uv[a], uv[b], uv[c]]);
+        }
+        let sign = self.scene.geometries.len();
+        self.scene
+            .geometries
+            .push(Surface::from_mesh(tris, None, Some(tex)));
+        let stripes = texture_alpha(|u, v| {
+            let inside = (0.08..0.92).contains(&v);
+            let color = if !inside || (0.3..0.36).contains(&u) || (0.64..0.7).contains(&u) {
+                Vec3::splat(0.03)
+            } else if u < 0.33 {
+                Vec3::new(1.0, 0.15, 0.1)
+            } else if u < 0.67 {
+                Vec3::new(0.15, 1.0, 0.2)
+            } else {
+                Vec3::new(0.15, 0.3, 1.0)
+            };
+            (color, 1.0)
+        });
+        let white = texture_alpha(|_, _| (Vec3::splat(0.8), 1.0));
+        let first = self.scene.textures.len() as u32;
+        self.scene.textures.extend([white, stripes]);
+        let n = self.scene.geometries.len();
+        self.scene.geometry_textures.resize(n, None);
+        self.scene.geometry_textures[sign] = Some(first);
+        let mut emission = self.scene.geometry_emission.clone();
+        emission.resize(n, Vec3::ZERO);
+        emission[sign] = Vec3::splat(4.0);
+        self.scene.geometry_emission = emission;
+        let mut emissive = self.scene.geometry_emissive_textures.clone();
+        emissive.resize(n, None);
+        emissive[sign] = Some(first + 1);
+        self.scene.geometry_emissive_textures = emissive;
+        self.scene.instances.push(Instance {
+            geometry: sign,
+            rotation: Mat3::IDENTITY,
+            scale: 1.0,
+            position: DVec3::new(0.3, 5.0, 0.0),
+            albedo: Vec3::ONE,
+        });
         self
     }
 

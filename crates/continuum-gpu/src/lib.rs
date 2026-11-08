@@ -2064,6 +2064,10 @@ pub struct InstancedScene {
     /// deep; otherwise use a light for that.
     /// Stored as half floats (at most 65,504).
     pub geometry_emission: Vec<Vec3>,
+    /// Each geometry's emissive texture, if any (empty: none; M10 gate 14):
+    /// an index into `textures` (sRGB, glTF's emissive map) multiplying its
+    /// emission, read through its texture coordinates.
+    pub geometry_emissive_textures: Vec<Option<u32>>,
     /// Each geometry's normal map, if any (empty: none; M10 gate 5): an
     /// index into `textures` of a tangent-space normal map (linear, OpenGL's
     /// convention as glTF specifies: green toward the image's top), read
