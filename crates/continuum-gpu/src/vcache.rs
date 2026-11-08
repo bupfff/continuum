@@ -133,6 +133,10 @@ pub struct CacheOptions {
     /// holds at the hits. At most three lights; not with movers or moving
     /// lights. Off by default.
     pub indirect: bool,
+    /// With bounce light (M10 gate 11; on by default): its samples also
+    /// gather the emission of the surfaces they hit, so emissive geometry
+    /// lights its surroundings (one bounce).
+    pub emission_bounce: bool,
     /// What a bounce sample counts against the bake budget, in sun texels.
     pub indirect_sample_cost: u32,
     /// Anti-aliasing at silhouettes (M7 gates 3–4): pixels whose neighbours
@@ -191,6 +195,7 @@ impl Default for CacheOptions {
             sky_sample_cost: 10,
             ledger_epsilon: 0.01,
             indirect: false,
+            emission_bounce: true,
             indirect_sample_cost: 8,
             edge_rays: false,
             edge_samples: 4,

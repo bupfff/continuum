@@ -458,6 +458,34 @@ impl Textured {
         self
     }
 
+    /// M10 gate 11's scene: the scene at night (M5 gate 8's point and spot
+    /// lights, the sky at 2% of the day's) with a glowing panel standing on
+    /// the ground 5 m ahead, 1.2 m wide and 0.9 m tall, emitting warm light
+    /// (radiance (3.0, 1.86, 0.9) from every face).
+    pub fn with_glow(mut self) -> Textured {
+        self.lights = Self::night_lights().to_vec();
+        self.sky *= 0.02;
+        let panel = self.scene.geometries.len();
+        self.scene.geometries.push(Surface::cuboid(
+            Vec3::new(-0.6, -0.04, 0.0),
+            Vec3::new(0.6, 0.04, 0.9),
+        ));
+        let n = self.scene.geometries.len();
+        self.scene.geometry_textures.resize(n, None);
+        let mut emission = self.scene.geometry_emission.clone();
+        emission.resize(n, Vec3::ZERO);
+        emission[panel] = Vec3::new(1.0, 0.62, 0.3) * 3.0;
+        self.scene.geometry_emission = emission;
+        self.scene.instances.push(Instance {
+            geometry: panel,
+            rotation: Mat3::IDENTITY,
+            scale: 1.0,
+            position: DVec3::new(0.3, 5.0, 0.0),
+            albedo: Vec3::splat(0.8),
+        });
+        self
+    }
+
     /// Night lights for the scene (M5 gate 8): a warm point light 10 cm
     /// across, 2 m up near the brick block, and a cool spot 5 cm across, 4 m
     /// up, aimed down the scene with 20° inner and 30° outer half-angles.
