@@ -6,7 +6,9 @@
 //! `cargo run --release -p bevy_continuum --example boxes`
 //!
 //! `-- --screenshot out.png --frames 300` saves the window after that many
-//! frames and exits.
+//! frames and exits. `-- --spin` spins the first box from a Bevy entity
+//! (`ContinuumInstance`), without the sky (movers and a sky are slow
+//! together in the cache).
 
 use std::sync::Arc;
 
@@ -15,7 +17,7 @@ use bevy::prelude::*;
 use bevy::render::view::Tonemapping;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy_continuum::continuum_gpu::{Instance, InstancedScene, Light, RendererOptions, Texture};
-use bevy_continuum::{ContinuumCamera, ContinuumPlugin, ContinuumScene};
+use bevy_continuum::{ContinuumCamera, ContinuumInstance, ContinuumPlugin, ContinuumScene};
 use continuum::glam::{DVec3, Mat3, Vec2, Vec3 as ZUp};
 use continuum::mesh::Surface;
 
@@ -37,6 +39,10 @@ fn checker() -> Texture {
 }
 
 /// The scene in Continuum's Z-up world.
+/// The box `--spin` turns: instance 1, at (−2.1, −2.1, 0.35) in the scene's
+/// Z-up world, which is (−2.1, 0.35, 2.1) in Bevy's.
+const SPUN: usize = 1;
+
 fn scene() -> ContinuumScene {
     let h = 4.0;
     let c = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(x, y)| ZUp::new(x, y, 0.0));
@@ -116,6 +122,12 @@ struct Run {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let spin = args.iter().any(|a| a == "--spin");
+    let mut scene = scene();
+    if spin {
+        scene.options.movable = vec![SPUN];
+        scene.options.sky = None;
+    }
     let arg = |name: &str| {
         args.iter()
             .position(|a| a == name)
@@ -124,13 +136,13 @@ fn main() {
     };
     App::new()
         .add_plugins((DefaultPlugins, ContinuumPlugin))
-        .insert_resource(scene())
+        .insert_resource(scene)
         .insert_resource(Run {
             screenshot: arg("--screenshot"),
             frames: arg("--frames").and_then(|n| n.parse().ok()).unwrap_or(300),
             frame: 0,
         })
-        .add_systems(Startup, |mut commands: Commands| {
+        .add_systems(Startup, move |mut commands: Commands| {
             commands.spawn((
                 Camera3d::default(),
                 Hdr,
@@ -139,8 +151,14 @@ fn main() {
                 ContinuumCamera,
                 Transform::default(),
             ));
+            if spin {
+                commands.spawn((
+                    ContinuumInstance(SPUN),
+                    Transform::from_xyz(-2.1, 0.35, 2.1),
+                ));
+            }
         })
-        .add_systems(Update, (circle, pulse, finish))
+        .add_systems(Update, (circle, pulse, turn, finish))
         .run();
 }
 
@@ -149,6 +167,13 @@ fn circle(time: Res<Time>, mut cameras: Query<&mut Transform, With<ContinuumCame
     let a = 0.15 * time.elapsed_secs();
     for mut t in &mut cameras {
         *t = Transform::from_xyz(6.0 * a.cos(), 3.0, 6.0 * a.sin()).looking_at(Vec3::ZERO, Vec3::Y);
+    }
+}
+
+/// The spun box turns about Bevy's up; the cache re-bakes what it changes.
+fn turn(time: Res<Time>, mut boxes: Query<&mut Transform, With<ContinuumInstance>>) {
+    for mut t in &mut boxes {
+        t.rotation = Quat::from_rotation_y(time.elapsed_secs());
     }
 }
 

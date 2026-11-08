@@ -317,7 +317,12 @@ App::new()
   appear in it. Bevy's tone mapping, post-processing and UI apply on top.
 - Changing a light's radiance in `ContinuumScene::lights` costs nothing;
   any other change to the resource rebuilds the renderer.
-- Run the example (a camera circling boxes and spheres, a pulsing lamp):
+- Moving objects: list instances in `options.movable` and mark Bevy
+  entities `ContinuumInstance(index)`; each follows its entity's
+  `GlobalTransform` (rotation and translation; the instance keeps its
+  scale), and the cache re-bakes only what the move changes.
+- Run the example (a camera circling boxes and spheres, a pulsing lamp;
+  `-- --spin` turns a box from a Bevy entity):
 
   ```bash
   cargo run --release -p bevy_continuum --example boxes

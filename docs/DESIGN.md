@@ -416,14 +416,21 @@ place, for a new conversation:
     cubic-spline, through the node hierarchy), tested against poses worked
     out from the spec; the viewer plays a file's first animation through
     movable instances (not with a sky). Not gated: movers are M9 G1's.
+  - *Bevy movers*: `ContinuumInstance(index)` makes a movable instance
+    follow its entity's `GlobalTransform` (a unit test checks the change
+    of axes for rotations); the `boxes` example's `--spin`.
   - *exposure*: `Renderer::set_exposure` scales the drawn colors before
     the tone curve (a test reads a float target back: exactly the colors
     times the factor); the viewer's `[`, `]` and `--exposure`.
 - **Next, in the order I would take them:**
   1. *glTF sampler wrap modes* (clamp, mirror): textures always repeat now.
      Every texture read (base color, box filter, normal maps,
-     metallic-roughness, emission, opacity, cutouts) would apply the mode;
-     the layer words have spare bits for it.
+     metallic-roughness, emission, opacity, cutouts) would apply the mode,
+     from a per-object word appended to `object_texture` (four slots × two
+     axes × two bits; the emission section's index formula changes). With
+     UVs inside [0, 1], clamp differs from repeat only within half a texel
+     of the edges, so the payoff is small; gate against Cycles' EXTEND and
+     MIRROR if done.
   2. *Emissive quads as area lights*, demoted: bounce light takes at most
      three lights (`vcache.rs`), and M10 G12's emitter is a box (six
      faces), so emitters as lights would turn bounce off where it matters.

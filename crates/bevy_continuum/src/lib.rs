@@ -32,14 +32,18 @@
 //!   tone curve.
 //! - **What can change.** The camera moves freely. Light colors and
 //!   intensities change for free ([`ContinuumScene::lights`]'s radiance, with
-//!   the same lights in the same places). Anything else (geometry, light
-//!   positions, options) rebuilds the renderer when the resource changes.
+//!   the same lights in the same places). Instances listed in the options'
+//!   `movable` follow the entities marked [`ContinuumInstance`] (rotation and
+//!   translation; the instance keeps its scale), re-baking only what each
+//!   move changes. Anything else (geometry, light positions, options)
+//!   rebuilds the renderer when the resource changes.
 //! - **Limits.** The renderer's limits apply (`docs/GUIDE.md`); cameras do
 //!   not roll (Continuum's up is always +Z); one renderer per camera.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use bevy::app::PostUpdate;
 use bevy::core_pipeline::schedule::{Core3d, Core3dSystems};
 use bevy::ecs::prelude::*;
 use bevy::math::Vec3 as BevyVec3;
@@ -53,7 +57,9 @@ use bevy::render::renderer::{
 use bevy::render::sync_world::MainEntity;
 use bevy::render::view::{ExtractedView, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderSystems};
-use continuum::glam::{DVec3, Vec3};
+use bevy::transform::TransformSystems;
+use bevy::transform::components::GlobalTransform;
+use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum_gpu::{
     Camera as ContinuumView, InstancedScene, Light, MaskConeKernel, Renderer, RendererOptions,
 };
@@ -69,7 +75,13 @@ impl Plugin for ContinuumPlugin {
         app.add_plugins((
             ExtractComponentPlugin::<ContinuumCamera>::default(),
             ExtractResourcePlugin::<ContinuumScene>::default(),
-        ));
+            ExtractResourcePlugin::<Movers>::default(),
+        ))
+        .init_resource::<Movers>()
+        .add_systems(
+            PostUpdate,
+            collect_movers.after(TransformSystems::Propagate),
+        );
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -102,6 +114,51 @@ pub struct ContinuumScene {
     pub options: RendererOptions,
 }
 
+/// Moves instance `.0` of the [`ContinuumScene`] (one listed in its
+/// `options.movable`) with this entity's `GlobalTransform`: its rotation
+/// and translation in Bevy's world (see the crate's coordinates). The
+/// instance keeps its own scale. The cache re-bakes what the move changes
+/// within the frame (M9 gate 1).
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContinuumInstance(pub usize);
+
+/// Each [`ContinuumInstance`]'s pose this frame, in Continuum's world:
+/// instance, rotation (column-major), position.
+#[derive(Resource, Clone, Default)]
+struct Movers(Vec<(usize, [f32; 9], [f64; 3])>);
+
+impl ExtractResource<RenderApp> for Movers {
+    type Source = Movers;
+
+    fn extract_resource(source: &Self::Source) -> Self {
+        source.clone()
+    }
+}
+
+/// Bevy's Y-up rotation as Continuum's Z-up one (the same change of axes
+/// as positions): `C · R · C⁻¹` with `C` taking (x, y, z) to (x, −z, y).
+fn rotation_to_z_up(r: [f32; 9]) -> Mat3 {
+    let c = Mat3::from_cols(Vec3::X, Vec3::Z, -Vec3::Y);
+    c * Mat3::from_cols_array(&r) * c.transpose()
+}
+
+/// Gathers the [`ContinuumInstance`]s' poses after transforms propagate.
+fn collect_movers(
+    instances: Query<(&ContinuumInstance, &GlobalTransform)>,
+    scene: Option<Res<ContinuumScene>>,
+    mut movers: ResMut<Movers>,
+) {
+    let origin = scene.map_or(DVec3::ZERO, |s| s.origin);
+    movers.0.clear();
+    for (instance, transform) in &instances {
+        let (_, rotation, translation) = transform.to_scale_rotation_translation();
+        let r = bevy::math::Mat3::from_quat(rotation).to_cols_array();
+        let p = to_z_up(translation);
+        let position = origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+        movers.0.push((instance.0, r, position.to_array()));
+    }
+}
+
 impl ExtractResource<RenderApp> for ContinuumScene {
     type Source = ContinuumScene;
 
@@ -119,6 +176,8 @@ struct View {
     size: (u32, u32),
     /// The lights' radiance as last set.
     radiance: Vec<Vec3>,
+    /// Movable instances' poses as last set.
+    poses: HashMap<usize, ([f32; 9], [f64; 3])>,
 }
 
 /// One renderer per camera, by main-world entity. (The kernel's settings
@@ -158,6 +217,7 @@ fn view_camera(view: &ExtractedView) -> ContinuumView {
 fn prepare_views(
     views: Res<Views>,
     scene: Option<Res<ContinuumScene>>,
+    movers: Option<Res<Movers>>,
     cameras: Query<(&MainEntity, &ExtractedView, &ExtractedCamera), With<ContinuumCamera>>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -201,6 +261,7 @@ fn prepare_views(
                     format,
                     size,
                     radiance: scene.lights.iter().map(|l| l.radiance).collect(),
+                    poses: HashMap::new(),
                 },
             );
         }
@@ -213,6 +274,13 @@ fn prepare_views(
             if v.radiance[k] != light.radiance {
                 v.renderer.set_light_radiance(k, light.radiance);
                 v.radiance[k] = light.radiance;
+            }
+        }
+        for &(i, r, p) in movers.iter().flat_map(|m| m.0.iter()) {
+            if scene.options.movable.contains(&i) && v.poses.get(&i) != Some(&(r, p)) {
+                v.renderer
+                    .set_transform(i, rotation_to_z_up(r), DVec3::from_array(p));
+                v.poses.insert(i, (r, p));
             }
         }
         v.renderer.compute(view_camera(view));
@@ -231,4 +299,29 @@ fn draw_view(
     let Some(v) = views.get(entity) else { return };
     v.renderer
         .encode_display(ctx.command_encoder(), target.main_texture_view());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A turn about Bevy's up (y) is the same turn about Continuum's up
+    /// (z), and the change of axes maps a rotated Bevy vector onto the
+    /// Continuum rotation of the mapped vector.
+    #[test]
+    fn rotations_change_axes_like_positions() {
+        let angle = 0.7f32;
+        let bevy_turn = bevy::math::Mat3::from_rotation_y(angle);
+        let ours = rotation_to_z_up(bevy_turn.to_cols_array());
+        let want = Mat3::from_rotation_z(angle);
+        assert!(ours.abs_diff_eq(want, 1e-6), "{ours} against {want}");
+        let r = bevy::math::Mat3::from_euler(bevy::math::EulerRot::XYZ, 0.3, -1.1, 2.0);
+        let v = BevyVec3::new(0.2, -0.5, 0.9);
+        let mapped = rotation_to_z_up(r.to_cols_array()) * to_z_up(v);
+        let direct = to_z_up(r * v);
+        assert!(
+            (mapped - direct).length() < 1e-6,
+            "{mapped} against {direct}"
+        );
+    }
 }
