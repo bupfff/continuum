@@ -217,6 +217,11 @@ relative RMSE (M3 gate 3).
 
 ## Running
 
+To compare GPUs, `cargo run --release -p room3d --bin bench` repeats the
+gates' timing measurements in one headless run; `docs/BENCHMARK.md` covers
+running it on a rented NVIDIA GPU, and `docs/results/bench-m4.md` holds the
+M4 baseline.
+
 ```bash
 cargo test --release
 cargo run --release -p flatland --bin gate1

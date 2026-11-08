@@ -347,7 +347,7 @@ estimates, and gates fail often, so treat them as ranges.
 | 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes. **Done (M6 G1, failed on round-trip precision only):** a textured import is 0.43% from Cycles, automatic charts are within a point of hand-made ones in the cache, warm frames take 1.5 ms. Not yet: PBR parameters, normal maps, alpha, the file's lights | 2–3 (1 done) |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel. **Tried (M7 G1, failed on all three):** exact 8×8 coverage per pixel costs hundreds of node tests per pixel at scale (105 ms on the textured scene, 10–87 s on the field) and gains 0.76× only from 150 m up. Kept off by default; v0.1 ships with one ray per pixel | 2 (1 spent) |
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
-| 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). Not yet: the cloud GPU benchmark | 1–2 (1 spent) |
+| 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
 ### 3.8 Next steps, in order (updated 2026-11-07)
 
@@ -424,8 +424,10 @@ place, for a new conversation:
   Naga 30's Metal backend ignores ray flags' face culling (worked around in
   the camera's passes); worth reporting upstream (the user's call).
 - **Needs the user:** which candidate next; pushing this session's later
-  commits (pushed through `979a80f`); a `v0.2` tag; a cloud GPU account for
-  an NVIDIA benchmark (the user plans it next); any publishing.
+  commits (pushed through `979a80f`); a `v0.2` tag; running the NVIDIA
+  benchmark on a cloud GPU (prepared: `docs/BENCHMARK.md`,
+  `scripts/cloud_bench.sh`, M4 baseline in `docs/results/bench-m4.md`);
+  any publishing.
 - **Working notes:** gate binaries are `experiments/room3d/src/bin/
   m<milestone>_gate<n>.rs`; test scenes are in `room3d::textured`
   (`Textured::new()`, `.with_materials()`, `.with_normal_maps()`,
