@@ -422,8 +422,11 @@ place, for a new conversation:
 - **Next, in the order I would take them.** These are completeness
   features: small, usable, and each checked against Cycles where it
   changes the image.
-  1. *A viewer option for the environment sky.* `--env` with a gradient
-     sky or an `.hdr` or `.png` image. Not gated: it uses M5 G12's path.
+  1. *A viewer option for the environment sky.* **Done (fourth session):**
+     `--env gradient|file.hdr|file.png` and `--env-strength`, through
+     `continuum_gltf::load_environment` (Radiance RGBE, flat or RLE; PNG
+     from sRGB). A round-trip test reads back the HDR Cycles was checked
+     against in M5 G12. Not gated: it uses M5 G12's path.
   2. *glTF `KHR_texture_transform`.* UV offset, scale and rotation, per
      texture slot. Many assets use it. Exact by construction: test it
      against a transformed copy of the mesh's UVs.

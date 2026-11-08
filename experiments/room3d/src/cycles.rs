@@ -581,3 +581,31 @@ pub fn relative_rmse(a: &[[f32; 3]], b: &[[f32; 3]]) -> f64 {
 pub fn seconds(s: f64) -> Duration {
     Duration::from_secs_f64(s.max(0.0))
 }
+
+#[cfg(test)]
+mod tests {
+    use continuum::glam::Vec3;
+    use continuum_gpu::Environment;
+
+    /// The environment Cycles reads (M5 gate 12) loads back unchanged, up
+    /// to RGBE's precision: the loader's orientation is the one Cycles was
+    /// checked against.
+    #[test]
+    fn written_environment_loads_back() {
+        let e = Environment::from_fn(64, 32, |d| {
+            Vec3::new(
+                d.x.max(0.0) * 3.0 + 0.01,
+                (d.y + 1.0) * 0.2,
+                d.z.max(0.0) * 50.0,
+            )
+        });
+        let back = continuum_gltf::decode_environment(&super::hdr_bytes(&e)).unwrap();
+        assert_eq!((back.width, back.height), (e.width, e.height));
+        for (a, b) in e.rgb.iter().zip(&back.rgb) {
+            let m = a[0].max(a[1]).max(a[2]);
+            for c in 0..3 {
+                assert!((a[c] - b[c]).abs() <= m / 128.0, "{a:?} vs {b:?}");
+            }
+        }
+    }
+}

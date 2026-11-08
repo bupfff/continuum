@@ -90,6 +90,11 @@ Flags:
   Pages bake their lights first and their sky later, so a view comes within
   5% of its warm image in 120–300 frames, and is warm in 1,200–2,600 at a
   fixed budget (M5 gate 9).
+- `--env sky.hdr` (or a `.png`) lights the scene with an equirectangular
+  environment image instead (an HDRI, in Blender's orientation;
+  `--env-strength K` scales it), and `--env gradient` with a
+  horizon-to-zenith gradient (1.37% from Cycles, M5 gate 12). Rays that miss
+  see the image in 8 bits below its peak, so a sun belongs in a light.
 
 Scenes can have several colored rectangular lights (`Renderer::new` takes a
 list). The cache stores light per unit
@@ -136,7 +141,8 @@ cargo run --release -p viewer -- --gltf scene.glb
 
 This flies through a file in real time:
 
-- lit by the file's own lights, or else a sun 30° up (`--sky` adds the sky);
+- lit by the file's own lights, or else a sun 30° up (`--sky` adds the sky,
+  `--env` an environment image);
 - seen from the file's camera, or from one framed around the scene;
 - standing on a grey ground (`--no-ground` leaves it out).
 

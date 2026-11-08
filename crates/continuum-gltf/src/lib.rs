@@ -35,13 +35,18 @@
 //!   color (or alone), becomes the geometry's emissive texture
 //!   (`InstancedScene::geometry_emissive_textures`, M10 gate 14; not saved).
 //! - The emissive factor, times `KHR_materials_emissive_strength`, becomes
-//!   the geometry's emission (`InstancedScene::geometry_emission`; emissive
-//!   textures are not imported).
+//!   the geometry's emission (`InstancedScene::geometry_emission`).
 //! - Punctual lights (`KHR_lights_punctual`) are imported
 //!   ([`Imported::lights`]): point and spot lights as small spheres,
 //!   directional lights as suns.
+//! - Environment images (an equirectangular `.hdr` or `.png` sky for
+//!   `RendererOptions::environment`) load with [`load_environment`].
 
 #![warn(missing_docs)]
+
+mod environment;
+
+pub use environment::{decode_environment, load_environment};
 
 use std::path::Path;
 

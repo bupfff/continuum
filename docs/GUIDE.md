@@ -95,7 +95,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   `MaskConeKernel::set_environment`) lights the scene
   with a sky whose radiance varies with direction: an equirectangular
   image (`Environment`, Blender's convention; `Environment::from_fn` builds
-  one from a function of direction) above the horizon; below it, the
+  one from a function of direction, and `continuum_gltf::load_environment`
+  reads a Radiance `.hdr` or a `.png`) above the horizon; below it, the
   scene's geometry stands for the ground. Surfaces get its irradiance at
   their normal times the cache's sky visibility; rays that miss see the
   image (8-bit over its peak, so a sun belongs in a light). 1.37% from

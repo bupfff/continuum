@@ -22,7 +22,10 @@
 //! (or `.gltf`) flies through your own scene the same way: lit by the file's
 //! lights or else a sun (`--sky` adds the sky), from the file's camera or one
 //! framed around the scene, over a grey ground (`--no-ground` to leave it
-//! out).
+//! out). `--env sky.hdr` (or a `.png`) lights the field or a glTF scene with
+//! an equirectangular environment image in place of the uniform sky
+//! (Blender's orientation; `--env-strength K` scales it), and `--env
+//! gradient` with a horizon-to-zenith gradient (M5 gate 12's sky).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path, P to pause moving objects,
@@ -38,8 +41,8 @@ use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum::mesh::Surface;
 use continuum_gpu::wgpu;
 use continuum_gpu::{
-    Camera, Instance, InstancedScene, Light, Lightmap, LiveRenderer, MaskConeKernel, RectLight,
-    Renderer, RendererOptions,
+    Camera, Environment, Instance, InstancedScene, Light, Lightmap, LiveRenderer, MaskConeKernel,
+    RectLight, Renderer, RendererOptions,
 };
 use room3d::field::Field;
 use room3d::showcase::{self, PATH_FRAMES, Showcase};
@@ -77,6 +80,9 @@ struct World {
     cache: bool,
     /// Add the scene's sky (instanced scenes only).
     sky: bool,
+    /// A sky that varies with direction, in place of the uniform one
+    /// (instanced scenes only).
+    environment: Option<Environment>,
 }
 
 /// An instanced scene with its lights and sky, positioned relative to
@@ -111,6 +117,7 @@ impl World {
             scale: 1,
             cache: true,
             sky: false,
+            environment: None,
         }
     }
 
@@ -148,6 +155,7 @@ impl World {
             scale: 1,
             cache: true,
             sky: false,
+            environment: None,
         }
     }
 
@@ -260,6 +268,7 @@ impl World {
             scale: 1,
             cache: true,
             sky: false,
+            environment: None,
         }
     }
 
@@ -294,6 +303,7 @@ impl World {
             scale: 1,
             cache: true,
             sky: false,
+            environment: None,
         }
     }
 
@@ -467,7 +477,8 @@ impl App {
                 cache: world.cache,
                 // The sky only with the cache: per pixel, sky cones every
                 // frame take seconds.
-                sky: (world.sky && world.cache).then_some(scene.sky),
+                sky: (world.sky && world.cache && world.environment.is_none()).then_some(scene.sky),
+                environment: world.environment.clone().filter(|_| world.cache),
                 ..Default::default()
             };
             let renderer = Renderer::new(
@@ -739,6 +750,69 @@ impl ApplicationHandler for App {
     }
 }
 
+/// The `--env` sky: `gradient` (M5 gate 12's, around the scene's uniform
+/// sky) or an image file, times `strength`, at most twice the texture size
+/// wide (the renderer resamples it to the texture size).
+fn load_environment(world: &World, spec: &str, strength: f32) -> Environment {
+    let Some(scene) = &world.instanced else {
+        eprintln!("--env needs an instanced scene: --scene field or --gltf <file>.");
+        std::process::exit(2);
+    };
+    if !world.cache {
+        eprintln!("--env is ignored with --no-cache (sky cones per pixel take seconds).");
+    }
+    let mut env = if spec == "gradient" {
+        let (horizon, zenith) = (
+            scene.sky * Vec3::new(1.3, 1.2, 1.05),
+            scene.sky * Vec3::new(0.55, 0.72, 1.25),
+        );
+        Environment::from_fn(512, 256, |d| {
+            if d.z <= 0.0 {
+                Vec3::ZERO
+            } else {
+                horizon * (1.0 - d.z) + zenith * d.z
+            }
+        })
+    } else {
+        match continuum_gltf::load_environment(Path::new(spec)) {
+            Ok(env) => env,
+            Err(e) => {
+                eprintln!("Could not load the environment {spec}: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+    let k = env.width.div_ceil(2 * continuum_gpu::TEXTURE_SIZE).max(1);
+    if k > 1 {
+        let (w, h) = (env.width / k, (env.height / k).max(1));
+        let mut rgb = vec![[0.0f32; 3]; (w * h) as usize];
+        for (i, p) in rgb.iter_mut().enumerate() {
+            let (x0, y0) = (i as u32 % w * k, i as u32 / w * k);
+            for y in y0..(y0 + k).min(env.height) {
+                for x in x0..x0 + k {
+                    let q = env.rgb[(y * env.width + x) as usize];
+                    (0..3).for_each(|c| p[c] += q[c]);
+                }
+            }
+            let n = (k * (k.min(env.height - y0))) as f32;
+            p.iter_mut().for_each(|c| *c /= n);
+        }
+        env = Environment {
+            width: w,
+            height: h,
+            rgb,
+        };
+    }
+    env.rgb
+        .iter_mut()
+        .for_each(|p| p.iter_mut().for_each(|c| *c *= strength));
+    println!(
+        "Environment {spec}: {}×{}, times {strength}.",
+        env.width, env.height
+    );
+    env
+}
+
 fn main() {
     let arg = |name: &str| std::env::args().skip_while(|a| a != name).nth(1);
     let frames_left: Option<u32> = arg("--frames").and_then(|n| n.parse().ok());
@@ -763,6 +837,12 @@ fn main() {
     world.scale = arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1);
     world.cache = !std::env::args().any(|a| a == "--no-cache");
     world.sky = std::env::args().any(|a| a == "--sky");
+    if let Some(spec) = arg("--env") {
+        let strength: f32 = arg("--env-strength")
+            .and_then(|k| k.parse().ok())
+            .unwrap_or(1.0);
+        world.environment = Some(load_environment(&world, &spec, strength));
+    }
     let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
     let camera = FlyCamera::looking_at(world.start.0, world.start.1);
     let mut app = App {
