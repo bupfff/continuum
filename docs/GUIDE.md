@@ -61,7 +61,10 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   a material with metallic 0, roughness 1 and no texture stays Lambertian.
 - **Emission.** `InstancedScene::geometry_emission` adds each geometry's
   emitted radiance in the cache's shading, directly and in reflections.
-  It does not light other surfaces: use a light for that. glTF import
+  With bounce light on (`CacheOptions::indirect`; `emission_bounce`, on by
+  default) it also lights other surfaces, one bounce deep: 7.46% from
+  Cycles near a glowing panel at night (18% without; M10 gate 12), coarse
+  near the emitter. For sharp shadows from an emitter, use a light. glTF import
   brings the emissive factor times `KHR_materials_emissive_strength` (not
   emissive textures).
 - **Normal maps.** `InstancedScene::geometry_normal_maps` takes, per

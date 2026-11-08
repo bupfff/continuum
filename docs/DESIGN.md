@@ -317,8 +317,9 @@ Against the goal in §1, honestly:
     M7 G1), the largest quality gap. Pixel cones (M7 G1) and compute
     silhouette rays (M7 G3) both failed on cost; silhouette rays through
     ray queries (M7 G4) cost 3× where half the pixels are edges;
-  - more than one bounce; alpha blending; emission that lights other
-    surfaces;
+  - more than one bounce; alpha blending (emission lights other surfaces
+    through bounce light since M10 G12, 7.46% from Cycles near a glowing
+    panel);
   - the quality contract (§3.3) beyond the bake's frame-time target.
 - **Against UE5.** No direct comparison has been made, so none is claimed.
   - Our measured edge: exact soft shadows from area lights and noise-free
@@ -419,6 +420,12 @@ place, for a new conversation:
   research, not a contained fix);
   over-count-free coverage for a dark state (unblocks 4); the sky later in
   flights (measure); bounce light with movers.
+- **Emission lights its surroundings** (M10 G11–G12, failed on the
+  absolute bound, kept): bounce samples gather the emission they hit;
+  over surfaces 7.46% from Cycles against 18.00% without (0.41×), against
+  5%; no cost (1.00×). The rest is bounce light's 3×3 samples a page under
+  a near emitter (`docs/results/m10-gate12.md`). Gate 11 scored all
+  pixels, which the night lights' visible disks decided (109.67%).
 - **Tried after the list (development only, reverted):** a guessed sky
   from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
   is the cache's softness in motion, not the sky;
