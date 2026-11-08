@@ -4211,7 +4211,16 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     let f0 = mix(vec3<f32>(0.04), base, mat.x);
     let albedo_spec = f0 * ab.x + ab.y;
     if (vc.indirect.z == 0u && max(albedo_spec.x, max(albedo_spec.y, albedo_spec.z)) > 0.005) {
-        spec += albedo_spec * reflected_light(point, reflect(dir, normal), mat.y);
+        // A shading or mapped normal can turn the mirror direction below the
+        // surface itself; it is kept just above it instead (as Cycles'
+        // ensure_valid_reflection does).
+        // A shading or mapped normal can turn the mirror direction below the
+        // surface itself; it is kept just above it instead (as Cycles'
+        // ensure_valid_reflection does).
+        var refl = reflect(dir, normal);
+        let up = dot(refl, hit.normal);
+        if (up < 0.01) { refl = normalize(refl + hit.normal * (0.01 - up)); }
+        spec += albedo_spec * reflected_light(point, refl, mat.y);
     }
     let diffuse = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
     return diffuse * e / 3.14159265 + spec + glow;
@@ -4248,8 +4257,10 @@ fn env_brdf(nv: f32, roughness: f32) -> vec2<f32> {
 
 // GGX specular per unit of the light's unshadowed irradiance at `p`
 // (normal `n`, toward the viewer `v`): toward light `r`'s point nearest the
-// mirror direction, the lobe widened by the light's angular radius (Karis
-// 2013's representative point, normalized).
+// mirror direction (Karis 2013's representative point), D and V at the
+// material's roughness, times the energy normalization (α/α′)² with α′
+// widened by the light's angular radius. (Evaluating D and V at α′ as well
+// lowered a small light's peak twice: M10 gate 10.)
 fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: vec3<f32>, mat: vec2<f32>) -> vec3<f32> {
     let refl = reflect(-v, n);
     var aim = light_center(r);
@@ -4284,7 +4295,7 @@ fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: 
     let wide = min(a + 0.5 * radius / max(length(light_center(r) - p), 1e-6), 1.0);
     let norm = (a / wide) * (a / wide);
     let f0 = mix(vec3<f32>(0.04), base, mat.x);
-    return ggx_d(max(dot(n, h), 0.0), wide) * smith_visibility(nv, nl, wide) * fresnel(f0, max(dot(v, h), 0.0)) * norm;
+    return ggx_d(max(dot(n, h), 0.0), a) * smith_visibility(nv, nl, a) * fresnel(f0, max(dot(v, h), 0.0)) * norm;
 }
 
 // The light arriving at `p` along `refl`: what the cache holds for the
