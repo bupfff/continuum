@@ -588,7 +588,15 @@ fn exposure_scales_the_drawn_colors() {
         &s,
         DVec3::ZERO,
         &lights(),
-        RendererOptions::default(),
+        // A pool small enough for software adapters (as `settled`).
+        RendererOptions {
+            cache_options: CacheOptions {
+                frame_target_ms: 0.0,
+                pages: 1 << 15,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     );
     let device = r.kernel().device().clone();
     let texture = device.create_texture(&wgpu::TextureDescriptor {
