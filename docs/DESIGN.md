@@ -380,6 +380,15 @@ new conversation:
   3. *Movers under a sky* (M9 G3's follow-up): texel-level sky charges
      with the cosine to the normal and the horizon, re-baking only the sky
      samples past ε. The per-page sphere bound is about 5,000× loose.
+     **Deferred (2026-11-07, the user's call after an estimate):** summed
+     over M9 G3's 64 movers, a per-sample bound with the cosine and horizon
+     falls below ε (1% of about 2.5) on ground beyond about 10 m from the
+     line of movers (0.007 at 10 m, 0.0018 at 20 m, against the sphere
+     bound's 0.095 and 0.047), but not within about 5 m (0.03–0.9), nor on
+     boulder faces turned toward the movers. It needs per-sample normals in
+     the stale pass, and M9 G3's fallback criterion would still fail, since
+     the sky later (M5 G9) is off with movers. Making the sky later work
+     with movers comes first.
   4. *Moving lights* (M9 G4's follow-up): a tight bound for mixed texels,
      which now re-bake every frame the light moves.
   5. *Materials accuracy* (M10 G2's follow-up): diagnose the 8.94%; the
