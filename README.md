@@ -149,7 +149,10 @@ This flies through a file in real time:
 - lit by the file's own lights, or else a sun 30° up (`--sky` adds the sky,
   `--env` an environment image);
 - seen from the file's camera, or from one framed around the scene;
-- standing on a grey ground (`--no-ground` leaves it out).
+- standing on a grey ground (`--no-ground` leaves it out);
+- playing the file's first animation, if it has one (P pauses; node
+  translation and rotation; not with a sky, which movers do not mix with
+  yet).
 
 `--scale N` and `--no-cache` work as for the field.
 

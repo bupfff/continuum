@@ -22,7 +22,9 @@
 //! (or `.gltf`) flies through your own scene the same way: lit by the file's
 //! lights or else a sun (`--sky` adds the sky), from the file's camera or one
 //! framed around the scene, over a grey ground (`--no-ground` to leave it
-//! out). `--env sky.hdr` (or a `.png`) lights the field or a glTF scene with
+//! out); a file's first animation plays (P pauses it; not with a sky, as
+//! movers and a sky do not mix in the cache yet). `--env sky.hdr` (or a
+//! `.png`) lights the field or a glTF scene with
 //! an equirectangular environment image in place of the uniform sky
 //! (Blender's orientation; `--env-strength K` scales it), and `--env
 //! gradient` with a horizon-to-zenith gradient (M5 gate 12's sky).
@@ -83,6 +85,8 @@ struct World {
     /// A sky that varies with direction, in place of the uniform one
     /// (instanced scenes only).
     environment: Option<Environment>,
+    /// A glTF file's first animation, played through movable instances.
+    animations: Option<continuum_gltf::Animations>,
 }
 
 /// An instanced scene with its lights and sky, positioned relative to
@@ -97,6 +101,26 @@ struct Instanced {
 }
 
 impl World {
+    /// The instances the first animation moves, if it plays: not with a sky
+    /// (movers and a sky do not mix in the cache yet).
+    fn animated_instances(&self) -> Vec<usize> {
+        match &self.animations {
+            Some(a) if !(self.cache && (self.sky || self.environment.is_some())) => a.instances(0),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The first animation's pose at `time` (60 Hz frames), looping.
+    fn animation_pose(&self, time: f32) -> Vec<(usize, Mat3, DVec3)> {
+        match &self.animations {
+            Some(a) if !self.animated_instances().is_empty() => {
+                let duration = a.list[0].duration.max(1e-3);
+                a.pose(0, (time / 60.0) % duration)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn showcase() -> World {
         let scene = Showcase::new();
         let camera = scene.camera(0.0);
@@ -118,6 +142,7 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            animations: None,
         }
     }
 
@@ -156,6 +181,7 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            animations: None,
         }
     }
 
@@ -202,6 +228,7 @@ impl World {
         // in radius), or else a sun.
         let mut lights = imported.lights(origin, 0.05);
         lights.truncate(continuum_gpu::MAX_LIGHTS);
+        let animations = (!imported.animations.is_empty()).then_some(imported.animations);
         let mut scene = imported.scene;
         if ground {
             // 20 radii across, just below the scene, so it casts shadows.
@@ -275,6 +302,7 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            animations,
         }
     }
 
@@ -310,6 +338,7 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            animations: None,
         }
     }
 
@@ -395,6 +424,15 @@ impl Backend {
         match self {
             Backend::Live(r) => r.resize(width, height),
             Backend::Instanced(r) => r.resize(width, height),
+        }
+    }
+
+    /// Moves animated instances (instanced scenes).
+    fn set_transforms(&mut self, poses: &[(usize, Mat3, DVec3)]) {
+        if let Backend::Instanced(r) = self {
+            for &(i, rotation, position) in poses {
+                r.set_transform(i, rotation, position);
+            }
         }
     }
 
@@ -485,6 +523,7 @@ impl App {
                 // frame take seconds.
                 sky: (world.sky && world.cache && world.environment.is_none()).then_some(scene.sky),
                 environment: world.environment.clone().filter(|_| world.cache),
+                movable: world.animated_instances(),
                 ..Default::default()
             };
             let renderer = Renderer::new(
@@ -693,9 +732,15 @@ impl ApplicationHandler for App {
                 self.update(dt.min(0.1));
                 let moved = self.world.movers(self.time);
                 let changes: Vec<_> = moved.iter().map(|(m, s)| (*m, s)).collect();
+                let poses = if self.paused {
+                    Vec::new()
+                } else {
+                    self.world.animation_pose(self.time)
+                };
                 let fov = self.world.fov;
                 let Some(gpu) = &mut self.gpu else { return };
                 gpu.backend.update_surfaces(&changes);
+                gpu.backend.set_transforms(&poses);
                 let texture = match gpu.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -848,6 +893,20 @@ fn main() {
             .and_then(|k| k.parse().ok())
             .unwrap_or(1.0);
         world.environment = Some(load_environment(&world, &spec, strength));
+    }
+    if let Some(a) = &world.animations {
+        let moving = world.animated_instances().len();
+        if moving > 0 {
+            println!(
+                "Playing animation {} ({:.1} s, looping) on {moving} instances; P pauses.",
+                a.list[0].name.as_deref().unwrap_or("0"),
+                a.list[0].duration
+            );
+        } else {
+            println!(
+                "The file's animation does not play with a sky (movers and a sky do not mix in the cache yet)."
+            );
+        }
     }
     let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
     let camera = FlyCamera::looking_at(world.start.0, world.start.1);

@@ -261,7 +261,8 @@ Against the goal in §1, honestly:
     (M10 G5: 3.63% from Cycles with them), metallic-roughness textures,
     and alpha masks cut into geometry (M10 G7: 3.29% from Cycles).
     Since then: emissive textures (M10 G15), BLEND materials as blending
-    (M10 G16), double-sided materials as back-to-back faces,
+    (M10 G16), double-sided materials as back-to-back faces, node
+    animations (played through movers),
     `KHR_texture_transform` (Blender's sign), and vertex colors (M10
     G17–G18: 1.29% from Cycles, 1.00× the frame). Saving writes all of
     these back. Not yet: sampler wrap modes other than repeat, and a
@@ -410,15 +411,20 @@ place, for a new conversation:
   - *blending speed*: M10 G19 passed, 1.23× the frame (G16: 1.33×), 4.70%
     from Cycles. The layers are traced in the visibility pass, and the
     extra-samples list is shaded by an indirect dispatch over the list.
+  - *glTF animations*: `Imported::animations` (`Animations::instances`
+    and `pose`: translation and rotation channels, step, linear and
+    cubic-spline, through the node hierarchy), tested against poses worked
+    out from the spec; the viewer plays a file's first animation through
+    movable instances (not with a sky). Not gated: movers are M9 G1's.
 - **Next, in the order I would take them:**
-  1. *Emissive quads as area lights:* a planar rectangle with uniform
-     emission (no emissive texture) becomes a rectangular light per
-     instance, so emitters cast sharp, exact shadows past bounce light's
-     3×3 samples a page (the rest of M10 G12's 7.46%). Exclude those
-     geometries from emission bounce, or light is counted twice. Gate it
-     against Cycles on M10 G12's scene.
-  2. *glTF sampler wrap modes* (clamp, mirror): textures always repeat now.
-     Small; exact by construction.
+  1. *glTF sampler wrap modes* (clamp, mirror): textures always repeat now.
+     Every texture read (base color, box filter, normal maps,
+     metallic-roughness, emission, opacity, cutouts) would apply the mode;
+     the layer words have spare bits for it.
+  2. *Emissive quads as area lights*, demoted: bounce light takes at most
+     three lights (`vcache.rs`), and M10 G12's emitter is a box (six
+     faces), so emitters as lights would turn bounce off where it matters.
+     Needs bounce channels for more lights first, or merged channels.
   3. *Flight spikes:* the light bake's cost per page varies 2–3× with
      content (likely SIMD divergence on coarse pages), and no planned count
      predicted it (`flight-spikes-diagnostics.md`). Research, not a

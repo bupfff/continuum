@@ -48,7 +48,12 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   movers stays within ε of a re-bake, but nearly every page in view
   re-bakes its sky while objects move, about 4× the frame time in a dense
   field (M9 gate 3). Movers' own pages show a guessed sky (as fallback)
-  until about 30 frames after they move.
+  until about 30 frames after they move. glTF node animations play this
+  way: `Imported::animations` lists the instances an animation moves
+  (`Animations::instances`, for `movable`) and their transforms at a time
+  (`Animations::pose`, for `set_transform`). Translation and rotation
+  channels, step, linear and cubic-spline; scale channels, morph weights
+  and baked instances (non-uniform scale) do not move.
 - **Moving lights, experimental.** Lights listed in
   `RendererOptions::moving_lights` move (`Renderer::set_light`; not
   spots). The cache's ledger never shows stale light (M9 gate 2). But

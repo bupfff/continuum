@@ -47,13 +47,19 @@
 //! - Punctual lights (`KHR_lights_punctual`) are imported
 //!   ([`Imported::lights`]): point and spot lights as small spheres,
 //!   directional lights as suns.
+//! - Node animations (translation and rotation channels; step, linear and
+//!   cubic-spline) are kept ([`Imported::animations`]):
+//!   [`Animations::pose`] gives each animated instance's transform at a
+//!   time, for `Renderer::set_transform` on movable instances.
 //! - Environment images (an equirectangular `.hdr` or `.png` sky for
 //!   `RendererOptions::environment`) load with [`load_environment`].
 
 #![warn(missing_docs)]
 
+mod animation;
 mod environment;
 
+pub use animation::{Animation, Animations};
 pub use environment::{decode_environment, load_environment};
 
 use std::path::Path;
@@ -134,6 +140,9 @@ pub struct ImportStats {
     /// `KHR_texture_transform` differs from the primitive's other slots
     /// (a geometry has one set of texture coordinates).
     pub texture_slots_skipped: usize,
+    /// Animation channels skipped: scale and morph weights (movers keep
+    /// their scale), or keyframes that do not match their times.
+    pub animation_channels_skipped: usize,
 }
 
 /// An imported scene: geometry, instances (world positions), the file's first
@@ -152,6 +161,8 @@ pub struct Imported {
     pub bounds: (DVec3, DVec3),
     /// What was imported and what was skipped.
     pub stats: ImportStats,
+    /// The file's node animations, played through movable instances.
+    pub animations: Animations,
 }
 
 /// Y-up to Z-up.
@@ -160,7 +171,7 @@ fn to_z_up(v: [f32; 3]) -> Vec3 {
 }
 
 /// The same change of axes as a matrix, and its inverse.
-fn axes() -> (DMat4, DMat4) {
+pub(crate) fn axes() -> (DMat4, DMat4) {
     let c = DMat4::from_cols_array(&[
         1.0, 0.0, 0.0, 0.0, // x stays
         0.0, 0.0, 1.0, 0.0, // y goes to z
@@ -559,6 +570,25 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
     };
     let mut stack: Vec<(gltf::Node, DMat4)> =
         roots.into_iter().map(|n| (n, DMat4::IDENTITY)).collect();
+    // Every node at rest, with its parent (for animations).
+    let mut nodes: Vec<animation::Node> = document
+        .nodes()
+        .map(|n| {
+            let (t, r, s) = n.transform().decomposed();
+            animation::Node {
+                parent: None,
+                translation: DVec3::from_array(t.map(f64::from)),
+                rotation: continuum::glam::DQuat::from_array(r.map(f64::from)),
+                scale: DVec3::from_array(s.map(f64::from)),
+            }
+        })
+        .collect();
+    for n in document.nodes() {
+        for child in n.children() {
+            nodes[child.index()].parent = Some(n.index());
+        }
+    }
+    let mut instance_nodes: Vec<Option<usize>> = Vec::new();
     while let Some((node, parent)) = stack.pop() {
         let local =
             DMat4::from_cols_array_2d(&node.transform().matrix().map(|col| col.map(|x| x as f64)));
@@ -607,7 +637,10 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 if p.geometry == usize::MAX {
                     continue;
                 }
+                let baked = stats.baked;
                 place(&mut scene, p, m, &mut stats);
+                // A baked instance cannot move.
+                instance_nodes.push((stats.baked == baked).then_some(node.index()));
             }
         }
         for child in node.children() {
@@ -635,12 +668,78 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         .map(|i| scene.geometries[i.geometry].triangles.len() as u64)
         .sum();
     stats.lights = lights.len();
+    let mut list = Vec::new();
+    for anim in document.animations() {
+        use gltf::animation::util::ReadOutputs;
+        let mut channels = Vec::new();
+        let mut duration = 0.0f32;
+        for ch in anim.channels() {
+            let reader = ch.reader(|b| Some(&buffers[b.index()]));
+            let interpolation = match ch.sampler().interpolation() {
+                gltf::animation::Interpolation::Step => animation::Interpolation::Step,
+                gltf::animation::Interpolation::Linear => animation::Interpolation::Linear,
+                gltf::animation::Interpolation::CubicSpline => {
+                    animation::Interpolation::CubicSpline
+                }
+            };
+            let times: Vec<f32> = match reader.read_inputs() {
+                Some(t) => t.collect(),
+                None => Vec::new(),
+            };
+            let f64s = |v: [f32; 3]| DVec3::from_array(v.map(f64::from));
+            let values = match reader.read_outputs() {
+                Some(ReadOutputs::Translations(t)) => {
+                    animation::Values::Translation(t.map(f64s).collect())
+                }
+                Some(ReadOutputs::Rotations(r)) => animation::Values::Rotation(
+                    r.into_f32()
+                        .map(|q| continuum::glam::DQuat::from_array(q.map(f64::from)))
+                        .collect(),
+                ),
+                _ => {
+                    stats.animation_channels_skipped += 1;
+                    continue;
+                }
+            };
+            let count = match &values {
+                animation::Values::Translation(v) => v.len(),
+                animation::Values::Rotation(v) => v.len(),
+            };
+            let per = if interpolation == animation::Interpolation::CubicSpline {
+                3
+            } else {
+                1
+            };
+            if times.is_empty() || count != per * times.len() {
+                stats.animation_channels_skipped += 1;
+                continue;
+            }
+            duration = duration.max(*times.last().unwrap());
+            channels.push(animation::Channel {
+                node: ch.target().node().index(),
+                interpolation,
+                times,
+                values,
+            });
+        }
+        list.push(Animation {
+            name: anim.name().map(String::from),
+            duration,
+            channels,
+        });
+    }
+    let animations = Animations {
+        list,
+        nodes,
+        instance_nodes,
+    };
     Ok(Imported {
         scene,
         camera,
         lights,
         bounds,
         stats,
+        animations,
     })
 }
 
