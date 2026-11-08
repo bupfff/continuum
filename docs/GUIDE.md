@@ -87,6 +87,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   import maps MASK. Double-sided
   geometry can be exactly back-to-back faces (glTF import doubles a
   double-sided material's triangles on the same plane; M10 gates 8–9).
+- **Environment light.** `MaskConeKernel::set_environment` lights the scene
+  with a sky whose radiance varies with direction: an equirectangular
+  image (`Environment`, Blender's convention; `Environment::from_fn` builds
+  one from a function of direction) above the horizon; below it, the
+  scene's geometry stands for the ground. Surfaces get its irradiance at
+  their normal times the cache's sky visibility; rays that miss see the
+  image (8-bit over its peak, so a sun belongs in a light). 1.37% from
+  Cycles on a gradient sky (M5 gate 12), 1.04× the frame. Bounce light and
+  per-pixel rendering use its mean radiance.
 - **Alpha blending.** `InstancedScene::geometry_blend` makes a geometry
   see-through: an opacity factor times its base color texture's alpha
   (glTF's BLEND materials are imported so). With the cache and hardware

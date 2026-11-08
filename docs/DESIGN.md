@@ -377,7 +377,7 @@ place, for a new conversation:
     (`flight-spikes-diagnostics.md`); M10 G14–G15 emissive textures
     (passed on the re-run, 6.35%); M10 G16 alpha blending (accuracy passed,
     4.71%; speed 1.33× against 1.3×; kept), glTF BLEND imported as
-    blending.
+    blending; M5 G11–G12 environment light (passed on the re-run, 1.37%).
 - **Done since the `v0.1.0` tag** (each with its results file):
   - passed: M9 G1 movers in the view cache; M10 G4 re-coloring with bounce
     light; M10 G5 normal maps (measured before M10 G10's fix); M10 G7 alpha
@@ -452,6 +452,14 @@ place, for a new conversation:
   kept): with hardware camera rays, up to four layers behind blended
   surfaces, composited front to back; shadows by the opacity factor; 4.71%
   from Cycles (panes opaque: 57%) (`docs/results/m10-gate16.md`).
+- **Environment light** (M5 G11 failed, **M5 G12 passed**): skies whose
+  radiance varies with direction (`MaskConeKernel::set_environment`, an
+  equirectangular image). Surfaces scale the cached uniform-sky visibility
+  by the environment's nine-harmonic irradiance over the open sky's; rays
+  that miss read the image (an extra base color layer). 1.37% from Cycles on
+  a gradient sky (uniform sky: 19.92%), 1.04× the frame. G11 read the sky
+  seen directly from the harmonics, which cannot follow a sky ending at the
+  horizon (`docs/results/m5-gate12.md`).
 - **Tried after the list (development only, reverted):** a guessed sky
   from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
   is the cache's softness in motion, not the sky;
