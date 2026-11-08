@@ -122,9 +122,9 @@ fn texture_alpha(f: impl Fn(f32, f32) -> (Vec3, f32)) -> Texture {
 }
 
 /// Vertical double-sided cards through the origin, each `width` wide and
-/// `height` tall, at the given angles about the vertical (the back faces 1 mm
-/// behind the front ones: exactly back-to-back faces make the cache's bakes
-/// about 100× slower, cause not yet established);
+/// `height` tall, at the given angles about the vertical (the back faces
+/// `back` metres behind the front ones; exactly back-to-back since M10
+/// gates 8–9, 1 mm in gates 6–7);
 /// texture coordinates over the whole texture times `repeat`, v down from
 /// the top (M10 gate 6).
 fn cards(angles: &[f32], width: f32, height: f32, repeat: Vec2, back: f32) -> Surface {

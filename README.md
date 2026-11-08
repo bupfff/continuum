@@ -27,7 +27,8 @@ Continuum renders:
 - metallic-roughness materials with glossy reflections, experimental
   (8.94% from Cycles, M10 gate 2, failed against 6%);
 - normal maps, 3.63% from Cycles (M10 gate 5), alpha cutouts, 3.29% (M10
-  gate 7), and emission;
+  gate 7), exactly back-to-back double-sided faces (M10 gates 8–9), and
+  emission;
 - textures box-filtered over each pixel's footprint (M7 gate 2).
 
 Every claim is measured against Blender's Cycles.
@@ -119,7 +120,8 @@ textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Metallic and
 roughness factors, emission and normal maps are imported too (normal maps
 3.63% from Cycles, M10 gate 5; metallic-roughness 8.94%, M10 gate 2, which
 failed against 6%), with metallic-roughness textures; alpha masks are cut
-into geometry (3.29% from Cycles, M10 gate 7).
+into geometry (3.29% from Cycles, M10 gate 7). Double-sided materials
+become exactly back-to-back faces (M10 gates 8–9).
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb

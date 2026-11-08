@@ -77,8 +77,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   geometry, before upload (`cut_out`), so shadows, sky and bounce light see
   the cut exactly. 3.29% from Cycles on a foliage scene (M10 gate 7). glTF
   import maps MASK (and BLEND, treated as MASK at 0.5). Double-sided
-  geometry needs its back faces offset slightly (glTF import uses 1 mm):
-  exactly back-to-back faces slow the cache's bakes.
+  geometry can be exactly back-to-back faces (glTF import doubles a
+  double-sided material's triangles on the same plane; M10 gates 8–9).
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
   1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
   the warm frame; re-coloring stays free (M10 gate 4). At most three
