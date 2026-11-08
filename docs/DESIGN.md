@@ -429,18 +429,21 @@ place, for a new conversation:
     2.18% from Cycles (67.44% repeating), 0.996× the frame.
   - *`v0.2.0` tagged* after CI passed.
 - **Next, in the order I would take them:**
-  1. *A second texture coordinate set* (glTF `TEXCOORD_1`, used by
-     lightmapped assets and some occlusion maps): one set per geometry now,
-     and a slot on another set is skipped.
-  2. *Emissive quads as area lights*, demoted: bounce light takes at most
+  1. *Bounce light with more than three lights* (M10 G21, in progress):
+     lights past the third bounce through the absolute emission channel;
+     re-coloring one re-bakes bounce light. Unblocks item 3.
+  2. *A second texture coordinate set* (glTF `TEXCOORD_1`): low value
+     here, as its main uses (baked occlusion and lightmaps) are what the
+     engine computes itself; a slot on another set is skipped.
+  3. *Emissive quads as area lights*, demoted: bounce light takes at most
      three lights (`vcache.rs`), and M10 G12's emitter is a box (six
      faces), so emitters as lights would turn bounce off where it matters.
      Needs bounce channels for more lights first, or merged channels.
-  3. *Flight spikes:* the light bake's cost per page varies 2–3× with
+  4. *Flight spikes:* the light bake's cost per page varies 2–3× with
      content (likely SIMD divergence on coarse pages), and no planned count
      predicted it (`flight-spikes-diagnostics.md`). Research, not a
      contained fix.
-  4. Research, not contained fixes:
+  5. Research, not contained fixes:
      - movers under a sky (texel-level charges with the cosine; M9 G3);
      - coverage that cannot over-count, for moving lights' dark state (M9
        G4);
