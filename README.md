@@ -31,7 +31,8 @@ Continuum renders:
 - emission that lights its surroundings through bounce light (7.46%, M10
   gate 12), and emissive textures (6.35%, M10 gate 15);
 - alpha blending for glass and other see-through surfaces, with partial
-  shadows (4.71% from Cycles, M10 gate 16; needs hardware ray queries);
+  shadows (4.71% from Cycles, M10 gate 16; 1.23× the frame, M10 gate 19;
+  needs hardware ray queries);
 - environment light: a sky whose radiance varies with direction, from an
   equirectangular image (1.37% from Cycles on a gradient sky, M5 gate 12);
 - textures box-filtered over each pixel's footprint (M7 gate 2).

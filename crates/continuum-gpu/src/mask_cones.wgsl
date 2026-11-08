@@ -4161,13 +4161,25 @@ fn indirect_light(slot: u32, r: PageRef) -> vec3<f32> {
 // each shaded from the cache with textures read for half a pixel, as
 // `vc_shade`'s compute path does. One thread per list entry (over the
 // screen's grid).
+// Before `vc_shade_edges` (M10 gate 19): its dispatch, a workgroup per 64
+// records of the extra samples' list, in the dispatch arguments' last three
+// words.
+@compute @workgroup_size(1)
+fn vc_args_edges() {
+    let count = min(atomicLoad(&vc_stats[15]), arrayLength(&edge_hits) / 5u);
+    dispatch_args[9] = (count + 63u) / 64u;
+    dispatch_args[10] = 1u;
+    dispatch_args[11] = 1u;
+}
+
 @compute @workgroup_size(8, 8)
-fn vc_shade_edges(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     lane = li;
     let w = u32(camera.params.x);
-    let i = gid.y * w + gid.x;
+    // Dispatched for the list alone (`vc_args_edges`, M10 gate 19).
+    let i = wid.x * 64u + li;
     let count = min(atomicLoad(&vc_stats[15]), arrayLength(&edge_hits) / 5u);
-    if (gid.x >= w || i >= count) { return; }
+    if (i >= count) { return; }
     let head = edge_hits[5u * i + 4u];
     let pixel = head.x;
     let at = vec3<u32>(pixel % w, pixel / w, 0u);

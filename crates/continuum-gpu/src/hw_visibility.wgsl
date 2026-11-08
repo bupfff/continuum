@@ -152,75 +152,97 @@ fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
     return clamp(a, 0.0, 1.0);
 }
 
-// After `hw_visibility`: extra samples for `vc_shade_edges`, listed at the
-// stats' last counter, five words a record (up to four samples: object,
-// triangle, distance bits, weight bits; then the pixel, its own sample's
-// weight bits, the samples' count, and each sample's quarter in four bits,
-// 15: the pixel's centre).
-// - A pixel whose own hit is alpha-blended (M10 gate 16) traces on through
-//   blended surfaces, front faces only: each layer weighs its opacity times
-//   what the layers before let through; the fourth takes what is left.
-// - Otherwise, with silhouette rays (`vc.indirect.w` 2 or 3, M7 gate 4), an
-//   edge pixel (a neighbour sees another object or a depth 5% away) traces
-//   four quarter-rays (or one diagonal pair, averaged with its own ray).
+// Appends a record to the extra samples' list for `vc_shade_edges`, at the
+// stats' last counter, five words a record: up to four samples (object,
+// triangle, distance bits, weight bits), then the pixel, its own sample's
+// weight bits, the samples' count, and each sample's quarter in four bits
+// (15: the pixel's centre).
+fn list_extra(pixel: u32, samples: array<vec4<u32>, 4>, n: u32, own_weight: f32, quarters: u32) {
+    let i = atomicAdd(&vc_stats[15], 1u);
+    if (5u * i + 4u >= arrayLength(&edge_hits)) { return; }
+    for (var j = 0u; j < n; j++) { edge_hits[5u * i + j] = samples[j]; }
+    edge_hits[5u * i + 4u] = vec4<u32>(pixel, bitcast<u32>(own_weight), n, quarters);
+}
+
+// The layers behind camera hit `own` (object, triangle, distance bits) if
+// it is alpha-blended (M10 gate 16), listed for `vc_shade_edges`: the ray
+// traces on through blended surfaces, front faces only, each layer weighing
+// its opacity times what the layers before let through; the fourth takes
+// what is left. Whether the pixel was listed.
+fn list_layers(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) -> bool {
+    if (own.x == NONE) { return false; }
+    let first = hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z));
+    if (first >= 1.0) { return false; }
+    var samples: array<vec4<u32>, 4>;
+    var n = 0u;
+    var through = 1.0 - first;
+    var t = bitcast<f32>(own.z);
+    loop {
+        if (n >= 4u || through <= 1e-4) { break; }
+        let hit = hw_trace(eye, dir, t * (1.0 + 1e-5) + 1e-4);
+        var a = 1.0;
+        if (hit.x != NONE && n < 3u) { a = hw_opacity(hit.x, hit.y, eye + dir * bitcast<f32>(hit.z)); }
+        let weight = through * a;
+        samples[n] = vec4<u32>(hit, bitcast<u32>(weight));
+        n++;
+        through -= weight;
+        if (hit.x == NONE || a >= 1.0) { break; }
+        t = bitcast<f32>(hit.z);
+    }
+    list_extra(pixel, samples, n, first, 0xffffu);
+    return true;
+}
+
+// `hw_visibility` with alpha blending (M10 gate 19): a pixel whose hit is
+// blended lists its layers here, in the pass that found the hit, rather
+// than in a full-screen pass after it.
+@compute @workgroup_size(8, 8)
+fn hw_visibility_blend(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let dir = camera_dir(gid);
+    let eye = camera.eye.xyz;
+    let hit = hw_trace(eye, dir, 0.0);
+    let pixel = gid.y * w + gid.x;
+    vis[pixel] = vec4<u32>(hit, seen_light(eye, dir, bitcast<f32>(hit.z)));
+    list_layers(pixel, eye, dir, hit);
+}
+
+// After `hw_visibility` (or `hw_visibility_blend`), with silhouette rays
+// (`vc.indirect.w` 2 or 3, M7 gate 4): an edge pixel (a neighbour sees
+// another object or a depth 5% away) traces four quarter-rays (or one
+// diagonal pair, averaged with its own ray), listed for `vc_shade_edges`.
+// A pixel whose own hit is blended was listed with its layers instead.
 @compute @workgroup_size(8, 8)
 fn hw_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
+    if (vc.indirect.w != 2u && vc.indirect.w != 3u) { return; }
     let pixel = gid.y * w + gid.x;
     let eye = camera.eye.xyz;
     let own = vis[pixel];
     let dir = camera_dir(gid);
+    if (own.x != NONE && hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z)) < 1.0) { return; }
+    if (!is_edge(gid, w, h)) { return; }
+    // Two samples (`vc.indirect.w` 3): one diagonal pair of quarters,
+    // alternating from pixel to pixel, with the pixel's own ray; four
+    // otherwise.
+    let two = vc.indirect.w == 3u;
+    let n = select(4u, 2u, two);
+    let weight = select(0.25, 1.0 / 3.0, two);
+    let own_weight = select(0.0, 1.0 / 3.0, two);
+    let flip = ((gid.x + gid.y) & 1u) == 1u;
     var samples: array<vec4<u32>, 4>;
-    var n = 0u;
-    var own_weight = 0.0;
-    var quarters = 0xffffu;
-    var listed = false;
-    if (own.x != NONE) {
-        let first = hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z));
-        if (first < 1.0) {
-            listed = true;
-            own_weight = first;
-            var through = 1.0 - first;
-            var t = bitcast<f32>(own.z);
-            loop {
-                if (n >= 4u || through <= 1e-4) { break; }
-                let hit = hw_trace(eye, dir, t * (1.0 + 1e-5) + 1e-4);
-                var a = 1.0;
-                if (hit.x != NONE && n < 3u) { a = hw_opacity(hit.x, hit.y, eye + dir * bitcast<f32>(hit.z)); }
-                let weight = through * a;
-                samples[n] = vec4<u32>(hit, bitcast<u32>(weight));
-                n++;
-                through -= weight;
-                if (hit.x == NONE || a >= 1.0) { break; }
-                t = bitcast<f32>(hit.z);
-            }
-        }
+    var quarters = 0u;
+    for (var j = 0u; j < n; j++) {
+        var q = j;
+        if (two) { q = select(select(0u, 3u, j == 1u), select(1u, 2u, j == 1u), flip); }
+        let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
+        samples[j] = vec4<u32>(hw_trace(eye, sd, 0.0), bitcast<u32>(weight));
+        quarters |= q << (4u * j);
     }
-    if (!listed && (vc.indirect.w == 2u || vc.indirect.w == 3u) && is_edge(gid, w, h)) {
-        listed = true;
-        // Two samples (`vc.indirect.w` 3): one diagonal pair of quarters,
-        // alternating from pixel to pixel, with the pixel's own ray; four
-        // otherwise.
-        let two = vc.indirect.w == 3u;
-        n = select(4u, 2u, two);
-        let weight = select(0.25, 1.0 / 3.0, two);
-        own_weight = select(0.0, 1.0 / 3.0, two);
-        let flip = ((gid.x + gid.y) & 1u) == 1u;
-        quarters = 0u;
-        for (var j = 0u; j < n; j++) {
-            var q = j;
-            if (two) { q = select(select(0u, 3u, j == 1u), select(1u, 2u, j == 1u), flip); }
-            let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
-            samples[j] = vec4<u32>(hw_trace(eye, sd, 0.0), bitcast<u32>(weight));
-            quarters |= q << (4u * j);
-        }
-        quarters |= (0xffffu << (4u * n)) & 0xffffu;
-    }
-    if (!listed) { return; }
-    let i = atomicAdd(&vc_stats[15], 1u);
-    if (5u * i + 4u >= arrayLength(&edge_hits)) { return; }
-    for (var j = 0u; j < n; j++) { edge_hits[5u * i + j] = samples[j]; }
-    edge_hits[5u * i + 4u] = vec4<u32>(pixel, bitcast<u32>(own_weight), n, quarters);
+    quarters |= (0xffffu << (4u * n)) & 0xffffu;
+    list_extra(pixel, samples, n, own_weight, quarters);
 }

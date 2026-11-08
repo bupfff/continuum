@@ -117,8 +117,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   (glTF's BLEND materials are imported so). With the cache and hardware
   camera rays, pixels see up to four layers, composited front to back, and
   shadows keep the factor's share of light: 4.71% from Cycles on glass and
-  a blind (M10 gate 16), at 1.33× the frame where a fifth of the pixels see
-  a pane. Without hardware rays, or with movers, a textured blend is cut at
+  a blind (M10 gate 16), at 1.23× the frame where a fifth of the pixels see
+  a pane (M10 gate 19). Without hardware rays, or with movers, a textured blend is cut at
   0.5 and an untextured one is opaque. Bounce and reflection rays see
   blended surfaces opaque.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate

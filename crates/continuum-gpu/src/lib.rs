@@ -573,10 +573,17 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_ledger_reset",
     "vc_ledger",
     "vc_bake_indirect",
+    "vc_shade_edges",
+    "vc_args_edges",
 ];
 
 /// The hardware-ray module's entry points (`hw_visibility.wgsl`).
-const HW_ENTRY_POINTS: &[&str] = &["hw_visibility", "hw_visibility_movers"];
+const HW_ENTRY_POINTS: &[&str] = &[
+    "hw_visibility",
+    "hw_visibility_movers",
+    "hw_visibility_blend",
+    "hw_edges",
+];
 
 /// Bindings the `visibility` pass uses.
 const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31, 52];
@@ -587,6 +594,13 @@ pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52];
 pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52, 59];
 /// `hw_edges` (M7 gate 4): silhouette rays through ray queries.
 pub(crate) const HW_EDGES_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 41, 42, 55, 56, 57, 58, 76, 81];
+/// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
+/// behind alpha-blended hits.
+pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
+    &[2, 3, 6, 30, 31, 32, 42, 52, 55, 56, 57, 58, 76, 81];
+/// `vc_args_edges` (M10 gate 19): `vc_shade_edges`'s dispatch from the
+/// list's count.
+pub(crate) const VC_ARGS_EDGES_BINDINGS: &[u32] = &[42, 66, 81];
 
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];

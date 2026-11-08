@@ -12,13 +12,13 @@ use crate::live::{DisplayDims, display_bind, display_pipeline};
 use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
-    HW_EDGES_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene,
-    Light, LightGpu, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
-    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
-    VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    HW_EDGES_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS,
+    HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu, MaskConeKernel,
+    RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
+    VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
+    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
+    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS,
+    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -43,6 +43,14 @@ pub struct FrameProfile {
     /// The bake's passes, in order, each submitted and waited for alone,
     /// with their labels (diagnostics; empty labels past the last).
     pub bake_passes: [(&'static str, Duration); 8],
+}
+
+/// How a camera pass is dispatched (see `InstancedRenderer::camera_dispatch`).
+#[derive(Clone, Copy, Debug)]
+enum CameraDispatch {
+    Screen,
+    One,
+    Listed,
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -310,8 +318,13 @@ pub struct InstancedRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     /// Camera passes with the bindings each uses: one pass, or a visibility
-    /// pass and a shading pass.
+    /// pass and a shading pass (and with the extra samples' list, the
+    /// passes that make and shade it).
     passes: Vec<(wgpu::ComputePipeline, Vec<u32>)>,
+    /// How each camera pass is dispatched: a workgroup per 8×8 pixels; one
+    /// thread (`vc_args_edges`); or from the dispatch arguments it wrote
+    /// (`vc_shade_edges`, M10 gate 19).
+    camera_dispatch: Vec<CameraDispatch>,
     hw: Option<HwScene>,
     display: wgpu::RenderPipeline,
     /// An empty pass that timestamps the end of the camera passes.
@@ -849,15 +862,32 @@ impl InstancedRenderer {
                 (kernel.entry("shade"), shade_bindings(RECT_LIGHT_BINDINGS)),
             ],
             (false, None) => vec![(kernel.entry("render"), RECT_LIGHT_BINDINGS.to_vec())],
-            (true, Some(v)) if hw_edges => vec![
-                v,
-                (kernel.entry("hw_edges"), HW_EDGES_BINDINGS.to_vec()),
-                (kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()),
-                (
+            (true, Some(v)) if hw_edges => {
+                // With blending, the visibility pass lists the layers behind
+                // blended hits (M10 gate 19); `hw_edges` runs for
+                // silhouette rays alone.
+                let mut list = vec![if blend {
+                    (
+                        kernel.entry("hw_visibility_blend"),
+                        HW_VISIBILITY_BLEND_BINDINGS.to_vec(),
+                    )
+                } else {
+                    v
+                }];
+                if cache.as_ref().is_some_and(|o| o.edge_rays) {
+                    list.push((kernel.entry("hw_edges"), HW_EDGES_BINDINGS.to_vec()));
+                }
+                list.push((kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()));
+                list.push((
+                    kernel.entry("vc_args_edges"),
+                    VC_ARGS_EDGES_BINDINGS.to_vec(),
+                ));
+                list.push((
                     kernel.entry("vc_shade_edges"),
                     VC_SHADE_EDGES_BINDINGS.to_vec(),
-                ),
-            ],
+                ));
+                list
+            }
             (true, v) => vec![
                 v.unwrap_or_else(|| {
                     (
@@ -868,6 +898,14 @@ impl InstancedRenderer {
                 (kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()),
             ],
         };
+        let camera_dispatch: Vec<CameraDispatch> = passes
+            .iter()
+            .map(|(_, bindings)| match bindings.as_slice() {
+                b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
+                b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
+                _ => CameraDispatch::Screen,
+            })
+            .collect();
         let cache = cache.map(|options| Cache {
             state: VirtualCache::new(
                 &device,
@@ -917,6 +955,7 @@ impl InstancedRenderer {
             device: device.clone(),
             queue: kernel.queue.clone(),
             passes,
+            camera_dispatch,
             hw,
             display_bind: display_bind(&device, &display, &colors, &dims_buf),
             mark: kernel.entry("mark"),
@@ -1114,7 +1153,13 @@ impl InstancedRenderer {
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.binds[k], &[]);
-        pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+        match (self.camera_dispatch[k], &self.cache) {
+            (CameraDispatch::One, _) => pass.dispatch_workgroups(1, 1, 1),
+            (CameraDispatch::Listed, Some(cache)) => {
+                pass.dispatch_workgroups_indirect(cache.state.buffer(66), 36)
+            }
+            _ => pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1),
+        }
     }
 
     /// Where the cache has timestamps: an empty pass whose beginning writes
