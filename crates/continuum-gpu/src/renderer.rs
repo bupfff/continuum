@@ -189,7 +189,9 @@ impl Renderer {
 
     /// Changes light `index`'s RGB radiance from the next frame. Lighting is
     /// linear in emitted power, so the cache re-weights what it holds and
-    /// bakes nothing.
+    /// bakes nothing. With bounce light, a light past the third has its
+    /// bounce baked at its radiance: re-coloring it clears bounce light,
+    /// which re-bakes over the following frames (M10 gate 21).
     pub fn set_light_radiance(&mut self, index: usize, radiance: Vec3) {
         self.inner.set_light_radiance(index, radiance);
     }

@@ -67,7 +67,8 @@ const VISIBLE_WINDOW: u32 = 1;
 /// arrive in about that).
 const INDIRECT_SAMPLES: u32 = 9;
 /// Bounce light's channels per sample: up to three lights, the sky, then
-/// emission (M10 gate 11).
+/// emission (M10 gate 11), which also takes the bounce of later lights at
+/// their radiance (M10 gate 21).
 const INDIRECT_CHANNELS: u64 = 5;
 const INCOMPLETE_CAP: u32 = 1 << 14;
 const INDIRECT_RETRY: u32 = 4;
@@ -132,8 +133,9 @@ pub struct CacheOptions {
     pub ledger_epsilon: f32,
     /// Bounce light (M10 gate 1): one bounce of diffuse light, sampled on a
     /// 3×3 grid per page (192 rays each), from the direct light the cache
-    /// holds at the hits. At most three lights; not with movers or moving
-    /// lights. Off by default.
+    /// holds at the hits. The first three lights' bounce re-colors free; later
+    /// lights' is baked at their radiance, so re-coloring one re-bakes bounce
+    /// light (M10 gate 21). Not with movers or moving lights. Off by default.
     pub indirect: bool,
     /// With bounce light (M10 gate 11; on by default): its samples also
     /// gather the emission of the surfaces they hit, so emissive geometry
@@ -912,10 +914,6 @@ impl VirtualCache {
             !options.indirect || (movers == 0 && moving.is_empty()),
             "bounce light with moving objects or lights is not supported yet"
         );
-        assert!(
-            !options.indirect || lights <= 3,
-            "bounce light takes at most three lights"
-        );
         let mut moving_index = vec![u32::MAX; lights as usize];
         for (j, &l) in moving.iter().enumerate() {
             moving_index[l] = j as u32;
@@ -1105,7 +1103,9 @@ impl VirtualCache {
                     } else {
                         16
                     },
-                    wgpu::BufferUsages::empty(),
+                    // Cleared when a light past the third is re-colored
+                    // (M10 gate 21).
+                    wgpu::BufferUsages::COPY_DST,
                 ),
             ),
             (
@@ -1826,6 +1826,11 @@ impl VirtualCache {
     /// renderer's `hw_edges` and `vc_shade_edges` passes trace and shade
     /// them instead of the shading pass's compute rays. Before the first
     /// `resize`, which makes their buffers.
+    /// Bounce light is on.
+    pub(crate) fn indirect(&self) -> bool {
+        self.options.indirect
+    }
+
     pub(crate) fn set_hardware_edges(&mut self, blend: bool) {
         self.hardware_edges = self.options.edge_rays;
         self.extra_samples = self.hardware_edges || blend;

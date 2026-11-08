@@ -327,6 +327,43 @@ impl Textured {
 }
 
 impl Textured {
+    /// M10 gate 21's lamps: the scene at night (M5 gate 8's point and spot
+    /// lights, the sky at 2%) with three more point lights 5 cm across: a
+    /// dim blue one third, then the brightest two, warm before the brick
+    /// block and green among the boulders, each 1.5 m up.
+    pub fn with_lamps(mut self) -> Textured {
+        let mut lights = Self::night_lights().to_vec();
+        lights.push(Light::point(
+            Vec3::new(0.5, 12.0, 1.5),
+            0.05,
+            Vec3::new(0.4, 0.5, 1.0) * 6.0,
+        ));
+        lights.push(Light::point(
+            Vec3::new(-1.6, 7.2, 1.5),
+            0.05,
+            Self::lamp_warm(),
+        ));
+        lights.push(Light::point(
+            Vec3::new(2.5, 8.5, 1.5),
+            0.05,
+            Vec3::new(0.3, 1.0, 0.4) * 45.0,
+        ));
+        self.lights = lights;
+        self.sky *= 0.02;
+        self
+    }
+
+    /// The fourth lamp's color in `with_lamps`.
+    pub fn lamp_warm() -> Vec3 {
+        Vec3::new(1.0, 0.55, 0.25) * 60.0
+    }
+
+    /// The fourth lamp re-colored for M10 gate 21: cool, the same power
+    /// (the same sum of channels).
+    pub fn lamp_cool() -> Vec3 {
+        Vec3::new(0.25, 0.55, 1.0) * 60.0
+    }
+
     /// M10 gate 20's wrap modes: the ground's tiles clamped (its coordinates
     /// run from −7.5 to 7.5), the boulders' lichen and the block's bricks
     /// mirrored.

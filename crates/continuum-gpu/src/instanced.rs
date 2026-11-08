@@ -733,7 +733,8 @@ impl InstancedRenderer {
 
     /// Changes light `index`'s RGB radiance from the next frame. Lighting is
     /// linear in emitted power: per-pixel frames shade with it, and the cache
-    /// re-weights its stored channels, baking nothing.
+    /// re-weights its stored channels, baking nothing (except bounce light
+    /// for a light past the third, which re-bakes: M10 gate 21).
     pub fn set_light_radiance(&mut self, index: usize, radiance: Vec3) {
         assert!(index < self.lights, "no light {index}");
         let buffer = &self
@@ -748,6 +749,16 @@ impl InstancedRenderer {
             offset,
             bytemuck::cast_slice(&[radiance.x, radiance.y, radiance.z, 0.0]),
         );
+        // Bounce light holds lights past the third at their radiance (M10
+        // gate 21): cleared, pages ask for their samples again.
+        if index >= 3
+            && let Some(cache) = &self.cache
+            && cache.state.indirect()
+        {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.clear_buffer(cache.state.buffer(73), 0, None);
+            self.queue.submit([encoder.finish()]);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

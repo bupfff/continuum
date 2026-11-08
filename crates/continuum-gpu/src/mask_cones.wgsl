@@ -4016,7 +4016,8 @@ const SECONDARY: u32 = 0x80000000u;
 const WANTS_SAMPLES: u32 = 0x40000000u;
 const IND_BINS: u32 = 192u;
 // Channels kept per sample: up to three lights, the sky, and emission
-// (absolute radiance, M10 gate 11).
+// (absolute radiance, M10 gate 11), which also holds the bounce of lights
+// past the third at their radiance (M10 gate 21).
 const IND_CH: u32 = 5u;
 const IND_SKY: u32 = 3u;
 const IND_GLOW: u32 = 4u;
@@ -4151,6 +4152,13 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
                 var direct = vc_bilinear(slot, r, l);
                 if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
                 sum[l] += reflect * direct;
+            }
+            // Lights past the third (M10 gate 21): at their radiance, in the
+            // emission channel (absolute radiance).
+            for (var l = lights_n; l < arrayLength(&lights); l++) {
+                var direct = vc_bilinear(slot, r, l);
+                if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
+                sum[IND_GLOW] += reflect * direct * lights[l].radiance.xyz;
             }
             sum[IND_SKY] += reflect * vc_bilinear(slot, r, sky_ch);
         }
