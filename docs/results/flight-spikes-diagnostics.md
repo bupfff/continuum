@@ -77,10 +77,15 @@ flight and tested the fit on the second (`spikes_dev`; per-frame CSV in
   group walk different paths, and the group costs its slowest. Summed work
   counters cannot see that. M5's sky diagnostics measured the same effect
   at about 10× (`m5-sky-bake-diagnostics.md`).
-- **To test it:** time pages of one mip at a time, or bake coarse pages
-  with packet walks (M5 gate 5 found packets faster above about 10,000
-  units a frame). A per-mip cost weight in the budget would follow if mip
-  explains it.
+- **Packet walks for the light bake make it much worse** (development,
+  reverted): 99th percentile 58–65 ms and worst frames 91–105 ms, with slow
+  bakes of about 50 ms for only 45–76 pages. A packet visits the union of
+  its invocations' paths, so divergent pages cost even more, which is
+  consistent with divergence being the cause.
+- **To test it further:** time pages of one mip at a time. If mip explains
+  the cost, the budget can weight units per mip; if spatial spread within
+  a page does, coarse pages could be split across frames or baked with
+  fewer texels per group.
 
 `CacheStats::spent_by_mip` is kept as a diagnostic.
 
