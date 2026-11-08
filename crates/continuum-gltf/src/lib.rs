@@ -38,9 +38,12 @@
 //!   (`InstancedScene::geometry_normal_maps`; its scale is ignored).
 //! - An emissive texture, through the same texture coordinates as the base
 //!   color (or alone), becomes the geometry's emissive texture
-//!   (`InstancedScene::geometry_emissive_textures`, M10 gate 14; not saved).
+//!   (`InstancedScene::geometry_emissive_textures`, M10 gate 14).
 //! - The emissive factor, times `KHR_materials_emissive_strength`, becomes
 //!   the geometry's emission (`InstancedScene::geometry_emission`).
+//! - Vertex colors (`COLOR_0`'s RGB; alpha ignored) become the geometry's
+//!   (`InstancedScene::geometry_colors`, M10 gate 17), multiplying its base
+//!   color, and are saved.
 //! - Punctual lights (`KHR_lights_punctual`) are imported
 //!   ([`Imported::lights`]): point and spot lights as small spheres,
 //!   directional lights as suns.
@@ -181,9 +184,9 @@ type GeometryKey = (
     Option<u32>,
     Option<u32>,
     bool,
-    // The emissive texture, the blend opacity's bits and the texture
-    // transform's.
-    (Option<u32>, Option<u32>, [u32; 5]),
+    // The emissive texture, the blend opacity's bits, the texture
+    // transform's, and the vertex colors' accessor.
+    (Option<u32>, Option<u32>, [u32; 5], Option<usize>),
 );
 
 /// A texture slot's coordinate set and `KHR_texture_transform` (the identity
@@ -290,6 +293,8 @@ struct Primitive {
     blend: Option<f32>,
     /// Its alpha cutoff (over its base color texture's alpha).
     alpha_cutoff: Option<f32>,
+    /// Its vertex colors per triangle corner (`COLOR_0`, M10 gate 17).
+    colors: Option<Vec<[Vec3; 3]>>,
     key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
@@ -353,6 +358,10 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             let positions: Vec<Vec3> = positions.map(to_z_up).collect();
             let normals: Option<Vec<Vec3>> =
                 reader.read_normals().map(|n| n.map(to_z_up).collect());
+            // Vertex colors (M10 gate 17): COLOR_0's RGB, linear.
+            let colors: Option<Vec<Vec3>> = reader
+                .read_colors(0)
+                .map(|c| c.into_rgb_f32().map(Vec3::from_array).collect());
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(i) => i.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
@@ -424,6 +433,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
             let mut corner_tex = Vec::with_capacity(indices.len() / 3);
+            let mut corner_colors = Vec::with_capacity(indices.len() / 3);
             for t in indices.as_chunks::<3>().0 {
                 let k = [t[0] as usize, t[1] as usize, t[2] as usize];
                 triangles.push(k.map(|i| positions[i]));
@@ -432,6 +442,9 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 }
                 if let Some(tc) = &texcoords {
                     corner_tex.push(k.map(|i| tc[i]));
+                }
+                if let Some(c) = &colors {
+                    corner_colors.push(k.map(|i| c[i]));
                 }
             }
             if double_sided {
@@ -446,6 +459,10 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     if texcoords.is_some() {
                         let c = corner_tex[f];
                         corner_tex.push([c[0], c[2], c[1]]);
+                    }
+                    if colors.is_some() {
+                        let c = corner_colors[f];
+                        corner_colors.push([c[0], c[2], c[1]]);
                     }
                 }
             }
@@ -462,6 +479,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 emissive_texture,
                 blend,
                 alpha_cutoff,
+                colors: colors.is_some().then_some(corner_colors),
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
                     accessor(gltf::Semantic::Normals),
@@ -476,7 +494,12 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     metallic_roughness,
                     alpha_cutoff.map(f32::to_bits),
                     double_sided,
-                    (emissive_texture, blend.map(f32::to_bits), chosen.bits()),
+                    (
+                        emissive_texture,
+                        blend.map(f32::to_bits),
+                        chosen.bits(),
+                        accessor(gltf::Semantic::Colors(0)),
+                    ),
                 ),
                 geometry: usize::MAX,
             });
@@ -510,6 +533,9 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 p.normals.clone(),
                 p.tex.clone(),
             ));
+            scene
+                .geometry_colors
+                .push(kept_colors(&p.triangles, p.colors.as_ref()));
             scene.geometry_textures.push(p.texture);
             scene.geometry_materials.push(p.material);
             scene.geometry_emission.push(p.emission);
@@ -663,6 +689,19 @@ impl Imported {
 /// Places primitive `p` with world matrix `m` (Z-up): an instance of its
 /// geometry if `m` is rotation, uniform scale and translation; otherwise a
 /// copy of the geometry with `m` baked in.
+/// Per-corner vertex colors for `Surface::from_mesh(triangles, ..)`: those
+/// of the triangles it keeps.
+fn kept_colors(triangles: &[Tri], colors: Option<&Vec<[Vec3; 3]>>) -> Option<Vec<[Vec3; 3]>> {
+    colors.map(|c| {
+        triangles
+            .iter()
+            .zip(c)
+            .filter(|(t, _)| !continuum::mesh::degenerate(t))
+            .map(|(_, c)| *c)
+            .collect()
+    })
+}
+
 fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut ImportStats) {
     let a = continuum::glam::DMat3::from_mat4(m);
     let scales = DVec3::new(a.x_axis.length(), a.y_axis.length(), a.z_axis.length());
@@ -700,6 +739,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
             .collect::<Vec<_>>()
     });
     let mut tex = p.tex.clone();
+    let mut colors = p.colors.clone();
     if mirrored {
         for t in &mut triangles {
             t.swap(1, 2);
@@ -714,8 +754,16 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
                 c.swap(1, 2);
             }
         }
+        if let Some(t) = &mut colors {
+            for c in t.iter_mut() {
+                c.swap(1, 2);
+            }
+        }
     }
     let geometry = scene.geometries.len();
+    scene
+        .geometry_colors
+        .push(kept_colors(&triangles, colors.as_ref()));
     scene
         .geometries
         .push(Surface::from_mesh(triangles, normals, tex));
@@ -739,8 +787,12 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
 /// Writes an instanced scene as binary glTF (`.glb`), the inverse of [`load`]
 /// (for tests and for comparison in other renderers).
 ///
-/// - Each geometry's triangles are written once, unindexed, with normals and
-///   texture coordinates where it has them.
+/// - Each geometry's triangles are written once, unindexed, with normals,
+///   and texture coordinates and vertex colors where it has them.
+/// - Materials: metallic and roughness, emission (with its emissive
+///   texture), normal maps, metallic-roughness textures, an alpha cutoff as
+///   MASK, or else blending as BLEND (the opacity as the base color factor's
+///   alpha). The environment is not part of glTF.
 /// - Instances sharing a geometry and an albedo share a mesh; each instance
 ///   is a node with its matrix.
 /// - Textures are embedded as PNG.
@@ -769,9 +821,10 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let floats =
         |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
     let y_up = |v: Vec3| [v.x, v.z, -v.y];
-    // Per geometry: accessors for positions, normals and texture coordinates.
+    // Per geometry: accessors for positions, normals, texture coordinates
+    // and vertex colors.
     let mut attributes: Vec<String> = Vec::new();
-    for g in &scene.geometries {
+    for (k, g) in scene.geometries.iter().enumerate() {
         let positions: Vec<f32> = g
             .triangles
             .iter()
@@ -805,6 +858,16 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 r#"{{"bufferView":{v},"componentType":5126,"count":{count},"type":"VEC2"}}"#
             ));
             write!(attr, r#","TEXCOORD_0":{}"#, accessors.len() - 1).unwrap();
+        }
+        if let Some(Some(colors)) = scene.geometry_colors.get(k)
+            && colors.len() == g.triangles.len()
+        {
+            let colors: Vec<f32> = colors.iter().flatten().flat_map(|c| c.to_array()).collect();
+            let v = view(&mut bin, &floats(&colors), Some(34962));
+            accessors.push(format!(
+                r#"{{"bufferView":{v},"componentType":5126,"count":{count},"type":"VEC3"}}"#
+            ));
+            write!(attr, r#","COLOR_0":{}"#, accessors.len() - 1).unwrap();
         }
         attributes.push(attr);
     }
@@ -860,15 +923,25 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 .flatten()
                 .filter(|_| scene.geometries[i.geometry].tex.len() == scene.geometries[i.geometry].triangles.len())
                 .map_or(String::new(), |t| format!(r#","normalTexture":{{"index":{t}}}"#));
-            let cut = scene
+            // An alpha cutoff as MASK; otherwise blending as BLEND, its
+            // opacity the base color factor's alpha.
+            let mut opacity = 1.0f32;
+            let cut = match scene
                 .geometry_alpha_cutoff
                 .get(i.geometry)
                 .copied()
                 .flatten()
                 .filter(|_| texture.is_some())
-                .map_or(String::new(), |c| {
-                    format!(r#","alphaMode":"MASK","alphaCutoff":{c:?}"#)
-                });
+            {
+                Some(c) => format!(r#","alphaMode":"MASK","alphaCutoff":{c:?}"#),
+                None => match scene.geometry_blend.get(i.geometry).copied().flatten() {
+                    Some(o) => {
+                        opacity = o.clamp(0.0, 1.0);
+                        r#","alphaMode":"BLEND""#.to_string()
+                    }
+                    None => String::new(),
+                },
+            };
             let m = scene
                 .geometry_materials
                 .get(i.geometry)
@@ -889,6 +962,15 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 emissive_strength |= strength > 1.0;
                 let f = e / strength;
                 let mut g = format!(r#","emissiveFactor":[{:?},{:?},{:?}]"#, f.x, f.y, f.z);
+                if let Some(t) = scene
+                    .geometry_emissive_textures
+                    .get(i.geometry)
+                    .copied()
+                    .flatten()
+                    .filter(|_| has_tex)
+                {
+                    write!(g, r#","emissiveTexture":{{"index":{t}}}"#).unwrap();
+                }
                 if strength > 1.0 {
                     write!(
                         g,
@@ -901,8 +983,8 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 String::new()
             };
             materials.push(format!(
-                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},1.0],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}{bumps}{cut}}}"#,
-                i.albedo.x, i.albedo.y, i.albedo.z, m.metallic, m.roughness
+                r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},{:?}],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}{bumps}{cut}}}"#,
+                i.albedo.x, i.albedo.y, i.albedo.z, opacity, m.metallic, m.roughness
             ));
             meshes.push(format!(
                 r#"{{"primitives":[{{"attributes":{{{}}},"material":{}}}]}}"#,

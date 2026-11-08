@@ -78,9 +78,22 @@ fn clip(p: &[Vec2], a: Vec2, b: Vec2, side: f32) -> Vec<Vec2> {
 /// is at least `cutoff`. Triangles without texture coordinates, or with
 /// degenerate ones, are kept whole.
 pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
+    cut_out_colored(surface, None, texture, cutoff).0
+}
+
+/// [`cut_out`], with the surface's vertex colors (per triangle corner, M10
+/// gate 17) interpolated into the triangles it makes.
+pub(crate) fn cut_out_colored(
+    surface: &Surface,
+    colors: Option<&[[Vec3; 3]]>,
+    texture: &Texture,
+    cutoff: f32,
+) -> (Surface, Option<Vec<[Vec3; 3]>>) {
+    let colors = colors.filter(|c| c.len() == surface.triangles.len());
     if surface.tex.len() != surface.triangles.len() {
-        return surface.clone();
+        return (surface.clone(), colors.map(|c| c.to_vec()));
     }
+    let mut out_colors: Vec<[Vec3; 3]> = Vec::new();
     let mips = AlphaMips::new(texture);
     let (tw, th) = (texture.width.max(1) as f32, texture.height.max(1) as f32);
     let mut tris: Vec<Tri> = Vec::new();
@@ -88,12 +101,14 @@ pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
     let mut tex: Vec<[Vec2; 3]> = Vec::new();
     for k in 0..surface.triangles.len() {
         let (p, n, t) = (surface.triangles[k], surface.normals[k], surface.tex[k]);
+        let c = colors.map_or([Vec3::ONE; 3], |c| c[k]);
         let det = (t[1] - t[0]).perp_dot(t[2] - t[0]);
         let geometric = (p[1] - p[0]).cross(p[2] - p[0]);
         if det.abs() < 1e-12 || geometric.length_squared() == 0.0 {
             tris.push(p);
             normals.push(n);
             tex.push(t);
+            out_colors.push(c);
             continue;
         }
         let side = det.signum();
@@ -123,6 +138,7 @@ pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
                 (
                     p[0] * l0 + p[1] * l1 + p[2] * l2,
                     (n[0] * l0 + n[1] * l1 + n[2] * l2).normalize_or(n[0]),
+                    c[0] * l0 + c[1] * l1 + c[2] * l2,
                 )
             };
             for m in 1..q.len() - 1 {
@@ -130,6 +146,7 @@ pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
                 let mapped = corners.map(map);
                 let mut pos = mapped.map(|c| c.0);
                 let mut nor = mapped.map(|c| c.1);
+                let mut col = mapped.map(|c| c.2);
                 let mut uv = corners;
                 let cross = (pos[1] - pos[0]).cross(pos[2] - pos[0]);
                 if cross.length_squared() <= 1e-20 * geometric.length_squared() {
@@ -138,11 +155,13 @@ pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
                 if cross.dot(geometric) < 0.0 {
                     pos.swap(1, 2);
                     nor.swap(1, 2);
+                    col.swap(1, 2);
                     uv.swap(1, 2);
                 }
                 tris.push(pos);
                 normals.push(nor);
                 tex.push(uv);
+                out_colors.push(col);
             }
         };
         let (i0, i1) = (
@@ -218,7 +237,17 @@ pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
             }
         }
     }
-    Surface::from_mesh(tris, Some(normals), Some(tex))
+    let out_colors = colors.map(|_| {
+        tris.iter()
+            .zip(out_colors)
+            .filter(|(t, _)| !continuum::mesh::degenerate(t))
+            .map(|(_, c)| c)
+            .collect()
+    });
+    (
+        Surface::from_mesh(tris, Some(normals), Some(tex)),
+        out_colors,
+    )
 }
 
 #[cfg(test)]

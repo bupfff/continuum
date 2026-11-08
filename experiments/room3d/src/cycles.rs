@@ -323,6 +323,28 @@ fn render_instanced_inner(
         changed |= write_if_changed(&path, obj_text(std::slice::from_ref(surface)).as_bytes())?;
         geometries.push(format!("{:?}", path.to_string_lossy()));
     }
+    // Each geometry's vertex colors (M10 gate 17): per OBJ corner, its
+    // position and linear RGB as little-endian f32 (the script checks the
+    // positions against the OBJ's corners), or null.
+    let mut colors = Vec::new();
+    for (g, surface) in scene.geometries.iter().enumerate() {
+        match scene.geometry_colors.get(g).cloned().flatten() {
+            Some(c) if c.len() == surface.triangles.len() => {
+                let path = work.join(format!("geometry_{g}_colors.bin"));
+                let bytes: Vec<u8> = surface
+                    .triangles
+                    .iter()
+                    .zip(&c)
+                    .flat_map(|(t, c)| (0..3).flat_map(move |k| [t[k], c[k]]))
+                    .flat_map(|v| v.to_array())
+                    .flat_map(f32::to_le_bytes)
+                    .collect();
+                changed |= write_if_changed(&path, &bytes)?;
+                colors.push(format!("{:?}", path.to_string_lossy()));
+            }
+            _ => colors.push("null".to_string()),
+        }
+    }
     // Base color textures as PNG, and each geometry's (or null).
     let mut texture_paths = Vec::new();
     for (k, t) in scene.textures.iter().enumerate() {
@@ -463,7 +485,7 @@ fn render_instanced_inner(
         })
         .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "colors": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -476,6 +498,7 @@ fn render_instanced_inner(
         emission.join(", "),
         emission_textures.join(", "),
         blend.join(", "),
+        colors.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),

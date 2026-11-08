@@ -80,9 +80,37 @@ for g, path in enumerate(job["geometries"]):
         mat.node_tree.links.new(attr.outputs["Color"], multiply.inputs["B"])
         color_in = bsdf.inputs["Base Color"] if material else bsdf.inputs["Color"]
         mat.node_tree.links.new(multiply.outputs["Result"], color_in)
+        base_socket = multiply.outputs["Result"]
     else:
         color_in = bsdf.inputs["Base Color"] if material else bsdf.inputs["Color"]
         mat.node_tree.links.new(attr.outputs["Color"], color_in)
+        base_socket = attr.outputs["Color"]
+    colors = (job.get("colors") or [None] * len(job["geometries"]))[g]
+    if colors:
+        # Vertex colors (M10 gate 17): a float corner attribute (linear),
+        # its corners checked against the OBJ's, multiplying the base color.
+        data = np.fromfile(colors, dtype="<f4").reshape(-1, 6)
+        mesh = source.data
+        assert len(mesh.loops) == len(data), (len(mesh.loops), len(data))
+        co = np.empty(3 * len(mesh.vertices), dtype=np.float32)
+        mesh.vertices.foreach_get("co", co)
+        corner_vertex = np.empty(len(mesh.loops), dtype=np.int32)
+        mesh.loops.foreach_get("vertex_index", corner_vertex)
+        worst = np.abs(co.reshape(-1, 3)[corner_vertex] - data[:, :3]).max()
+        assert worst < 1e-3, f"vertex colors' corners differ from the OBJ's by {worst}"
+        layer = mesh.color_attributes.new("vcolor", "FLOAT_COLOR", "CORNER")
+        rgba = np.concatenate([data[:, 3:], np.ones((len(data), 1), np.float32)], axis=1)
+        layer.data.foreach_set("color", rgba.ravel())
+        vattr = nodes.new("ShaderNodeAttribute")
+        vattr.attribute_type = "GEOMETRY"
+        vattr.attribute_name = "vcolor"
+        vmul = nodes.new("ShaderNodeMix")
+        vmul.data_type = "RGBA"
+        vmul.blend_type = "MULTIPLY"
+        vmul.inputs["Factor"].default_value = 1.0
+        mat.node_tree.links.new(base_socket, vmul.inputs["A"])
+        mat.node_tree.links.new(vattr.outputs["Color"], vmul.inputs["B"])
+        mat.node_tree.links.new(vmul.outputs["Result"], color_in)
     normal_map = (job.get("normal_maps") or [None] * len(job["geometries"]))[g]
     if normal_map:
         # A tangent-space normal map (M10 gate 5): non-color, linear

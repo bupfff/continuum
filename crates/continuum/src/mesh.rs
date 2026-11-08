@@ -46,6 +46,16 @@ fn flat_normal(t: &Tri) -> Vec3 {
     (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero()
 }
 
+/// Whether [`Surface::from_mesh`] drops triangle `t` as degenerate (data
+/// kept per triangle beside a surface, such as vertex colors, is filtered
+/// the same way).
+pub fn degenerate(t: &Tri) -> bool {
+    let scale = (t[1] - t[0]).length().max((t[2] - t[0]).length());
+    let area = (t[1] - t[0]).cross(t[2] - t[0]).length();
+    // NaN is degenerate too.
+    area.partial_cmp(&(1e-6 * scale * scale)) != Some(std::cmp::Ordering::Greater)
+}
+
 impl Surface {
     /// Triangles with flat normals. A consecutive pair `[a, b, c]`, `[a, c, d]`
     /// that forms a parallelogram (as [`box_mesh`] emits each face) shares one
@@ -112,11 +122,7 @@ impl Surface {
         tex: Option<Vec<[Vec2; 3]>>,
     ) -> Surface {
         let keep: Vec<usize> = (0..triangles.len())
-            .filter(|&k| {
-                let t = triangles[k];
-                let scale = (t[1] - t[0]).length().max((t[2] - t[0]).length());
-                (t[1] - t[0]).cross(t[2] - t[0]).length() > 1e-6 * scale * scale
-            })
+            .filter(|&k| !degenerate(&triangles[k]))
             .collect();
         let tris: Vec<Tri> = keep.iter().map(|&k| triangles[k]).collect();
         let face: Vec<Vec3> = tris.iter().map(flat_normal).collect();

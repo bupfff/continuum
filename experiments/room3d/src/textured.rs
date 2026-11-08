@@ -287,6 +287,7 @@ impl Textured {
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
+            geometry_colors: Vec::new(),
         };
         // The camera stands at 1.5 m looking along +y, slightly down; the sun
         // is 30° up behind and to the left, 1 km away, 0.5° across.
@@ -325,6 +326,44 @@ impl Textured {
 }
 
 impl Textured {
+    /// M10 gate 17's vertex colors: the boulders get a smooth color field
+    /// over their corners (multiplying their lichen), and the brick block
+    /// loses its texture for a color per corner (a gradient along each
+    /// axis).
+    pub fn with_vertex_colors(mut self) -> Textured {
+        let rock = &self.scene.geometries[1];
+        let rock_colors: Vec<[Vec3; 3]> = rock
+            .triangles
+            .iter()
+            .map(|t| {
+                t.map(|p| {
+                    let q = p * 3.0;
+                    Vec3::new(
+                        0.6 + 0.4 * q.x.sin(),
+                        0.6 + 0.4 * (q.y + 2.0).sin(),
+                        0.6 + 0.4 * (q.z + 4.0).sin(),
+                    )
+                })
+            })
+            .collect();
+        let block_colors: Vec<[Vec3; 3]> = self.scene.geometries[2]
+            .triangles
+            .iter()
+            .map(|t| {
+                t.map(|p| {
+                    Vec3::new(
+                        0.15 + 0.8 * (p.x + 1.5) / 3.0,
+                        0.15 + 0.8 * p.z / 2.0,
+                        0.15 + 0.8 * (p.y + 0.5),
+                    )
+                })
+            })
+            .collect();
+        self.scene.geometry_colors = vec![None, Some(rock_colors), Some(block_colors)];
+        self.scene.geometry_textures[2] = None;
+        self
+    }
+
     /// M10 gate 2's materials: the ground dielectric (roughness 0.6), the
     /// boulders metallic (roughness 0.3), the brick block dielectric
     /// (roughness 0.4).

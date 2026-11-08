@@ -1302,6 +1302,21 @@ impl MaskConeKernel {
             })
             .collect();
         let (mut flat, xforms, bounds) = flatten_instanced(&geometries, &placements);
+        // Vertex colors (M10 gate 17) in the triangles' unused w: 1 plus an
+        // sRGB byte per channel, an exact integer (0: none).
+        let mut first = 0;
+        for (g, geometry) in scene.geometries.iter().enumerate() {
+            if let Some(Some(colors)) = scene.geometry_colors.get(g)
+                && colors.len() == geometry.triangles.len()
+            {
+                for (t, corners) in colors.iter().enumerate() {
+                    for (k, c) in corners.iter().enumerate() {
+                        flat.tris[3 * (first + t) + k][3] = color_code(*c);
+                    }
+                }
+            }
+            first += geometry.triangles.len();
+        }
         let (nodes, items, movers) = if movable.is_empty() {
             let (nodes, items) = object_hierarchy(&bounds, |_| true);
             (nodes, items, None)
@@ -2305,6 +2320,12 @@ pub struct InstancedScene {
     /// shadows, sky, the cache and bounce light all see the cut. Ignored
     /// for a geometry without a texture.
     pub geometry_alpha_cutoff: Vec<Option<f32>>,
+    /// Each geometry's vertex colors, if any (empty: none; M10 gate 17): a
+    /// linear RGB color per triangle corner (as `Surface::tex`), multiplying
+    /// its base color and texture, interpolated across each triangle. Kept
+    /// at 8 bits per channel (sRGB-encoded), so within `[0, 1]`. glTF's
+    /// `COLOR_0`. Ignored unless it has one entry per triangle.
+    pub geometry_colors: Vec<Option<Vec<[Vec3; 3]>>>,
 }
 
 impl InstancedScene {
@@ -2353,11 +2374,17 @@ impl InstancedScene {
         }
         let mut scene = self.clone();
         for (g, cutoff, texture) in masked {
-            scene.geometries[g] = cut_out(
+            let colors = self.geometry_colors.get(g).and_then(|c| c.as_deref());
+            let (surface, colors) = cutout::cut_out_colored(
                 &self.geometries[g],
+                colors,
                 &self.textures[texture as usize],
                 cutoff,
             );
+            scene.geometries[g] = surface;
+            if let Some(colors) = colors {
+                scene.geometry_colors[g] = Some(colors);
+            }
         }
         scene.geometry_alpha_cutoff.clear();
         std::borrow::Cow::Owned(scene)
@@ -2381,6 +2408,21 @@ impl InstancedScene {
         used.dedup();
         used
     }
+}
+
+/// A vertex color's code (M10 gate 17): 1 plus its sRGB bytes, red lowest,
+/// as an exact integer in an f32 (at most 2^24).
+fn color_code(c: Vec3) -> f32 {
+    let byte = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        let s = if x <= 0.003_130_8 {
+            12.92 * x
+        } else {
+            1.055 * x.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round() as u32
+    };
+    (1 + byte(c.x) + (byte(c.y) << 8) + (byte(c.z) << 16)) as f32
 }
 
 /// `x` (clamped to 0..=65,504) as half-float bits, truncated; values below

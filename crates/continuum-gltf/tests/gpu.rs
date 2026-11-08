@@ -110,6 +110,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),
+        geometry_colors: Vec::new(),
     }
 }
 
@@ -446,6 +447,9 @@ fn gltf_round_trip_keeps_materials() {
     });
     s.geometry_metallic_roughness = vec![Some(0), None, None];
     s.geometry_alpha_cutoff = vec![Some(0.25), None, None];
+    s.geometry_emission[0] = Vec3::new(0.5, 0.25, 0.125);
+    s.geometry_emissive_textures = vec![Some(0), None, None];
+    s.geometry_blend = vec![None, Some(0.4), None];
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
     let imported = continuum_gltf::load(&path).unwrap().scene;
@@ -493,6 +497,18 @@ fn gltf_round_trip_keeps_materials() {
                 .is_some()
         };
         assert_eq!(mr(&s, a.geometry), mr(&imported, b.geometry));
+        let emissive = |scene: &InstancedScene, g: usize| {
+            scene
+                .geometry_emissive_textures
+                .get(g)
+                .copied()
+                .flatten()
+                .is_some()
+        };
+        assert_eq!(emissive(&s, a.geometry), emissive(&imported, b.geometry));
+        let blend =
+            |scene: &InstancedScene, g: usize| scene.geometry_blend.get(g).copied().flatten();
+        assert_eq!(blend(&s, a.geometry), blend(&imported, b.geometry));
     }
 }
 
@@ -556,6 +572,83 @@ fn metallic_roughness_texture_multiplies_the_factors() {
         smoother.relative_rmse > 1e-3,
         "the texture had no effect: {smoother:?}"
     );
+}
+
+/// sRGB byte `b` decoded to linear, as the kernel decodes vertex colors.
+fn srgb(b: u8) -> f32 {
+    let s = b as f32 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Vertex colors multiply the base color (M10 gate 17): one color on every
+/// corner of a geometry renders as the instances' albedo times it, with a
+/// texture (the ground) and without (the cubes), bounce light included.
+#[test]
+fn vertex_colors_multiply_the_base_color() {
+    let s = scene(DVec3::ZERO);
+    let colors = [
+        Vec3::new(srgb(250), srgb(180), srgb(90)),
+        Vec3::new(srgb(60), srgb(200), srgb(255)),
+    ];
+    let mut colored = s.clone();
+    colored.geometry_colors = vec![
+        Some(vec![[colors[0]; 3]; s.geometries[0].triangles.len()]),
+        Some(vec![[colors[1]; 3]; s.geometries[1].triangles.len()]),
+        None,
+    ];
+    let mut tinted = s.clone();
+    for i in &mut tinted.instances {
+        if i.geometry < 2 {
+            i.albedo *= colors[i.geometry];
+        }
+    }
+    let (a, b) = (settled(&colored), settled(&tinted));
+    let d = difference(&a, &b);
+    eprintln!("vertex colors against tinted albedos: {d:?}");
+    assert!(d.relative_rmse < 1e-4, "{d:?}");
+    let plain = difference(&settled(&s), &b);
+    assert!(
+        plain.relative_rmse > 0.05,
+        "the colors had no effect: {plain:?}"
+    );
+}
+
+/// Vertex colors survive a glTF round trip (`COLOR_0`).
+#[test]
+fn gltf_round_trip_keeps_vertex_colors() {
+    let mut s = scene(DVec3::ZERO);
+    let sphere = &s.geometries[2];
+    let colors: Vec<[Vec3; 3]> = sphere
+        .triangles
+        .iter()
+        .map(|t| t.map(|p| (p / 0.6 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE)))
+        .collect();
+    s.geometry_colors = vec![None, None, Some(colors)];
+    let path = std::env::temp_dir().join(format!("continuum-colors-{}.glb", std::process::id()));
+    continuum_gltf::save(&s, &path).unwrap();
+    let imported = continuum_gltf::load(&path).unwrap().scene;
+    std::fs::remove_file(&path).ok();
+    let mut found = 0;
+    for (g, geometry) in imported.geometries.iter().enumerate() {
+        let Some(colors) = imported.geometry_colors.get(g).cloned().flatten() else {
+            continue;
+        };
+        found += 1;
+        assert_eq!(colors.len(), geometry.triangles.len());
+        // glTF is Y-up: the saved sphere comes back in Continuum's axes, so
+        // each corner's color is still the function of its position.
+        for (t, c) in geometry.triangles.iter().zip(&colors) {
+            for (p, c) in t.iter().zip(c) {
+                let want = (*p / 0.6 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE);
+                assert!((*c - want).abs().max_element() < 1e-5, "{c} against {want}");
+            }
+        }
+    }
+    assert_eq!(found, 1, "one geometry with colors");
 }
 
 /// Emission adds to what a surface reflects, exactly, in the cached path.

@@ -88,6 +88,7 @@ fn scene() -> ContinuumScene {
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
+            geometry_colors: Vec::new(),
         }),
         lights: vec![
             Light::sun(

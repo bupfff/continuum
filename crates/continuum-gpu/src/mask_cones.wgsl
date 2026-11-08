@@ -1561,6 +1561,22 @@ fn primary_hit(eye: vec3<f32>, dir: vec3<f32>) -> Hit {
 
 // Barycentric coordinates of world point `p` (on the triangle's plane) in
 // triangle `t` of object `m`.
+// Triangle `t`'s vertex color at world point `p` on object `m` (M10 gate
+// 17): each corner's code in its position's w (1 plus an sRGB byte per
+// channel, red lowest; 0: none, white), decoded to linear and interpolated.
+fn vertex_color(m: u32, t: u32, p: vec3<f32>) -> vec3<f32> {
+    let c0 = tris[3u * t].w;
+    if (c0 == 0.0) { return vec3<f32>(1.0); }
+    let b = barycentric(m, t, p);
+    return decode_color(c0) * b.x + decode_color(tris[3u * t + 1u].w) * b.y + decode_color(tris[3u * t + 2u].w) * b.z;
+}
+
+fn decode_color(code: f32) -> vec3<f32> {
+    let c = u32(code) - 1u;
+    let s = vec3<f32>(f32(c & 255u), f32((c >> 8u) & 255u), f32(c >> 16u)) / 255.0;
+    return select(pow((s + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), s / 12.92, s <= vec3<f32>(0.04045));
+}
+
 fn barycentric(m: u32, t: u32, world_p: vec3<f32>) -> vec3<f32> {
     let p = point_to_object(m, world_p);
     let v0 = tris[3u * t].xyz;
@@ -1683,7 +1699,7 @@ fn decode_tangent(code: f32) -> vec4<f32> {
 // albedo times its texture, sampled at the mip level whose texels match the
 // pixel's footprint (`distance` along the camera ray `dir`, normal `n`).
 fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
-    let base = albedo[m].xyz;
+    let base = albedo[m].xyz * vertex_color(m, t, p);
     let layer = object_texture[m];
     if (layer == NONE) { return base; }
     let b = barycentric(m, t, p);
@@ -3954,7 +3970,7 @@ fn indirect_at(slot: u32, sample: u32, ch: u32) -> u32 {
 
 // A hit's base color, its texture read at a footprint of `footprint` meters.
 fn bounce_albedo(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
-    let base = albedo[m].xyz;
+    let base = albedo[m].xyz * vertex_color(m, t, p);
     let layer = object_texture[m];
     if (layer == NONE) { return base; }
     let b = barycentric(m, t, p);
