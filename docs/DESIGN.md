@@ -386,8 +386,8 @@ place, for a new conversation:
   - M10 G6 reached no criterion (a cache bug, fixed; re-run as G7);
   - not gated, tested: emission; metallic-roughness textures; glTF import
     and save of metallic and roughness, emission, normal and
-    metallic-roughness textures, alpha modes (MASK; BLEND as MASK at 0.5)
-    and double-sided materials (back faces on the same plane).
+    metallic-roughness textures, alpha modes (MASK; BLEND as blending since
+    M10 G16) and double-sided materials (back faces on the same plane).
 - **The six candidates, as left:**
   1. *Back-to-back faces.* Done (M10 G8–G9, kept): normal bake speed, 3.42%
      from Cycles against the 1 mm control's 3.37%, no offset in glTF import

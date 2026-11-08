@@ -2137,6 +2137,26 @@ impl InstancedScene {
 
     /// This scene with its alpha cutouts made geometry ([`cut_out`]):
     /// borrowed when it has none.
+    /// The scene with alpha blending replaced by its fallback (M10 gate 16):
+    /// a textured blended geometry cut at an alpha of 0.5 over its opacity
+    /// factor, an untextured one opaque. For renderers without blending
+    /// (no hardware camera rays, movers, or no cache).
+    pub(crate) fn blend_as_mask(&self) -> InstancedScene {
+        let mut s = self.clone();
+        let n = s.geometries.len();
+        s.geometry_alpha_cutoff.resize(n, None);
+        for g in 0..n {
+            if let Some(o) = s.geometry_blend.get(g).copied().flatten()
+                && s.geometry_textures.get(g).copied().flatten().is_some()
+                && s.geometry_alpha_cutoff[g].is_none()
+            {
+                s.geometry_alpha_cutoff[g] = Some(0.5 / o.max(1e-6));
+            }
+        }
+        s.geometry_blend.clear();
+        s
+    }
+
     pub fn with_cutouts(&self) -> std::borrow::Cow<'_, InstancedScene> {
         let masked: Vec<(usize, f32, u32)> = (0..self.geometries.len())
             .filter_map(|g| {

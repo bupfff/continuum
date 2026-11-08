@@ -21,8 +21,11 @@
 //!   (`InstancedScene::geometry_metallic_roughness`).
 //! - Alpha mode MASK becomes the geometry's alpha cutoff
 //!   (`InstancedScene::geometry_alpha_cutoff`: cut away as geometry before
-//!   upload), divided by the base color factor's alpha. BLEND is treated as
-//!   MASK at 0.5: no blending.
+//!   upload), divided by the base color factor's alpha. BLEND becomes
+//!   alpha blending (`InstancedScene::geometry_blend`, M10 gate 16): the
+//!   base color factor's alpha as the opacity, times the texture's alpha
+//!   (where blending is not available the renderer cuts a textured BLEND at
+//!   0.5, as before).
 //! - A double-sided material's triangles are doubled, the back faces
 //!   reversed on the same plane.
 //! - A normal texture, through the same texture coordinates as the base
@@ -164,7 +167,8 @@ type GeometryKey = (
     Option<u32>,
     Option<u32>,
     bool,
-    Option<u32>,
+    // The emissive texture and the blend opacity's bits.
+    (Option<u32>, Option<u32>),
 );
 
 /// One primitive's geometry before placement.
@@ -183,6 +187,8 @@ struct Primitive {
     metallic_roughness: Option<u32>,
     /// Its emissive texture's index in the scene's textures (M10 gate 14).
     emissive_texture: Option<u32>,
+    /// Its opacity if alpha-blended (M10 gate 16).
+    blend: Option<f32>,
     /// Its alpha cutoff (over its base color texture's alpha).
     alpha_cutoff: Option<f32>,
     key: GeometryKey,
@@ -353,12 +359,13 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 }
             }
             let alpha_cutoff = match material.alpha_mode() {
-                gltf::material::AlphaMode::Opaque => None,
                 gltf::material::AlphaMode::Mask => Some(material.alpha_cutoff().unwrap_or(0.5)),
-                gltf::material::AlphaMode::Blend => Some(0.5),
+                _ => None,
             }
             .filter(|_| texture.is_some())
             .map(|c| c / factor[3].max(1e-6));
+            let blend = (material.alpha_mode() == gltf::material::AlphaMode::Blend)
+                .then_some(factor[3].clamp(0.0, 1.0));
             let double_sided = material.double_sided();
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
@@ -399,6 +406,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 normal_map,
                 metallic_roughness,
                 emissive_texture,
+                blend,
                 alpha_cutoff,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
@@ -414,7 +422,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     metallic_roughness,
                     alpha_cutoff.map(f32::to_bits),
                     double_sided,
-                    emissive_texture,
+                    (emissive_texture, blend.map(f32::to_bits)),
                 ),
                 geometry: usize::MAX,
             });
@@ -455,6 +463,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             scene.geometry_metallic_roughness.push(p.metallic_roughness);
             scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
             scene.geometry_emissive_textures.push(p.emissive_texture);
+            scene.geometry_blend.push(p.blend);
         }
     }
     // Nodes, with world matrices.
@@ -663,6 +672,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_metallic_roughness.push(p.metallic_roughness);
     scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
     scene.geometry_emissive_textures.push(p.emissive_texture);
+    scene.geometry_blend.push(p.blend);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,

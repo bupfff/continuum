@@ -84,9 +84,18 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   geometry where its base color texture's alpha is below the cutoff, as
   geometry, before upload (`cut_out`), so shadows, sky and bounce light see
   the cut exactly. 3.29% from Cycles on a foliage scene (M10 gate 7). glTF
-  import maps MASK (and BLEND, treated as MASK at 0.5). Double-sided
+  import maps MASK. Double-sided
   geometry can be exactly back-to-back faces (glTF import doubles a
   double-sided material's triangles on the same plane; M10 gates 8–9).
+- **Alpha blending.** `InstancedScene::geometry_blend` makes a geometry
+  see-through: an opacity factor times its base color texture's alpha
+  (glTF's BLEND materials are imported so). With the cache and hardware
+  camera rays, pixels see up to four layers, composited front to back, and
+  shadows keep the factor's share of light: 4.71% from Cycles on glass and
+  a blind (M10 gate 16), at 1.33× the frame where a fifth of the pixels see
+  a pane. Without hardware rays, or with movers, a textured blend is cut at
+  0.5 and an untextured one is opaque. Bounce and reflection rays see
+  blended surfaces opaque.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
   1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
   the warm frame; re-coloring stays free (M10 gate 4). At most three

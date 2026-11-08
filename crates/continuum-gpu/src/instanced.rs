@@ -742,6 +742,20 @@ impl InstancedRenderer {
         movable: &[usize],
         moving_lights: &[usize],
     ) -> Self {
+        // Alpha blending needs the cache's extra-samples pass: hardware camera
+        // rays, no movers (M10 gate 16); otherwise its fallback.
+        let blending = cache.is_some()
+            && kernel.uses_hardware_rays()
+            && !kernel.pixel_cones.get()
+            && movable.is_empty();
+        let fallback;
+        let scene: &InstancedScene =
+            if !blending && scene.geometry_blend.iter().any(|b| b.is_some()) {
+                fallback = scene.blend_as_mask();
+                &fallback
+            } else {
+                scene
+            };
         let cut = scene.with_cutouts();
         let scene: &InstancedScene = &cut;
         let device = kernel.device.clone();
