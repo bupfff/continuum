@@ -283,6 +283,7 @@ impl Textured {
             geometry_materials: Vec::new(),
             geometry_emission: Vec::new(),
             geometry_emissive_textures: Vec::new(),
+            geometry_blend: Vec::new(),
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
@@ -517,6 +518,77 @@ impl Textured {
         let first = self.scene.textures.len() as u32;
         self.scene.textures.extend([tiles, bricks]);
         self.scene.geometry_normal_maps = vec![Some(first), None, Some(first + 1)];
+        self
+    }
+
+    /// M10 gate 16's scene: two alpha-blended panes standing on the ground
+    /// in front of the block and the boulders. A blue glass pane (1.6 ×
+    /// 1.2 m, opacity 0.35, albedo (0.6, 0.8, 1.0)) and a blind (1.2 ×
+    /// 1.0 m, white, opacity its texture's alpha: horizontal bands of 0.15
+    /// and 0.85). `double_sided`: back faces on the same plane, as glTF's
+    /// import of double-sided materials makes (Continuum's own shadows need
+    /// them); otherwise front faces only (Cycles' reference, which shades
+    /// both sides of a face and would attenuate twice through coincident
+    /// ones).
+    pub fn with_glass(mut self, double_sided: bool) -> Textured {
+        let pane = |w: f32, h: f32| {
+            let p = [
+                Vec3::new(-w / 2.0, 0.0, 0.0),
+                Vec3::new(w / 2.0, 0.0, 0.0),
+                Vec3::new(w / 2.0, 0.0, h),
+                Vec3::new(-w / 2.0, 0.0, h),
+            ];
+            let uv = [
+                Vec2::new(0.0, 1.0),
+                Vec2::new(1.0, 1.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(0.0, 0.0),
+            ];
+            let faces: &[[usize; 3]] = if double_sided {
+                &[[0, 1, 2], [0, 2, 3], [0, 2, 1], [0, 3, 2]]
+            } else {
+                &[[0, 1, 2], [0, 2, 3]]
+            };
+            let (mut tris, mut tex) = (Vec::new(), Vec::new());
+            for &[a, b, c] in faces {
+                tris.push([p[a], p[b], p[c]]);
+                tex.push([uv[a], uv[b], uv[c]]);
+            }
+            Surface::from_mesh(tris, None, Some(tex))
+        };
+        let glass = self.scene.geometries.len();
+        self.scene.geometries.push(pane(1.6, 1.2));
+        self.scene.geometries.push(pane(1.2, 1.0));
+        let white = texture_alpha(|_, _| (Vec3::ONE, 1.0));
+        let blind = texture_alpha(|_, v| {
+            let band = ((v * 10.0).floor() as i32) % 2 == 0;
+            (Vec3::splat(0.9), if band { 0.15 } else { 0.85 })
+        });
+        let first = self.scene.textures.len() as u32;
+        self.scene.textures.extend([white, blind]);
+        let n = self.scene.geometries.len();
+        self.scene.geometry_textures.resize(n, None);
+        self.scene.geometry_textures[glass] = Some(first);
+        self.scene.geometry_textures[glass + 1] = Some(first + 1);
+        let mut blend = self.scene.geometry_blend.clone();
+        blend.resize(n, None);
+        blend[glass] = Some(0.35);
+        blend[glass + 1] = Some(1.0);
+        self.scene.geometry_blend = blend;
+        self.scene.instances.push(Instance {
+            geometry: glass,
+            rotation: Mat3::IDENTITY,
+            scale: 1.0,
+            position: DVec3::new(-0.8, 4.0, 0.0),
+            albedo: Vec3::new(0.6, 0.8, 1.0),
+        });
+        self.scene.instances.push(Instance {
+            geometry: glass + 1,
+            rotation: Mat3::from_rotation_z(0.3),
+            scale: 1.0,
+            position: DVec3::new(1.6, 6.0, 0.0),
+            albedo: Vec3::ONE,
+        });
         self
     }
 

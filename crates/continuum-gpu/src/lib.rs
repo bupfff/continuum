@@ -2081,6 +2081,12 @@ pub struct InstancedScene {
     /// an index into `textures` (sRGB, glTF's emissive map) multiplying its
     /// emission, read through its texture coordinates.
     pub geometry_emissive_textures: Vec<Option<u32>>,
+    /// Each geometry's opacity if it is alpha-blended (empty: none; M10
+    /// gate 16): Some(factor), times its base color texture's alpha where it
+    /// has one. With hardware camera rays, pixels see through blended
+    /// surfaces (a few layers, composited front to back); shadows from them
+    /// keep the factor's share of the light. glTF's BLEND materials.
+    pub geometry_blend: Vec<Option<f32>>,
     /// Each geometry's normal map, if any (empty: none; M10 gate 5): an
     /// index into `textures` of a tangent-space normal map (linear, OpenGL's
     /// convention as glTF specifies: green toward the image's top), read
