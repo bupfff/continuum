@@ -416,6 +416,9 @@ place, for a new conversation:
     cubic-spline, through the node hierarchy), tested against poses worked
     out from the spec; the viewer plays a file's first animation through
     movable instances (not with a sky). Not gated: movers are M9 G1's.
+  - *exposure*: `Renderer::set_exposure` scales the drawn colors before
+    the tone curve (a test reads a float target back: exactly the colors
+    times the factor); the viewer's `[`, `]` and `--exposure`.
 - **Next, in the order I would take them:**
   1. *glTF sampler wrap modes* (clamp, mirror): textures always repeat now.
      Every texture read (base color, box filter, normal maps,
