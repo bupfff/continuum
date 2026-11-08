@@ -436,6 +436,11 @@ place, for a new conversation:
   from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
   is the cache's softness in motion, not the sky;
   `docs/results/m5-gate10.md`).
+- **Flight spikes (diagnosed, not fixed):** the slowest 5% of frames
+  follow GPU bakes whose cost per unit triples for a few frames (18–25 ms
+  instead of 7); a faster-reacting budget did not help, since timings
+  arrive two frames late. Needs per-page cost prediction or split bakes
+  (`docs/results/flight-spikes-diagnostics.md`).
 - **Known issues:** the total sky work is still large (the sky later orders
   it); sustained speed on the fanless Air (M5 G8); Metal only measured.
   Naga 30's Metal backend ignores ray flags' face culling (worked around in
