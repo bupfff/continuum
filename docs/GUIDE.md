@@ -80,7 +80,10 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   light from lights, specular and reflections; the sky and bounce light
   keep the interpolated normal. 3.63% from Cycles on a beveled-tile scene
   (M10 gate 5). glTF import brings normal textures (scale ignored; no
-  `KHR_texture_transform` or vertex colors yet, for any texture).
+  vertex colors yet). `KHR_texture_transform` is baked into the texture
+  coordinates; a geometry has one set, so a slot whose set or transform
+  differs from the base color's is skipped
+  (`ImportStats::texture_slots_skipped`).
   Tangents are MikkTSpace's, per corner, as glTF specifies (M10 gate 13;
   no measurable difference from per-triangle frames on its test scene,
   which had no baked maps).

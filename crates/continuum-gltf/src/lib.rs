@@ -11,7 +11,12 @@
 //! - Albedo is the material's base color factor (linear). Its base color
 //!   texture, where it has one and the primitive has the texture coordinates
 //!   it names, is imported and sampled when shading
-//!   (`InstancedScene::textures`).
+//!   (`InstancedScene::textures`). `KHR_texture_transform` is applied to the
+//!   texture coordinates at import, as Blender's importer applies it. A
+//!   geometry has one set of texture coordinates: the first texture slot
+//!   that loads (the base color's, where it has one) chooses the set and
+//!   transform, and a slot with others is skipped
+//!   ([`ImportStats::texture_slots_skipped`]).
 //! - Metallic and roughness factors become the geometry's [`Material`]
 //!   (`InstancedScene::geometry_materials`). A primitive without a material,
 //!   or with metallic 0 and roughness 1 (what [`save`] writes for a
@@ -122,6 +127,10 @@ pub struct ImportStats {
     pub textures: usize,
     /// Images skipped: pixel formats other than 8 bits per channel.
     pub textures_skipped: usize,
+    /// Texture slots skipped because their coordinate set or
+    /// `KHR_texture_transform` differs from the primitive's other slots
+    /// (a geometry has one set of texture coordinates).
+    pub texture_slots_skipped: usize,
 }
 
 /// An imported scene: geometry, instances (world positions), the file's first
@@ -172,9 +181,94 @@ type GeometryKey = (
     Option<u32>,
     Option<u32>,
     bool,
-    // The emissive texture and the blend opacity's bits.
-    (Option<u32>, Option<u32>),
+    // The emissive texture, the blend opacity's bits and the texture
+    // transform's.
+    (Option<u32>, Option<u32>, [u32; 5]),
 );
+
+/// A texture slot's coordinate set and `KHR_texture_transform` (the identity
+/// without one).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UvSlot {
+    set: u32,
+    offset: [f32; 2],
+    rotation: f32,
+    scale: [f32; 2],
+}
+
+impl Default for UvSlot {
+    fn default() -> Self {
+        UvSlot {
+            set: 0,
+            offset: [0.0; 2],
+            rotation: 0.0,
+            scale: [1.0; 2],
+        }
+    }
+}
+
+impl UvSlot {
+    fn of(info: &gltf::texture::Info) -> UvSlot {
+        match info.texture_transform() {
+            Some(t) => UvSlot {
+                set: t.tex_coord().unwrap_or(info.tex_coord()),
+                offset: t.offset(),
+                rotation: t.rotation(),
+                scale: t.scale(),
+            },
+            None => UvSlot {
+                set: info.tex_coord(),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A normal texture's (the gltf crate leaves its transform as JSON).
+    fn of_normal(info: &gltf::material::NormalTexture) -> UvSlot {
+        let mut slot = UvSlot {
+            set: info.tex_coord(),
+            ..Default::default()
+        };
+        if let Some(t) = info.extension_value("KHR_texture_transform") {
+            let pair = |key: &str, default: [f32; 2]| match t.get(key).and_then(|v| v.as_array()) {
+                Some(a) if a.len() == 2 => [0, 1].map(|k| a[k].as_f64().unwrap_or(0.0) as f32),
+                _ => default,
+            };
+            slot.offset = pair("offset", [0.0; 2]);
+            slot.scale = pair("scale", [1.0; 2]);
+            slot.rotation = t.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            if let Some(set) = t.get("texCoord").and_then(|v| v.as_u64()) {
+                slot.set = set as u32;
+            }
+        }
+        slot
+    }
+
+    /// `uv` through the transform: scaled, rotated, then offset. The
+    /// rotation's sign is the one Blender's importer applies (checked in
+    /// `tests/texture_transform.rs`); the extension's GLSL sample, read
+    /// column-major, is its transpose.
+    fn apply(&self, uv: [f32; 2]) -> Vec2 {
+        let (sin, cos) = self.rotation.sin_cos();
+        let (u, v) = (uv[0] * self.scale[0], uv[1] * self.scale[1]);
+        Vec2::new(
+            cos * u + sin * v + self.offset[0],
+            -sin * u + cos * v + self.offset[1],
+        )
+    }
+
+    /// The transform's bits, for deduplicating geometries.
+    fn bits(&self) -> [u32; 5] {
+        [
+            self.offset[0],
+            self.offset[1],
+            self.rotation,
+            self.scale[0],
+            self.scale[1],
+        ]
+        .map(f32::to_bits)
+    }
+}
 
 /// One primitive's geometry before placement.
 struct Primitive {
@@ -278,91 +372,46 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             });
             let emission = Vec3::from_array(material.emissive_factor())
                 * material.emissive_strength().unwrap_or(1.0);
-            // The base color texture, through the texture coordinate set it
-            // names.
-            let mut texture = None;
+            // Texture slots share one coordinate set and transform: the
+            // first slot that loads chooses them (the base color's, where it
+            // has one), and a slot with others is skipped.
             let mut texcoords: Option<Vec<Vec2>> = None;
-            if let Some(info) = pbr.base_color_texture()
-                && let Some(t) = reader.read_tex_coords(info.tex_coord())
-            {
-                let image = info.texture().source().index();
-                let slot = *texture_of_image[image].get_or_insert_with(|| {
+            let mut chosen: Option<UvSlot> = None;
+            let mut skipped = 0;
+            let mut slot_texture = |slot: UvSlot, image: usize| -> Option<u32> {
+                if chosen.is_some_and(|c| c != slot) {
+                    skipped += 1;
+                    return None;
+                }
+                let index = (*texture_of_image[image].get_or_insert_with(|| {
                     to_rgba(&images[image]).map(|t| {
                         textures.push(t);
                         textures.len() as u32 - 1
                     })
-                });
-                if let Some(index) = slot {
-                    texture = Some(index);
-                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
+                }))?;
+                if chosen.is_none() {
+                    let t = reader.read_tex_coords(slot.set)?;
+                    texcoords = Some(t.into_f32().map(|uv| slot.apply(uv)).collect());
+                    chosen = Some(slot);
                 }
-            }
-            // The normal texture, through the base color's coordinates or
-            // alone.
-            let mut normal_map = None;
-            let mut tex_set = pbr.base_color_texture().map_or(0, |i| i.tex_coord());
-            if let Some(info) = material.normal_texture()
-                && (texcoords.is_none() || info.tex_coord() == tex_set)
-            {
-                if texcoords.is_none()
-                    && let Some(t) = reader.read_tex_coords(info.tex_coord())
-                {
-                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
-                    tex_set = info.tex_coord();
-                }
-                if texcoords.is_some() {
-                    let image = info.texture().source().index();
-                    normal_map = *texture_of_image[image].get_or_insert_with(|| {
-                        to_rgba(&images[image]).map(|t| {
-                            textures.push(t);
-                            textures.len() as u32 - 1
-                        })
-                    });
-                }
-            }
-            // The emissive texture (sRGB), likewise (M10 gate 14).
-            let mut emissive_texture = None;
-            if let Some(info) = material.emissive_texture()
-                && (texcoords.is_none() || info.tex_coord() == tex_set)
-            {
-                if texcoords.is_none()
-                    && let Some(t) = reader.read_tex_coords(info.tex_coord())
-                {
-                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
-                    tex_set = info.tex_coord();
-                }
-                if texcoords.is_some() {
-                    let image = info.texture().source().index();
-                    emissive_texture = *texture_of_image[image].get_or_insert_with(|| {
-                        to_rgba(&images[image]).map(|t| {
-                            textures.push(t);
-                            textures.len() as u32 - 1
-                        })
-                    });
-                }
-            }
-            // The metallic-roughness texture, likewise.
-            let mut metallic_roughness = None;
-            if let Some(info) = pbr.metallic_roughness_texture()
-                && surface.is_some()
-                && (texcoords.is_none() || info.tex_coord() == tex_set)
-            {
-                if texcoords.is_none()
-                    && let Some(t) = reader.read_tex_coords(info.tex_coord())
-                {
-                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
-                    tex_set = info.tex_coord();
-                }
-                if texcoords.is_some() {
-                    let image = info.texture().source().index();
-                    metallic_roughness = *texture_of_image[image].get_or_insert_with(|| {
-                        to_rgba(&images[image]).map(|t| {
-                            textures.push(t);
-                            textures.len() as u32 - 1
-                        })
-                    });
-                }
-            }
+                Some(index)
+            };
+            let texture = pbr
+                .base_color_texture()
+                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture().source().index()));
+            let normal_map = material
+                .normal_texture()
+                .and_then(|i| slot_texture(UvSlot::of_normal(&i), i.texture().source().index()));
+            // The emissive texture (sRGB, M10 gate 14).
+            let emissive_texture = material
+                .emissive_texture()
+                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture().source().index()));
+            let metallic_roughness = pbr
+                .metallic_roughness_texture()
+                .filter(|_| surface.is_some())
+                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture().source().index()));
+            stats.texture_slots_skipped += skipped;
+            let chosen = chosen.unwrap_or_default();
             let alpha_cutoff = match material.alpha_mode() {
                 gltf::material::AlphaMode::Mask => Some(material.alpha_cutoff().unwrap_or(0.5)),
                 _ => None,
@@ -418,7 +467,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     accessor(gltf::Semantic::Normals),
                     texcoords
                         .as_ref()
-                        .and(accessor(gltf::Semantic::TexCoords(tex_set))),
+                        .and(accessor(gltf::Semantic::TexCoords(chosen.set))),
                     primitive.indices().map(|a| a.index()),
                     texture,
                     surface.map(|m| (m.metallic.to_bits(), m.roughness.to_bits())),
@@ -427,7 +476,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     metallic_roughness,
                     alpha_cutoff.map(f32::to_bits),
                     double_sided,
-                    (emissive_texture, blend.map(f32::to_bits)),
+                    (emissive_texture, blend.map(f32::to_bits), chosen.bits()),
                 ),
                 geometry: usize::MAX,
             });

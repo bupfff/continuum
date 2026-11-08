@@ -180,10 +180,16 @@ impl World {
             imported.scene.geometries.len(),
             imported.stats.charts,
             imported.stats.textures,
-            if imported.stats.skipped_primitives + imported.stats.textures_skipped > 0 {
+            if imported.stats.skipped_primitives
+                + imported.stats.textures_skipped
+                + imported.stats.texture_slots_skipped
+                > 0
+            {
                 format!(
-                    " ({} primitives and {} textures skipped)",
-                    imported.stats.skipped_primitives, imported.stats.textures_skipped
+                    " ({} primitives, {} textures and {} texture slots skipped)",
+                    imported.stats.skipped_primitives,
+                    imported.stats.textures_skipped,
+                    imported.stats.texture_slots_skipped
                 )
             } else {
                 String::new()

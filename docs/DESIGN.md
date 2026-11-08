@@ -427,9 +427,12 @@ place, for a new conversation:
      `continuum_gltf::load_environment` (Radiance RGBE, flat or RLE; PNG
      from sRGB). A round-trip test reads back the HDR Cycles was checked
      against in M5 G12. Not gated: it uses M5 G12's path.
-  2. *glTF `KHR_texture_transform`.* UV offset, scale and rotation, per
-     texture slot. Many assets use it. Exact by construction: test it
-     against a transformed copy of the mesh's UVs.
+  2. *glTF `KHR_texture_transform`.* **Done (fourth session):** baked into
+     the texture coordinates at import. The test checks against Blender's
+     importer's route (`conversion.py`, then a Mapping node), whose
+     rotation sign is the transpose of the extension's GLSL sample read
+     column-major; we follow Blender. One set and transform per geometry:
+     a slot with another is skipped and counted.
   3. *Vertex colors* (glTF `COLOR_0`), multiplying the base color. Needs a
      per-corner attribute in the kernel, which is near its 29-buffer limit
      on Metal: pack it into an existing buffer.

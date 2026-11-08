@@ -132,8 +132,10 @@ roughness factors, emission and normal maps are imported too (normal maps
 with metallic-roughness and emissive textures (6.35%, M10 gate 15). Alpha
 masks are cut into geometry (3.29% from Cycles, M10 gate 7), and BLEND
 materials are blended (4.71%, M10 gate 16). Double-sided materials become
-exactly back-to-back faces (M10 gates 8–9). Not yet imported:
-`KHR_texture_transform` and vertex colors.
+exactly back-to-back faces (M10 gates 8–9). `KHR_texture_transform` is
+applied to the texture coordinates, as Blender's importer applies it (one
+transform per primitive: a slot with another is skipped). Not yet imported:
+vertex colors.
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb
