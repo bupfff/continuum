@@ -764,6 +764,7 @@ impl InstancedRenderer {
                         rotation: i.rotation,
                         scale: i.scale,
                         translation: (i.position - origin).as_vec3(),
+                        clear: scene.blend_clear(i.geometry),
                     }
                 })
                 .collect();
@@ -813,7 +814,8 @@ impl InstancedRenderer {
         // Silhouette rays through ray queries (M7 gate 4): with the cache's
         // edge rays and hardware camera rays (not with movers, whose own
         // structure the pass does not trace).
-        let hw_edges = cache.as_ref().is_some_and(|o| o.edge_rays)
+        let blend = scene.geometry_blend.iter().any(|b| b.is_some());
+        let hw_edges = cache.as_ref().is_some_and(|o| o.edge_rays || blend)
             && hw.as_ref().is_some_and(|hw| hw.movers.is_none());
         let shade_bindings = |list: &[u32]| {
             let mut keep = list.to_vec();
@@ -894,7 +896,7 @@ impl InstancedRenderer {
         });
         let mut cache = cache;
         if hw_edges && let Some(c) = &mut cache {
-            c.state.set_hardware_edges();
+            c.state.set_hardware_edges(blend);
         }
         let colors = Self::colors_buffer(&device, width, height);
         let mut renderer = InstancedRenderer {

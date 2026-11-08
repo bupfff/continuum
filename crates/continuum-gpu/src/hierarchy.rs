@@ -230,11 +230,15 @@ pub(crate) struct Placement {
     pub rotation: Mat3,
     pub scale: f32,
     pub translation: Vec3,
+    /// One less the object's opacity if it is alpha-blended (M10 gate 16;
+    /// 0: opaque): shadows from it keep this share of the light.
+    pub clear: f32,
 }
 
 impl Placement {
     /// The transform as the shader reads it (`xforms`): rows 0–2 of the
-    /// rotation with the translation in `w`, then `[scale, 1 / scale, 0, 0]`.
+    /// rotation with the translation in `w`, then `[scale, 1 / scale, clear,
+    /// 0]`.
     pub(crate) fn rows(&self) -> [[f32; 4]; 4] {
         let r = self.rotation.transpose();
         let t = self.translation;
@@ -242,7 +246,7 @@ impl Placement {
             [r.x_axis.x, r.x_axis.y, r.x_axis.z, t.x],
             [r.y_axis.x, r.y_axis.y, r.y_axis.z, t.y],
             [r.z_axis.x, r.z_axis.y, r.z_axis.z, t.z],
-            [self.scale, 1.0 / self.scale, 0.0, 0.0],
+            [self.scale, 1.0 / self.scale, self.clear, 0.0],
         ]
     }
 
@@ -422,6 +426,32 @@ pub(crate) fn flatten_instanced(
     objects: &[Placement],
 ) -> (Flat, Vec<[f32; 4]>, Vec<(Vec3, Vec3)>) {
     let mut flat = flatten(geometries);
+    // A blended geometry's coverage samples scale by its opacity (M10 gate
+    // 16): its nodes are its root's and those after it, up to the next
+    // geometry's root.
+    let mut roots: Vec<(usize, u32)> = flat
+        .ranges
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r[2] != NONE)
+        .map(|(g, r)| (g, r[2]))
+        .collect();
+    roots.sort_by_key(|&(_, root)| root);
+    for (k, &(g, root)) in roots.iter().enumerate() {
+        let Some(o) = objects.iter().find(|o| o.geometry == g) else {
+            continue;
+        };
+        if o.clear <= 0.0 {
+            continue;
+        }
+        let end = roots.get(k + 1).map_or(flat.blas.len() as u32, |r| r.1);
+        let opacity = 1.0 - o.clear;
+        for c in
+            &mut flat.blas_cov[root as usize * COVERAGE_SAMPLES..end as usize * COVERAGE_SAMPLES]
+        {
+            *c *= opacity;
+        }
+    }
     let ranges = std::mem::take(&mut flat.ranges);
     let local: Vec<(Vec3, Vec3)> = geometries.iter().map(|g| mesh_bounds(g)).collect();
     let mut transforms = Vec::with_capacity(4 * objects.len().max(1));

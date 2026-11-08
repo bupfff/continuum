@@ -112,6 +112,23 @@ for g, path in enumerate(job["geometries"]):
         mat.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
         mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[2])
         surface = mix.outputs["Shader"]
+    elif (job.get("blend") or [None] * len(job["geometries"]))[g] is not None:
+        # Alpha blending (M10 gate 16): a Transparent BSDF mixed in by one
+        # less the opacity times the texture's alpha.
+        opacity = job["blend"][g]
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        mix = nodes.new("ShaderNodeMixShader")
+        if texture:
+            scale = nodes.new("ShaderNodeMath")
+            scale.operation = "MULTIPLY"
+            scale.inputs[1].default_value = opacity
+            mat.node_tree.links.new(image.outputs["Alpha"], scale.inputs[0])
+            mat.node_tree.links.new(scale.outputs[0], mix.inputs["Fac"])
+        else:
+            mix.inputs["Fac"].default_value = opacity
+        mat.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
+        mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[2])
+        surface = mix.outputs["Shader"]
     else:
         surface = bsdf.outputs["BSDF"]
     emission = (job.get("emission") or [None] * len(job["geometries"]))[g]
@@ -321,7 +338,7 @@ cy.diffuse_bounces = job["bounces"]
 cy.glossy_bounces = job["bounces"]
 cy.transmission_bounces = 0
 cy.volume_bounces = 0
-cy.transparent_max_bounces = 64 if any(c is not None for c in (job.get("alpha") or [])) else 0
+cy.transparent_max_bounces = 64 if any(c is not None for c in (job.get("alpha") or []) + (job.get("blend") or [])) else 0
 cy.caustics_reflective = False
 cy.caustics_refractive = False
 cy.sample_clamp_direct = 0.0

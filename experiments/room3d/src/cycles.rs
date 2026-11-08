@@ -355,6 +355,13 @@ pub fn render_instanced_lights(
             },
         )
         .collect();
+    // Each geometry's blend opacity (M10 gate 16), or null.
+    let blend: Vec<String> = (0..scene.geometries.len())
+        .map(|g| match scene.geometry_blend.get(g).copied().flatten() {
+            Some(o) => format!("{o}"),
+            None => "null".to_string(),
+        })
+        .collect();
     // Each geometry's alpha cutoff (M10 gate 6), or null.
     let alpha: Vec<String> = (0..scene.geometries.len())
         .map(|g| {
@@ -368,7 +375,7 @@ pub fn render_instanced_lights(
         })
         .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -380,6 +387,7 @@ pub fn render_instanced_lights(
         alpha.join(", "),
         emission.join(", "),
         emission_textures.join(", "),
+        blend.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),

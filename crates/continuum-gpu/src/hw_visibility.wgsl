@@ -114,17 +114,17 @@ fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
     vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
 }
 
-// The nearest front face along a camera ray through `scene_as`: object,
-// triangle and distance bits (object NONE: a miss), back-face hits traced
-// again as `hw_visibility` does.
-fn hw_trace(eye: vec3<f32>, dir: vec3<f32>) -> vec3<u32> {
+// The nearest front face along a camera ray through `scene_as` beyond
+// `t_min`: object, triangle and distance bits (object NONE: a miss),
+// back-face hits traced again as `hw_visibility` does.
+fn hw_trace(eye: vec3<f32>, dir: vec3<f32>, t_min: f32) -> vec3<u32> {
     var rq: ray_query;
-    rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
+    rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, t_min, 3.4e38, eye, dir));
     rayQueryProceed(&rq);
     var hit = rayQueryGetCommittedIntersection(&rq);
     if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.primitive_index, dir)) {
         var fq: ray_query;
-        rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
+        rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, t_min, 3.4e38, eye, dir));
         while (rayQueryProceed(&fq)) {
             let c = rayQueryGetCandidateIntersection(&fq);
             if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
@@ -136,28 +136,91 @@ fn hw_trace(eye: vec3<f32>, dir: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(mesh, meshes[mesh].x + hit.primitive_index, bitcast<u32>(hit.t));
 }
 
-// After `hw_visibility` (M7 gate 4): an edge pixel (a neighbour sees
-// another object or a depth 5% away, as `vc_shade`'s test) traces its four
-// quarter-rays and is listed for `vc_shade_edges`, at the stats' last
-// counter (which counts edge pixels, as the compute path does).
+// The opacity at world point `p` on triangle `t` of object `m`: 1 unless
+// alpha-blended (M10 gate 16; its factor in its material's second word's
+// z, w set), then the factor times its base color texture's alpha.
+fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
+    let mat = materials[2u * m + 1u];
+    if (mat.w == 0u) { return 1.0; }
+    var a = bitcast<f32>(mat.z);
+    let layer = object_texture[m];
+    if (layer != NONE) {
+        let b = barycentric(m, t, p);
+        let uv = tri_tex[3u * t] * b.x + tri_tex[3u * t + 1u] * b.y + tri_tex[3u * t + 2u] * b.z;
+        a *= textureSampleLevel(base_color, base_sampler, uv, i32(layer), 0.0).w;
+    }
+    return clamp(a, 0.0, 1.0);
+}
+
+// After `hw_visibility`: extra samples for `vc_shade_edges`, listed at the
+// stats' last counter, five words a record (up to four samples: object,
+// triangle, distance bits, weight bits; then the pixel, its own sample's
+// weight bits, the samples' count, and each sample's quarter in four bits,
+// 15: the pixel's centre).
+// - A pixel whose own hit is alpha-blended (M10 gate 16) traces on through
+//   blended surfaces, front faces only: each layer weighs its opacity times
+//   what the layers before let through; the fourth takes what is left.
+// - Otherwise, with silhouette rays (`vc.indirect.w` 2 or 3, M7 gate 4), an
+//   edge pixel (a neighbour sees another object or a depth 5% away) traces
+//   four quarter-rays (or one diagonal pair, averaged with its own ray).
 @compute @workgroup_size(8, 8)
 fn hw_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
-    if (gid.x >= w || gid.y >= h || !is_edge(gid, w, h)) { return; }
-    let i = atomicAdd(&vc_stats[15], 1u);
-    if (4u * i + 3u >= arrayLength(&edge_hits)) { return; }
+    if (gid.x >= w || gid.y >= h) { return; }
     let pixel = gid.y * w + gid.x;
     let eye = camera.eye.xyz;
-    // Two samples (`vc.indirect.w` 3): one diagonal pair of quarters,
-    // alternating from pixel to pixel; four otherwise.
-    let two = vc.indirect.w == 3u;
-    let n = select(4u, 2u, two);
-    let flip = ((gid.x + gid.y) & 1u) == 1u;
-    for (var j = 0u; j < n; j++) {
-        var q = j;
-        if (two) { q = select(select(0u, 3u, j == 1u), select(1u, 2u, j == 1u), flip); }
-        let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
-        edge_hits[4u * i + j] = vec4<u32>(hw_trace(eye, sd), pixel | (q << 28u));
+    let own = vis[pixel];
+    let dir = camera_dir(gid);
+    var samples: array<vec4<u32>, 4>;
+    var n = 0u;
+    var own_weight = 0.0;
+    var quarters = 0xffffu;
+    var listed = false;
+    if (own.x != NONE) {
+        let first = hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z));
+        if (first < 1.0) {
+            listed = true;
+            own_weight = first;
+            var through = 1.0 - first;
+            var t = bitcast<f32>(own.z);
+            loop {
+                if (n >= 4u || through <= 1e-4) { break; }
+                let hit = hw_trace(eye, dir, t * (1.0 + 1e-5) + 1e-4);
+                var a = 1.0;
+                if (hit.x != NONE && n < 3u) { a = hw_opacity(hit.x, hit.y, eye + dir * bitcast<f32>(hit.z)); }
+                let weight = through * a;
+                samples[n] = vec4<u32>(hit, bitcast<u32>(weight));
+                n++;
+                through -= weight;
+                if (hit.x == NONE || a >= 1.0) { break; }
+                t = bitcast<f32>(hit.z);
+            }
+        }
     }
+    if (!listed && (vc.indirect.w == 2u || vc.indirect.w == 3u) && is_edge(gid, w, h)) {
+        listed = true;
+        // Two samples (`vc.indirect.w` 3): one diagonal pair of quarters,
+        // alternating from pixel to pixel, with the pixel's own ray; four
+        // otherwise.
+        let two = vc.indirect.w == 3u;
+        n = select(4u, 2u, two);
+        let weight = select(0.25, 1.0 / 3.0, two);
+        own_weight = select(0.0, 1.0 / 3.0, two);
+        let flip = ((gid.x + gid.y) & 1u) == 1u;
+        quarters = 0u;
+        for (var j = 0u; j < n; j++) {
+            var q = j;
+            if (two) { q = select(select(0u, 3u, j == 1u), select(1u, 2u, j == 1u), flip); }
+            let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
+            samples[j] = vec4<u32>(hw_trace(eye, sd, 0.0), bitcast<u32>(weight));
+            quarters |= q << (4u * j);
+        }
+        quarters |= (0xffffu << (4u * n)) & 0xffffu;
+    }
+    if (!listed) { return; }
+    let i = atomicAdd(&vc_stats[15], 1u);
+    if (5u * i + 4u >= arrayLength(&edge_hits)) { return; }
+    for (var j = 0u; j < n; j++) { edge_hits[5u * i + j] = samples[j]; }
+    edge_hits[5u * i + 4u] = vec4<u32>(pixel, bitcast<u32>(own_weight), n, quarters);
 }

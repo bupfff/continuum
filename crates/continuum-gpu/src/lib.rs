@@ -463,7 +463,7 @@ pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52];
 /// `hw_visibility_movers` adds the movers' acceleration structure (59).
 pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52, 59];
 /// `hw_edges` (M7 gate 4): silhouette rays through ray queries.
-pub(crate) const HW_EDGES_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 41, 42, 81];
+pub(crate) const HW_EDGES_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 41, 42, 55, 56, 57, 58, 76, 81];
 
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
@@ -1118,6 +1118,7 @@ impl MaskConeKernel {
                 rotation: i.rotation,
                 scale: i.scale,
                 translation: (i.position - origin).as_vec3(),
+                clear: scene.blend_clear(i.geometry),
             })
             .collect();
         let (mut flat, xforms, bounds) = flatten_instanced(&geometries, &placements);
@@ -1222,7 +1223,7 @@ impl MaskConeKernel {
         let materials: Vec<[u32; 4]> = scene
             .instances
             .iter()
-            .map(|i| -> [u32; 6] {
+            .map(|i| -> [u32; 8] {
                 // Its normal map's and metallic-roughness texture's
                 // layers plus one (0: none).
                 let layer = layer_of(&scene.geometry_normal_maps, i);
@@ -1246,10 +1247,25 @@ impl MaskConeKernel {
                     e[2] | layer << 16,
                     mr,
                     emissive_of(i),
+                    // Alpha blending (M10 gate 16): the opacity factor, and 1.
+                    scene
+                        .geometry_blend
+                        .get(i.geometry)
+                        .copied()
+                        .flatten()
+                        .map_or(0, |o| o.clamp(0.0, 1.0).to_bits()),
+                    scene
+                        .geometry_blend
+                        .get(i.geometry)
+                        .copied()
+                        .flatten()
+                        .is_some() as u32,
                 ]
             })
-            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0, 0, 0]))
-            .flat_map(|[a, b, c, d, mr, glow]| [[a, b, c, d], [mr, glow, 0, 0]])
+            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0, 0, 0, 0, 0]))
+            .flat_map(|[a, b, c, d, mr, glow, blend, blended]| {
+                [[a, b, c, d], [mr, glow, blend, blended]]
+            })
             .collect();
         let mut tex: Vec<[f32; 2]> = Vec::new();
         for g in &scene.geometries {
@@ -1450,6 +1466,7 @@ impl MaskConeKernel {
                 rotation: i.rotation,
                 scale: i.scale,
                 translation: (i.position - origin).as_vec3(),
+                clear: scene.blend_clear(i.geometry),
             })
             .collect();
         hw::build(&self.device, &self.queue, &geometries, &placements, movable)
@@ -2108,6 +2125,16 @@ pub struct InstancedScene {
 }
 
 impl InstancedScene {
+    /// One less geometry `g`'s opacity if it is alpha-blended (0: opaque;
+    /// M10 gate 16), as transforms carry it for shadows.
+    pub(crate) fn blend_clear(&self, g: usize) -> f32 {
+        self.geometry_blend
+            .get(g)
+            .copied()
+            .flatten()
+            .map_or(0.0, |o| 1.0 - o.clamp(0.0, 1.0))
+    }
+
     /// This scene with its alpha cutouts made geometry ([`cut_out`]):
     /// borrowed when it has none.
     pub fn with_cutouts(&self) -> std::borrow::Cow<'_, InstancedScene> {

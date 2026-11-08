@@ -389,7 +389,7 @@ fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, ve
     for (var i = 0u; i < q.n; i++) {
         let a = clamp(q.v[i], vec2<f32>(0.0), vec2<f32>(g));
         let b = clamp(q.v[(i + 1u) % q.n], vec2<f32>(0.0), vec2<f32>(g));
-        draw_edge(acc, span, a, b, 1.0);
+        draw_edge(acc, span, a, b, tri_weight);
     }
     return true;
 }
@@ -517,6 +517,10 @@ fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
     return 2u;
 }
 
+// The weight `rasterize` draws a triangle with: its object's opacity if it
+// is alpha-blended (M10 gate 16; set per mesh by `add_mesh_coverage_if`).
+var<private> tri_weight: f32 = 1.0;
+
 // Rasterizes triangle `t` into `acc` if it faces the apex and may touch the cone.
 fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, t: u32) -> bool {
     if (u32(light.params.z) == 4u) { return false; }
@@ -640,6 +644,9 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
     }
     let c = cone_to_object(world_cone, m);
     let range = meshes[m];
+    // An alpha-blended object covers by its opacity (M10 gate 16).
+    tri_weight = 1.0;
+    if (range.w != NONE) { tri_weight = 1.0 - xforms[4u * range.w + 3u].z; }
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
     // Cells written by this mesh's edges; the running sum is zero outside them.
@@ -4126,11 +4133,9 @@ fn indirect_light(slot: u32, r: PageRef) -> vec3<f32> {
     return total;
 }
 
-// Silhouette rays through hardware ray queries (M7 gate 4): the edge pixels
-// `hw_edges` found, counted in the stats' last counter (as the compute path
-// counts edge pixels; so not with COUNT_WORK), each with its four
-// quarter-rays' hits (object, triangle, distance bits; w: the pixel, its
-// top four bits the quarter), or two (`vc.indirect.w` 3).
+// Extra samples (M7 gate 4's silhouette rays, M10 gate 16's layers behind
+// blended surfaces): the records `hw_edges` lists, counted in the stats'
+// last counter (so not with COUNT_WORK), five words each (see `hw_edges`).
 @group(0) @binding(81) var<storage, read_write> edge_hits: array<vec4<u32>>;
 
 // After `vc_shade`: each listed edge pixel averages its four quarter-rays,
@@ -4142,26 +4147,32 @@ fn vc_shade_edges(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     lane = li;
     let w = u32(camera.params.x);
     let i = gid.y * w + gid.x;
-    let count = min(atomicLoad(&vc_stats[15]), arrayLength(&edge_hits) / 4u);
+    let count = min(atomicLoad(&vc_stats[15]), arrayLength(&edge_hits) / 5u);
     if (gid.x >= w || i >= count) { return; }
-    let pixel = edge_hits[4u * i].w & 0x0fffffffu;
+    let head = edge_hits[5u * i + 4u];
+    let pixel = head.x;
     let at = vec3<u32>(pixel % w, pixel / w, 0u);
-    // Two samples (`vc.indirect.w` 3): averaged with the pixel's own ray.
-    let two = vc.indirect.w == 3u;
-    let n = select(4u, 2u, two);
-    var sum = select(vec3<f32>(0.0), colors[pixel].xyz, two);
-    sub_share = 0.5;
-    for (var j = 0u; j < n; j++) {
-        let e = edge_hits[4u * i + j];
-        let q = e.w >> 28u;
-        let sd = camera_dir_at(at, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
+    // The pixel's own sample, then each listed one, by its weight.
+    var sum = colors[pixel].xyz * bitcast<f32>(head.y);
+    for (var j = 0u; j < min(head.z, 4u); j++) {
+        let e = edge_hits[5u * i + j];
+        let q = (head.w >> (4u * j)) & 0xfu;
+        // A quarter's ray reads textures for half a pixel; a layer behind a
+        // blended surface, the pixel's centre, for the whole pixel.
+        var sd = camera_dir_at(at, 0.0, 0.0);
+        sub_share = 1.0;
+        if (q != 0xfu) {
+            sd = camera_dir_at(at, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
+            sub_share = 0.5;
+        }
+        let weight = bitcast<f32>(e.w);
         if (e.x == NONE) {
-            sum += light.sky.xyz;
+            sum += light.sky.xyz * weight;
         } else {
-            sum += vc_hit_color(sd, hit_from(e.xyz, sd), false);
+            sum += vc_hit_color(sd, hit_from(e.xyz, sd), false) * weight;
         }
     }
-    colors[pixel] = vec4<f32>(sum / select(4.0, 3.0, two), 1.0);
+    colors[pixel] = vec4<f32>(sum, 1.0);
 }
 
 var<workgroup> fallback_count: atomic<u32>;
@@ -4598,6 +4609,9 @@ fn mesh_fragment(world_cone: Cone, m: u32, base: u32) -> Fragment {
     frag_solid = vec2<u32>(0u);
     let c = cone_to_object(world_cone, m);
     let range = meshes[m];
+    // An alpha-blended object covers by its opacity (M10 gate 16).
+    tri_weight = 1.0;
+    if (range.w != NONE) { tri_weight = 1.0 - xforms[4u * range.w + 3u].z; }
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
     var span = vec2<u32>(68u, 0u);

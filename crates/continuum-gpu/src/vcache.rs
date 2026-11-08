@@ -822,6 +822,9 @@ pub(crate) struct VirtualCache {
     /// Silhouette rays through ray queries (M7 gate 4): `hw_edges` lists
     /// edge pixels for `vc_shade_edges` (buffer 81; counted in the stats).
     hardware_edges: bool,
+    /// The extra samples' list (buffer 81): silhouette rays through ray
+    /// queries, or layers behind alpha-blended surfaces (M10 gate 16).
+    extra_samples: bool,
     append_pages: u32,
     alloc_frame: Vec<u32>,
     appended: f32,
@@ -1247,6 +1250,7 @@ impl VirtualCache {
             retrying: Default::default(),
             sky_due: HashMap::new(),
             hardware_edges: false,
+            extra_samples: false,
             sky_rebaked: 0,
             mover_ids: HashMap::new(),
             append_pages,
@@ -1314,13 +1318,13 @@ impl VirtualCache {
     /// Request buffers for a `width × height` image. Requests in flight are
     /// dropped.
     pub(crate) fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if self.hardware_edges {
+        if self.extra_samples {
             self.buffers.retain(|(b, _)| *b != 81);
             self.buffers.push((
                 81,
                 device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("edge hits"),
-                    size: (width as u64 * height as u64 * 64).max(64),
+                    label: Some("extra samples"),
+                    size: (width as u64 * height as u64 * 80).max(80),
                     usage: wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 }),
@@ -1822,8 +1826,9 @@ impl VirtualCache {
     /// renderer's `hw_edges` and `vc_shade_edges` passes trace and shade
     /// them instead of the shading pass's compute rays. Before the first
     /// `resize`, which makes their buffers.
-    pub(crate) fn set_hardware_edges(&mut self) {
+    pub(crate) fn set_hardware_edges(&mut self, blend: bool) {
         self.hardware_edges = self.options.edge_rays;
+        self.extra_samples = self.hardware_edges || blend;
     }
 
     /// Clears the request tiles and counters before shading.
