@@ -194,6 +194,58 @@ fn main() -> std::io::Result<()> {
         writeln!(report, "{line}").unwrap();
     };
 
+    if std::env::var("M10_DEV").as_deref() == Ok("ss") {
+        // Candidate 5's diagnosis (after this gate): ours with materials,
+        // supersampled, against the cached reference.
+        println!("DIAGNOSTIC RUN: not the gate's numbers");
+        let mut r = renderer(&t, true);
+        settle(&mut r, t.camera, &target);
+        let px = supersampled(&mut r, t.camera, &target);
+        let reference = render_instanced_lights(
+            &t.scene, t.origin, &t.lights, t.sky, t.camera, (W, H), 4096, 1, 1,
+            &out_dir.join("m10_gate2_cycles"),
+        )?;
+        let mean = |px: &[[f32; 3]]| px.iter().map(|p| (p[0] + p[1] + p[2]) as f64).sum::<f64>();
+        println!(
+            "with materials {:.2}% from Cycles (mean {:+.2}%; reference {})",
+            100.0 * relative_rmse(&px, &reference.pixels),
+            100.0 * (mean(&px) / mean(&reference.pixels) - 1.0),
+            reference.device
+        );
+        save("diag", &px)?;
+        std::fs::write(out_dir.join("m10_gate2_diag.f32"), px.iter().flatten().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>())?;
+        // Where the error is: pixels whose reference exceeds 1 in a channel
+        // (highlights), and per row band.
+        let err = |a: &[f32; 3], b: &[f32; 3]| (0..3).map(|c| ((a[c] - b[c]) as f64).powi(2)).sum::<f64>();
+        let total: f64 = px.iter().zip(&reference.pixels).map(|(a, b)| err(a, b)).sum();
+        let bright: f64 = px
+            .iter()
+            .zip(&reference.pixels)
+            .filter(|(_, b)| b[0].max(b[1]).max(b[2]) > 1.0)
+            .map(|(a, b)| err(a, b))
+            .sum();
+        let n_bright = reference.pixels.iter().filter(|b| b[0].max(b[1]).max(b[2]) > 1.0).count();
+        let rest: Vec<([f32; 3], [f32; 3])> = px
+            .iter()
+            .zip(&reference.pixels)
+            .filter(|(_, b)| b[0].max(b[1]).max(b[2]) <= 1.0)
+            .map(|(a, b)| (*a, *b))
+            .collect();
+        let (ra, rb): (Vec<[f32; 3]>, Vec<[f32; 3]>) = rest.into_iter().unzip();
+        println!(
+            "highlights (reference above 1): {} pixels ({:.2}%) carry {:.1}% of the squared error; the rest is {:.2}% from Cycles; ours {:+.2}% in highlights",
+            n_bright,
+            100.0 * n_bright as f64 / px.len() as f64,
+            100.0 * bright / total,
+            100.0 * relative_rmse(&ra, &rb),
+            100.0 * {
+                let (s_o, s_r) = px.iter().zip(&reference.pixels).filter(|(_, b)| b[0].max(b[1]).max(b[2]) > 1.0)
+                    .fold((0.0f64, 0.0f64), |acc, (a, b)| (acc.0 + (a[0] + a[1] + a[2]) as f64, acc.1 + (b[0] + b[1] + b[2]) as f64));
+                s_o / s_r - 1.0
+            }
+        );
+        return Ok(());
+    }
     if std::env::var_os("M10_DEV").is_some() {
         println!("DEVELOPMENT RUN: not the gate's numbers");
         let mut r = renderer(&t, true);
