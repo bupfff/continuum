@@ -49,6 +49,10 @@ pub struct RendererOptions {
     /// every pixel traces sky cones every frame, which is far slower than
     /// lights alone.
     pub sky: Option<Vec3>,
+    /// A sky whose radiance varies with direction (M5 gate 12), in place of
+    /// `sky`: an equirectangular image above the horizon. See
+    /// [`crate::MaskConeKernel::set_environment`].
+    pub environment: Option<crate::Environment>,
     /// The cache's tuning.
     pub cache_options: CacheOptions,
     /// Anti-aliasing (experimental, M7): each pixel traces a mask cone
@@ -74,6 +78,7 @@ impl Default for RendererOptions {
             scale: 1,
             cache: true,
             sky: None,
+            environment: None,
             cache_options: CacheOptions::default(),
             pixel_cones: false,
             movable: Vec::new(),
@@ -115,6 +120,7 @@ impl Renderer {
         kernel.set_prefilter(1.0);
         kernel.set_sky_prefilter(8.0);
         kernel.set_sky(options.sky.unwrap_or(Vec3::ZERO));
+        kernel.set_environment(options.environment.as_ref());
         kernel.set_pixel_cones(options.pixel_cones);
         let inner = InstancedRenderer::with_movers(
             &kernel,
