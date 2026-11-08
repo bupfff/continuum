@@ -31,7 +31,8 @@
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path, P to pause moving objects,
-//! V to toggle vsync, Esc to quit. `--frames N` renders N frames (along the
+//! V to toggle vsync, `[` and `]` to change the exposure a stop at a time
+//! (`--exposure K` to start at K; instanced scenes), Esc to quit. `--frames N` renders N frames (along the
 //! camera path, if the scene has one), prints timings, and exits.
 
 use std::collections::HashSet;
@@ -87,6 +88,8 @@ struct World {
     environment: Option<Environment>,
     /// A glTF file's first animation, played through movable instances.
     animations: Option<continuum_gltf::Animations>,
+    /// The display's exposure (instanced scenes): `--exposure`, `[` and `]`.
+    exposure: f32,
 }
 
 /// An instanced scene with its lights and sky, positioned relative to
@@ -143,6 +146,7 @@ impl World {
             sky: false,
             environment: None,
             animations: None,
+            exposure: 1.0,
         }
     }
 
@@ -182,6 +186,7 @@ impl World {
             sky: false,
             environment: None,
             animations: None,
+            exposure: 1.0,
         }
     }
 
@@ -303,6 +308,7 @@ impl World {
             sky: false,
             environment: None,
             animations,
+            exposure: 1.0,
         }
     }
 
@@ -339,6 +345,7 @@ impl World {
             sky: false,
             environment: None,
             animations: None,
+            exposure: 1.0,
         }
     }
 
@@ -424,6 +431,13 @@ impl Backend {
         match self {
             Backend::Live(r) => r.resize(width, height),
             Backend::Instanced(r) => r.resize(width, height),
+        }
+    }
+
+    /// Sets the display's exposure (instanced scenes).
+    fn set_exposure(&mut self, factor: f32) {
+        if let Backend::Instanced(r) = self {
+            r.set_exposure(factor);
         }
     }
 
@@ -526,7 +540,7 @@ impl App {
                 movable: world.animated_instances(),
                 ..Default::default()
             };
-            let renderer = Renderer::new(
+            let mut renderer = Renderer::new(
                 kernel,
                 format,
                 (config.width, config.height),
@@ -535,6 +549,7 @@ impl App {
                 &scene.lights,
                 options,
             );
+            renderer.set_exposure(world.exposure);
             renderer.wait();
             println!(
                 "{} ({} scene): {}, {:.0} MB on the GPU ({}), ready in {:.1} s; window {}×{}, rendering at 1/{} scale; camera rays: {}.",
@@ -686,6 +701,18 @@ impl ApplicationHandler for App {
                             Some(_) => None,
                             None => Some(0.0),
                         };
+                    }
+                    // Exposure, a stop at a time (instanced scenes).
+                    let stop = match code {
+                        KeyCode::BracketRight => Some(2.0),
+                        KeyCode::BracketLeft => Some(0.5),
+                        _ => None,
+                    };
+                    if let Some(f) = stop
+                        && let Some(gpu) = &mut self.gpu
+                    {
+                        self.world.exposure *= f;
+                        gpu.backend.set_exposure(self.world.exposure);
                     }
                     if code == KeyCode::KeyV
                         && !repeat
@@ -888,6 +915,9 @@ fn main() {
     world.scale = arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1);
     world.cache = !std::env::args().any(|a| a == "--no-cache");
     world.sky = std::env::args().any(|a| a == "--sky");
+    world.exposure = arg("--exposure")
+        .and_then(|k| k.parse().ok())
+        .unwrap_or(1.0);
     if let Some(spec) = arg("--env") {
         let strength: f32 = arg("--env-strength")
             .and_then(|k| k.parse().ok())

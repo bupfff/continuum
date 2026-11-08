@@ -889,6 +889,11 @@ impl MaskConeKernel {
         &self.device
     }
 
+    /// The queue the kernel submits to.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     /// Prefiltered cones: a cone stops descending a mesh's triangle hierarchy at
     /// nodes that project to at most `bins` bins and splats their precomputed
     /// coverage instead. 0 (the default) is exact. Applies to work set up after

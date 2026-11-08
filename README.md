@@ -59,6 +59,8 @@ Controls:
 - WASD to move, Q/E down and up, Shift to move faster.
 - Drag with the left mouse button to look.
 - C plays the camera path, P pauses the moving objects.
+- `[` and `]` change the exposure a stop at a time (field and glTF scenes;
+  `--exposure K` starts at K).
 - V toggles vsync, Esc quits.
 
 The title bar shows the frame rate. `--scene room` opens the M2 test room

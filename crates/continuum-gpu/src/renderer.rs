@@ -174,6 +174,14 @@ impl Renderer {
         self.inner.encode_display(encoder, target);
     }
 
+    /// Scales the colors drawn to the target by `factor` (exposure) before
+    /// the tone curve, from the next frame: 1 by default, 2 one stop
+    /// brighter. A float target gets the scaled linear light;
+    /// [`Self::read_colors`] stays unscaled.
+    pub fn set_exposure(&mut self, factor: f32) {
+        self.inner.set_exposure(factor);
+    }
+
     /// Follows the target's new size.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.inner.resize(width, height);

@@ -355,6 +355,8 @@ pub struct InstancedRenderer {
     /// Textures are sampled for this share of a pixel's width (1: the
     /// pixel; 1/16 for references at 16×16 samples per pixel).
     footprint: f32,
+    /// The display's exposure (see `set_exposure`).
+    exposure: f32,
     /// Textures box-filtered over the pixel's footprint (M7 gate 2; the
     /// default), or isotropic trilinear (as before).
     texture_box: bool,
@@ -708,6 +710,13 @@ impl InstancedRenderer {
         self.pixel_offset = [dx, dy];
     }
 
+    /// Scales the colors drawn to the target by `factor` before the tone
+    /// curve (1 by default; a float target gets them scaled, linear) from
+    /// the next frame. `read_colors` stays unscaled.
+    pub fn set_exposure(&mut self, factor: f32) {
+        self.exposure = factor.max(0.0);
+    }
+
     /// Textures are sampled at the footprint of `share` of a pixel's width
     /// from the next frame (1 by default): for references that average
     /// `n × n` sub-pixel samples, `1 / n`, as at `n` times the resolution.
@@ -986,6 +995,7 @@ impl InstancedRenderer {
             ),
             pixel_offset: [0.0; 2],
             footprint: 1.0,
+            exposure: 1.0,
             texture_box: true,
             movers,
             moving: moving_lights.to_vec(),
@@ -1246,6 +1256,7 @@ impl InstancedRenderer {
         let dims = DisplayDims {
             size: [self.width, self.height],
             flags: [self.display_mode(), self.scale],
+            exposure: [self.exposure, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
@@ -1319,6 +1330,7 @@ impl InstancedRenderer {
         let dims = DisplayDims {
             size: [self.width, self.height],
             flags: [self.display_mode(), self.scale],
+            exposure: [self.exposure, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));

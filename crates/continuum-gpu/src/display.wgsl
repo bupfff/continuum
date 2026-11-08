@@ -9,6 +9,9 @@ struct Dims {
     // gamma here, 2 linear light (float targets, which an engine tone-maps);
     // y: the render scale (window pixels per rendered pixel; 0 means 1)
     flags: vec2<u32>,
+    // x: the exposure, a factor on the colors before the tone curve (0
+    // means 1).
+    exposure: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> colors: array<vec4<f32>>;
@@ -23,7 +26,7 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = min(vec2<u32>(pos.xy) / max(dims.flags.y, 1u), dims.size - vec2<u32>(1u));
-    let c = colors[p.y * dims.size.x + p.x].rgb;
+    let c = colors[p.y * dims.size.x + p.x].rgb * select(1.0, dims.exposure.x, dims.exposure.x > 0.0);
     if (dims.flags.x == 2u) {
         return vec4<f32>(c, 1.0);
     }

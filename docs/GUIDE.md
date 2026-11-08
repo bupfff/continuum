@@ -160,10 +160,11 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 - **On DX12, wgpu needs DXC** (`dxcompiler.dll` on the path and
   `WGPU_DX12_COMPILER=dxc`, or wgpu's `static-dxc` feature); CI uses it.
   The older FXC compiler is untested.
-- **No exposure control.** `Renderer::read_colors` returns linear light as
-  it is. Drawn to a window, colors go through a fixed Reinhard curve; a
-  float target (such as Bevy's HDR) gets linear light for the engine's own
-  tone mapping.
+- **Exposure only, no tone-curve choice.** `Renderer::set_exposure`
+  scales what is drawn (1 by default); colors then go through a fixed
+  Reinhard curve, or reach a float target (such as Bevy's HDR) as scaled
+  linear light for the engine's own tone mapping. `Renderer::read_colors`
+  returns linear light, unscaled.
 
 ## Setup
 

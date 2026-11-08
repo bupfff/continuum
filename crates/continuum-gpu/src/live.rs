@@ -20,6 +20,8 @@ use continuum::mesh::Surface;
 pub(crate) struct DisplayDims {
     pub size: [u32; 2],
     pub flags: [u32; 2],
+    /// x: the exposure (0: 1).
+    pub exposure: [f32; 4],
 }
 
 /// The pass that tonemaps the colors buffer into a surface texture.
@@ -1024,6 +1026,7 @@ impl LiveRenderer {
         let dims = DisplayDims {
             size: [self.width, self.height],
             flags: [!self.srgb as u32, 0],
+            exposure: [1.0, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));

@@ -574,6 +574,108 @@ fn metallic_roughness_texture_multiplies_the_factors() {
     );
 }
 
+/// Exposure scales what is drawn, before the tone curve: on a float target
+/// (linear light), the target holds the colors times the factor, while
+/// `read_colors` stays unscaled.
+#[test]
+fn exposure_scales_the_drawn_colors() {
+    let s = scene(DVec3::ZERO);
+    let format = wgpu::TextureFormat::Rgba32Float;
+    let mut r = Renderer::new(
+        kernel(),
+        format,
+        (WIDTH, HEIGHT),
+        &s,
+        DVec3::ZERO,
+        &lights(),
+        RendererOptions::default(),
+    );
+    let device = r.kernel().device().clone();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("float target"),
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut frames = 0;
+    while frames < 2_000 && !r.is_settled(32) {
+        r.render(camera(), &view);
+        frames += 1;
+    }
+    let drawn = |r: &mut Renderer, exposure: f32| -> Vec<f32> {
+        r.set_exposure(exposure);
+        r.render(camera(), &view);
+        let queue = r.kernel().queue().clone();
+        let bytes = (WIDTH * HEIGHT * 16) as u64;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(WIDTH * 16),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap();
+        data.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect()
+    };
+    let one = drawn(&mut r, 1.0);
+    let colors = r.read_colors();
+    let two = drawn(&mut r, 2.0);
+    let unscaled = r.read_colors();
+    let mut worst = (0.0f32, 0.0f32, 0.0f32);
+    for (k, c) in colors.iter().enumerate() {
+        for ch in 0..3 {
+            let (a, b) = (one[4 * k + ch], two[4 * k + ch]);
+            worst.0 = worst.0.max((a - c[ch]).abs());
+            worst.1 = worst.1.max((b - 2.0 * a).abs());
+            worst.2 = worst.2.max((unscaled[k][ch] - c[ch]).abs());
+        }
+    }
+    eprintln!(
+        "exposure: worst |drawn − colors| {}, |2× − twice| {}, read_colors change {}",
+        worst.0, worst.1, worst.2
+    );
+    assert!(
+        worst.0 < 1e-6 && worst.1 < 1e-6 && worst.2 < 1e-6,
+        "{worst:?}"
+    );
+    assert!(
+        colors.iter().flatten().any(|&c| c > 0.05),
+        "the image is dark"
+    );
+}
+
 /// sRGB byte `b` decoded to linear, as the kernel decodes vertex colors.
 fn srgb(b: u8) -> f32 {
     let s = b as f32 / 255.0;
