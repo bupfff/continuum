@@ -174,6 +174,53 @@ fn main() -> std::io::Result<()> {
         }
         image.save(&out_dir.join(format!("m10_gate14_{name}.png")))
     };
+    if std::env::var("M10_DEV").as_deref() == Ok("ss") {
+        // Diagnosis after the gate: where ours and Cycles differ.
+        println!("DIAGNOSTIC RUN: not the gate's numbers");
+        let mut r = renderer(true);
+        settle(&mut r, t.camera, &target);
+        let ours = supersampled(&mut r, t.camera, &target);
+        let reference = render_instanced_lights(
+            &t.scene,
+            t.origin,
+            &t.lights,
+            t.sky,
+            t.camera,
+            (W, H),
+            4096,
+            1,
+            1,
+            &out_dir.join("m10_gate14_cycles"),
+        )?;
+        let bright = |p: &[f32; 3]| p.iter().cloned().fold(0.0f32, f32::max) > 1.0;
+        let (mut se_b, mut se_r, mut n_b, mut sum_o, mut sum_c) =
+            (0.0f64, 0.0f64, 0usize, 0.0f64, 0.0f64);
+        for (o, c) in ours.iter().zip(&reference.pixels) {
+            let d: f64 = (0..3).map(|k| ((o[k] - c[k]) as f64).powi(2)).sum();
+            if bright(c) && c.iter().all(|&x| x < 8.0) {
+                se_b += d;
+                n_b += 1;
+                sum_o += (o[0] + o[1] + o[2]) as f64;
+                sum_c += (c[0] + c[1] + c[2]) as f64;
+            } else {
+                se_r += d;
+            }
+        }
+        println!(
+            "sign-bright pixels (Cycles above 1, below 8): {n_b}, {:.1}% of the squared error; ours/Cycles over them {:.4}; the rest {:.1}%",
+            100.0 * se_b / (se_b + se_r),
+            sum_o / sum_c,
+            100.0 * se_r / (se_b + se_r)
+        );
+        std::fs::write(
+            out_dir.join("m10_gate14_ours.f32"),
+            ours.iter()
+                .flatten()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        )?;
+        return Ok(());
+    }
     if std::env::var_os("M10_DEV").is_some() {
         println!("DEVELOPMENT RUN: not the gate's numbers");
         let mut r = renderer(true);

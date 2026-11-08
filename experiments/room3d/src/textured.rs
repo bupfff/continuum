@@ -524,7 +524,13 @@ impl Textured {
     /// sign: a double-sided panel 1.2 m wide and 0.9 m tall standing 5 m
     /// ahead, its emission (4, 4, 4) times an emissive texture of three
     /// vertical stripes (red, green, blue) between dark margins.
-    pub fn with_sign(mut self) -> Textured {
+    pub fn with_sign(self) -> Textured {
+        self.with_sign_sided(true)
+    }
+
+    /// `with_sign`, its back faces left out when not `double_sided` (M10
+    /// gate 15: Cycles lights a sign from its coincident back faces).
+    pub fn with_sign_sided(mut self, double_sided: bool) -> Textured {
         self.lights = Self::night_lights().to_vec();
         self.sky *= 0.02;
         let (w, h) = (1.2f32, 0.9f32);
@@ -542,7 +548,12 @@ impl Textured {
         ];
         // Front faces toward -y (the camera), back faces toward +y.
         let (mut tris, mut tex) = (Vec::new(), Vec::new());
-        for [a, b, c] in [[0, 1, 2], [0, 2, 3], [0, 2, 1], [0, 3, 2]] {
+        let faces: &[[usize; 3]] = if double_sided {
+            &[[0, 1, 2], [0, 2, 3], [0, 2, 1], [0, 3, 2]]
+        } else {
+            &[[0, 1, 2], [0, 2, 3]]
+        };
+        for &[a, b, c] in faces {
             tris.push([p[a], p[b], p[c]]);
             tex.push([uv[a], uv[b], uv[c]]);
         }
