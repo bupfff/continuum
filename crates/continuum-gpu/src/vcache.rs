@@ -155,7 +155,9 @@ pub struct CacheOptions {
     /// first, its sky shown as the open sky over each pixel's normal until a
     /// later frame bakes the sky alone, within what the budget leaves after
     /// new pages. Sun shadows arrive about 11× sooner; the converged cache
-    /// is the same. Pages for bounce light's hits bake whole.
+    /// is the same. Ignored with bounce light (its samples keep whatever
+    /// coarser pages they find, so another bake order settles differently),
+    /// movers or moving lights.
     pub sky_later: bool,
     /// Experiments only. Each light's texels hold the shadowed share of its
     /// unshadowed light,
@@ -2122,6 +2124,7 @@ impl VirtualCache {
                 map.get_mut(&moved).expect("resident page").1 = i;
             });
             self.slot_key[slot as usize] = [EMPTY; 3];
+            self.sky_due.remove(&slot);
             self.free.push(slot);
             freed += 1;
         }
@@ -2152,9 +2155,9 @@ impl VirtualCache {
 
     /// Chooses the frame's pages from the requested ones (each listed once by
     /// the shader, with its priority), within the bake budget.
-    /// Lists page `k` (entry `index`) for its sky samples, as the plan
-    /// does; their count.
-    fn push_sky_samples(&mut self, index: u32, k: [u32; 3]) -> u32 {
+    /// Page `k`'s texels listed along each axis, its sky stride, and its sky
+    /// samples, as the plan lists them.
+    fn sky_layout(&self, k: [u32; 3]) -> ([u32; 2], u32, u32) {
         let (m, c, mip, page) = unpack(k);
         let n = self.grid(c, m, mip).map(|x| x + 1);
         let inside = [
@@ -2163,7 +2166,13 @@ impl VirtualCache {
         ];
         let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
         let stride = self.sky_stride(m, mip);
-        let samples = listed[0].div_ceil(stride) * listed[1].div_ceil(stride);
+        (listed, stride, listed[0].div_ceil(stride) * listed[1].div_ceil(stride))
+    }
+
+    /// Lists page `k` (entry `index`) for its sky samples, as the plan
+    /// does; their count.
+    fn push_sky_samples(&mut self, index: u32, k: [u32; 3]) -> u32 {
+        let (listed, stride, samples) = self.sky_layout(k);
         let first = self.sky_samples.len() as u32;
         for y in (0..listed[1]).step_by(stride as usize) {
             for x in (0..listed[0]).step_by(stride as usize) {
@@ -2208,8 +2217,17 @@ impl VirtualCache {
         }
         order.sort_unstable();
         let mut evicted_now = false;
+        // The sky later (M5 gate 9): not with movers or moving lights, whose
+        // passes use the same sky guess, nor with bounce light, whose
+        // samples keep the coarser pages they find, so a different bake
+        // order would settle to a different image.
+        let sky_later = self.sky
+            && self.options.sky_later
+            && self.append_pages == 0
+            && !self.options.indirect;
         for (priority, k) in order {
             let secondary = priority & SECONDARY != 0;
+            let later = sky_later && !secondary;
             // A fingerprint collision can list a page twice.
             if self.map.contains_key(&k) {
                 continue;
@@ -2230,7 +2248,7 @@ impl VirtualCache {
             // grid is a rounding larger; it skips texels outside its own.
             let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
             let stride = self.sky_stride(m, mip);
-            let samples = if self.sky {
+            let samples = if self.sky && !later {
                 listed[0].div_ceil(stride) * listed[1].div_ceil(stride)
             } else {
                 0
@@ -2265,10 +2283,11 @@ impl VirtualCache {
             self.bake_list.push([k[0], k[1], k[2], slot]);
             let b = self.page_bounds(m, c, mip, page);
             self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
-            // w 1: no bounce samples planned (the fill clears the slot's).
+            // w 1: no bounce samples planned (the fill clears the slot's);
+            // w 2: lights only, the sky a guess until it is baked alone.
             let bare = self.options.indirect && secondary;
-            self.bake_bounds
-                .push([b[4], b[5], b[6], bare as u32 as f32]);
+            let kind = if later { 2.0 } else { bare as u32 as f32 };
+            self.bake_bounds.push([b[4], b[5], b[6], kind]);
             // Light by light, so neighbouring invocations trace one light.
             for l in 0..self.lights {
                 for y in 0..listed[1] {
@@ -2279,12 +2298,19 @@ impl VirtualCache {
             }
             if self.sky {
                 let first = self.sky_samples.len() as u32;
-                for y in (0..listed[1]).step_by(stride as usize) {
-                    for x in (0..listed[0]).step_by(stride as usize) {
-                        self.sky_samples.push([index, y * STRIDE + x]);
+                if !later {
+                    for y in (0..listed[1]).step_by(stride as usize) {
+                        for x in (0..listed[0]).step_by(stride as usize) {
+                            self.sky_samples.push([index, y * STRIDE + x]);
+                        }
                     }
                 }
                 self.page_sky.push([first, samples | stride << 24]);
+            }
+            // Its sky alone from the next frame: in this one the fill would
+            // race the guess's mark against the sky's clearing it.
+            if later {
+                self.sky_due.insert(slot, self.frame + 1);
             }
             if self.options.indirect && !secondary {
                 for k in 0..INDIRECT_SAMPLES {
@@ -2294,23 +2320,33 @@ impl VirtualCache {
             self.texels += inside[0] * inside[1];
             self.spent += cost;
         }
-        // Skies to re-bake for movers, once due, within what is left.
+        // Skies to re-bake alone (for movers, and pages baked with the sky
+        // later), once due, within what is left of the budget.
         if self.sky && !self.sky_due.is_empty() {
-            let due: Vec<u32> = self
+            let mut due: Vec<(u32, u32)> = self
                 .sky_due
                 .iter()
                 .filter(|&(_, &d)| d <= self.frame)
-                .map(|(&s, _)| s)
+                .map(|(&s, &d)| (d, s))
                 .collect();
-            for slot in due {
+            // Oldest first, then by slot: the same order every run.
+            due.sort_unstable();
+            for (_, slot) in due {
                 if self.spent >= budget || self.bake_list.len() >= budget as usize {
                     break;
                 }
-                self.sky_due.remove(&slot);
                 let k = self.slot_key[slot as usize];
                 if k[0] == EMPTY {
+                    self.sky_due.remove(&slot);
                     continue;
                 }
+                // Only within the budget (M5 gate 9: a sky that does not fit
+                // waits, as a new page's would).
+                let cost = self.sky_layout(k).2 * self.options.sky_sample_cost;
+                if self.spent + cost > budget && !self.bake_list.is_empty() {
+                    break;
+                }
+                self.sky_due.remove(&slot);
                 let (m, c, mip, page) = unpack(k);
                 let index = self.bake_list.len() as u32;
                 self.bake_list.push([k[0], k[1], k[2], slot]);

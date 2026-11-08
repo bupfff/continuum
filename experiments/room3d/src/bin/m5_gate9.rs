@@ -11,8 +11,11 @@
 //! normal (the guess M9 gate 3 already shows on moved pages), and listed to
 //! have its sky baked alone from the next frame, within what each frame's
 //! budget leaves after new pages. Sun shadows arrive about 11× sooner; the
-//! sky follows. Bounce samples treat a page whose sky is a guess as missing.
-//! The converged cache is the same.
+//! sky follows. The converged cache is the same. (Ignored with bounce light,
+//! decided in development after this binary's first commit: bounce samples
+//! keep whatever coarser pages they find, so another bake order settles to
+//! an image about 2% different on the library's test scene. This gate's
+//! scene has no bounce light.)
 //!
 //! Scene: the million-boulder field (sun 3 km, `Field::sky`), M5 gate 5's
 //! four viewpoints at 1280×720, cache defaults except a fixed bake budget of
@@ -37,9 +40,21 @@
 //!
 //! Reported, not gated: the share of pixels shown with fallback (no page,
 //! or a guessed sky) averaged over the same frames; the frames until the
-//! image is within 5% of the reference.
+//! image is within 5% of the reference; sky samples and pages baked until
+//! warm.
+//!
+//! Changed after this binary's first commit, before any full-size run: the
+//! skies re-baked alone (M9 gate 3's queue, which the sky later uses) now
+//! stay within the frame's budget; before, a frame could overshoot it by one
+//! page's sky, which would have favoured the sky later here. Also the
+//! development mode and the reported totals. A development run (100,000
+//! boulders, standing) passed every criterion: 0.17× the error while
+//! warming, 0.65× the frames.
 //!
 //! `cargo run --release -p room3d --bin m5_gate9`
+//!
+//! `M5_DEV=1`: a development check on 100,000 boulders at the standing
+//! viewpoint alone, whose numbers are not the gate's.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -62,6 +77,9 @@ struct WarmUp {
     frames: Option<usize>,
     image: Vec<[f32; 3]>,
     samples: Vec<(usize, f64, f64)>,
+    /// Sky samples and pages baked until warm.
+    sky: u64,
+    pages: u64,
 }
 
 fn warm_up(
@@ -93,10 +111,13 @@ fn warm_up(
         }
     }
     r.finish();
+    let log = r.cache_log();
     WarmUp {
         frames,
         image: r.read_colors(),
         samples,
+        sky: log.iter().map(|s| s.sky_samples as u64).sum(),
+        pages: log.iter().map(|s| s.pages_baked as u64).sum(),
     }
 }
 
@@ -110,7 +131,11 @@ fn main() -> std::io::Result<()> {
     kernel.set_prefilter(1.0);
     kernel.set_sky_prefilter(SKY_PREFILTER);
     kernel.set_hardware_rays(true);
-    let field = Field::new(1_000_000, DVec3::ZERO);
+    let dev = std::env::var_os("M5_DEV").is_some();
+    if dev {
+        println!("DEVELOPMENT RUN: 100,000 boulders, standing only; not the gate's numbers");
+    }
+    let field = Field::new(if dev { 100_000 } else { 1_000_000 }, DVec3::ZERO);
     let origin = field.origin_near_camera();
     let (ground, light) = field.relative(origin);
     kernel.set_sky(field.sky());
@@ -175,7 +200,7 @@ fn main() -> std::io::Result<()> {
         writeln!(report, "{line}").unwrap();
     };
     let mut pass = [true; 3];
-    for (name, camera) in views {
+    for (name, camera) in views.into_iter().take(if dev { 1 } else { 4 }) {
         let reference = warm_up(&mut cached(false), camera, &target, None);
         let Some(base_frames) = reference.frames else {
             say(format!("{name}: the baseline never warmed: FAIL"));
@@ -214,7 +239,7 @@ fn main() -> std::io::Result<()> {
         pass[2] &= c3;
         let verdict = |c: bool| if c { "PASS" } else { "FAIL" };
         say(format!(
-            "{name}: 1. same result {:.4}% (at most 0.1%): {}; 2. frames until warm {} against {} ({:.2}×, at most 1.2×; the baseline's second run {}): {}; 3. mean error while warming {:.2}% against {:.2}% ({:.2}×, at most 0.5×): {}; reported: fallback {:.1}% against {:.1}%, within 5% at frame {} against {}",
+            "{name}: 1. same result {:.4}% (at most 0.1%): {}; 2. frames until warm {} against {} ({:.2}×, at most 1.2×; the baseline's second run {}): {}; 3. mean error while warming {:.2}% against {:.2}% ({:.2}×, at most 0.5×): {}; reported: fallback {:.1}% against {:.1}%, within 5% at frame {} against {}, sky samples {} against {}, pages baked {} against {}",
             100.0 * same,
             verdict(c1),
             later.frames.map_or("never".into(), |f| f.to_string()),
@@ -230,6 +255,10 @@ fn main() -> std::io::Result<()> {
             100.0 * mean(&base, |s| s.2),
             within(&later),
             within(&base),
+            later.sky,
+            base.sky,
+            later.pages,
+            base.pages,
         ));
     }
     let verdict = |c: bool| if c { "PASS" } else { "FAIL" };
@@ -240,6 +269,8 @@ fn main() -> std::io::Result<()> {
         verdict(pass[2]),
         verdict(pass.iter().all(|&p| p))
     ));
-    std::fs::write(out_dir.join("m5_gate9.txt"), report)?;
+    if !dev {
+        std::fs::write(out_dir.join("m5_gate9.txt"), report)?;
+    }
     Ok(())
 }

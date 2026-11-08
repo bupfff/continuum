@@ -887,3 +887,49 @@ fn bounce_light_settles_and_recolors_free() {
         "re-coloring a light made the cache bake"
     );
 }
+
+/// With the sky later (M5 gate 9), pages bake their lights first and their
+/// sky alone afterwards. Settled, the cache shows the same image as baking
+/// each page whole; with bounce light the option is ignored.
+#[test]
+fn sky_later_settles_to_the_same_image() {
+    let s = scene(DVec3::ZERO);
+    let settle = |sky_later: bool, indirect: bool| {
+        let mut r = renderer(
+            kernel(),
+            &s,
+            DVec3::ZERO,
+            RendererOptions {
+                sky: Some(SKY),
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    bake_budget: 4_000,
+                    pages: 1 << 15,
+                    indirect,
+                    sky_later,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 4_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        assert!(r.is_settled(32), "not settled after {frames} frames");
+        (r.read_colors(), frames)
+    };
+    for indirect in [false, true] {
+        let (whole, whole_frames) = settle(false, indirect);
+        let (later, later_frames) = settle(true, indirect);
+        let d = difference(&later, &whole);
+        eprintln!("bounce {indirect}: settled in {whole_frames} and {later_frames} frames; {d:?}");
+        assert_finite_and_lit(&later);
+        // Bounce light's samples depend on what is resident when they are
+        // baked, which varies run to run (about 2e-4 here).
+        let bound = if indirect { 2e-3 } else { 1e-4 };
+        assert!(d.relative_rmse < bound, "bounce {indirect}: {d:?}");
+    }
+}
