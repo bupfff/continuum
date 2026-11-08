@@ -12,6 +12,10 @@ const W: u32 = 1280;
 const H: u32 = 720;
 const FLIGHT: usize = 600;
 
+/// A profiled frame: its index, total bake time, and each bake pass's label
+/// and time (ms).
+type Row = (usize, f64, Vec<(&'static str, f64)>);
+
 fn main() {
     let work = std::env::args().any(|a| a == "work");
     let kernel = if work {
@@ -75,7 +79,7 @@ fn main() {
             origin,
             CacheOptions::default(),
         );
-        let mut rows: Vec<(usize, f64, Vec<(&'static str, f64)>)> = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
         for f in 0..FLIGHT {
             let p = r.frame_profiled(camera(f), &target);
             let passes: Vec<(&'static str, f64)> = p
