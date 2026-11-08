@@ -112,6 +112,7 @@ mod instanced;
 mod lightmap;
 mod live;
 mod renderer;
+mod tangents;
 mod vcache;
 
 pub use cutout::cut_out;
@@ -1141,12 +1142,32 @@ impl MaskConeKernel {
             hierarchy::NONE
         };
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let normals: Vec<[f32; 4]> = scene
-            .geometries
-            .iter()
-            .flat_map(|g| g.normals.iter().flatten().map(|&n| v4(n)))
-            .chain(std::iter::once([0.0; 4]))
-            .collect();
+        // Per triangle corner, its shading normal, and in w its MikkTSpace
+        // tangent's code where the geometry has a normal map (M10 gate 13;
+        // 0: none).
+        let mut normals: Vec<[f32; 4]> = Vec::new();
+        for (g, geometry) in scene.geometries.iter().enumerate() {
+            let mapped = scene
+                .geometry_normal_maps
+                .get(g)
+                .copied()
+                .flatten()
+                .is_some()
+                && geometry.tex.len() == geometry.triangles.len()
+                && geometry.normals.len() == geometry.triangles.len();
+            let tangents = (self.mikktspace.get() && mapped)
+                .then(|| tangents::mikktspace(geometry))
+                .flatten();
+            for (t, corners) in geometry.normals.iter().enumerate() {
+                for (k, n) in corners.iter().enumerate() {
+                    let w = tangents
+                        .as_ref()
+                        .map_or(0.0, |ts| tangents::encode(ts[t][k]));
+                    normals.push([n.x, n.y, n.z, w]);
+                }
+            }
+        }
+        normals.push([0.0; 4]);
         let albedo: Vec<[f32; 4]> = scene.instances.iter().map(|i| v4(i.albedo)).collect();
         // Per object, its texture layer (NONE: none), then per object its
         // emission as two words of half floats (for bounce samples, which

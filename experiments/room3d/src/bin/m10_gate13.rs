@@ -192,12 +192,12 @@ fn main() -> std::io::Result<()> {
     let verdict = |c: bool| if c { "PASS" } else { "FAIL" };
 
     // 2. Speed, first.
-    let mut dark = renderer(false);
-    let own_frames = settle(&mut dark, t.camera, &target);
-    let own_warm = warm(&mut dark, t.camera, &target);
-    let mut glow = renderer(true);
-    let mikk_frames = settle(&mut glow, t.camera, &target);
-    let mikk_warm = warm(&mut glow, t.camera, &target);
+    let mut own = renderer(false);
+    let own_frames = settle(&mut own, t.camera, &target);
+    let own_warm = warm(&mut own, t.camera, &target);
+    let mut mikk = renderer(true);
+    let mikk_frames = settle(&mut mikk, t.camera, &target);
+    let mikk_warm = warm(&mut mikk, t.camera, &target);
     let c2 = ms(mikk_warm) <= 1.1 * ms(own_warm);
     say(format!(
         "2. speed: warm {:.2} ms with MikkTSpace tangents, {:.2} ms with triangles' frames ({:.2}×, at most 1.1×); settled in {mikk_frames} and {own_frames} frames: {}",
@@ -208,8 +208,8 @@ fn main() -> std::io::Result<()> {
     ));
 
     // 1. Accuracy against Cycles.
-    let with = supersampled(&mut glow, t.camera, &target);
-    let without = supersampled(&mut dark, t.camera, &target);
+    let with = supersampled(&mut mikk, t.camera, &target);
+    let without = supersampled(&mut own, t.camera, &target);
     let reference = render_instanced_lights(
         &t.scene,
         t.origin,

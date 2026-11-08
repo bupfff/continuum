@@ -1616,6 +1616,21 @@ fn mapped_normal(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir:
     tangent = normalize(tangent);
     var bitangent = cross(n, tangent);
     if (dot(bitangent, dpdv) > 0.0) { bitangent = -bitangent; }
+    // MikkTSpace's tangents where the geometry has them (M10 gate 13):
+    // interpolated, kept orthogonal to the normal; the bitangent is the
+    // handedness times normal × tangent, as glTF specifies.
+    let c0 = normals[3u * t].w;
+    let c1 = normals[3u * t + 1u].w;
+    let c2 = normals[3u * t + 2u].w;
+    if (c0 != 0.0 && c1 != 0.0 && c2 != 0.0) {
+        let k0 = decode_tangent(c0);
+        var mt = normal_to_world(m, k0.xyz * b.x + decode_tangent(c1).xyz * b.y + decode_tangent(c2).xyz * b.z);
+        mt -= n * dot(n, mt);
+        if (dot(mt, mt) > 1e-20) {
+            tangent = normalize(mt);
+            bitangent = cross(n, tangent) * k0.w;
+        }
+    }
     // A texel's size on the surface, and the pixel's footprint there.
     let size = f32(textureDimensions(normal_maps).x);
     let scale = object_scale(m);
@@ -1629,6 +1644,21 @@ fn mapped_normal(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir:
     let bent = tangent * s.x + bitangent * s.y + n * s.z;
     if (dot(bent, bent) < 1e-12) { return n; }
     return normalize(bent);
+}
+
+// A tangent and handedness from its code in the normals' w (M10 gate 13):
+// octahedral coordinates at 11 bits each, plus one, as an exact integer, its
+// sign the handedness.
+fn decode_tangent(code: f32) -> vec4<f32> {
+    let a = abs(code) - 1.0;
+    let qu = floor(a / 2048.0);
+    let qv = a - qu * 2048.0;
+    let p = vec2<f32>(qu, qv) / 2047.0 * 2.0 - vec2<f32>(1.0);
+    var d = vec3<f32>(p, 1.0 - abs(p.x) - abs(p.y));
+    if (d.z < 0.0) {
+        d = vec3<f32>((1.0 - abs(d.y)) * select(-1.0, 1.0, d.x >= 0.0), (1.0 - abs(d.x)) * select(-1.0, 1.0, d.y >= 0.0), d.z);
+    }
+    return vec4<f32>(normalize(d), sign(code));
 }
 
 // The surface's color at world point `p` on triangle `t` of object `m`: its
