@@ -1185,6 +1185,18 @@ impl MaskConeKernel {
                 }
             })
             .collect();
+        // A geometry's emissive texture's layer in the base color array, plus
+        // one (0: none; M10 gate 14).
+        let emissive_of = |i: &Instance| {
+            let g = &scene.geometries[i.geometry];
+            scene
+                .geometry_emissive_textures
+                .get(i.geometry)
+                .copied()
+                .flatten()
+                .filter(|_| g.tex.len() == g.triangles.len())
+                .map_or(0, |t| t + 1)
+        };
         for i in &scene.instances {
             let e = scene
                 .geometry_emission
@@ -1193,7 +1205,7 @@ impl MaskConeKernel {
                 .unwrap_or(Vec3::ZERO)
                 .to_array()
                 .map(half_bits);
-            object_textures.extend([e[0] | e[1] << 16, e[2]]);
+            object_textures.extend([e[0] | e[1] << 16, e[2] | emissive_of(i) << 16]);
         }
         // Per object, its material: metallic and roughness (roughness below
         // zero: Lambertian), and its emission as half floats.
@@ -1210,7 +1222,7 @@ impl MaskConeKernel {
         let materials: Vec<[u32; 4]> = scene
             .instances
             .iter()
-            .map(|i| -> [u32; 5] {
+            .map(|i| -> [u32; 6] {
                 // Its normal map's and metallic-roughness texture's
                 // layers plus one (0: none).
                 let layer = layer_of(&scene.geometry_normal_maps, i);
@@ -1233,10 +1245,11 @@ impl MaskConeKernel {
                     e[0] | e[1] << 16,
                     e[2] | layer << 16,
                     mr,
+                    emissive_of(i),
                 ]
             })
-            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0, 0]))
-            .flat_map(|[a, b, c, d, mr]| [[a, b, c, d], [mr, 0, 0, 0]])
+            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0, 0, 0]))
+            .flat_map(|[a, b, c, d, mr, glow]| [[a, b, c, d], [mr, glow, 0, 0]])
             .collect();
         let mut tex: Vec<[f32; 2]> = Vec::new();
         for g in &scene.geometries {

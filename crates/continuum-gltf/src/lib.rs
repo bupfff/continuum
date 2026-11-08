@@ -28,6 +28,9 @@
 //! - A normal texture, through the same texture coordinates as the base
 //!   color (or alone), becomes the geometry's normal map
 //!   (`InstancedScene::geometry_normal_maps`; its scale is ignored).
+//! - An emissive texture, through the same texture coordinates as the base
+//!   color (or alone), becomes the geometry's emissive texture
+//!   (`InstancedScene::geometry_emissive_textures`, M10 gate 14; not saved).
 //! - The emissive factor, times `KHR_materials_emissive_strength`, becomes
 //!   the geometry's emission (`InstancedScene::geometry_emission`; emissive
 //!   textures are not imported).
@@ -161,6 +164,7 @@ type GeometryKey = (
     Option<u32>,
     Option<u32>,
     bool,
+    Option<u32>,
 );
 
 /// One primitive's geometry before placement.
@@ -177,6 +181,8 @@ struct Primitive {
     normal_map: Option<u32>,
     /// Its metallic-roughness texture's index in the scene's textures.
     metallic_roughness: Option<u32>,
+    /// Its emissive texture's index in the scene's textures (M10 gate 14).
+    emissive_texture: Option<u32>,
     /// Its alpha cutoff (over its base color texture's alpha).
     alpha_cutoff: Option<f32>,
     key: GeometryKey,
@@ -303,6 +309,27 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     });
                 }
             }
+            // The emissive texture (sRGB), likewise (M10 gate 14).
+            let mut emissive_texture = None;
+            if let Some(info) = material.emissive_texture()
+                && (texcoords.is_none() || info.tex_coord() == tex_set)
+            {
+                if texcoords.is_none()
+                    && let Some(t) = reader.read_tex_coords(info.tex_coord())
+                {
+                    texcoords = Some(t.into_f32().map(Vec2::from_array).collect());
+                    tex_set = info.tex_coord();
+                }
+                if texcoords.is_some() {
+                    let image = info.texture().source().index();
+                    emissive_texture = *texture_of_image[image].get_or_insert_with(|| {
+                        to_rgba(&images[image]).map(|t| {
+                            textures.push(t);
+                            textures.len() as u32 - 1
+                        })
+                    });
+                }
+            }
             // The metallic-roughness texture, likewise.
             let mut metallic_roughness = None;
             if let Some(info) = pbr.metallic_roughness_texture()
@@ -371,6 +398,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 emission,
                 normal_map,
                 metallic_roughness,
+                emissive_texture,
                 alpha_cutoff,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
@@ -386,6 +414,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     metallic_roughness,
                     alpha_cutoff.map(f32::to_bits),
                     double_sided,
+                    emissive_texture,
                 ),
                 geometry: usize::MAX,
             });
@@ -425,6 +454,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             scene.geometry_normal_maps.push(p.normal_map);
             scene.geometry_metallic_roughness.push(p.metallic_roughness);
             scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
+            scene.geometry_emissive_textures.push(p.emissive_texture);
         }
     }
     // Nodes, with world matrices.
@@ -632,6 +662,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_normal_maps.push(p.normal_map);
     scene.geometry_metallic_roughness.push(p.metallic_roughness);
     scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
+    scene.geometry_emissive_textures.push(p.emissive_texture);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,

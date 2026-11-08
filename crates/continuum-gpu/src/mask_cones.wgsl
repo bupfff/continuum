@@ -1582,6 +1582,14 @@ fn bounce_emission(m: u32) -> vec3<f32> {
     if (i + 1u >= arrayLength(&object_texture)) { return vec3<f32>(0.0); }
     return vec3<f32>(unpack2x16float(object_texture[i]), unpack2x16float(object_texture[i + 1u]).x);
 }
+
+// `bounce_emission` times its emissive texture at `p` on triangle `t`
+// (M10 gate 14), read for `footprint` world units.
+fn bounce_emission_at(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
+    let i = arrayLength(&object_texture) / 3u + 2u * m;
+    if (i + 1u >= arrayLength(&object_texture)) { return vec3<f32>(0.0); }
+    return emission_textured(m, t, p, bounce_emission(m), object_texture[i + 1u] >> 16u, footprint);
+}
 @group(0) @binding(58) var<storage, read> tri_tex: array<vec2<f32>>;
 // Linear textures: normal maps (M10 gate 5) and metallic-roughness
 // textures, a layer each; objects name theirs in `materials`.
@@ -2598,6 +2606,32 @@ fn material_of(m: u32) -> vec2<f32> {
 fn emission_of(m: u32) -> vec3<f32> {
     let v = materials[2u * m];
     return vec3<f32>(unpack2x16float(v.z), unpack2x16float(v.w).x);
+}
+
+// Object `m`'s emission at world point `p` on triangle `t`: its factor times
+// its emissive texture (layer plus one `layer`, 0: none; M10 gate 14) read
+// for a footprint of `footprint` world units.
+fn emission_textured(m: u32, t: u32, p: vec3<f32>, factor: vec3<f32>, layer: u32, footprint: f32) -> vec3<f32> {
+    if (layer == 0u || max(factor.x, max(factor.y, factor.z)) <= 0.0) { return factor; }
+    let b = barycentric(m, t, p);
+    let t0 = tri_tex[3u * t];
+    let t1 = tri_tex[3u * t + 1u];
+    let t2 = tri_tex[3u * t + 2u];
+    let uv = t0 * b.x + t1 * b.y + t2 * b.z;
+    let size = f32(textureDimensions(base_color).x);
+    let v0 = tris[3u * t].xyz;
+    let scale = object_scale(m);
+    let world_area = 0.5 * length(cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0)) * scale * scale;
+    let e1 = (t1 - t0) * size;
+    let e2 = (t2 - t0) * size;
+    let texel = sqrt(world_area / max(0.5 * abs(e1.x * e2.y - e1.y * e2.x), 1e-12));
+    let lod = log2(max(footprint / max(texel, 1e-12), 1e-6));
+    return factor * textureSampleLevel(base_color, base_sampler, uv, i32(layer - 1u), lod).xyz;
+}
+
+// `emission_textured` with the layer from the materials buffer.
+fn emission_at(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
+    return emission_textured(m, t, p, emission_of(m), materials[2u * m + 1u].y, footprint);
 }
 
 // Object `m`'s material at world point `p` on triangle `t` (seen at
@@ -4000,7 +4034,9 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             let w = hemicube_weight(b);
             // The hit's own emission (M10 gate 11): radiance over the bin's
             // projected solid angle; no page needed.
-            if (vc.extra.x == 1u) { sum[IND_GLOW] += bounce_emission(hit.mesh) * w; }
+            if (vc.extra.x == 1u) {
+                sum[IND_GLOW] += bounce_emission_at(hit.mesh, hit.tri, surf.apex + dir * hit.distance, hit.distance * IND_BIN_ANGLE) * w;
+            }
             // The page at the hit, at the mip of the bin's footprint or the
             // finest coarser one resident.
             let footprint = hit.distance * IND_BIN_ANGLE;
@@ -4268,7 +4304,9 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     // A material (M10 gate 2): roughness below zero is Lambertian.
     let mat = material_at(hit.mesh, hit.tri, surface, hit.normal, hit.distance, dir);
     let pbr = mat.y >= 0.0;
-    let glow = emission_of(hit.mesh);
+    // Emission (with its texture, M10 gate 14) for the pixel's footprint.
+    let glow_footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share * hit.distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(hit.normal, dir)), 0.2);
+    let glow = emission_at(hit.mesh, hit.tri, surface, glow_footprint);
     var spec = vec3<f32>(0.0);
     if (found) {
         // Each light's cached shadowed share, times its unshadowed
@@ -4463,7 +4501,7 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
     }
     let hm = material_of(hit.mesh);
     let metal = select(0.0, hm.x, hm.y >= 0.0);
-    return bounce_albedo(hit.mesh, hit.tri, q, footprint) * (1.0 - metal) * e / 3.14159265 + emission_of(hit.mesh);
+    return bounce_albedo(hit.mesh, hit.tri, q, footprint) * (1.0 - metal) * e / 3.14159265 + emission_at(hit.mesh, hit.tri, q, footprint);
 }
 
 

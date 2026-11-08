@@ -343,6 +343,18 @@ pub fn render_instanced_lights(
             _ => "null".to_string(),
         })
         .collect();
+    // Each geometry's emissive texture (M10 gate 14): a texture's path, or
+    // null.
+    let emission_textures: Vec<String> = (0..scene.geometries.len())
+        .map(
+            |g| match scene.geometry_emissive_textures.get(g).copied().flatten() {
+                Some(t) if scene.geometries[g].tex.len() == scene.geometries[g].triangles.len() => {
+                    texture_paths[t as usize].clone()
+                }
+                _ => "null".to_string(),
+            },
+        )
+        .collect();
     // Each geometry's alpha cutoff (M10 gate 6), or null.
     let alpha: Vec<String> = (0..scene.geometries.len())
         .map(|g| {
@@ -356,7 +368,7 @@ pub fn render_instanced_lights(
         })
         .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -367,6 +379,7 @@ pub fn render_instanced_lights(
         normal_maps.join(", "),
         alpha.join(", "),
         emission.join(", "),
+        emission_textures.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),

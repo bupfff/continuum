@@ -122,6 +122,23 @@ for g, path in enumerate(job["geometries"]):
         peak = max(emission)
         glow.inputs["Color"].default_value = (emission[0] / peak, emission[1] / peak, emission[2] / peak, 1.0)
         glow.inputs["Strength"].default_value = peak
+        glow_texture = (job.get("emission_textures") or [None] * len(job["geometries"]))[g]
+        if glow_texture:
+            # An emissive texture (M10 gate 14): sRGB, linear filtering,
+            # repeating, through the OBJ's texture coordinates, times the
+            # emission's color.
+            gimage = nodes.new("ShaderNodeTexImage")
+            gimage.image = bpy.data.images.load(glow_texture, check_existing=True)
+            gimage.image.colorspace_settings.name = "sRGB"
+            gimage.interpolation = "Linear"
+            gimage.extension = "REPEAT"
+            gmul = nodes.new("ShaderNodeMix")
+            gmul.data_type = "RGBA"
+            gmul.blend_type = "MULTIPLY"
+            gmul.inputs["Factor"].default_value = 1.0
+            gmul.inputs["B"].default_value = glow.inputs["Color"].default_value
+            mat.node_tree.links.new(gimage.outputs["Color"], gmul.inputs["A"])
+            mat.node_tree.links.new(gmul.outputs["Result"], glow.inputs["Color"])
         add = nodes.new("ShaderNodeAddShader")
         mat.node_tree.links.new(surface, add.inputs[0])
         mat.node_tree.links.new(glow.outputs["Emission"], add.inputs[1])
