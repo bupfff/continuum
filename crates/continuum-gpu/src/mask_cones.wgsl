@@ -4414,12 +4414,15 @@ fn environment_on() -> bool {
 }
 
 // The environment's irradiance on a normal `n` (its radiance above the
-// horizon convolved with the clamped cosine: bands weighted π, 2π/3, π/4).
+// horizon convolved with the clamped cosine: bands weighted π, 2π/3, π/4),
+// unrolled (M5 gate 12).
 fn environment_irradiance(n: vec3<f32>) -> vec3<f32> {
-    let y = sh9(n);
-    let band = array<f32, 9>(3.14159265, 2.0943951, 2.0943951, 2.0943951, 0.78539816, 0.78539816, 0.78539816, 0.78539816, 0.78539816);
-    var e = vec3<f32>(0.0);
-    for (var k = 0u; k < 9u; k++) { e += light.sky_sh[k].xyz * (band[k] * y[k]); }
+    let s = light.sky_sh;
+    var e = s[0].xyz * (3.14159265 * 0.282095);
+    e += (s[1].xyz * n.y + s[2].xyz * n.z + s[3].xyz * n.x) * (2.0943951 * 0.488603);
+    e += (s[4].xyz * (n.x * n.y) + s[5].xyz * (n.y * n.z) + s[7].xyz * (n.x * n.z)) * (0.78539816 * 1.092548);
+    e += s[6].xyz * (0.78539816 * 0.315392 * (3.0 * n.z * n.z - 1.0));
+    e += s[8].xyz * (0.78539816 * 0.546274 * (n.x * n.x - n.y * n.y));
     return max(e, vec3<f32>(0.0));
 }
 
@@ -4439,9 +4442,16 @@ fn sky_scale(n: vec3<f32>) -> vec3<f32> {
 }
 
 // The sky's radiance seen along `d`: the uniform sky's, or the
-// environment's through its spherical harmonics (none below the horizon).
+// environment's: from its image where the base color array holds it (M5
+// gate 12; light.objects.w its layer, sky_sh[0].w its peak), else through
+// its spherical harmonics (none below the horizon).
 fn sky_seen(d: vec3<f32>) -> vec3<f32> {
     if (!environment_on()) { return light.sky.xyz; }
+    if (light.objects.w != NONE) {
+        let u = (3.14159265 - atan2(d.y, d.x)) / 6.2831853;
+        let v = 0.5 - asin(clamp(d.z, -1.0, 1.0)) / 3.14159265;
+        return textureSampleLevel(base_color, base_sampler, vec2<f32>(u, v), i32(light.objects.w), 0.0).xyz * light.sky_sh[0].w;
+    }
     if (d.z < 0.0) { return vec3<f32>(0.0); }
     let y = sh9(d);
     var l = vec3<f32>(0.0);

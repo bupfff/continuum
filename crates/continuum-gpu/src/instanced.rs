@@ -933,7 +933,11 @@ impl InstancedRenderer {
             // Shading reads the lights' buffer; the camera's radiance is unused.
             radiance: lights[0].radiance.x,
             lights: lights.len(),
-            textures: kernel.scene_textures(&scene.textures, &scene.linear_textures()),
+            textures: {
+                // The environment's image after the scene's (M5 gate 12).
+                let (all, _) = kernel.textures_with_environment(&scene.textures);
+                kernel.scene_textures(&all, &scene.linear_textures())
+            },
             srgb: target_format.is_srgb(),
             float_target: matches!(
                 target_format,

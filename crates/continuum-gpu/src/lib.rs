@@ -85,6 +85,9 @@ pub struct MaskConeKernel {
     /// The environment's radiance as nine spherical harmonics coefficients,
     /// if set (M5 gate 11).
     environment: std::cell::Cell<Option<[[f32; 4]; 9]>>,
+    /// The environment's image for what rays see of it (M5 gate 12): sRGB
+    /// over its peak radiance, and that peak.
+    environment_image: std::cell::RefCell<Option<(Texture, f32)>>,
     pixel_cones: std::cell::Cell<bool>,
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
@@ -175,6 +178,39 @@ impl Environment {
             }
         }
         Environment { width, height, rgb }
+    }
+
+    /// Its image over its peak radiance as sRGB bytes, and the peak (for
+    /// what rays see of it: limited dynamic range; M5 gate 12).
+    fn texture(&self) -> (Texture, f32) {
+        let peak = self
+            .rgb
+            .iter()
+            .flat_map(|p| p.iter().copied())
+            .fold(0.0f32, f32::max)
+            .max(1e-12);
+        let encode = |c: f32| {
+            let c = (c / peak).clamp(0.0, 1.0);
+            let s = if c <= 0.003_130_8 {
+                12.92 * c
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            };
+            (s * 255.0).round() as u8
+        };
+        let rgba = self
+            .rgb
+            .iter()
+            .flat_map(|p| [encode(p[0]), encode(p[1]), encode(p[2]), 255])
+            .collect();
+        (
+            Texture {
+                width: self.width,
+                height: self.height,
+                rgba,
+            },
+            peak,
+        )
     }
 
     /// The unit direction through pixel `(x, y)`'s centre.
@@ -749,6 +785,7 @@ impl MaskConeKernel {
             hardware_rays: std::cell::Cell::new(ray_queries),
             mikktspace: std::cell::Cell::new(true),
             environment: std::cell::Cell::new(None),
+            environment_image: std::cell::RefCell::new(None),
             pixel_cones: std::cell::Cell::new(false),
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
@@ -876,16 +913,41 @@ impl MaskConeKernel {
                 let (sh, mean) = e.sh9();
                 self.environment.set(Some(sh));
                 self.set_sky(mean);
+                *self.environment_image.borrow_mut() = Some(e.texture());
             }
-            None => self.environment.set(None),
+            None => {
+                self.environment.set(None);
+                *self.environment_image.borrow_mut() = None;
+            }
+        }
+    }
+
+    /// The scene's base color textures, and the environment's image after
+    /// them if there is one (M5 gate 12), with its layer (NONE: none).
+    pub(crate) fn textures_with_environment(&self, textures: &[Texture]) -> (Vec<Texture>, u32) {
+        let mut all = textures.to_vec();
+        match &*self.environment_image.borrow() {
+            Some((t, _)) => {
+                all.push(t.clone());
+                (all, textures.len() as u32)
+            }
+            None => (all, hierarchy::NONE),
         }
     }
 
     /// The light uniform's environment fields (M5 gate 11).
-    fn environment_uniform(&self, u: &mut LightUniform) {
+    /// The light uniform's environment fields (M5 gates 11–12): its
+    /// harmonics, and with `layer` (the base color array's layer of its
+    /// image, NONE: none) the image's layer and peak.
+    fn environment_uniform(&self, u: &mut LightUniform, layer: u32) {
+        u.objects[3] = hierarchy::NONE;
         if let Some(sh) = self.environment.get() {
             u.sky_sh = sh;
             u.objects[2] = 1;
+            if let Some((_, peak)) = &*self.environment_image.borrow() {
+                u.objects[3] = layer;
+                u.sky_sh[0][3] = *peak;
+            }
         }
     }
 
@@ -1412,7 +1474,7 @@ impl MaskConeKernel {
             ),
             objects,
         );
-        self.environment_uniform(&mut uniform);
+        self.environment_uniform(&mut uniform, scene.textures.len() as u32);
         // Writable for movers (the hierarchy's movers subtree, transforms).
         let storage = |label: &str, contents: &[u8]| {
             self.device
@@ -1817,7 +1879,7 @@ impl MaskConeKernel {
             ),
             hierarchy::NONE,
         );
-        self.environment_uniform(&mut uniform);
+        self.environment_uniform(&mut uniform, hierarchy::NONE);
         let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
         let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
@@ -1991,7 +2053,7 @@ impl MaskConeKernel {
             ),
             hierarchy::NONE,
         );
-        self.environment_uniform(&mut uniform);
+        self.environment_uniform(&mut uniform, hierarchy::NONE);
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()
             .map(|&(p, n)| ReceiverGpu {
