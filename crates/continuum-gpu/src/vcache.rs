@@ -151,6 +151,12 @@ pub struct CacheOptions {
     /// holds at most 2^20 (384 MB). A geometry whose grid would exceed 1,024
     /// texels along a chart walks itself.
     pub self_spacing: f32,
+    /// With a sky (M5 gate 9): a page the pixels ask for bakes its lights
+    /// first, its sky shown as the open sky over each pixel's normal until a
+    /// later frame bakes the sky alone, within what the budget leaves after
+    /// new pages. Sun shadows arrive about 11× sooner; the converged cache
+    /// is the same. Pages for bounce light's hits bake whole.
+    pub sky_later: bool,
     /// Experiments only. Each light's texels hold the shadowed share of its
     /// unshadowed light,
     /// and shading multiplies that by the unshadowed light at the pixel, with
@@ -177,6 +183,7 @@ impl Default for CacheOptions {
             edge_rays: false,
             glossy_rays: true,
             self_spacing: 0.01,
+            sky_later: false,
             light_ratio: true,
         }
     }
