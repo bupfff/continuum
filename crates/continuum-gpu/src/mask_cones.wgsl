@@ -1571,7 +1571,17 @@ fn barycentric(m: u32, t: u32, world_p: vec3<f32>) -> vec3<f32> {
 // corners' texture coordinates.
 @group(0) @binding(55) var base_color: texture_2d_array<f32>;
 @group(0) @binding(56) var base_sampler: sampler;
+// Per object its texture layer, then per object its emission as two words
+// of half floats (`bounce_emission`).
 @group(0) @binding(57) var<storage, read> object_texture: array<u32>;
+
+// Object `m`'s emission, from `object_texture` (for bounce samples, which
+// cannot bind `materials` within the buffer limit; M10 gate 11).
+fn bounce_emission(m: u32) -> vec3<f32> {
+    let i = arrayLength(&object_texture) / 3u + 2u * m;
+    if (i + 1u >= arrayLength(&object_texture)) { return vec3<f32>(0.0); }
+    return vec3<f32>(unpack2x16float(object_texture[i]), unpack2x16float(object_texture[i + 1u]).x);
+}
 @group(0) @binding(58) var<storage, read> tri_tex: array<vec2<f32>>;
 // Linear textures: normal maps (M10 gate 5) and metallic-roughness
 // textures, a layer each; objects name theirs in `materials`.
@@ -2409,8 +2419,11 @@ struct VcParams {
     ledger: vec4<u32>,
     // Bounce light (M10 gate 1): x: samples to bake, y: 1 if on; z: 1 to
     // skip glossy reflection rays (M10 gate 2's diagnostic); w: 1 for four
-    // rays at silhouette pixels (M7 gate 3)
+    // rays at silhouette pixels (M7 gate 3), 2 and 3 through ray queries
+    // (M7 gate 4)
     indirect: vec4<u32>,
+    // x: 1 if bounce samples gather emission (M10 gate 11)
+    extra: vec4<u32>,
 };
 
 const PAGE: u32 = 8u;
@@ -3852,8 +3865,11 @@ const IND_R: u32 = 8u;
 const SECONDARY: u32 = 0x80000000u;
 const WANTS_SAMPLES: u32 = 0x40000000u;
 const IND_BINS: u32 = 192u;
-// Channels kept per sample: up to three lights and the sky.
-const IND_CH: u32 = 4u;
+// Channels kept per sample: up to three lights, the sky, and emission
+// (absolute radiance, M10 gate 11).
+const IND_CH: u32 = 5u;
+const IND_SKY: u32 = 3u;
+const IND_GLOW: u32 = 4u;
 // A bin's width, in radians, about: its footprint at a hit is this times
 // the distance.
 const IND_BIN_ANGLE: f32 = 0.25;
@@ -3917,7 +3933,7 @@ fn hemicube_weight(b: u32) -> f32 {
     return abs(0.5 * sum);
 }
 
-var<workgroup> ind_partial: array<vec4<f32>, 256>;
+var<workgroup> ind_partial: array<vec4<f32>, 320>;
 var<workgroup> ind_missing: array<f32, 64>;
 
 // One workgroup per sample (rows of 65,535 workgroups); each invocation
@@ -3937,9 +3953,9 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let k = job.y;
     let texel = min(page * PAGE + vec2<u32>(4u * (k % 3u), 4u * (k / 3u)), n - vec2<u32>(1u));
     let surf = vc_surface(m, c, n, texel);
-    let lights_n = min(arrayLength(&lights), IND_CH - 1u);
+    let lights_n = min(arrayLength(&lights), IND_SKY);
     let sky_ch = vc.sky.z;
-    var sum = array<vec3<f32>, 4>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    var sum = array<vec3<f32>, 5>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
     var missing = 0.0;
     if (listed && surf.ok) {
         for (var b = li; b < IND_BINS; b += 64u) {
@@ -3952,6 +3968,9 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             let geometric = normal_to_world(hit.mesh, cross(tris[tv + 1u].xyz - tris[tv].xyz, tris[tv + 2u].xyz - tris[tv].xyz));
             if (dot(geometric, dir) > 0.0) { continue; }
             let w = hemicube_weight(b);
+            // The hit's own emission (M10 gate 11): radiance over the bin's
+            // projected solid angle; no page needed.
+            if (vc.extra.x == 1u) { sum[IND_GLOW] += bounce_emission(hit.mesh) * w; }
             // The page at the hit, at the mip of the bin's footprint or the
             // finest coarser one resident.
             let footprint = hit.distance * IND_BIN_ANGLE;
@@ -3981,7 +4000,7 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
                 if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
                 sum[l] += reflect * direct;
             }
-            sum[IND_CH - 1u] += reflect * vc_bilinear(slot, r, sky_ch);
+            sum[IND_SKY] += reflect * vc_bilinear(slot, r, sky_ch);
         }
     }
     for (var ch = 0u; ch < IND_CH; ch++) { ind_partial[li * IND_CH + ch] = vec4<f32>(sum[ch], 0.0); }
@@ -4016,11 +4035,18 @@ fn indirect_light(slot: u32, r: PageRef) -> vec3<f32> {
     let g = (vec2<f32>(r.base) + r.frac) * 0.25;
     let i0 = min(vec2<u32>(floor(g)), vec2<u32>(1u));
     let f = clamp(g - vec2<f32>(i0), vec2<f32>(0.0), vec2<f32>(1.0));
-    let lights_n = min(arrayLength(&lights), IND_CH - 1u);
+    let lights_n = min(arrayLength(&lights), IND_SKY);
     var total = vec3<f32>(0.0);
     for (var ch = 0u; ch < IND_CH; ch++) {
         var radiance = light.sky.xyz;
-        if (ch < lights_n) { radiance = lights[ch].radiance.xyz; } else if (ch < IND_CH - 1u) { continue; }
+        if (ch == IND_GLOW) {
+            // Emission is stored as absolute radiance.
+            radiance = vec3<f32>(1.0);
+        } else if (ch < lights_n) {
+            radiance = lights[ch].radiance.xyz;
+        } else if (ch < IND_SKY) {
+            continue;
+        }
         var v = vec3<f32>(0.0);
         for (var q = 0u; q < 4u; q++) {
             let ix = i0.x + (q & 1u);

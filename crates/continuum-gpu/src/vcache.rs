@@ -66,7 +66,9 @@ const VISIBLE_WINDOW: u32 = 1;
 /// wait before re-baking an incomplete page's samples (its requested pages
 /// arrive in about that).
 const INDIRECT_SAMPLES: u32 = 9;
-const INDIRECT_CHANNELS: u64 = 4;
+/// Bounce light's channels per sample: up to three lights, the sky, then
+/// emission (M10 gate 11).
+const INDIRECT_CHANNELS: u64 = 5;
 const INCOMPLETE_CAP: u32 = 1 << 14;
 const INDIRECT_RETRY: u32 = 4;
 /// Request priorities' flags (the shader's `SECONDARY`, `WANTS_SAMPLES`).
@@ -323,6 +325,7 @@ struct VcParams {
     movers: [u32; 4],
     ledger: [u32; 4],
     indirect: [u32; 4],
+    extra: [u32; 4],
 }
 
 /// Per-chart tables shared by every object with a geometry: the chart's size
@@ -903,7 +906,7 @@ impl VirtualCache {
             "bounce light with moving objects or lights is not supported yet"
         );
         assert!(
-            !options.indirect || (lights as u64) < INDIRECT_CHANNELS,
+            !options.indirect || lights <= 3,
             "bounce light takes at most three lights"
         );
         let mut moving_index = vec![u32::MAX; lights as usize];
@@ -1558,6 +1561,13 @@ impl VirtualCache {
                 } else {
                     self.options.edge_rays as u32
                 },
+            ],
+            // x: 1 if bounce samples gather emission (M10 gate 11).
+            extra: [
+                (self.options.indirect && self.options.emission_bounce) as u32,
+                0,
+                0,
+                0,
             ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));

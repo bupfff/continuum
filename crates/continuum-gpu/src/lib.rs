@@ -1137,9 +1137,11 @@ impl MaskConeKernel {
             .chain(std::iter::once([0.0; 4]))
             .collect();
         let albedo: Vec<[f32; 4]> = scene.instances.iter().map(|i| v4(i.albedo)).collect();
-        // Per object, its texture layer (NONE: none); per geometry triangle,
-        // its corners' texture coordinates (zero without).
-        let object_textures: Vec<u32> = scene
+        // Per object, its texture layer (NONE: none), then per object its
+        // emission as two words of half floats (for bounce samples, which
+        // cannot bind the materials buffer: M10 gate 11); per geometry
+        // triangle, its corners' texture coordinates (zero without).
+        let mut object_textures: Vec<u32> = scene
             .instances
             .iter()
             .map(|i| {
@@ -1151,6 +1153,16 @@ impl MaskConeKernel {
                 }
             })
             .collect();
+        for i in &scene.instances {
+            let e = scene
+                .geometry_emission
+                .get(i.geometry)
+                .copied()
+                .unwrap_or(Vec3::ZERO)
+                .to_array()
+                .map(half_bits);
+            object_textures.extend([e[0] | e[1] << 16, e[2]]);
+        }
         // Per object, its material: metallic and roughness (roughness below
         // zero: Lambertian), and its emission as half floats.
         let linear = scene.linear_textures();
@@ -2015,7 +2027,9 @@ pub struct InstancedScene {
     pub geometry_materials: Vec<Option<Material>>,
     /// Each geometry's emitted radiance (linear RGB, added to what it
     /// reflects; empty: none). Shown by the cache's shading, directly and in
-    /// reflections; it does not light other surfaces (use a light for that).
+    /// reflections. With bounce light (`CacheOptions::indirect` and
+    /// `emission_bounce`, M10 gate 11) it lights other surfaces, one bounce
+    /// deep; otherwise use a light for that.
     /// Stored as half floats (at most 65,504).
     pub geometry_emission: Vec<Vec3>,
     /// Each geometry's normal map, if any (empty: none; M10 gate 5): an

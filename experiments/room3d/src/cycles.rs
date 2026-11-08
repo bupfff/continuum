@@ -336,6 +336,13 @@ pub fn render_instanced_lights(
             },
         )
         .collect();
+    // Each geometry's emitted radiance (M10 gate 11), or null.
+    let emission: Vec<String> = (0..scene.geometries.len())
+        .map(|g| match scene.geometry_emission.get(g).copied() {
+            Some(e) if e.max_element() > 0.0 => format!("[{}, {}, {}]", e.x, e.y, e.z),
+            _ => "null".to_string(),
+        })
+        .collect();
     // Each geometry's alpha cutoff (M10 gate 6), or null.
     let alpha: Vec<String> = (0..scene.geometries.len())
         .map(|g| {
@@ -349,7 +356,7 @@ pub fn render_instanced_lights(
         })
         .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -359,6 +366,7 @@ pub fn render_instanced_lights(
         materials.join(", "),
         normal_maps.join(", "),
         alpha.join(", "),
+        emission.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),

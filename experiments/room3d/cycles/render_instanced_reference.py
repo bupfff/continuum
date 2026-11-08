@@ -111,9 +111,22 @@ for g, path in enumerate(job["geometries"]):
         mat.node_tree.links.new(test.outputs[0], mix.inputs["Fac"])
         mat.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
         mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[2])
-        mat.node_tree.links.new(mix.outputs["Shader"], out.inputs["Surface"])
+        surface = mix.outputs["Shader"]
     else:
-        mat.node_tree.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+        surface = bsdf.outputs["BSDF"]
+    emission = (job.get("emission") or [None] * len(job["geometries"]))[g]
+    if emission and max(emission) > 0.0:
+        # Emission (M10 gate 11): the geometry's radiance added to what it
+        # reflects, as Continuum's lights are (strength the peak channel).
+        glow = nodes.new("ShaderNodeEmission")
+        peak = max(emission)
+        glow.inputs["Color"].default_value = (emission[0] / peak, emission[1] / peak, emission[2] / peak, 1.0)
+        glow.inputs["Strength"].default_value = peak
+        add = nodes.new("ShaderNodeAddShader")
+        mat.node_tree.links.new(surface, add.inputs[0])
+        mat.node_tree.links.new(glow.outputs["Emission"], add.inputs[1])
+        surface = add.outputs["Shader"]
+    mat.node_tree.links.new(surface, out.inputs["Surface"])
     source.data.materials.clear()
     source.data.materials.append(mat)
 
