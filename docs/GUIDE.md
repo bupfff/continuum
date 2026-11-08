@@ -52,10 +52,10 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   when they come back into view: a third of the pixels in a fast flight
   with a fast sun. Not yet with movers or a sky in the cache. Lights
   change color and intensity freely either way.
-- **Materials, experimental.** `InstancedScene::geometry_materials` takes
+- **Materials.** `InstancedScene::geometry_materials` takes
   metallic and roughness (glTF's model) for the cache's shading: specular
-  from lights and one glossy reflection ray per pixel. It is 8.94% from
-  Cycles on a test scene (M10 gate 2, failed against 6%).
+  from lights and one glossy reflection ray per pixel. It is 5.85% from
+  Cycles on a test scene (M10 gate 10).
   `InstancedScene::geometry_metallic_roughness` scales the factors by a
   texture (glTF's layout). glTF import brings the factors and the texture;
   a material with metallic 0, roughness 1 and no texture stays Lambertian.

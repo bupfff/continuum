@@ -272,12 +272,12 @@ Against the goal in §1, honestly:
     its own settle helper, which returned after one frame. M10 G3's
     secondary requests stopped request cascades (materials settle in 1.12×
     the frames instead of 6.9×). Not yet with movers or moving lights.
-- **Metallic-roughness materials and glossy reflections** (M10 G2, failed
-  on accuracy). GGX specular from lights (a representative point times the
-  cached shadowed share), a split-sum directional albedo, and one
-  reflection ray per pixel reading the cache at the lobe's mip. 8.94% from
-  Cycles against at most 6% (12.71% without reflection rays), warm frame
-  1.82×. Metallic-roughness textures scale the factors (tested, not gated).
+- **Metallic-roughness materials and glossy reflections** (M10 G2 failed
+  on accuracy; **M10 G10 passed** after a fix). GGX specular from lights (a
+  representative point times the cached shadowed share), a split-sum
+  directional albedo, and one reflection ray per pixel reading the cache at
+  the lobe's mip. 5.85% from Cycles against at most 6% (gate 2: 8.94%; the
+  light-size normalization was applied twice), warm frame 1.68×. Metallic-roughness textures scale the factors (tested, not gated).
 - **Normal maps** (M10 G5, passed): tangent-space maps with per-triangle
   tangents bend the normal for light from lights, specular and
   reflections. 3.63% from Cycles with the maps against 26.42% ignoring
@@ -359,7 +359,8 @@ new conversation:
   - failed but kept, working with known costs: M9 G2/G4 moving lights
     (sound, 1.6× at a real sun's speed); M9 G3 movers under a sky (sound,
     3.6–4.0× while moving); M10 G1/G3 bounce light (accurate); M10 G2
-    materials (8.94% against 6%); M7 G3 silhouette rays (13× cost, off);
+    materials (8.94% against 6%; fixed, M10 G10 passed at 5.85%); M7 G3
+    silhouette rays (13× cost, off);
   - M10 G6 reached no criterion (a cache bug, fixed; re-run as G7);
   - not gated, tested: emission; metallic-roughness textures; glTF import
     and save of metallic and roughness, emission, normal and
@@ -399,10 +400,11 @@ new conversation:
      soundness (8 pages beyond their bound, changes of 1–5%). The likely
      cause is coverage summed within a mesh over-counting overlapping
      layers. Needs coverage that cannot over-count for the dark test.
-  5. *Materials accuracy* (M10 G2's follow-up): diagnose the 8.94%; the
-     likely cause is one reflection ray per pixel (no blur across the
-     glossy lobe), then the specular visibility taken from the diffuse
-     share.
+  5. *Materials accuracy* (M10 G2's follow-up). **Done (M10 G10,
+     passed):** sun highlights on metal carried 75% of the squared error;
+     specular from lights applied the light-size normalization twice. Fixed:
+     5.85% from Cycles (`docs/results/m10-gate10.md`). Not the cause: one
+     reflection ray per pixel (eight across the lobe: 8.85%).
   6. *Silhouette anti-aliasing through hardware rays* (M7 G3's follow-up).
   7. Combinations not supported yet: bounce light with movers or moving
      lights; movers with moving lights. Also emission that lights other
@@ -608,7 +610,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | G1 pixel cones for primary visibility (**failed** all three: against the 16×16 reference the textured scene is 7.15% vs one ray's 7.11%, the field from 150 m 17.91% vs 23.49% (0.76× against ≤ 0.35×), from standing height 34.61% vs 12.49% with a banding artifact on the 2.1 km ground triangles; half a pixel's turn changes the image 1.67× as much as the reference's (≤ 1.5×); warm cached frames 105 ms on the textured scene (≤ 16.7 ms), per-pixel frames 10–87 s on the field; the textured scene's error is texture filtering, not silhouettes, `docs/results/m7-gate1.md`); G2 texture filtering for the area integral (**passed**: a box filter over the pixel's footprint from ray differentials, 3.99% from the 16×16 reference against 7.11%, warm frame 1.03×, `docs/results/m7-gate2.md`); G3 silhouette rays (**failed**: field from 150 m 0.49× the error but 13× the frame; textured scene 0.91×, 1.66×, `docs/results/m7-gate3.md`); no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 (**done**: `v0.1.0`, 2026-11-07; the cloud benchmark is still open) |
 | M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G4 the ledger without its work limit (**failed** on speed: sound in 30 checks; at a real sun's speed fallback 4.9–5.0% but means 24.7–25.3 ms against 15.8 ms still, mixed texels re-baked every frame, `docs/results/m9-gate4.md`); G3 movers under a sky (**failed** on work and speed: sound in 30 checks, but 99.73% of pages read re-baked their sky every moving frame; means 53.0–58.3 ms against 14.66 ms still; fallback 30%, 21–22% even still from slow sky streaming; the per-page sphere bound about 5,000× loose, `docs/results/m9-gate3.md`); a light switch with no lag |
-| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run (**passed**: 3.29% from Cycles masking the cards, 34.07% with them opaque; warm frame 1.15×, `docs/results/m10-gate7.md`); G8 exactly back-to-back faces (**failed** on accuracy: speed fixed, 1.03× the 1 mm scene's bake time; but Metal ray queries ignore `CULL_BACK_FACING`, so camera rays hit either coincident face, 5.01% from Cycles, `docs/results/m10-gate8.md`); G9 gate 8 re-run with back-face hits re-traced (**failed** on its 0.5% bound against the 1 mm control, 1.08%, which mostly measures that control's own offset: 1 mm to 2 mm moves the image as much; 3.42% from Cycles against the control's 3.37%; bake 1.21×, warm frame 1.04×; fixes kept, `docs/results/m10-gate9.md`) |
+| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run (**passed**: 3.29% from Cycles masking the cards, 34.07% with them opaque; warm frame 1.15×, `docs/results/m10-gate7.md`); G8 exactly back-to-back faces (**failed** on accuracy: speed fixed, 1.03× the 1 mm scene's bake time; but Metal ray queries ignore `CULL_BACK_FACING`, so camera rays hit either coincident face, 5.01% from Cycles, `docs/results/m10-gate8.md`); G10 gate 2 re-run (**passed**: 5.85% from Cycles, warm frame 1.68×; specular from lights had applied Karis's normalization twice, so sun highlights on metal were low, `docs/results/m10-gate10.md`); G9 gate 8 re-run with back-face hits re-traced (**failed** on its 0.5% bound against the 1 mm control, 1.08%, which mostly measures that control's own offset: 1 mm to 2 mm moves the image as much; 3.42% from Cycles against the control's 3.37%; bake 1.21×, warm frame 1.04×; fixes kept, `docs/results/m10-gate9.md`) |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
 

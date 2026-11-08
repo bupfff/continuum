@@ -24,8 +24,8 @@ Continuum renders:
   failed on that);
 - one bounce of light in the cache, 1.79% from Cycles with one bounce
   (M10 gate 1);
-- metallic-roughness materials with glossy reflections, experimental
-  (8.94% from Cycles, M10 gate 2, failed against 6%);
+- metallic-roughness materials with glossy reflections (5.85% from
+  Cycles, M10 gate 10);
 - normal maps, 3.63% from Cycles (M10 gate 5), alpha cutouts, 3.29% (M10
   gate 7), exactly back-to-back double-sided faces (M10 gates 8–9), and
   emission;
@@ -119,8 +119,8 @@ scenes:
 A textured scene imported this way is within 0.43% of Cycles with the same
 textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Metallic and
 roughness factors, emission and normal maps are imported too (normal maps
-3.63% from Cycles, M10 gate 5; metallic-roughness 8.94%, M10 gate 2, which
-failed against 6%), with metallic-roughness textures; alpha masks are cut
+3.63% from Cycles, M10 gate 5; metallic-roughness 5.85%, M10 gate 10),
+with metallic-roughness textures; alpha masks are cut
 into geometry (3.29% from Cycles, M10 gate 7). Double-sided materials
 become exactly back-to-back faces (M10 gates 8–9).
 
