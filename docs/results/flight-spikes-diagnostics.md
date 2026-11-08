@@ -38,6 +38,32 @@ The 99th percentile stayed at 28.8–28.9 ms. The worst frame rose to
 The budget learns from GPU timings that arrive two frames late, and the
 bursts last only a few frames, so measured corrections come too late.
 
+## Not explained by any count planned or measured
+
+Later development runs fitted each frame's GPU bake time on the first
+flight and tested the fit on the second (`spikes_dev`; per-frame CSV in
+`out/spikes_run*.csv`):
+
+| Model | Test R² |
+|---|---|
+| One cost per budget unit | 0.05 |
+| One cost per page | 0.05 |
+| A cost per mip level (`CacheStats::spent_by_mip`, mips 6 to 13+) | −0.43 |
+| The kernel's work counters (`KernelOptions::count_work`: object nodes, meshes, triangle-hierarchy nodes, triangles) | 0.37, residuals up to 13 ms |
+
+- **Slow bakes cost about 5× per page** (1.04 ms against 0.21 ms). They
+  lean toward fine (7–8) and very coarse (11–13) mips, but with fewer pages
+  and units: the budget had already been cut after the frames before.
+- **They are tied to content, not chance.** They fall on the same frames
+  (about 373–397) in both flights.
+- **Most of their cost is something the counters do not see.** Hierarchy
+  work explains only a third of the variation. Candidates: memory access
+  patterns, or the bake's other passes (table updates, fill).
+- **Next step:** a GPU capture of one slow frame (Xcode's Metal tools)
+  would show which pass and what stalls.
+
+`CacheStats::spent_by_mip` is kept as a diagnostic.
+
 ## What would
 
 - Predicting a page's cost before baking it: from its mip, or from the

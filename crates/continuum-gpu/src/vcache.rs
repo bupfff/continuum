@@ -242,6 +242,9 @@ pub struct CacheStats {
     pub budget: u32,
     /// Of `budget`, what the frame's plan used.
     pub spent: u32,
+    /// Diagnostics: of `spent`, the units of the pages planned per mip level,
+    /// from mip 6 (or finer) to mip 13 (or coarser).
+    pub spent_by_mip: [u32; 8],
     /// GPU time of the frame's bake passes, in milliseconds, where the device
     /// has timestamp queries and the frame was not profiled (else 0).
     pub gpu_bake_ms: f32,
@@ -842,6 +845,7 @@ pub(crate) struct VirtualCache {
     sky_samples: Vec<[u32; 2]>,
     page_sky: Vec<[u32; 2]>,
     spent: u32,
+    spent_by_mip: [u32; 8],
     /// The frame being prepared (counted from 1).
     frame: u32,
     /// Per frame: what was baked, then what its shading reported once read back.
@@ -1261,6 +1265,7 @@ impl VirtualCache {
             sky_samples: Vec::new(),
             page_sky: Vec::new(),
             spent: 0,
+            spent_by_mip: [0; 8],
             frame: 1,
             log: Vec::new(),
             latest: 0,
@@ -1581,6 +1586,7 @@ impl VirtualCache {
             planning: std::mem::take(&mut self.planning),
             budget: self.budget as u32,
             spent: self.spent,
+            spent_by_mip: self.spent_by_mip,
             timed: self.timer.is_some(),
             evicting: std::mem::take(&mut self.evicting),
             waiting: std::mem::take(&mut self.waiting),
@@ -2251,6 +2257,8 @@ impl VirtualCache {
             self.bake_bounds.push([b[4], b[5], b[6], 3.0]);
             let samples = self.push_sky_samples(index, k);
             self.spent += samples * self.options.sky_sample_cost;
+            self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] +=
+                samples * self.options.sky_sample_cost;
             self.sky_rebaked += 1;
         }
     }
@@ -2297,6 +2305,7 @@ impl VirtualCache {
         self.page_sky.clear();
         self.texels = 0;
         self.spent = 0;
+        self.spent_by_mip = [0; 8];
         // Resident pages shown without bounce samples: schedule them.
         for (k, priority) in &requests {
             if priority & WANTS_SAMPLES != 0
@@ -2426,6 +2435,7 @@ impl VirtualCache {
             }
             self.texels += inside[0] * inside[1];
             self.spent += cost;
+            self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] += cost;
         }
         // Then skies to re-bake alone with what is left.
         self.plan_due_skies(budget);

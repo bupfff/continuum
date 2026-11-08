@@ -445,8 +445,10 @@ place, for a new conversation:
 - **Flight spikes (diagnosed, not fixed):** the slowest 5% of frames
   follow GPU bakes whose cost per unit triples for a few frames (18–25 ms
   instead of 7); a faster-reacting budget did not help, since timings
-  arrive two frames late. Needs per-page cost prediction or split bakes
-  (`docs/results/flight-spikes-diagnostics.md`).
+  arrive two frames late. Neither budget units, pages, mips nor the
+  kernel's work counters explain the bursts (test R² at most 0.37); they
+  are content-dependent (the same frames each flight). Next: a GPU capture
+  of a slow frame (`docs/results/flight-spikes-diagnostics.md`).
 - **Known issues:** the total sky work is still large (the sky later orders
   it); sustained speed on the fanless Air (M5 G8); Metal only measured.
   Naga 30's Metal backend ignores ray flags' face culling (worked around in

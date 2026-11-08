@@ -13,7 +13,16 @@ const H: u32 = 720;
 const FLIGHT: usize = 600;
 
 fn main() {
-    let kernel = MaskConeKernel::new().expect("GPU");
+    let work = std::env::args().any(|a| a == "work");
+    let kernel = if work {
+        MaskConeKernel::new_with(continuum_gpu::KernelOptions {
+            count_work: true,
+            ..Default::default()
+        })
+    } else {
+        MaskConeKernel::new()
+    }
+    .expect("GPU");
     kernel.set_prefilter(1.0);
     kernel.set_sky_prefilter(8.0);
     kernel.set_hardware_rays(true);
@@ -72,6 +81,27 @@ fn main() {
         }
         r.finish();
         let log: Vec<CacheStats> = r.cache_log().to_vec();
+        // Per frame: GPU bake time, units planned, and units per mip.
+        let mut csv = String::from(
+            "frame,timed,bake_ms,spent,pages,m0,m1,m2,m3,m4,m5,m6,m7,w0,w1,w2,w3,w4,w5,w6,w7,w8,w9,w10,w11\n",
+        );
+        for (i, s) in log.iter().enumerate() {
+            csv += &format!(
+                "{i},{},{},{},{},{},{}\n",
+                s.timed as u32,
+                s.gpu_bake_ms,
+                s.spent,
+                s.pages_baked,
+                s.spent_by_mip.map(|x| x.to_string()).join(","),
+                s.work.map(|x| x.to_string()).join(",")
+            );
+        }
+        std::fs::write(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("out/spikes_run{}.csv", run + 1)),
+            csv,
+        )
+        .unwrap();
         let mut sorted = times.clone();
         sorted.sort_by(f64::total_cmp);
         let p95 = sorted[FLIGHT * 95 / 100];
