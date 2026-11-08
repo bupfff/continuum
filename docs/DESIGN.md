@@ -390,7 +390,15 @@ new conversation:
      the sky later (M5 G9) is off with movers. Making the sky later work
      with movers comes first.
   4. *Moving lights* (M9 G4's follow-up): a tight bound for mixed texels,
-     which now re-bake every frame the light moves.
+     which now re-bake every frame the light moves. **Measured first
+     (2026-11-07, `docs/results/m9-mixed-texels-diagnostics.md`), not
+     gated:** 97.5% of texels are stored as exactly 0 or 1, so a tighter
+     band bound would help almost none. The cost is shadowed texels counted
+     as mixed. A "dark" state (guard wholly covered, ratio 0) cut the real
+     sun's flight to 1.25× the still one (development, 640×360), but failed
+     soundness (8 pages beyond their bound, changes of 1–5%). The likely
+     cause is coverage summed within a mesh over-counting overlapping
+     layers. Needs coverage that cannot over-count for the dark test.
   5. *Materials accuracy* (M10 G2's follow-up): diagnose the 8.94%; the
      likely cause is one reflection ray per pixel (no blur across the
      glossy lobe), then the specular visibility taken from the diffuse
