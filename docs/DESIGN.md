@@ -444,6 +444,10 @@ place, for a new conversation:
   (the texture ignored: 491%), no cost. G14 failed from its reference
   scene: Cycles lit the double-sided sign from its coincident back faces
   (`docs/results/m10-gate15.md`).
+- **Alpha blending** (M10 G16, failed on speed only: 1.33× against 1.3×;
+  kept): with hardware camera rays, up to four layers behind blended
+  surfaces, composited front to back; shadows by the opacity factor; 4.71%
+  from Cycles (panes opaque: 57%) (`docs/results/m10-gate16.md`).
 - **Tried after the list (development only, reverted):** a guessed sky
   from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
   is the cache's softness in motion, not the sky;
