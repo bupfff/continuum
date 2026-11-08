@@ -373,7 +373,11 @@ place, for a new conversation:
     no gain, removed); M10 G11–G12 emission lights its surroundings
     (failed on the absolute bound, 7.46% against 5%, kept); M10 G13
     MikkTSpace tangents (failed: no difference on its scene, kept); flight
-    spikes diagnosed (`flight-spikes-diagnostics.md`).
+    spikes diagnosed to the light bake's cost per unit varying 2–3×
+    (`flight-spikes-diagnostics.md`); M10 G14–G15 emissive textures
+    (passed on the re-run, 6.35%); M10 G16 alpha blending (accuracy passed,
+    4.71%; speed 1.33× against 1.3×; kept), glTF BLEND imported as
+    blending.
 - **Done since the `v0.1.0` tag** (each with its results file):
   - passed: M9 G1 movers in the view cache; M10 G4 re-coloring with bounce
     light; M10 G5 normal maps (measured before M10 G10's fix); M10 G7 alpha
