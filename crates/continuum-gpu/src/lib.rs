@@ -2134,9 +2134,6 @@ impl InstancedScene {
             .flatten()
             .map_or(0.0, |o| 1.0 - o.clamp(0.0, 1.0))
     }
-
-    /// This scene with its alpha cutouts made geometry ([`cut_out`]):
-    /// borrowed when it has none.
     /// The scene with alpha blending replaced by its fallback (M10 gate 16):
     /// a textured blended geometry cut at an alpha of 0.5 over its opacity
     /// factor, an untextured one opaque. For renderers without blending
@@ -2157,6 +2154,8 @@ impl InstancedScene {
         s
     }
 
+    /// This scene with its alpha cutouts made geometry ([`cut_out`]):
+    /// borrowed when it has none.
     pub fn with_cutouts(&self) -> std::borrow::Cow<'_, InstancedScene> {
         let masked: Vec<(usize, f32, u32)> = (0..self.geometries.len())
             .filter_map(|g| {
