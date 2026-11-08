@@ -311,6 +311,15 @@ world.use_nodes = True
 background = world.node_tree.nodes["Background"]
 background.inputs["Color"].default_value = (*sky, 1.0)
 background.inputs["Strength"].default_value = 1.0 if any(sky) else 0.0
+sky_map = job.get("sky_map")
+if sky_map:
+    # An environment (M5 gate 11): its HDR image, equirectangular, linear.
+    environment = world.node_tree.nodes.new("ShaderNodeTexEnvironment")
+    environment.image = bpy.data.images.load(sky_map)
+    environment.interpolation = "Linear"
+    environment.projection = "EQUIRECTANGULAR"
+    world.node_tree.links.new(environment.outputs["Color"], background.inputs["Color"])
+    background.inputs["Strength"].default_value = 1.0
 scene.world = world
 
 scene.render.engine = "CYCLES"

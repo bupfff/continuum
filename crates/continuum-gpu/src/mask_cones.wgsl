@@ -35,6 +35,9 @@ struct Light {
     // x: the object hierarchy's first node in `blas_cov` (NONE: no object-
     // level prefiltering; see `splat_object_node`)
     objects: vec4<u32>,
+    // The environment's radiance above the horizon, nine spherical harmonics
+    // coefficients (RGB in xyz; objects.z 1 with an environment; M5 gate 11)
+    sky_sh: array<vec4<f32>, 9>,
 };
 
 struct Receiver {
@@ -4167,7 +4170,7 @@ fn vc_shade_edges(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
         }
         let weight = bitcast<f32>(e.w);
         if (e.x == NONE) {
-            sum += light.sky.xyz * weight;
+            sum += sky_seen(sd) * weight;
         } else {
             sum += vc_hit_color(sd, hit_from(e.xyz, sd), false) * weight;
         }
@@ -4219,7 +4222,7 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
         let pixel = gid.y * w + gid.x;
         let hit = recorded_hit(pixel, dir);
         // A ray that misses everything sees the sky.
-        var color = light.sky.xyz;
+        var color = sky_seen(dir);
         if (vis[pixel].w != 0u) {
             let l = lights[vis[pixel].w - 1u];
             color = l.radiance.xyz * spot_falloff(l, -dir);
@@ -4241,7 +4244,7 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
                 let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
                 let sh = primary_hit(camera.eye.xyz, sd);
                 if (sh.mesh == NONE) {
-                    sum += light.sky.xyz;
+                    sum += sky_seen(sd);
                 } else {
                     sum += vc_hit_color(sd, sh, false);
                 }
@@ -4339,9 +4342,9 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         }
         if (found_guess) {
             vc_fell_back = true;
-            e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + normal.z));
+            e += sky_open(normal);
         } else {
-            e += light.sky.xyz * vc_bilinear(found_slot, found_ref, count);
+            e += sky_scale(normal) * vc_bilinear(found_slot, found_ref, count);
         }
         if (vc.indirect.y == 1u) {
             e += indirect_light(found_slot, found_ref);
@@ -4361,7 +4364,7 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         }
         // The sky above the horizon, with the ground below it: a
         // guess until a page arrives.
-        e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + normal.z));
+        e += sky_open(normal);
     }
     if (sample) {
         atomicAdd(&vc_stats[2], 1u);
@@ -4389,6 +4392,61 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     }
     let diffuse = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
     return diffuse * e / 3.14159265 + spec + glow;
+}
+
+// --- Environment light (M5 gate 11): sky radiance varying with direction. ---
+
+fn sh9(d: vec3<f32>) -> array<f32, 9> {
+    return array<f32, 9>(
+        0.282095,
+        0.488603 * d.y,
+        0.488603 * d.z,
+        0.488603 * d.x,
+        1.092548 * d.x * d.y,
+        1.092548 * d.y * d.z,
+        0.315392 * (3.0 * d.z * d.z - 1.0),
+        1.092548 * d.x * d.z,
+        0.546274 * (d.x * d.x - d.y * d.y));
+}
+
+fn environment_on() -> bool {
+    return light.objects.z == 1u;
+}
+
+// The environment's irradiance on a normal `n` (its radiance above the
+// horizon convolved with the clamped cosine: bands weighted π, 2π/3, π/4).
+fn environment_irradiance(n: vec3<f32>) -> vec3<f32> {
+    let y = sh9(n);
+    let band = array<f32, 9>(3.14159265, 2.0943951, 2.0943951, 2.0943951, 0.78539816, 0.78539816, 0.78539816, 0.78539816, 0.78539816);
+    var e = vec3<f32>(0.0);
+    for (var k = 0u; k < 9u; k++) { e += light.sky_sh[k].xyz * (band[k] * y[k]); }
+    return max(e, vec3<f32>(0.0));
+}
+
+// The sky's irradiance on normal `n` with nothing in the way: the
+// environment's, or the uniform sky's above the horizon.
+fn sky_open(n: vec3<f32>) -> vec3<f32> {
+    if (environment_on()) { return environment_irradiance(n); }
+    return light.sky.xyz * (3.14159265 * 0.5 * (1.0 + n.z));
+}
+
+// What a cached sky value (irradiance per unit radiance of a uniform sky)
+// is multiplied by at normal `n`: the uniform sky's radiance, or the
+// environment's open irradiance over the uniform sky's (its ratio).
+fn sky_scale(n: vec3<f32>) -> vec3<f32> {
+    if (environment_on()) { return environment_irradiance(n) / max(3.14159265 * 0.5 * (1.0 + n.z), 1e-3); }
+    return light.sky.xyz;
+}
+
+// The sky's radiance seen along `d`: the uniform sky's, or the
+// environment's through its spherical harmonics (none below the horizon).
+fn sky_seen(d: vec3<f32>) -> vec3<f32> {
+    if (!environment_on()) { return light.sky.xyz; }
+    if (d.z < 0.0) { return vec3<f32>(0.0); }
+    let y = sh9(d);
+    var l = vec3<f32>(0.0);
+    for (var k = 0u; k < 9u; k++) { l += light.sky_sh[k].xyz * y[k]; }
+    return max(l, vec3<f32>(0.0));
 }
 
 // --- Materials (M10 gate 2): metallic-roughness, glossy reflections. ---
@@ -4468,7 +4526,7 @@ fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: 
 // width there), or the sky.
 fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
     let hit = primary_hit(p, refl);
-    if (hit.mesh == NONE) { return light.sky.xyz; }
+    if (hit.mesh == NONE) { return sky_seen(refl); }
     let q = p + refl * hit.distance;
     // The lobe's width there: about α radians.
     let footprint = hit.distance * max(roughness * roughness, 0.002);
@@ -4494,7 +4552,7 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
         for (var l = 0u; l < count; l++) {
             e += lights[l].radiance.xyz * unshadowed_rect(hp, hn, lights[l]);
         }
-        e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + hn.z));
+        e += sky_open(hn);
     } else {
         // A page seen in reflections is in use: kept, not evicted.
         slot_used[slot] = vc.counts.y;
@@ -4504,9 +4562,9 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
             e += lights[l].radiance.xyz * direct;
         }
         if (sky_guess) {
-            e += light.sky.xyz * (3.14159265 * 0.5 * (1.0 + hn.z));
+            e += sky_open(hn);
         } else {
-            e += light.sky.xyz * vc_bilinear(slot, r, count);
+            e += sky_scale(hn) * vc_bilinear(slot, r, count);
         }
         if (vc.indirect.y == 1u) { e += indirect_light(slot, r); }
     }

@@ -217,6 +217,87 @@ pub fn render_instanced_lights(
     lights: &[Light],
     sky: Vec3,
     camera: Camera,
+    size: (u32, u32),
+    samples: u32,
+    bounces: u32,
+    seed: u32,
+    work: &Path,
+) -> io::Result<Reference> {
+    render_instanced_inner(
+        scene, origin, lights, sky, None, camera, size, samples, bounces, seed, work,
+    )
+}
+
+/// [`render_instanced_lights`] with an environment for sky light (M5 gate
+/// 11): its radiance image, equirectangular as Blender reads it.
+#[allow(clippy::too_many_arguments)]
+pub fn render_instanced_environment(
+    scene: &InstancedScene,
+    origin: DVec3,
+    lights: &[Light],
+    environment: &continuum_gpu::Environment,
+    camera: Camera,
+    size: (u32, u32),
+    samples: u32,
+    bounces: u32,
+    seed: u32,
+    work: &Path,
+) -> io::Result<Reference> {
+    render_instanced_inner(
+        scene,
+        origin,
+        lights,
+        Vec3::ZERO,
+        Some(environment),
+        camera,
+        size,
+        samples,
+        bounces,
+        seed,
+        work,
+    )
+}
+
+/// An environment as a Radiance HDR file (uncompressed RGBE, rows from the
+/// top).
+fn hdr_bytes(e: &continuum_gpu::Environment) -> Vec<u8> {
+    let mut out = format!(
+        "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y {} +X {}\n",
+        e.height, e.width
+    )
+    .into_bytes();
+    for p in &e.rgb {
+        let m = p[0].max(p[1]).max(p[2]);
+        if m < 1e-32 {
+            out.extend([0, 0, 0, 0]);
+        } else {
+            let (mant, exp) = frexp(m);
+            let scale = mant * 256.0 / m;
+            out.extend([
+                (p[0] * scale) as u8,
+                (p[1] * scale) as u8,
+                (p[2] * scale) as u8,
+                (exp + 128) as u8,
+            ]);
+        }
+    }
+    out
+}
+
+/// `x` as a mantissa in [0.5, 1) and an exponent.
+fn frexp(x: f32) -> (f32, i32) {
+    let e = x.log2().floor() as i32 + 1;
+    (x / 2f32.powi(e), e)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_instanced_inner(
+    scene: &InstancedScene,
+    origin: DVec3,
+    lights: &[Light],
+    sky: Vec3,
+    environment: Option<&continuum_gpu::Environment>,
+    camera: Camera,
     (width, height): (u32, u32),
     samples: u32,
     bounces: u32,
@@ -227,6 +308,13 @@ pub fn render_instanced_lights(
     // Whether any input differs from what the work directory holds: a
     // result is reused only when every input and the job are unchanged.
     let mut changed = false;
+    // The environment (M5 gate 11), as an HDR image, if any.
+    let mut sky_map = String::new();
+    if let Some(e) = environment {
+        let path = work.join("sky_map.hdr");
+        changed |= write_if_changed(&path, &hdr_bytes(e))?;
+        sky_map = format!("\n  \"sky_map\": {:?},", path.to_string_lossy());
+    }
     let mut geometries = Vec::new();
     for (g, surface) in scene.geometries.iter().enumerate() {
         // Always checked: a file left from another scene in the same
@@ -377,7 +465,7 @@ pub fn render_instanced_lights(
     let job = format!(
         r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
-  "sky": {},
+  "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
   "width": {width}, "height": {height}, "samples": {samples}, "bounces": {bounces}, "seed": {seed}}}"#,
         geometries.join(", "),

@@ -43,8 +43,12 @@ struct LightUniform {
     /// Uniform sky radiance (linear RGB; zero: no sky).
     sky: [f32; 4],
     /// `[first object-hierarchy node's coverage in blas_cov (NONE: no
-    /// object-level prefiltering), 0, 0, 0]`
+    /// object-level prefiltering), sky prefilter bits, 1 with an
+    /// environment (M5 gate 11), 0]`
     objects: [u32; 4],
+    /// The environment's radiance above the horizon as nine spherical
+    /// harmonics coefficients (RGB in xyz; M5 gate 11).
+    sky_sh: [[f32; 4]; 9],
 }
 
 #[repr(C)]
@@ -78,6 +82,9 @@ pub struct MaskConeKernel {
     /// MikkTSpace tangents for normal maps (M10 gate 13; else each
     /// triangle's own frame).
     mikktspace: std::cell::Cell<bool>,
+    /// The environment's radiance as nine spherical harmonics coefficients,
+    /// if set (M5 gate 11).
+    environment: std::cell::Cell<Option<[[f32; 4]; 9]>>,
     pixel_cones: std::cell::Cell<bool>,
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
@@ -142,6 +149,85 @@ struct CameraUniform {
     right: [f32; 4],
     up: [f32; 4],
     params: [f32; 4],
+}
+
+/// An environment's radiance over directions (M5 gate 11): an
+/// equirectangular image in Blender's convention, rows from the top (the
+/// zenith) down, column `u` at azimuth `atan2(y, x) = π − 2π u`, linear RGB.
+#[derive(Clone, Debug, Default)]
+pub struct Environment {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// `width × height` linear RGB radiances, row by row from the top.
+    pub rgb: Vec<[f32; 3]>,
+}
+
+impl Environment {
+    /// An environment from a function of direction (unit, z up), sampled at
+    /// each pixel's centre.
+    pub fn from_fn(width: u32, height: u32, f: impl Fn(Vec3) -> Vec3) -> Environment {
+        let mut rgb = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgb.push(f(Self::direction(width, height, x, y)).to_array());
+            }
+        }
+        Environment { width, height, rgb }
+    }
+
+    /// The unit direction through pixel `(x, y)`'s centre.
+    pub fn direction(width: u32, height: u32, x: u32, y: u32) -> Vec3 {
+        let u = (x as f32 + 0.5) / width as f32;
+        let v = 1.0 - (y as f32 + 0.5) / height as f32;
+        let phi = std::f32::consts::PI - std::f32::consts::TAU * u;
+        let e = (v - 0.5) * std::f32::consts::PI;
+        Vec3::new(e.cos() * phi.cos(), e.cos() * phi.sin(), e.sin())
+    }
+
+    /// Its radiance above the horizon as nine real spherical harmonics
+    /// coefficients (RGB), and its mean radiance there (over solid angle).
+    fn sh9(&self) -> ([[f32; 4]; 9], Vec3) {
+        let mut c = [[0.0f64; 3]; 9];
+        let (mut sum, mut area) = (Vec3::ZERO.as_dvec3(), 0.0f64);
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        let cell = std::f64::consts::TAU / w as f64 * std::f64::consts::PI / h as f64;
+        for y in 0..h {
+            for x in 0..w {
+                let d = Self::direction(w, h, x, y);
+                if d.z <= 0.0 {
+                    continue;
+                }
+                let solid = cell * (d.z.asin().cos() as f64);
+                let l = Vec3::from_array(self.rgb[(y * w + x) as usize]).as_dvec3();
+                for (k, b) in sh_basis(d).iter().enumerate() {
+                    for ch in 0..3 {
+                        c[k][ch] += l[ch] * *b as f64 * solid;
+                    }
+                }
+                sum += l * solid;
+                area += solid;
+            }
+        }
+        let sh = c.map(|k| [k[0] as f32, k[1] as f32, k[2] as f32, 0.0]);
+        (sh, (sum / area.max(1e-12)).as_vec3())
+    }
+}
+
+/// The nine real spherical harmonics at unit direction `d` (bands 0–2).
+fn sh_basis(d: Vec3) -> [f32; 9] {
+    [
+        0.282_095,
+        0.488_603 * d.y,
+        0.488_603 * d.z,
+        0.488_603 * d.x,
+        1.092_548 * d.x * d.y,
+        1.092_548 * d.y * d.z,
+        0.315_392 * (3.0 * d.z * d.z - 1.0),
+        1.092_548 * d.x * d.z,
+        0.546_274 * (d.x * d.x - d.y * d.y),
+    ]
 }
 
 /// Compile-time choices for a [`MaskConeKernel`] (experiments only).
@@ -400,6 +486,7 @@ impl RectLight {
             ],
             sky: v4(sky),
             objects: [objects, sky_prefilter.to_bits(), 0, 0],
+            sky_sh: [[0.0; 4]; 9],
         }
     }
 }
@@ -661,6 +748,7 @@ impl MaskConeKernel {
             pipelines: Default::default(),
             hardware_rays: std::cell::Cell::new(ray_queries),
             mikktspace: std::cell::Cell::new(true),
+            environment: std::cell::Cell::new(None),
             pixel_cones: std::cell::Cell::new(false),
             prefilter: std::cell::Cell::new(0.0),
             sky: std::cell::Cell::new(Vec3::ZERO),
@@ -769,6 +857,36 @@ impl MaskConeKernel {
     #[doc(hidden)]
     pub fn set_sky(&self, rgb: Vec3) {
         self.sky.set(rgb.max(Vec3::ZERO));
+    }
+
+    /// Sky light from an environment (M5 gate 11): radiance varying with
+    /// direction above the horizon (below it, the scene's own geometry is
+    /// taken to be the ground), or None for [`Self::set_sky`]'s uniform sky.
+    /// The view cache keeps each texel's sky visibility for a uniform sky,
+    /// and shading scales it by the environment's irradiance at the pixel's
+    /// normal over the open sky's (as lights' ratios): exact for an
+    /// unoccluded sky, approximate where occlusion depends on direction.
+    /// Camera and reflection rays that miss see the environment through its
+    /// nine spherical harmonics (smooth). Sets the uniform sky to the
+    /// environment's mean radiance above the horizon, which bounce light
+    /// and per-pixel rendering use. Read when a renderer is made.
+    pub fn set_environment(&self, environment: Option<&Environment>) {
+        match environment {
+            Some(e) => {
+                let (sh, mean) = e.sh9();
+                self.environment.set(Some(sh));
+                self.set_sky(mean);
+            }
+            None => self.environment.set(None),
+        }
+    }
+
+    /// The light uniform's environment fields (M5 gate 11).
+    fn environment_uniform(&self, u: &mut LightUniform) {
+        if let Some(sh) = self.environment.get() {
+            u.sky_sh = sh;
+            u.objects[2] = 1;
+        }
     }
 
     /// The sky set with [`Self::set_sky`].
@@ -1278,7 +1396,7 @@ impl MaskConeKernel {
         if tex.is_empty() {
             tex.push([0.0; 2]);
         }
-        let uniform = light.uniform(
+        let mut uniform = light.uniform(
             scene.instances.len(),
             0,
             Hierarchy::Triangles,
@@ -1294,6 +1412,7 @@ impl MaskConeKernel {
             ),
             objects,
         );
+        self.environment_uniform(&mut uniform);
         // Writable for movers (the hierarchy's movers subtree, transforms).
         let storage = |label: &str, contents: &[u8]| {
             self.device
@@ -1682,7 +1801,7 @@ impl MaskConeKernel {
         lightmap: Option<&Lightmap>,
     ) -> Vec<(u32, wgpu::Buffer)> {
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let uniform = frame.light.uniform(
+        let mut uniform = frame.light.uniform(
             frame.meshes.len(),
             0,
             frame.hierarchy,
@@ -1698,6 +1817,7 @@ impl MaskConeKernel {
             ),
             hierarchy::NONE,
         );
+        self.environment_uniform(&mut uniform);
         let flat = flatten(frame.meshes);
         let (nodes, items) = mesh_hierarchy(frame.meshes);
         let albedo4: Vec<[f32; 4]> = frame.albedo.iter().map(|&a| v4(a)).collect();
@@ -1855,7 +1975,7 @@ impl MaskConeKernel {
         let main = self.entry("main");
         let debug = debug_mode != 0;
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let uniform = light.uniform(
+        let mut uniform = light.uniform(
             meshes.len(),
             debug_mode,
             hierarchy,
@@ -1871,6 +1991,7 @@ impl MaskConeKernel {
             ),
             hierarchy::NONE,
         );
+        self.environment_uniform(&mut uniform);
         let receivers_gpu: Vec<ReceiverGpu> = receivers
             .iter()
             .map(|&(p, n)| ReceiverGpu {
