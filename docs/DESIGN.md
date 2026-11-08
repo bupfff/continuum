@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-07, after M5 gate 9)
+## 3.6 Where we stand (updated 2026-11-07, after M7 gate 4)
 
 Against the goal in §1, honestly:
 
@@ -351,86 +351,76 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-07)
 
-**Start here (end of session, 2026-11-07).** The state in one place, for a
-new conversation:
+**Start here (end of the second session, 2026-11-07).** The state in one
+place, for a new conversation:
 
-- **Done since the `v0.1.0` tag** (each with its results file in
-  `docs/results/`):
+- **This session** took the six candidates below in order (the user's
+  call). Results in `docs/results/`:
+  - passed: M5 G9 the sky later (on by default); M10 G10 materials (5.85%
+    from Cycles; the light-size normalization was applied twice);
+  - failed but kept: M10 G8–G9 exactly back-to-back faces (bake speed
+    fixed; the 0.5% bound against a 1 mm control measured the offset
+    itself; two bugs fixed: smooth normals cancelling to NaN bounce rays,
+    and Metal ray queries ignoring back-face culling); M7 G4 silhouette
+    rays through ray queries (1.29× textured, 3.03× on the field from
+    150 m, against 1.5×);
+  - measured, not gated: moving lights' mixed texels
+    (`m9-mixed-texels-diagnostics.md`);
+  - deferred by the user after an estimate: movers under a sky.
+- **Done since the `v0.1.0` tag** (each with its results file):
   - passed: M9 G1 movers in the view cache; M10 G4 re-coloring with bounce
-    light; M10 G5 normal maps; M10 G7 alpha cutouts; M7 G2 texture box
-    filter;
+    light; M10 G5 normal maps (measured before M10 G10's fix); M10 G7 alpha
+    cutouts; M7 G2 texture box filter; M5 G9 the sky later; M10 G10
+    materials;
   - failed but kept, working with known costs: M9 G2/G4 moving lights
     (sound, 1.6× at a real sun's speed); M9 G3 movers under a sky (sound,
-    3.6–4.0× while moving); M10 G1/G3 bounce light (accurate); M10 G2
-    materials (8.94% against 6%; fixed, M10 G10 passed at 5.85%); M7 G3
-    silhouette rays (13× cost, off; through ray queries 1.29–3.03×, M7
-    G4);
+    3.6–4.0× while moving); M10 G1/G3 bounce light (accurate); M10 G8–G9
+    back-to-back faces; M7 G3–G4 silhouette rays (off by default);
   - M10 G6 reached no criterion (a cache bug, fixed; re-run as G7);
   - not gated, tested: emission; metallic-roughness textures; glTF import
     and save of metallic and roughness, emission, normal and
     metallic-roughness textures, alpha modes (MASK; BLEND as MASK at 0.5)
-    and double-sided materials (back faces on the same plane since M10
-    G8–G9).
-- **Candidates for next, in the order I would take them** (the user picks;
-  each is for a new gate):
-  1. *Back-to-back faces.* **Done (M10 G8–G9, failed on the comparison
-     with the 1 mm control, which mostly measured that control's own
-     offset; kept):** normal bake speed, 3.42% from Cycles against the
-     control's 3.37%, no offset in glTF import
+    and double-sided materials (back faces on the same plane).
+- **The six candidates, as left:**
+  1. *Back-to-back faces.* Done (M10 G8–G9, kept): normal bake speed, 3.42%
+     from Cycles against the 1 mm control's 3.37%, no offset in glTF import
      (`docs/results/m10-gate9.md`).
-  2. *Sky warm-up* (M5 G5). **Done (M5 G9, passed):** the sky later. Views
-     come within 5% of their warm image 10–20× sooner and warm in 0.6× the
-     frames (`docs/results/m5-gate9.md`). Not measured: flights; with
-     bounce light, movers or moving lights it is off.
-  3. *Movers under a sky* (M9 G3's follow-up): texel-level sky charges
-     with the cosine to the normal and the horizon, re-baking only the sky
-     samples past ε. The per-page sphere bound is about 5,000× loose.
-     **Deferred (2026-11-07, the user's call after an estimate):** summed
-     over M9 G3's 64 movers, a per-sample bound with the cosine and horizon
-     falls below ε (1% of about 2.5) on ground beyond about 10 m from the
-     line of movers (0.007 at 10 m, 0.0018 at 20 m, against the sphere
-     bound's 0.095 and 0.047), but not within about 5 m (0.03–0.9), nor on
-     boulder faces turned toward the movers. It needs per-sample normals in
-     the stale pass, and M9 G3's fallback criterion would still fail, since
-     the sky later (M5 G9) is off with movers. Making the sky later work
-     with movers comes first.
-  4. *Moving lights* (M9 G4's follow-up): a tight bound for mixed texels,
-     which now re-bake every frame the light moves. **Measured first
-     (2026-11-07, `docs/results/m9-mixed-texels-diagnostics.md`), not
-     gated:** 97.5% of texels are stored as exactly 0 or 1, so a tighter
-     band bound would help almost none. The cost is shadowed texels counted
-     as mixed. A "dark" state (guard wholly covered, ratio 0) cut the real
-     sun's flight to 1.25× the still one (development, 640×360), but failed
-     soundness (8 pages beyond their bound, changes of 1–5%). The likely
-     cause is coverage summed within a mesh over-counting overlapping
-     layers. Needs coverage that cannot over-count for the dark test.
-  5. *Materials accuracy* (M10 G2's follow-up). **Done (M10 G10,
-     passed):** sun highlights on metal carried 75% of the squared error;
-     specular from lights applied the light-size normalization twice. Fixed:
-     5.85% from Cycles (`docs/results/m10-gate10.md`). Not the cause: one
-     reflection ray per pixel (eight across the lobe: 8.85%).
-  6. *Silhouette anti-aliasing through hardware rays* (M7 G3's follow-up).
-     **Tried (M7 G4, failed on the field's speed):** ray queries in their
-     own passes, same quality as compute rays; 1.29× the frame on the
-     textured scene, 3.03× on the field from 150 m up (compute 24×), where
-     half the pixels are edges and shading four quarters is the cost
-     (`docs/results/m7-gate4.md`). Next: fewer quarters or a cap.
-  7. Combinations not supported yet: bounce light with movers or moving
-     lights; movers with moving lights. Also emission that lights other
-     surfaces, alpha blending, MikkTSpace tangents.
-- **Known issues:** the cache's total sky work is still large (the sky
-  later orders it; with bounce light, movers or moving lights it is off);
-  sustained speed on the fanless Air (M5 G8); Metal only measured.
-- **Needs the user:** which candidate next; a `v0.2` tag (everything above
-  is on `main`, CI green as of the last push); a cloud GPU account for an
-  NVIDIA benchmark; any publishing.
+  2. *Sky warm-up.* Done (M5 G9, passed): views come within 5% of their
+     warm image 10–20× sooner and warm in 0.6× the frames
+     (`docs/results/m5-gate9.md`). Off with bounce light, movers or moving
+     lights. Not measured: flights.
+  3. *Movers under a sky.* Deferred: a per-sample bound with the cosine and
+     horizon would clear ground beyond about 10 m from the movers but not
+     nearer, and M9 G3's fallback criterion would still fail because the
+     sky later is off with movers. Making the sky later work with movers
+     comes first.
+  4. *Moving lights' mixed texels.* 97.5% of texels are stored as exactly 0
+     or 1, so a tighter band bound helps almost none. A dark state cut the
+     cost to 1.25× but failed soundness; coverage summed within a mesh can
+     over-count. Needs coverage that cannot over-count for the dark test.
+  5. *Materials accuracy.* Done (M10 G10, passed, 5.85%).
+  6. *Silhouette rays through ray queries.* Built (M7 G4, failed on the
+     field's speed, 3.03×). Next: fewer quarters or a cap per frame.
+- **Next candidates, in the order I would take them:** the sky later with
+  movers (unblocks 3); two-ray or capped silhouette rays (a new M7 gate);
+  over-count-free coverage for a dark state (unblocks 4); the sky later in
+  flights (measure); bounce light with movers.
+- **Known issues:** the total sky work is still large (the sky later orders
+  it); sustained speed on the fanless Air (M5 G8); Metal only measured.
+  Naga 30's Metal backend ignores ray flags' face culling (worked around in
+  the camera's passes); worth reporting upstream (the user's call).
+- **Needs the user:** which candidate next; pushing this session's later
+  commits (pushed through `979a80f`); a `v0.2` tag; a cloud GPU account for
+  an NVIDIA benchmark (the user plans it next); any publishing.
 - **Working notes:** gate binaries are `experiments/room3d/src/bin/
   m<milestone>_gate<n>.rs`; test scenes are in `room3d::textured`
   (`Textured::new()`, `.with_materials()`, `.with_normal_maps()`,
-  `.with_foliage()`) and `room3d::field`. Settle a view by waiting for 32
-  quiet frames rendered after the call (M10 G4's helper); an earlier helper
-  returned after one frame. Cycles references are cached per work directory
-  (`out/<gate>_cycles`) and re-rendered when the job changes.
+  `.with_foliage()`, `.with_foliage_back(m)`) and `room3d::field`. Settle a
+  view by waiting for 32 quiet frames rendered after the call. Cycles
+  references are cached per work directory (`out/<gate>_cycles`) and
+  re-rendered when the job changes. Development tools from this session:
+  `backface_dev`, `ledger_dev`, `edges_dev`, and `m10_gate2`'s `M10_DEV=ss`
+  diagnostic (error split by highlights).
 
 **Decided 2026-11-07: a more complete paradigm before the tag.** The
 user's order (all attempted; results above and below):
