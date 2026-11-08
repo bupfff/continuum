@@ -404,11 +404,19 @@ place, for a new conversation:
      field's speed, 3.03×). Next: fewer quarters or a cap per frame.
 - **Next candidates, in the order I would take them:** ~~the sky later with
   movers~~ (done, development only: sound, cost 1.01×, no quality gain in
-  flights; M9 G5); ~~two-ray silhouette rays~~ (an option,
+  flights; M9 G5; this also answers "the sky later in flights": in motion
+  both caches lag 25–30% behind the settled image); ~~two-ray silhouette
+  rays~~ (an option,
   `edge_samples` 2, development only: field 0.56× the error at 2.00× the
   frame, four quarters 0.41× at 2.62×; nothing reaches 1.5× where half the
   pixels are edges, `docs/results/m7-edge-samples-diagnostics.md`; a cap
   per frame would flicker without blending frames, so not tried);
+  over-count-free coverage for a dark state (assessed, not started: a bin
+  counted only when one triangle covers it is sound but almost never full,
+  since boulder triangles are about a guard bin's size; an exact union per
+  bin needs polygon clipping in the kernel's hot loop; a guard traced at
+  the light cone's resolution costs about 9× and is still not guaranteed;
+  research, not a contained fix);
   over-count-free coverage for a dark state (unblocks 4); the sky later in
   flights (measure); bounce light with movers.
 - **Known issues:** the total sky work is still large (the sky later orders
