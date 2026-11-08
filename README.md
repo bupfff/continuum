@@ -27,8 +27,13 @@ Continuum renders:
 - metallic-roughness materials with glossy reflections (5.85% from
   Cycles, M10 gate 10);
 - normal maps, 3.63% from Cycles (M10 gate 5), alpha cutouts, 3.29% (M10
-  gate 7), exactly back-to-back double-sided faces (M10 gates 8–9), and
-  emission;
+  gate 7), and exactly back-to-back double-sided faces (M10 gates 8–9);
+- emission that lights its surroundings through bounce light (7.46%, M10
+  gate 12), and emissive textures (6.35%, M10 gate 15);
+- alpha blending for glass and other see-through surfaces, with partial
+  shadows (4.71% from Cycles, M10 gate 16; needs hardware ray queries);
+- environment light: a sky whose radiance varies with direction, from an
+  equirectangular image (1.37% from Cycles on a gradient sky, M5 gate 12);
 - textures box-filtered over each pixel's footprint (M7 gate 2).
 
 Every claim is measured against Blender's Cycles.
@@ -112,17 +117,18 @@ scenes:
 - meshes and node instances;
 - base color factors and textures, sampled per pixel at the pixel's
   footprint;
-- automatic charts for the lighting cache.
-
+- automatic charts for the lighting cache;
 - punctual lights (`KHR_lights_punctual`): point, spot and directional.
 
 A textured scene imported this way is within 0.43% of Cycles with the same
 textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Metallic and
 roughness factors, emission and normal maps are imported too (normal maps
 3.63% from Cycles, M10 gate 5; metallic-roughness 5.85%, M10 gate 10),
-with metallic-roughness textures; alpha masks are cut
-into geometry (3.29% from Cycles, M10 gate 7). Double-sided materials
-become exactly back-to-back faces (M10 gates 8–9).
+with metallic-roughness and emissive textures (6.35%, M10 gate 15). Alpha
+masks are cut into geometry (3.29% from Cycles, M10 gate 7), and BLEND
+materials are blended (4.71%, M10 gate 16). Double-sided materials become
+exactly back-to-back faces (M10 gates 8–9). Not yet imported:
+`KHR_texture_transform` and vertex colors.
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb

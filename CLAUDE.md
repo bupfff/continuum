@@ -16,7 +16,9 @@
     the prefiltered hierarchies; `cutout.rs` alpha cutouts made geometry.
   - **Materials and textures:** `InstancedScene` in `continuum-gpu/src/lib.rs`
     (`geometry_materials`, `_emission`, `_normal_maps`,
-    `_metallic_roughness`, `_alpha_cutoff`); glTF import and save in
+    `_metallic_roughness`, `_alpha_cutoff`, `_emissive_textures`,
+    `_blend`); `Environment` (the environment sky) in the same file;
+    `tangents.rs` MikkTSpace; glTF import and save in
     `crates/continuum-gltf/src/lib.rs`.
   - **Core types:** `crates/continuum`.
   - **2D experiments:** binaries in `experiments/flatland/src/bin/`; every
@@ -24,7 +26,8 @@
   - **3D gates and diagnostics:** binaries in `experiments/room3d/src/bin/`
     (`m<milestone>_gate<n>.rs`), with scenes in `room3d::{showcase, field,
     outdoor, textured}` (`Textured::new()` and its `.with_materials()`,
-    `.with_normal_maps()`, `.with_foliage()`).
+    `.with_normal_maps()`, `.with_foliage()`, `.with_glow()`,
+    `.with_sign()`, `.with_glass()`).
   - **Viewer:** `apps/viewer` (`cargo run --release -p viewer -- --scene
     field --scale 2`).
   - **Patched wgpu-core:** `third_party/` (see its README).

@@ -34,6 +34,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 | One bounce of light, textured scene, against Cycles | 1.79% | M10 G1 |
 | Normal maps against Cycles | 3.63% | M10 G5 |
 | Alpha-masked foliage against Cycles | 3.29% | M10 G7 |
+| Emissive textures (a sign at night) against Cycles | 6.35% | M10 G15 |
+| Alpha-blended glass and a blind against Cycles | 4.71% | M10 G16 |
+| A gradient environment sky against Cycles | 1.37% | M5 G12 |
 
 ## Limits, today
 
@@ -76,7 +79,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   OpenGL's convention as glTF specifies). The cache's shading uses it for
   light from lights, specular and reflections; the sky and bounce light
   keep the interpolated normal. 3.63% from Cycles on a beveled-tile scene
-  (M10 gate 5). glTF import brings normal textures (scale ignored).
+  (M10 gate 5). glTF import brings normal textures (scale ignored; no
+  `KHR_texture_transform` or vertex colors yet, for any texture).
   Tangents are MikkTSpace's, per corner, as glTF specifies (M10 gate 13;
   no measurable difference from per-triangle frames on its test scene,
   which had no baked maps).
@@ -87,7 +91,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   import maps MASK. Double-sided
   geometry can be exactly back-to-back faces (glTF import doubles a
   double-sided material's triangles on the same plane; M10 gates 8–9).
-- **Environment light.** `MaskConeKernel::set_environment` lights the scene
+- **Environment light.** `RendererOptions::environment` (or
+  `MaskConeKernel::set_environment`) lights the scene
   with a sky whose radiance varies with direction: an equirectangular
   image (`Environment`, Blender's convention; `Environment::from_fn` builds
   one from a function of direction) above the horizon; below it, the

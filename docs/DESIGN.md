@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-07, after M7 gate 4)
+## 3.6 Where we stand (updated 2026-11-08, after M5 gate 12)
 
 Against the goal in §1, honestly:
 
@@ -260,6 +260,10 @@ Against the goal in §1, honestly:
     times strength; not shown by other surfaces' lighting) and normal maps
     (M10 G5: 3.63% from Cycles with them), metallic-roughness textures,
     and alpha masks cut into geometry (M10 G7: 3.29% from Cycles).
+    Since then: emissive textures (M10 G15), BLEND materials as blending
+    (M10 G16) and double-sided materials as back-to-back faces. Not yet:
+    `KHR_texture_transform`, vertex colors, and saving emissive textures
+    or blending back to glTF.
 - **One bounce of light in the view cache** (M10 G1, failed on its
   re-coloring check only).
   - On M6's textured scene, the cached image with bounce light is 1.79%
@@ -282,6 +286,9 @@ Against the goal in §1, honestly:
   tangents bend the normal for light from lights, specular and
   reflections. 3.63% from Cycles with the maps against 26.42% ignoring
   them, at 1.04× the warm frame. The sky and bounce light ignore the maps.
+  Tangents are MikkTSpace's per corner since M10 G13 (failed: no
+  measurable difference on its scene, whose maps were not baked from a
+  high-poly model; kept as glTF specifies, no cost).
 - **Alpha cutouts** (M10 G7, passed; G6 reached no criterion). Masked
   triangles become the opaque part of their texture, as geometry, before
   upload (`cut_out`: marching squares on the bilinear alpha), so every path
@@ -295,9 +302,29 @@ Against the goal in §1, honestly:
   Two bugs: smooth normals cancelled to zero (NaN bounce rays visited the
   whole scene), and Metal's ray queries ignore `CULL_BACK_FACING`, so
   camera rays now re-trace back-face hits through tested candidates.
-- **Emission** (not gated, exact by construction): a per-geometry emitted
-  radiance added in the cached shading and in reflections. It lights
-  nothing else.
+- **Emission** (exact by construction where seen directly and in
+  reflections). It lights other surfaces through bounce light (M10
+  G11–G12, failed on the absolute bound, kept): 7.46% from Cycles over
+  surfaces near a glowing panel at night against 18.00% without, at no
+  cost; the rest is bounce light's 3×3 samples a page near an emitter.
+  **Emissive textures** (M10 G15, passed; G14 failed from its reference
+  scene's coincident faces): 6.35% from Cycles on a striped sign, no cost.
+- **Alpha blending** (M10 G16, failed on speed only: 1.33× the frame
+  against 1.3× where a fifth of the pixels see a pane; kept). With
+  hardware camera rays, up to four layers behind blended surfaces are
+  traced and composited front to back (the extra-samples list, shared with
+  silhouette rays); shadows keep the opacity factor's share of light.
+  4.71% from Cycles on glass and a blind, against 57.31% drawn opaque.
+  Without hardware rays, or with movers, a textured blend is cut at 0.5.
+  Bounce and reflection rays see blended surfaces opaque.
+- **Environment light** (M5 G11 failed, **M5 G12 passed**): a sky whose
+  radiance varies with direction, from an equirectangular image.
+  Surfaces scale the cached uniform-sky visibility by the environment's
+  nine-harmonic irradiance over the open sky's, so the cache bakes nothing
+  new; rays that miss read the image. 1.37% from Cycles on a gradient sky
+  (the best uniform sky: 19.92%), 1.04× the frame. Seen directly it has
+  8-bit range (a sun belongs in a light); bounce light and the per-pixel
+  path use its mean.
 - **Texture filtering for the area integral** (M7 G2, passed): a box
   filter over the pixel's footprint (ray differentials, four taps) halves
   the textured scene's error against the area-integrated image (7.11% to
@@ -317,9 +344,7 @@ Against the goal in §1, honestly:
     M7 G1), the largest quality gap. Pixel cones (M7 G1) and compute
     silhouette rays (M7 G3) both failed on cost; silhouette rays through
     ray queries (M7 G4) cost 3× where half the pixels are edges;
-  - more than one bounce; alpha blending (emission lights other surfaces
-    through bounce light since M10 G12, 7.46% from Cycles near a glowing
-    panel);
+  - more than one bounce;
   - the quality contract (§3.3) beyond the bake's frame-time target.
 - **Against UE5.** No direct comparison has been made, so none is claimed.
   - Our measured edge: exact soft shadows from area lights and noise-free
@@ -345,153 +370,136 @@ estimates, and gates fail often, so treat them as ranges.
 |---|---|---|---|
 | 1 | View-dependent lighting cache: texels only on visible surfaces, coarser with distance, a per-frame bake budget, kept across frames, exact incremental updates for movers, instanced objects | Real-time at scale. M4 gate 7 shows per-pixel cones are the bottleneck. **Done for static scenes (M4 G8–G11; G11 passed):** flying over a million boulders at 720p averages 14.6–15.0 ms with the bake budget following the frame time; lighting is softer in motion and sharpens when the view settles. Sky in this cache since M5 G5 (at frame rate, slow to converge; the sky later, M5 G9, brings views within 5% 10–20× sooner). Not yet: movers in this cache | 2–3 (3 done) |
 | 2 | Sky light and several lights (sun, sky environment, point and spot lights) | Outdoor scenes had black shadows. **Sky done per pixel and matched to Cycles (M5 G2–G3); in the view cache at frame rate (M5 G5), but slow to converge. Several colored rect lights done (M5 G6), cached as ratios (M5 G7); point and spot lights (M5 G8).** The sky later (M5 G9) shows shadows first and warms views 10–20× sooner to within 5%. Not yet: sustained speed with several lights | 3 (3 done) |
-| 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes. **Done (M6 G1, failed on round-trip precision only):** a textured import is 0.43% from Cycles, automatic charts are within a point of hand-made ones in the cache, warm frames take 1.5 ms. Not yet: PBR parameters, normal maps, alpha, the file's lights | 2–3 (1 done) |
+| 3 | glTF import: meshes, instances, base-color textures, automatic charts | Real content instead of procedural scenes. **Done (M6 G1, failed on round-trip precision only):** a textured import is 0.43% from Cycles, automatic charts are within a point of hand-made ones in the cache, warm frames take 1.5 ms. Since then (M10): metallic-roughness, normal, emissive and metallic-roughness textures, alpha masks and blending, double-sided materials, the file's lights. Not yet: `KHR_texture_transform`, vertex colors | 2–3 (2 done) |
 | 4 | Pixel-footprint cones for primary visibility: anti-aliasing and far-field level of detail | The far field shimmers; one ray per pixel. **Tried (M7 G1, failed on all three):** exact 8×8 coverage per pixel costs hundreds of node tests per pixel at scale (105 ms on the textured scene, 10–87 s on the field) and gains 0.76× only from 150 m up. Kept off by default; v0.1 ships with one ray per pixel | 2 (1 spent) |
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-07)
+### 3.8 Next steps, in order (updated 2026-11-08)
 
-**Start here (end of the second session, 2026-11-07).** The state in one
+**Start here (end of the third session, 2026-11-08).** The state in one
 place, for a new conversation:
 
-- **This session** took the six candidates below in order (the user's
-  call). Results in `docs/results/`:
-  - passed: M5 G9 the sky later (on by default); M10 G10 materials (5.85%
-    from Cycles; the light-size normalization was applied twice);
-  - failed but kept: M10 G8–G9 exactly back-to-back faces (bake speed
-    fixed; the 0.5% bound against a 1 mm control measured the offset
-    itself; two bugs fixed: smooth normals cancelling to NaN bounce rays,
-    and Metal ray queries ignoring back-face culling); M7 G4 silhouette
-    rays through ray queries (1.29× textured, 3.03× on the field from
-    150 m, against 1.5×);
-  - measured, not gated: moving lights' mixed texels
-    (`m9-mixed-texels-diagnostics.md`);
-  - deferred by the user after an estimate: movers under a sky;
-  - after the list: the NVIDIA benchmark prepared (deferred: no funds for a
-    rented GPU); M5 G10 a guessed sky from coarser pages (development only,
-    no gain, removed); M10 G11–G12 emission lights its surroundings
-    (failed on the absolute bound, 7.46% against 5%, kept); M10 G13
-    MikkTSpace tangents (failed: no difference on its scene, kept); flight
-    spikes diagnosed to the light bake's cost per unit varying 2–3×
-    (`flight-spikes-diagnostics.md`); M10 G14–G15 emissive textures
-    (passed on the re-run, 6.35%); M10 G16 alpha blending (accuracy passed,
-    4.71%; speed 1.33× against 1.3×; kept), glTF BLEND imported as
-    blending; M5 G11–G12 environment light (passed on the re-run, 1.37%).
-- **Done since the `v0.1.0` tag** (each with its results file):
-  - passed: M9 G1 movers in the view cache; M10 G4 re-coloring with bounce
-    light; M10 G5 normal maps (measured before M10 G10's fix); M10 G7 alpha
-    cutouts; M7 G2 texture box filter; M5 G9 the sky later; M10 G10
-    materials;
-  - failed but kept, working with known costs: M9 G2/G4 moving lights
-    (sound, 1.6× at a real sun's speed); M9 G3 movers under a sky (sound,
-    3.6–4.0× while moving); M10 G1/G3 bounce light (accurate); M10 G8–G9
-    back-to-back faces; M7 G3–G4 silhouette rays (off by default);
-  - M10 G6 reached no criterion (a cache bug, fixed; re-run as G7);
-  - not gated, tested: emission; metallic-roughness textures; glTF import
-    and save of metallic and roughness, emission, normal and
-    metallic-roughness textures, alpha modes (MASK; BLEND as blending since
-    M10 G16) and double-sided materials (back faces on the same plane).
-- **The six candidates, as left:**
-  1. *Back-to-back faces.* Done (M10 G8–G9, kept): normal bake speed, 3.42%
-     from Cycles against the 1 mm control's 3.37%, no offset in glTF import
-     (`docs/results/m10-gate9.md`).
-  2. *Sky warm-up.* Done (M5 G9, passed): views come within 5% of their
-     warm image 10–20× sooner and warm in 0.6× the frames
-     (`docs/results/m5-gate9.md`). Off with bounce light, movers or moving
-     lights. Not measured: flights.
-  3. *Movers under a sky.* Deferred: a per-sample bound with the cosine and
-     horizon would clear ground beyond about 10 m from the movers but not
-     nearer. The sky later now works with movers (M9 G5, development
-     only), but does not help flights: both caches are 25–30% from the
-     settled image in motion (`docs/results/m9-gate5.md`), so it does not
-     unblock M9 G3's criteria.
-  4. *Moving lights' mixed texels.* 97.5% of texels are stored as exactly 0
-     or 1, so a tighter band bound helps almost none. A dark state cut the
-     cost to 1.25× but failed soundness; coverage summed within a mesh can
-     over-count. Needs coverage that cannot over-count for the dark test.
-  5. *Materials accuracy.* Done (M10 G10, passed, 5.85%).
-  6. *Silhouette rays through ray queries.* Built (M7 G4, failed on the
-     field's speed, 3.03×). Next: fewer quarters or a cap per frame.
-- **Next candidates, in the order I would take them:** ~~the sky later with
-  movers~~ (done, development only: sound, cost 1.01×, no quality gain in
-  flights; M9 G5; this also answers "the sky later in flights": in motion
-  both caches lag 25–30% behind the settled image); ~~two-ray silhouette
-  rays~~ (an option,
-  `edge_samples` 2, development only: field 0.56× the error at 2.00× the
-  frame, four quarters 0.41× at 2.62×; nothing reaches 1.5× where half the
-  pixels are edges, `docs/results/m7-edge-samples-diagnostics.md`; a cap
-  per frame would flicker without blending frames, so not tried);
-  over-count-free coverage for a dark state (assessed, not started: a bin
-  counted only when one triangle covers it is sound but almost never full,
-  since boulder triangles are about a guard bin's size; an exact union per
-  bin needs polygon clipping in the kernel's hot loop; a guard traced at
-  the light cone's resolution costs about 9× and is still not guaranteed;
-  research, not a contained fix);
-  over-count-free coverage for a dark state (unblocks 4); the sky later in
-  flights (measure); bounce light with movers.
-- **Emission lights its surroundings** (M10 G11–G12, failed on the
-  absolute bound, kept): bounce samples gather the emission they hit;
-  over surfaces 7.46% from Cycles against 18.00% without (0.41×), against
-  5%; no cost (1.00×). The rest is bounce light's 3×3 samples a page under
-  a near emitter (`docs/results/m10-gate12.md`). Gate 11 scored all
-  pixels, which the night lights' visible disks decided (109.67%).
-- **MikkTSpace tangents for normal maps** (M10 G13, failed: no measurable
-  difference on its scene, kept as glTF specifies, no cost): coded per
-  corner in the normals buffer; on regular low-poly spheres the triangles'
-  own frames already agree (11.80% against 11.75% where they differ). A
-  fair test needs a map baked from a high-poly model
-  (`docs/results/m10-gate13.md`).
-- **Emissive textures** (M10 G14–G15, passed on the re-run): glTF's
-  emissive maps times the emissive factor, directly, in reflections and in
-  bounce light; 6.35% from Cycles over surfaces on a striped sign at night
-  (the texture ignored: 491%), no cost. G14 failed from its reference
-  scene: Cycles lit the double-sided sign from its coincident back faces
-  (`docs/results/m10-gate15.md`).
-- **Alpha blending** (M10 G16, failed on speed only: 1.33× against 1.3×;
-  kept): with hardware camera rays, up to four layers behind blended
-  surfaces, composited front to back; shadows by the opacity factor; 4.71%
-  from Cycles (panes opaque: 57%) (`docs/results/m10-gate16.md`).
-- **Environment light** (M5 G11 failed, **M5 G12 passed**): skies whose
-  radiance varies with direction (`MaskConeKernel::set_environment`, an
-  equirectangular image). Surfaces scale the cached uniform-sky visibility
-  by the environment's nine-harmonic irradiance over the open sky's; rays
-  that miss read the image (an extra base color layer). 1.37% from Cycles on
-  a gradient sky (uniform sky: 19.92%), 1.04× the frame. G11 read the sky
-  seen directly from the harmonics, which cannot follow a sky ending at the
-  horizon (`docs/results/m5-gate12.md`).
-- **Tried after the list (development only, reverted):** a guessed sky
-  from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
-  is the cache's softness in motion, not the sky;
-  `docs/results/m5-gate10.md`).
-- **Flight spikes (diagnosed, not fixed):** the slowest 5% of frames
-  follow GPU bakes whose cost per unit triples for a few frames (18–25 ms
-  instead of 7); a faster-reacting budget did not help, since timings
-  arrive two frames late. Neither budget units, pages, mips nor the
-  kernel's work counters explain the bursts (test R² at most 0.37); they
-  are content-dependent (the same frames each flight). Per-pass profiling
-  puts it all in the light bake, whose cost per unit varies 2–3×; likely
-  SIMD divergence on coarse pages. Next: time pages by mip, or packet walks
-  for coarse pages (`docs/results/flight-spikes-diagnostics.md`).
-- **Known issues:** the total sky work is still large (the sky later orders
-  it); sustained speed on the fanless Air (M5 G8); Metal only measured.
-  Naga 30's Metal backend ignores ray flags' face culling (worked around in
-  the camera's passes); worth reporting upstream (the user's call).
-- **Needs the user:** which candidate next; pushing this session's later
-  commits (pushed through `979a80f`); a `v0.2` tag; running the NVIDIA
-  benchmark on a cloud GPU (prepared: `docs/BENCHMARK.md`,
-  `scripts/cloud_bench.sh`, M4 baseline in `docs/results/bench-m4.md`;
-  deferred until the user can pay for a rented GPU);
-  any publishing.
-- **Working notes:** gate binaries are `experiments/room3d/src/bin/
-  m<milestone>_gate<n>.rs`; test scenes are in `room3d::textured`
-  (`Textured::new()`, `.with_materials()`, `.with_normal_maps()`,
-  `.with_foliage()`, `.with_foliage_back(m)`) and `room3d::field`. Settle a
-  view by waiting for 32 quiet frames rendered after the call. Cycles
-  references are cached per work directory (`out/<gate>_cycles`) and
-  re-rendered when the job changes. Development tools from this session:
-  `backface_dev`, `ledger_dev`, `edges_dev`, and `m10_gate2`'s `M10_DEV=ss`
-  diagnostic (error split by highlights).
+- **The user's direction:** make the engine complete. Pick the next
+  feature by judgment, finish usable features before new research, and keep
+  usage low. The NVIDIA benchmark is ready but waits until the user can pay
+  for a rented GPU.
+- **This session** first took the second session's six candidates in
+  order, then added features. Each result is in `docs/results/`:
+  - **passed:**
+    - M5 G9: the sky later, on by default;
+    - M10 G10: materials, 5.85% from Cycles; the light-size normalization
+      had been applied twice;
+    - M10 G15: emissive textures, 6.35%;
+    - M5 G12: environment light, 1.37% against 19.92% for a uniform sky,
+      1.04× the frame.
+  - **failed but kept:**
+    - M10 G8–G9: exactly back-to-back faces. Bake speed is fixed. Two bugs
+      were fixed: smooth normals cancelling to NaN, and Metal ignoring
+      back-face culling.
+    - M7 G4: silhouette rays through ray queries. 1.29× the frame on the
+      textured scene, 3.03× on the field.
+    - M10 G11–G12: emission lights its surroundings, 7.46% against a 5%
+      bound.
+    - M10 G13: MikkTSpace tangents. No difference on its scene.
+    - M10 G16: alpha blending. Accurate at 4.71%, but 1.33× the frame
+      against a 1.3× limit.
+  - **failed on the scene or reference, then re-run:**
+    - M10 G14: coincident faces in the Cycles scene (re-run as G15);
+    - M5 G11: the visible sky read from the harmonics (re-run as G12).
+  - **development only:**
+    - M5 G10: a guessed sky from coarser pages, removed;
+    - M9 G5: the sky later with movers, kept;
+    - `edge_samples` 2.
+  - **diagnosed:**
+    - moving lights' mixed texels (`m9-mixed-texels-diagnostics.md`);
+    - flight spikes (`flight-spikes-diagnostics.md`).
+  - **library:**
+    - `RendererOptions::environment`;
+    - glTF import of emissive textures and of BLEND as blending;
+    - the NVIDIA benchmark prepared: `docs/BENCHMARK.md`,
+      `scripts/cloud_bench.sh`, M4 baseline in `docs/results/bench-m4.md`.
+- **Next, in the order I would take them.** These are completeness
+  features: small, usable, and each checked against Cycles where it
+  changes the image.
+  1. *A viewer option for the environment sky.* `--env` with a gradient
+     sky or an `.hdr` or `.png` image. Not gated: it uses M5 G12's path.
+  2. *glTF `KHR_texture_transform`.* UV offset, scale and rotation, per
+     texture slot. Many assets use it. Exact by construction: test it
+     against a transformed copy of the mesh's UVs.
+  3. *Vertex colors* (glTF `COLOR_0`), multiplying the base color. Needs a
+     per-corner attribute in the kernel, which is near its 29-buffer limit
+     on Metal: pack it into an existing buffer.
+  4. *Saving the new material fields back to glTF:* emissive textures,
+     blending, the environment. Round-trip tests.
+  5. *Blending speed* (a new gate): M10 G16 missed 1.3× by 0.03×. Levers:
+     skip the layer pass where no blended surface is in view; one layer
+     when the first is nearly opaque.
+  6. *Flight spikes:* predict each page's bake cost (it varies 2–3× with
+     content, likely SIMD divergence on coarse pages) and budget by
+     predicted cost.
+  7. *Emissive quads as area lights:* sharp shadows from emitters, past
+     bounce light's 3×3 samples a page (the rest of M10 G12's 7.46%).
+  8. Research, not contained fixes:
+     - movers under a sky (texel-level charges with the cosine; M9 G3);
+     - coverage that cannot over-count, for moving lights' dark state (M9
+       G4);
+     - more than one bounce;
+     - bounce light with movers.
+- **Earlier candidates, as left:**
+  - *Movers under a sky:* deferred. A per-sample bound with the cosine
+    and the horizon would clear ground beyond about 10 m from the movers,
+    but not nearer. The sky later with movers (M9 G5) is sound but gains
+    nothing in flight: both caches lag 25–30% behind the settled image in
+    motion.
+  - *Moving lights' mixed texels:* 97.5% of texels store exactly 0 or 1,
+    so a tighter band bound helps almost none. A dark state cut the cost
+    to 1.25× but failed soundness, because coverage summed within a mesh
+    can over-count. Ways out were assessed:
+    - a bin counted only when one triangle covers it is sound but almost
+      never full;
+    - an exact union per bin needs polygon clipping in the hot loop;
+    - a guard traced at the light cone's resolution costs about 9×.
+  - *Silhouette rays:* nothing reaches 1.5× where half the pixels are
+    edges. Four quarters give 0.41× the error at 2.62× the frame. A cap
+    per frame would flicker without blending frames.
+- **Known issues:**
+  - the total sky work is large (the sky later orders it, but does not cut
+    it);
+  - sustained speed on the fanless Air (M5 G8);
+  - only Metal has been measured;
+  - blending and silhouette rays need hardware ray queries and no movers;
+  - Naga 30's Metal backend ignores ray flags' face culling. It is worked
+    around in the camera's passes and worth reporting upstream (the
+    user's call);
+  - the 29-buffer limit per stage on Metal. Every new kernel input so far
+    has been packed into an existing buffer (emission words after the
+    object textures, the blend clear in the transforms' row 3, the
+    environment as an extra base color layer).
+- **Needs the user:**
+  - running the NVIDIA benchmark (needs funds);
+  - a `v0.2` tag;
+  - any publishing or upstream report.
+- **Working notes:**
+  - Gate binaries are `experiments/room3d/src/bin/m<milestone>_gate<n>.rs`.
+  - Test scenes are in `room3d::textured`: `Textured::new()` with
+    `.with_materials()`, `.with_normal_maps()`, `.with_curved_normal_maps()`,
+    `.with_foliage()`, `.with_foliage_back(m)`, `.with_glow()`,
+    `.with_sign()` / `.with_sign_sided()` and `.with_glass()`. The field
+    scene is `room3d::field`.
+  - Cycles jobs (`room3d::cycles`) take emission, emissive textures,
+    blending and an environment image (`sky_map`, written as HDR).
+    References are cached per work directory (`out/<gate>_cycles`) and
+    re-rendered when the job changes.
+  - Settle a view by waiting for 32 quiet frames rendered after the call.
+  - When lights are visible, score over surfaces: their visible disks
+    decide all-pixel scores.
+  - Keep coincident emissive or transparent faces out of Cycles scenes.
+  - Gate commits run
+    `cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`
+    first and commit only if it passes (two lint slips reached `main`).
+  - Development tools: `backface_dev`, `ledger_dev`, `edges_dev`,
+    `spikes_dev` (work and passes modes) and `bench`.
 
 **Decided 2026-11-07: a more complete paradigm before the tag.** The
 user's order (all attempted; results above and below):
@@ -675,12 +683,12 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M2 GPU primary visibility | wgpu, tile frustum traversal, mask coverage AA | G1 mask cones in a WGSL compute shader (**passed on attempt 2**: matches the CPU to 6.4e-6, 7.5× faster than 10 CPU threads on the M4, `docs/results/m2-gate1.md`); G2 mesh hierarchy on the GPU (**failed**: identical output, rays 7.5× faster, but the frame only 1.6× faster because cone setup and rasterization dominate, `docs/results/m2-gate2.md`); G3 960×540 at 60 fps with per-pixel cones every frame (**failed**: 33.6 → 26.0 ms, identical output; per-pixel cones every frame are the brute-force path, `docs/results/m2-gate3.md`); G4 world-space lighting cache (**passed on attempt 2**: 1080p in 5.66 ms at 0.58% RMSE vs per-pixel cones, `docs/results/m2-gate4.md`); G5 moving objects with exact soft shadows (**passed**: incremental block re-bake on the GPU equals a full re-bake exactly on every frame; 9.85 ms per 1080p frame with 6.1% of blocks re-baked, vs 21.9 ms for a full re-bake alone, `docs/results/m2-gate5.md`); G6 one-bounce indirect light from cone G-buffers (**passed on attempt 2**: exact against a from-scratch trace on every frame after padding hierarchy boxes, 3.6% RMSE vs 16× the directions, 11.66 ms per 1080p frame with moving boxes, `docs/results/m2-gate6.md`); real-time viewer with moving boxes and indirect light (`apps/viewer`, about 10.8 ms per frame at 2560×1440 on the M4 Air); frame time at 1080p on M4 Air; image-diffed in CI |
 | M3 general meshes and a first showcase | Per-mesh triangle hierarchies, chart-based lightmaps with smooth normals, static coverage cache, probes on moving objects, procedural showcase, Cycles reference pipeline | G1 triangle hierarchies on the GPU (**failed**: identical output but 3.9× vs a 10× target on a 40k-triangle sphere, because cone cost grows with the triangles really inside cones; that is the prefiltered hierarchy's job, `docs/results/m3-gate1.md`); G2 general meshes in the lighting cache (**passed**: 1.61% RMSE vs per-pixel cones with the same normals, 4.99 ms at 1080p, `docs/results/m3-gate2.md`); G3 the showcase in real time vs Cycles (**failed narrowly on speed**: bit-exact on all 300 frames and 3.80% RMSE vs Cycles, but 17.76 ms vs 16.7 ms per 1080p frame, `docs/results/m3-gate3.md`) |
 | M4 scale | Prefiltered cones, instancing, large-world coordinates, a virtual lighting cache | G1 prefiltered cones (**passed**: flat cost from 40k to 2.56M triangles, 86 ms vs 13.7 s exact, 0.55% from exact, `docs/results/m4-gate1.md`); G2 ten billion instanced triangles in a large world (**failed** on two of three: the 64 km-offset field renders identically with rebasing, and 10^10 triangles fit in 152 MB, but instanced vs flattened is 0.22% vs a 0.1% target because the flattened reference is the less precise one, and 10^6 vs 10^3 instances cost 3.04× vs 2× because camera rays near the horizon dominate; cones to a small sun are nearly free, `docs/results/m4-gate2.md`); G3 nearest-first ray traversal (**passed**: identical output, 10^10 vs 10^7 triangles 1.40×, 2.83× faster than the fixed order, 100.8 ms at 1080p for a million boulders, `docs/results/m4-gate3.md`); G4 visibility buffer (**failed**: identical output but 0.88× on the field and 1.11× slower on the showcase; register pressure was not the limit, ray traversal itself is, `docs/results/m4-gate4.md`); G5 traversal stacks in workgroup memory (**failed**: identical output but 2.6× slower, as 12 KB per workgroup limits occupancy, `docs/results/m4-gate5.md`); G6 hardware ray queries for camera rays (**failed**: no faster, 0.9×, and 67–270 ms per 720p frame. A corrected diagnostic shows per-pixel sun cones, not rays, dominate; gates 2 and 4 had blamed rays from a broken "light turned away" test, `docs/results/m4-gate6.md`); G7 cones that pay only for what they see (**failed**: no speedup; a stage-by-stage profile shows cones descending the triangle hierarchies of the objects they start on dominate, 119 of 215 ms from 150 m up at 720p, so per-pixel cones every frame are the brute-force path at scale too, `docs/results/m4-gate7.md`); G8 view-dependent lighting cache (**failed** all three: 14–39% from per-pixel exact cones, 20–37 ms warm, 42.7 ms mean in flight; but warm shading fell from 47–233 ms to 2–3 ms and only 1.8% of pixels lacked a page in flight. Diagnostics: one sample per pixel is itself 13–24% from the supersampled image, so later quality gates compare with the area-integrated image; and wgpu spends 15–17 ms of CPU time per `submit` walking the TLAS's million per-instance dependencies, while hardware rays take 4.5–6.6 ms on the GPU, `docs/results/m4-gate8.md`); G9 the cache at speed (**failed** on the flight's 99th percentile, 34.0 vs 33.3 ms. Same images as G8; warm frames 2.9–4.7 ms at 720p with hardware rays after a wgpu-core patch that keeps one TLAS dependency per distinct BLAS, pipelined requests and a faster page manager; flight mean 12.8 ms, 1.6% fallback. The flight is bound by CPU planning, which re-derives a backlog of ~50k wanted pages every frame, `docs/results/m4-gate9.md`); G10 smooth flight (**failed**: progressive requests from the shader and GPU deduplication cut CPU planning to 1.9 ms per frame, but the flight is then GPU-bound at 17.6–17.9 ms mean, 38 ms 99th percentile on a hot machine; next, baking by frame time instead of a fixed cone count, `docs/results/m4-gate10.md`); G11 baking to a frame-time target (**passed**: same images; warm 6.5–8.0 ms at 720p; three flights over a million boulders at 14.6–15.0 ms mean, 26–32 ms 99th percentile, 1.7% fallback. Caveat: the budget sits near its floor while flying, so only 0.6% of samples reach their wanted mip in motion and lighting is softer until the view settles, `docs/results/m4-gate11.md`); zoom and flythrough with no shimmer |
-| M5 lights (v0.1 item 2) | Several lights, a sky environment, colored light | G1 sky light through six cube-face mask cones (**failed**: sky alone 2.74% from Cycles, sun and sky 5.12% against 3%; the reference was at fault: Blender 5.2's Cycles always box-filters at least one pixel, so it area-integrates while we point-sampled, and it loses 1.9% of a small sun 3 km away; sky interiors match Cycles to 0.1–0.5%, `docs/results/m5-gate1.md`); G2 the same with the reference fixed (**passed**: 4×4 per pixel against Cycles' one-pixel box, sun at 1 km: sky only 0.74%, sun and sky 1.19% exact and prefiltered; interiors within 0.0–0.5%, `docs/results/m5-gate2.md`); G3 object-level prefiltered coverage (**passed**: on the million-boulder field against instanced Cycles, sky only 1.15% and sun and sky 2.39% at 4×4 per pixel; more than 25× cheaper than walking every object; sun-only images bit-identical, `docs/results/m5-gate3.md`); G4 sky through the view cache (**failed** on cached-vs-per-pixel sky, 2.4–20.5% against 5%, the texel blur the sun channel also shows, and on speed; the speed numbers are confounded, since a control showed the machine running gate 11's own warm frame 10× slower than in gate 11; real finding: sky texels cost about 100× sun texels, so the bake budget's 1,000-texel floor must become a time, `docs/results/m5-gate4.md`); G5 sky through the cache at speed (**failed** on warm-up: with own-object sky masks baked once per geometry (faithful to 0.06–0.15%), sky faces as separate jobs, a horizon cull and a bake budget that follows GPU time, three sun-and-sky flights average 14.8 ms with 99th percentile under 25 ms and 4.5% fallback, warm frames 2.2–2.6 ms, sun channel unchanged; but views warm with sky in 13–95× the sun's frames, against 10×. Reported: the sky's error against Cycles depends on the cube's orientation, 1.9–4.2%, `docs/results/m5-gate5.md`; diagnostics in `docs/results/m5-sky-bake-diagnostics.md`); G6 several colored lights (**passed**: three RGB lights around the camera within 1.22% of Cycles at 16×16 samples per pixel over surfaces; re-coloring a warm cache bakes nothing and is bit-identical to a fresh one; flights with three lights 14.1–14.9 ms mean, 99th percentile 29–31 ms; light cones gained bounding-cone culling and nearest-first walks, which took a grazing lamp's flight from 579 to 14 ms; reported: with sky the 99th percentile is 35 ms, and gate 3's sun lit only the horizon, `docs/results/m5-gate6.md`); G7 lights cached as ratios, shaded with each pixel's normal (**failed** on flight speed: the cache's error against per-pixel cones fell to 0.41–0.56× with the sun and 0.57–0.68× with three lights; per-pixel still 1.22% from Cycles; but two of three flights with three lights averaged 17.09 and 17.58 ms, one with 99th percentile 36.4 ms, as camera passes doubled to 4.3–6.2 ms with the bake budget at its floor, `docs/results/m5-gate7.md`); G8 point and spot lights, and cheaper shading of lights (**failed** on sustained speed: a night scene with a point light and a spot is 1.35% from Cycles and its cache 0.82% from per-pixel; field cache errors within gate 7's; but flights ran last after about ten minutes of load and slowed from 14.5 to 20–25 ms mean, camera passes from 5 to 9.5 ms; a diagnostic showed the same flight slowing steadily under sustained load (13.1 → 16.3 ms over twelve flights) and none in one process when cool, `docs/results/m5-gate8.md`); G9 the sky later (**passed**: pages bake lights first, sky alone from the next frame; at gate 5's four viewpoints with a fixed budget, error while warming 0.11–0.17× the baseline's, within 5% at frame 120–300 against 1,200–4,220, warm in 0.61–0.65× the frames, warm image identical, `docs/results/m5-gate9.md`); next: the library API |
+| M5 lights (v0.1 item 2) | Several lights, a sky environment, colored light | G1 sky light through six cube-face mask cones (**failed**: sky alone 2.74% from Cycles, sun and sky 5.12% against 3%; the reference was at fault: Blender 5.2's Cycles always box-filters at least one pixel, so it area-integrates while we point-sampled, and it loses 1.9% of a small sun 3 km away; sky interiors match Cycles to 0.1–0.5%, `docs/results/m5-gate1.md`); G2 the same with the reference fixed (**passed**: 4×4 per pixel against Cycles' one-pixel box, sun at 1 km: sky only 0.74%, sun and sky 1.19% exact and prefiltered; interiors within 0.0–0.5%, `docs/results/m5-gate2.md`); G3 object-level prefiltered coverage (**passed**: on the million-boulder field against instanced Cycles, sky only 1.15% and sun and sky 2.39% at 4×4 per pixel; more than 25× cheaper than walking every object; sun-only images bit-identical, `docs/results/m5-gate3.md`); G4 sky through the view cache (**failed** on cached-vs-per-pixel sky, 2.4–20.5% against 5%, the texel blur the sun channel also shows, and on speed; the speed numbers are confounded, since a control showed the machine running gate 11's own warm frame 10× slower than in gate 11; real finding: sky texels cost about 100× sun texels, so the bake budget's 1,000-texel floor must become a time, `docs/results/m5-gate4.md`); G5 sky through the cache at speed (**failed** on warm-up: with own-object sky masks baked once per geometry (faithful to 0.06–0.15%), sky faces as separate jobs, a horizon cull and a bake budget that follows GPU time, three sun-and-sky flights average 14.8 ms with 99th percentile under 25 ms and 4.5% fallback, warm frames 2.2–2.6 ms, sun channel unchanged; but views warm with sky in 13–95× the sun's frames, against 10×. Reported: the sky's error against Cycles depends on the cube's orientation, 1.9–4.2%, `docs/results/m5-gate5.md`; diagnostics in `docs/results/m5-sky-bake-diagnostics.md`); G6 several colored lights (**passed**: three RGB lights around the camera within 1.22% of Cycles at 16×16 samples per pixel over surfaces; re-coloring a warm cache bakes nothing and is bit-identical to a fresh one; flights with three lights 14.1–14.9 ms mean, 99th percentile 29–31 ms; light cones gained bounding-cone culling and nearest-first walks, which took a grazing lamp's flight from 579 to 14 ms; reported: with sky the 99th percentile is 35 ms, and gate 3's sun lit only the horizon, `docs/results/m5-gate6.md`); G7 lights cached as ratios, shaded with each pixel's normal (**failed** on flight speed: the cache's error against per-pixel cones fell to 0.41–0.56× with the sun and 0.57–0.68× with three lights; per-pixel still 1.22% from Cycles; but two of three flights with three lights averaged 17.09 and 17.58 ms, one with 99th percentile 36.4 ms, as camera passes doubled to 4.3–6.2 ms with the bake budget at its floor, `docs/results/m5-gate7.md`); G8 point and spot lights, and cheaper shading of lights (**failed** on sustained speed: a night scene with a point light and a spot is 1.35% from Cycles and its cache 0.82% from per-pixel; field cache errors within gate 7's; but flights ran last after about ten minutes of load and slowed from 14.5 to 20–25 ms mean, camera passes from 5 to 9.5 ms; a diagnostic showed the same flight slowing steadily under sustained load (13.1 → 16.3 ms over twelve flights) and none in one process when cool, `docs/results/m5-gate8.md`); G9 the sky later (**passed**: pages bake lights first, sky alone from the next frame; at gate 5's four viewpoints with a fixed budget, error while warming 0.11–0.17× the baseline's, within 5% at frame 120–300 against 1,200–4,220, warm in 0.61–0.65× the frames, warm image identical, `docs/results/m5-gate9.md`); G10 a guessed sky from coarser pages (development only, **failed**: 1.00× the baseline's flight error against 0.8×; removed, `docs/results/m5-gate10.md`); G11 environment light (**failed** both: 22.64% from Cycles, 1.16× the frame; nine harmonics cannot show a sky that ends at the horizon, `docs/results/m5-gate11.md`); G12 environment light, rays that miss reading the image (**passed**: 1.37% from Cycles against the uniform sky's 19.92%, 1.04× the frame, `docs/results/m5-gate12.md`) |
 | M6 content (v0.1 item 3) | glTF import, base-color textures, automatic charts | G1 glTF import with automatic charts and textures (**failed** on criterion 1 only: the `.glb` round trip is 0.024% from the original per pixel against 0.01%, all in one edge pixel flipped by f32 rounding of instance transforms; the imported textured scene is 0.43% from Cycles with textures at 16×16 per pixel, its automatic charts give 2.37% cached vs per-pixel against the hand-made charts' 1.52%, warm frame 1.53 ms at 720p; real assets reported: a 28k-triangle textured pack warms in 1,317 frames at 1.43 ms, `docs/results/m6-gate1.md`) |
 | M7 primary cones (v0.1 item 4) | Pixel-footprint cones: anti-aliasing and far-field level of detail | G1 pixel cones for primary visibility (**failed** all three: against the 16×16 reference the textured scene is 7.15% vs one ray's 7.11%, the field from 150 m 17.91% vs 23.49% (0.76× against ≤ 0.35×), from standing height 34.61% vs 12.49% with a banding artifact on the 2.1 km ground triangles; half a pixel's turn changes the image 1.67× as much as the reference's (≤ 1.5×); warm cached frames 105 ms on the textured scene (≤ 16.7 ms), per-pixel frames 10–87 s on the field; the textured scene's error is texture filtering, not silhouettes, `docs/results/m7-gate1.md`); G2 texture filtering for the area integral (**passed**: a box filter over the pixel's footprint from ray differentials, 3.99% from the 16×16 reference against 7.11%, warm frame 1.03×, `docs/results/m7-gate2.md`); G3 silhouette rays (**failed**: field from 150 m 0.49× the error but 13× the frame; textured scene 0.91×, 1.66×, `docs/results/m7-gate3.md`); G4 silhouette rays through ray queries (**failed** on the field's speed: quality as the compute path's, 1.29× the frame on the textured scene, 3.03× on the field from 150 m against 1.5× (compute path 24.15×), `docs/results/m7-gate4.md`); no shimmer in flythroughs |
 | M8 library (v0.1 items 5–6) | Library API, Bevy plugin, examples; Windows/NVIDIA CI and a cloud benchmark | A tagged v0.1 (**done**: `v0.1.0`, 2026-11-07; the cloud benchmark is still open) |
-| M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G4 the ledger without its work limit (**failed** on speed: sound in 30 checks; at a real sun's speed fallback 4.9–5.0% but means 24.7–25.3 ms against 15.8 ms still, mixed texels re-baked every frame, `docs/results/m9-gate4.md`); G3 movers under a sky (**failed** on work and speed: sound in 30 checks, but 99.73% of pages read re-baked their sky every moving frame; means 53.0–58.3 ms against 14.66 ms still; fallback 30%, 21–22% even still from slow sky streaming; the per-page sphere bound about 5,000× loose, `docs/results/m9-gate3.md`); a light switch with no lag |
-| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run (**passed**: 3.29% from Cycles masking the cards, 34.07% with them opaque; warm frame 1.15×, `docs/results/m10-gate7.md`); G8 exactly back-to-back faces (**failed** on accuracy: speed fixed, 1.03× the 1 mm scene's bake time; but Metal ray queries ignore `CULL_BACK_FACING`, so camera rays hit either coincident face, 5.01% from Cycles, `docs/results/m10-gate8.md`); G10 gate 2 re-run (**passed**: 5.85% from Cycles, warm frame 1.68×; specular from lights had applied Karis's normalization twice, so sun highlights on metal were low, `docs/results/m10-gate10.md`); G9 gate 8 re-run with back-face hits re-traced (**failed** on its 0.5% bound against the 1 mm control, 1.08%, which mostly measures that control's own offset: 1 mm to 2 mm moves the image as much; 3.42% from Cycles against the control's 3.37%; bake 1.21×, warm frame 1.04×; fixes kept, `docs/results/m10-gate9.md`) |
+| M9 dynamic scenes | Moving objects in the view cache (exact invalidation, same-frame re-bake); the ledger on the GPU: movers' effect on sky light, moving lights | G1 moving objects in the view cache (**passed**: 65 movers among a million boulders with three lights; no stale value in 30 checks of up to 137,260 pages; 0.84% of pages read re-baked per frame; flights 15.76–16.14 ms, 1.06–1.09× the movers held still, `docs/results/m9-gate1.md`); G2 a moving light through the ledger (**failed** on fallback only: a sun drifting 0.25° per second over the field; no page beyond its bound or ε in 30 checks, none changed at all; 0.69% of pages read re-baked per frame; means 14.45–14.58 ms against 15.64 ms still; fallback 33.3–34.2% against 10%, from off-screen pages set aside; the ε went into snapping, so no deferral within ε was exercised, `docs/results/m9-gate2.md`); G4 the ledger without its work limit (**failed** on speed: sound in 30 checks; at a real sun's speed fallback 4.9–5.0% but means 24.7–25.3 ms against 15.8 ms still, mixed texels re-baked every frame, `docs/results/m9-gate4.md`); G3 movers under a sky (**failed** on work and speed: sound in 30 checks, but 99.73% of pages read re-baked their sky every moving frame; means 53.0–58.3 ms against 14.66 ms still; fallback 30%, 21–22% even still from slow sky streaming; the per-page sphere bound about 5,000× loose, `docs/results/m9-gate3.md`); G5 the sky later with movers (development only, **failed**: 1.02× the error while moving against 0.5×; sound, cost 1.01×; kept, `docs/results/m9-gate5.md`); a light switch with no lag |
+| M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run (**passed**: 3.29% from Cycles masking the cards, 34.07% with them opaque; warm frame 1.15×, `docs/results/m10-gate7.md`); G8 exactly back-to-back faces (**failed** on accuracy: speed fixed, 1.03× the 1 mm scene's bake time; but Metal ray queries ignore `CULL_BACK_FACING`, so camera rays hit either coincident face, 5.01% from Cycles, `docs/results/m10-gate8.md`); G10 gate 2 re-run (**passed**: 5.85% from Cycles, warm frame 1.68×; specular from lights had applied Karis's normalization twice, so sun highlights on metal were low, `docs/results/m10-gate10.md`); G9 gate 8 re-run with back-face hits re-traced (**failed** on its 0.5% bound against the 1 mm control, 1.08%, which mostly measures that control's own offset: 1 mm to 2 mm moves the image as much; 3.42% from Cycles against the control's 3.37%; bake 1.21×, warm frame 1.04×; fixes kept, `docs/results/m10-gate9.md`); G11 emission lights its surroundings (**failed**: scored over all pixels, which the lights' visible disks decide, 109.67%; 1.00×, `docs/results/m10-gate11.md`); G12 the same over surfaces (**failed** on the absolute bound: 7.46% from Cycles against 5%, 18.00% without (0.41×); 1.00×; kept, `docs/results/m10-gate12.md`); G13 MikkTSpace tangents (**failed**: 11.80% against the triangles' frames' 11.75% where they differ; 1.00×; kept, `docs/results/m10-gate13.md`); G14 emissive textures (**failed** from the reference: 62.86%, Cycles lit the double-sided sign from its coincident faces, `docs/results/m10-gate14.md`); G15 re-run with a one-sided sign (**passed**: 6.35% over surfaces, texture ignored 491.34%; 1.00×, `docs/results/m10-gate15.md`); G16 alpha blending (**failed** on speed: 4.71% from Cycles, panes opaque 57.31%; 1.33× the frame against 1.3×; kept, `docs/results/m10-gate16.md`) |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
 
