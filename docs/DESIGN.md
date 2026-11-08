@@ -426,6 +426,12 @@ place, for a new conversation:
   5%; no cost (1.00×). The rest is bounce light's 3×3 samples a page under
   a near emitter (`docs/results/m10-gate12.md`). Gate 11 scored all
   pixels, which the night lights' visible disks decided (109.67%).
+- **MikkTSpace tangents for normal maps** (M10 G13, failed: no measurable
+  difference on its scene, kept as glTF specifies, no cost): coded per
+  corner in the normals buffer; on regular low-poly spheres the triangles'
+  own frames already agree (11.80% against 11.75% where they differ). A
+  fair test needs a map baked from a high-poly model
+  (`docs/results/m10-gate13.md`).
 - **Tried after the list (development only, reverted):** a guessed sky
   from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
   is the cache's softness in motion, not the sky;

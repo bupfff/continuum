@@ -94,7 +94,7 @@ mod tests {
     fn codes_round_trip_within_0_15_degrees() {
         let mut worst = 1.0f32;
         for i in 0..2000 {
-            let a = i as f32 * 0.7853;
+            let a = i as f32 * 0.7;
             let b = (i as f32 * 0.3121).sin();
             let t = Vec3::new(
                 a.cos() * (1.0 - b * b).sqrt(),

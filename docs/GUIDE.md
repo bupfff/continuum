@@ -73,8 +73,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   light from lights, specular and reflections; the sky and bounce light
   keep the interpolated normal. 3.63% from Cycles on a beveled-tile scene
   (M10 gate 5). glTF import brings normal textures (scale ignored).
-  Tangents come from texture coordinates per triangle (MikkTSpace differs on
-  curved meshes).
+  Tangents are MikkTSpace's, per corner, as glTF specifies (M10 gate 13;
+  no measurable difference from per-triangle frames on its test scene,
+  which had no baked maps).
 - **Alpha cutouts.** `InstancedScene::geometry_alpha_cutoff` cuts each
   geometry where its base color texture's alpha is below the cutoff, as
   geometry, before upload (`cut_out`), so shadows, sky and bounce light see
