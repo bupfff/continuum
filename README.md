@@ -81,9 +81,10 @@ Flags:
 - `--no-cache` lights every pixel with its own mask cone every frame, as
   before.
 - `--sky` adds a blue-white sky. Frames keep their rate (flights average
-  14.8 ms with sun and sky, M5 gate 5), but sky light converges slowly: a
-  view takes 1,400 frames to sharpen standing and up to 12,000 from above.
-  Until then it is lit from coarser pages.
+  14.8 ms with sun and sky, M5 gate 5), but sky light converges slowly.
+  Pages bake their lights first and their sky later, so a view comes within
+  5% of its warm image in 120–300 frames, and is warm in 1,200–2,600 at a
+  fixed budget (M5 gate 9).
 
 Scenes can have several colored rectangular lights (`Renderer::new` takes a
 list). The cache stores light per unit

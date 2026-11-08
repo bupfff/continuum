@@ -94,7 +94,10 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   `CacheOptions::edge_rays` (off) adds four rays at silhouette pixels; it
   halves the error far away but costs up to 13× the frame (M7 gate 3).
 - **The sky converges slowly** in the cache: a view takes hundreds to
-  thousands of frames to sharpen (M5 G5). It is opt-in.
+  thousands of frames to warm (M5 G5). With `CacheOptions::sky_later` (the
+  default) pages bake their lights first and their sky later, so views come
+  within 5% of their warm image in 120–300 frames (M5 G9). Not with bounce
+  light, movers or moving lights. The sky is opt-in.
 - **Sustained speed on fanless laptops.** Flights with several lights hold
   60 Hz while the machine is cool. After minutes of load, the GPU slows and
   frames take 20 ms or more (M5 G8).
