@@ -447,8 +447,10 @@ place, for a new conversation:
   instead of 7); a faster-reacting budget did not help, since timings
   arrive two frames late. Neither budget units, pages, mips nor the
   kernel's work counters explain the bursts (test R² at most 0.37); they
-  are content-dependent (the same frames each flight). Next: a GPU capture
-  of a slow frame (`docs/results/flight-spikes-diagnostics.md`).
+  are content-dependent (the same frames each flight). Per-pass profiling
+  puts it all in the light bake, whose cost per unit varies 2–3×; likely
+  SIMD divergence on coarse pages. Next: time pages by mip, or packet walks
+  for coarse pages (`docs/results/flight-spikes-diagnostics.md`).
 - **Known issues:** the total sky work is still large (the sky later orders
   it); sustained speed on the fanless Air (M5 G8); Metal only measured.
   Naga 30's Metal backend ignores ray flags' face culling (worked around in

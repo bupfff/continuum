@@ -40,6 +40,9 @@ pub struct FrameProfile {
     /// The first four camera passes, in order, each submitted and waited
     /// for alone.
     pub passes: [Duration; 4],
+    /// The bake's passes, in order, each submitted and waited for alone,
+    /// with their labels (diagnostics; empty labels past the last).
+    pub bake_passes: [(&'static str, Duration); 8],
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -58,44 +61,71 @@ impl Cache {
     /// with moving lights, the ledger does; either sizes the bake and the
     /// fill.
     fn encode_bake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 6]) {
+        self.encode_bake_passes(encoder, counts, None);
+    }
+
+    /// `encode_bake`'s passes, or with `only`, that one pass alone and
+    /// untimed (diagnostics: `frame_profiled` submits each on its own);
+    /// the passes' labels.
+    fn encode_bake_passes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        counts: [u32; 6],
+        only: Option<usize>,
+    ) -> Vec<&'static str> {
         let groups = |n: u32| Dispatch::Groups(n.div_ceil(64), 1);
         let slots = |n: u32| {
             let g = n.div_ceil(64);
             Dispatch::Groups(g.min(65_535), g.div_ceil(65_535))
         };
-        let mut list: Vec<(&wgpu::ComputePipeline, &wgpu::BindGroup, Dispatch)> = Vec::new();
+        let mut list: Vec<(
+            &'static str,
+            &wgpu::ComputePipeline,
+            &wgpu::BindGroup,
+            Dispatch,
+        )> = Vec::new();
         if counts[0] > 0 {
-            list.push((&self.passes[0], &self.binds[0], groups(counts[0])));
+            list.push(("update", &self.passes[0], &self.binds[0], groups(counts[0])));
         }
         let moved = counts[4] > 0 && self.has_movers;
         let lit = counts[5] > 0 && self.moving_lights;
         let indirect = moved || lit;
         if let Some((passes, binds)) = &self.movers {
             if self.moving_lights && counts[3] > 0 {
-                list.push((&passes[4], &binds[4], groups(counts[3])));
+                list.push(("ledger reset", &passes[4], &binds[4], groups(counts[3])));
             }
             if moved {
-                list.push((&passes[0], &binds[0], slots(self.state.pages())));
-                list.push((&passes[1], &binds[1], Dispatch::Groups(1, 1)));
-                list.push((&passes[2], &binds[2], Dispatch::Indirect(0)));
+                list.push(("stale", &passes[0], &binds[0], slots(self.state.pages())));
+                list.push(("stale args", &passes[1], &binds[1], Dispatch::Groups(1, 1)));
+                list.push(("stale texels", &passes[2], &binds[2], Dispatch::Indirect(0)));
             }
             if lit {
-                list.push((&passes[5], &binds[5], slots(self.state.pages())));
+                list.push(("ledger", &passes[5], &binds[5], slots(self.state.pages())));
             }
             if indirect {
-                list.push((&passes[3], &binds[3], Dispatch::Groups(1, 1)));
-                list.push((&self.passes[1], &self.binds[1], Dispatch::Indirect(12)));
+                list.push(("bake args", &passes[3], &binds[3], Dispatch::Groups(1, 1)));
+                list.push((
+                    "bake",
+                    &self.passes[1],
+                    &self.binds[1],
+                    Dispatch::Indirect(12),
+                ));
             }
         }
         if indirect {
         } else if counts[1] > 0 {
-            list.push((&self.passes[1], &self.binds[1], groups(counts[1])));
+            list.push(("bake", &self.passes[1], &self.binds[1], groups(counts[1])));
         }
         // The stale pass may append sky samples (M9 gate 3).
         if indirect && self.state.has_sky() {
-            list.push((&self.passes[2], &self.binds[2], Dispatch::Indirect(36)));
+            list.push((
+                "sky",
+                &self.passes[2],
+                &self.binds[2],
+                Dispatch::Indirect(36),
+            ));
         } else if counts[2] > 0 {
-            list.push((&self.passes[2], &self.binds[2], groups(counts[2])));
+            list.push(("sky", &self.passes[2], &self.binds[2], groups(counts[2])));
         }
         let bounce = self.state.indirect_jobs();
         let bounce_pass = self
@@ -104,13 +134,19 @@ impl Cache {
             .and_then(|(p, b)| b.as_ref().map(|b| (p, b)))
             .filter(|_| bounce > 0);
         if indirect {
-            list.push((&self.passes[3], &self.binds[3], Dispatch::Indirect(24)));
+            list.push((
+                "fill",
+                &self.passes[3],
+                &self.binds[3],
+                Dispatch::Indirect(24),
+            ));
         } else if counts[3] > 0 {
-            list.push((&self.passes[3], &self.binds[3], groups(counts[3])));
+            list.push(("fill", &self.passes[3], &self.binds[3], groups(counts[3])));
         }
         // Bounce samples read the direct light just baked: after the fill.
         if let Some((pipeline, bind)) = bounce_pass {
             list.push((
+                "bounce",
                 pipeline,
                 bind,
                 Dispatch::Groups(bounce.min(65_535), bounce.div_ceil(65_535)),
@@ -119,10 +155,17 @@ impl Cache {
         let set = self.state.timer.as_ref().map(|t| &t.set);
         let ran: Vec<usize> = (0..list.len()).collect();
         let args = self.state.buffer(66);
-        for (k, (pipeline, bind, dispatch)) in list.iter().enumerate() {
+        for (k, (_, pipeline, bind, dispatch)) in list.iter().enumerate() {
+            if only.is_some_and(|o| o != k) {
+                continue;
+            }
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
-                timestamp_writes: timestamps(set, &ran, k, 0),
+                timestamp_writes: if only.is_some() {
+                    None
+                } else {
+                    timestamps(set, &ran, k, 0)
+                },
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, *bind, &[]);
@@ -131,6 +174,7 @@ impl Cache {
                 Dispatch::Indirect(offset) => pass.dispatch_workgroups_indirect(args, *offset),
             }
         }
+        list.iter().map(|e| e.0).collect()
     }
 }
 
@@ -1223,18 +1267,33 @@ impl InstancedRenderer {
         let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.apply_moves(&mut encoder);
+        let mut counts = None;
         if let Some(cache) = &mut self.cache {
             cache.state.encode_clear(&mut encoder);
-            let counts = cache.state.upload(
+            counts = Some(cache.state.upload(
                 &self.queue,
                 self.width,
                 self.height,
                 camera.vertical_fov_degrees,
-            );
-            cache.encode_bake(&mut encoder, counts);
+            ));
         }
         self.queue.submit([encoder.finish()]);
         self.wait();
+        // Each bake pass on its own, waited for.
+        if let (Some(cache), Some(counts)) = (&self.cache, counts) {
+            let mut none = self.device.create_command_encoder(&Default::default());
+            let labels = cache.encode_bake_passes(&mut none, counts, Some(usize::MAX));
+            for (k, label) in labels.into_iter().enumerate() {
+                let pass_start = Instant::now();
+                let mut encoder = self.device.create_command_encoder(&Default::default());
+                cache.encode_bake_passes(&mut encoder, counts, Some(k));
+                self.queue.submit([encoder.finish()]);
+                self.wait();
+                if k < 8 {
+                    profile.bake_passes[k] = (label, pass_start.elapsed());
+                }
+            }
+        }
         profile.bake = start.elapsed();
         for k in 0..self.passes.len() {
             let start = Instant::now();

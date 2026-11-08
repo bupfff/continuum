@@ -59,8 +59,28 @@ flight and tested the fit on the second (`spikes_dev`; per-frame CSV in
 - **Most of their cost is something the counters do not see.** Hierarchy
   work explains only a third of the variation. Candidates: memory access
   patterns, or the bake's other passes (table updates, fill).
-- **Next step:** a GPU capture of one slow frame (Xcode's Metal tools)
-  would show which pass and what stalls.
+- **Which pass:** `FrameProfile::bake_passes` (each bake pass submitted
+  and waited for alone; `spikes_dev passes`) shows the light bake (cones
+  toward the lights) takes nearly all of it. Across the flight it averaged
+  26.19 ms against 0.24 ms for table updates and 0.36 ms for the fill.
+  Profiled frames are not timed, so the budget stays at its maximum.
+- **The slowest bakes:**
+
+  | Frames | Light bake | Pages |
+  |---|---|---|
+  | 400–406 | 50–61 ms | 336–414 |
+  | 583–587 | 52–53 ms | 118–124 |
+
+  The cost per unit of work varies 2–3× with content.
+- **A likely cause, not established: divergence.** On coarse pages,
+  neighbouring texels lie metres apart, so the 32 invocations of a SIMD
+  group walk different paths, and the group costs its slowest. Summed work
+  counters cannot see that. M5's sky diagnostics measured the same effect
+  at about 10× (`m5-sky-bake-diagnostics.md`).
+- **To test it:** time pages of one mip at a time, or bake coarse pages
+  with packet walks (M5 gate 5 found packets faster above about 10,000
+  units a frame). A per-mip cost weight in the budget would follow if mip
+  explains it.
 
 `CacheStats::spent_by_mip` is kept as a diagnostic.
 

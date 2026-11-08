@@ -61,6 +61,46 @@ fn main() {
             vertical_fov_degrees: ground.vertical_fov_degrees,
         }
     };
+    if std::env::args().any(|a| a == "passes") {
+        // Every frame profiled: each bake pass submitted and waited for
+        // alone.
+        let mut r = InstancedRenderer::with_cache_lights(
+            &kernel,
+            format,
+            W,
+            H,
+            1,
+            &lights,
+            &field.scene,
+            origin,
+            CacheOptions::default(),
+        );
+        let mut rows: Vec<(usize, f64, Vec<(&'static str, f64)>)> = Vec::new();
+        for f in 0..FLIGHT {
+            let p = r.frame_profiled(camera(f), &target);
+            let passes: Vec<(&'static str, f64)> = p
+                .bake_passes
+                .iter()
+                .filter(|(l, _)| !l.is_empty())
+                .map(|(l, d)| (*l, d.as_secs_f64() * 1000.0))
+                .collect();
+            let total = passes.iter().map(|x| x.1).sum::<f64>();
+            rows.push((f, total, passes));
+        }
+        let mut mean: std::collections::BTreeMap<&str, f64> = Default::default();
+        for (_, _, passes) in &rows {
+            for (l, d) in passes {
+                *mean.entry(l).or_default() += d / FLIGHT as f64;
+            }
+        }
+        println!("mean per frame: {mean:.2?}");
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (f, total, passes) in rows.iter().take(10) {
+            let pages = r.cache_log()[*f].pages_baked;
+            println!("frame {f}: bake {total:.2} ms ({pages} pages): {passes:.2?}");
+        }
+        return;
+    }
     for run in 0..2 {
         let mut r = InstancedRenderer::with_cache_lights(
             &kernel,
