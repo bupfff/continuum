@@ -92,7 +92,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   pixel instead; it is experimental and far from real time on large scenes
   (M7 gate 1: 105 ms per frame on a small textured scene).
   `CacheOptions::edge_rays` (off) adds four rays at silhouette pixels; it
-  halves the error far away but costs up to 13× the frame (M7 gate 3).
+  halves the error far away. With hardware ray queries it costs 1.29× the
+  frame on a textured scene and 3× on dense geometry from far away, where
+  half the pixels are edges (M7 gate 4; compute rays 24×).
 - **The sky converges slowly** in the cache: a view takes hundreds to
   thousands of frames to warm (M5 G5). With `CacheOptions::sky_later` (the
   default) pages bake their lights first and their sky later, so views come

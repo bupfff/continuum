@@ -135,9 +135,12 @@ pub struct CacheOptions {
     pub indirect: bool,
     /// What a bounce sample counts against the bake budget, in sun texels.
     pub indirect_sample_cost: u32,
-    /// Anti-aliasing at silhouettes (M7 gate 3): pixels whose neighbours
+    /// Anti-aliasing at silhouettes (M7 gates 3–4): pixels whose neighbours
     /// see another object or depth average four rays through their
-    /// quarters.
+    /// quarters. With hardware camera rays (and no movers) the rays are ray
+    /// queries in their own passes: 1.29× the frame on a textured scene,
+    /// 3.03× on the field from 150 m up, where half the pixels are edges
+    /// (compute rays: 1.84× and 24×).
     pub edge_rays: bool,
     /// Experiments only: glossy reflection rays for materials (M10 gate 2;
     /// on by default).
