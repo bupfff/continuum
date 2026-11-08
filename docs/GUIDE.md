@@ -100,6 +100,13 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   triangle; kept at 8 bits per channel (sRGB-encoded), so within [0, 1].
   1.29% from Cycles, 1.00× the frame (M10 gates 17–18). glTF's `COLOR_0`
   (alpha ignored) is imported and saved.
+- **Emissive faces as area lights, experimental.**
+  `InstancedScene::emitters_to_lights` makes each emissive rectangle
+  (uniform emission, at most a given number per geometry) a one-sided
+  rectangular light per instance, for exact shadows from emitters, and sets
+  the geometry's emission to zero. Not yet validated: the cache settles 6×
+  more slowly, and with bounce light it can keep re-baking a page (M10
+  gate 23). The viewer's `--emitters-as-lights` uses it for glTF files.
 - **Texture wrap modes.** `InstancedScene::texture_wrap` gives each
   texture's mode along u and v (`Wrap::Repeat`, the default; `Clamp`;
   `Mirror`), as glTF samplers do (imported and saved). 2.18% from Cycles

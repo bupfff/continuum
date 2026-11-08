@@ -2437,6 +2437,60 @@ impl InstancedScene {
         s
     }
 
+    /// Emissive faces made area lights (M10 gate 23). Each geometry with
+    /// uniform emission (no emissive texture, not blended) whose triangles
+    /// all pair into planar rectangles, at most `max_faces` of them, becomes
+    /// one one-sided rectangular light per rectangle and instance: facing out
+    /// of the rectangle's front (its triangles' winding), at the emission's
+    /// radiance, 1 mm in front of it. Its emission is set to zero, so its
+    /// light is not counted twice: the lights show it to the camera and
+    /// light the scene, with exact shadows, and it still occludes. Returns
+    /// the lights, relative to `origin`, to add to the scene's (the
+    /// renderer takes at most [`MAX_LIGHTS`] in all).
+    pub fn emitters_to_lights(&mut self, origin: DVec3, max_faces: usize) -> Vec<Light> {
+        let mut lights = Vec::new();
+        for g in 0..self.geometries.len() {
+            let e = self.geometry_emission.get(g).copied().unwrap_or(Vec3::ZERO);
+            let textured = self
+                .geometry_emissive_textures
+                .get(g)
+                .copied()
+                .flatten()
+                .is_some();
+            let blended = self.geometry_blend.get(g).copied().flatten().is_some();
+            if e.max_element() <= 0.0 || textured || blended {
+                continue;
+            }
+            let tris = &self.geometries[g].triangles;
+            if tris.len() > 2 * max_faces {
+                continue;
+            }
+            let Some(rects) = rectangles(tris) else {
+                continue;
+            };
+            for i in self.instances.iter().filter(|i| i.geometry == g) {
+                let to_world =
+                    |p: Vec3| i.position - origin + (i.rotation * (p * i.scale)).as_dvec3();
+                for &(c, u, v) in &rects {
+                    let (wu, wv) = (i.rotation * u * i.scale, i.rotation * v * i.scale);
+                    let normal = wu.cross(wv).normalize_or_zero();
+                    let corner = to_world(c) + (normal * 1e-3).as_dvec3();
+                    lights.push(Light::rect(
+                        RectLight {
+                            corner: corner.as_vec3(),
+                            edge_u: wu,
+                            edge_v: wv,
+                            one_sided: true,
+                        },
+                        e,
+                    ));
+                }
+            }
+            self.geometry_emission[g] = Vec3::ZERO;
+        }
+        lights
+    }
+
     /// This scene with its alpha cutouts made geometry ([`cut_out`]):
     /// borrowed when it has none.
     pub fn with_cutouts(&self) -> std::borrow::Cow<'_, InstancedScene> {
@@ -2491,6 +2545,69 @@ impl InstancedScene {
         used.dedup();
         used
     }
+}
+
+/// Triangles paired into planar rectangles, each as a corner and two
+/// perpendicular edges whose cross product points out of the triangles'
+/// front; None unless every triangle pairs (M10 gate 23).
+fn rectangles(tris: &[continuum::mesh::Tri]) -> Option<Vec<(Vec3, Vec3, Vec3)>> {
+    if tris.is_empty() || !tris.len().is_multiple_of(2) {
+        return None;
+    }
+    let normal = |t: &[Vec3; 3]| (t[1] - t[0]).cross(t[2] - t[0]);
+    let mut used = vec![false; tris.len()];
+    let mut out = Vec::with_capacity(tris.len() / 2);
+    for i in 0..tris.len() {
+        if used[i] {
+            continue;
+        }
+        let a = tris[i];
+        let size = (a[1] - a[0]).length().max((a[2] - a[0]).length());
+        let eps = 1e-5 * size.max(1e-6);
+        let same = |p: Vec3, q: Vec3| (p - q).length() <= eps;
+        let mut found = None;
+        for j in i + 1..tris.len() {
+            if used[j]
+                || normal(&a)
+                    .normalize_or_zero()
+                    .dot(normal(&tris[j]).normalize_or_zero())
+                    < 0.9999
+            {
+                continue;
+            }
+            let b = tris[j];
+            let shared: Vec<Vec3> = a
+                .iter()
+                .copied()
+                .filter(|&p| b.iter().any(|&q| same(p, q)))
+                .collect();
+            if shared.len() != 2 {
+                continue;
+            }
+            let c = a
+                .iter()
+                .copied()
+                .find(|&p| !shared.iter().any(|&s| same(p, s)))?;
+            let d = b
+                .iter()
+                .copied()
+                .find(|&q| !shared.iter().any(|&s| same(q, s)))?;
+            let (mut u, mut v) = (shared[0] - c, shared[1] - c);
+            if u.dot(v).abs() > 1e-4 * u.length() * v.length() || !same(d, c + u + v) {
+                continue;
+            }
+            if u.cross(v).dot(normal(&a)) < 0.0 {
+                std::mem::swap(&mut u, &mut v);
+            }
+            found = Some((j, (c, u, v)));
+            break;
+        }
+        let (j, rect) = found?;
+        used[i] = true;
+        used[j] = true;
+        out.push(rect);
+    }
+    Some(out)
 }
 
 /// A vertex color's code (M10 gate 17): 1 plus its sRGB bytes, red lowest,
@@ -2676,4 +2793,64 @@ fn uniform_buffer(device: &wgpu::Device, label: &str, contents: &[u8]) -> wgpu::
         contents,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     })
+}
+
+#[cfg(test)]
+mod emitter_tests {
+    use super::*;
+
+    /// A glowing box becomes six one-sided lights, one per face, facing
+    /// out, covering its surface, placed by the instance, and the box's
+    /// emission is set to zero (M10 gate 23).
+    #[test]
+    fn a_glowing_box_becomes_six_outward_lights() {
+        let (lo, hi) = (Vec3::new(-0.6, -0.04, 0.0), Vec3::new(0.6, 0.04, 0.9));
+        let glow = Vec3::new(3.0, 1.86, 0.9);
+        let mut scene = InstancedScene {
+            geometries: vec![Surface::cuboid(lo, hi)],
+            instances: vec![Instance {
+                geometry: 0,
+                rotation: Mat3::from_rotation_z(0.3),
+                scale: 2.0,
+                position: DVec3::new(10.0, 5.0, 1.0),
+                albedo: Vec3::splat(0.8),
+            }],
+            geometry_emission: vec![glow],
+            ..Default::default()
+        };
+        let origin = DVec3::new(9.0, 4.0, 0.0);
+        let lights = scene.emitters_to_lights(origin, 6);
+        assert_eq!(lights.len(), 6);
+        assert_eq!(scene.geometry_emission[0], Vec3::ZERO);
+        let size = (hi - lo) * 2.0;
+        let area = 2.0 * (size.x * size.y + size.y * size.z + size.z * size.x);
+        let i = &scene.instances[0];
+        let center = (i.position - origin).as_vec3() + i.rotation * ((lo + hi) * 0.5 * 2.0);
+        let mut total = 0.0;
+        for l in &lights {
+            let Emitter::Rect(r) = l.emitter else {
+                panic!("a rectangle")
+            };
+            assert!(r.one_sided);
+            assert_eq!(l.radiance, glow);
+            assert!(r.edge_u.dot(r.edge_v).abs() < 1e-4);
+            let n = r.edge_u.cross(r.edge_v);
+            total += n.length();
+            let middle = r.corner + 0.5 * (r.edge_u + r.edge_v);
+            assert!(n.dot(middle - center) > 0.0, "a light facing in");
+            // 1 mm outside its face: its plane's distance from the centre
+            // is half the box's extent along its normal, plus 1 mm.
+            let normal = n.normalize();
+            let half = 0.5 * (i.rotation.transpose() * normal).abs().dot(size);
+            assert!(((middle - center).dot(normal) - half - 1e-3).abs() < 1e-4);
+        }
+        assert!((total - area).abs() < 1e-4 * area, "{total} against {area}");
+        // A box with more faces than allowed is left as it is.
+        let mut kept = InstancedScene {
+            geometry_emission: vec![glow],
+            ..scene.clone()
+        };
+        assert!(kept.emitters_to_lights(origin, 5).is_empty());
+        assert_eq!(kept.geometry_emission[0], glow);
+    }
 }

@@ -22,7 +22,8 @@
 //! (or `.gltf`) flies through your own scene the same way: lit by the file's
 //! lights or else a sun (`--sky` adds the sky), from the file's camera or one
 //! framed around the scene, over a grey ground (`--no-ground` to leave it
-//! out); a file's first animation plays (P pauses it; not with a sky, as
+//! out; `--emitters-as-lights` makes emissive rectangles area lights); a
+//! file's first animation plays (P pauses it; not with a sky, as
 //! movers and a sky do not mix in the cache yet). `--env sky.hdr` (or a
 //! `.png`) lights the field or a glTF scene with
 //! an equirectangular environment image in place of the uniform sky
@@ -192,7 +193,7 @@ impl World {
 
     /// The glTF file at `path`, lit by a sun 30° up, over a grey ground
     /// unless `ground` is false. The render origin is the scene's center.
-    fn gltf(path: &Path, ground: bool) -> World {
+    fn gltf(path: &Path, ground: bool, emitters: bool) -> World {
         let start = Instant::now();
         let imported = continuum_gltf::load(path).unwrap_or_else(|e| {
             eprintln!("Could not load {}: {e}", path.display());
@@ -235,6 +236,23 @@ impl World {
         lights.truncate(continuum_gpu::MAX_LIGHTS);
         let animations = (!imported.animations.is_empty()).then_some(imported.animations);
         let mut scene = imported.scene;
+        // `--emitters-as-lights`: emissive rectangles (up to six per
+        // geometry) become area lights, if they fit with the file's.
+        if emitters {
+            let mut converted = scene.clone();
+            let made = converted.emitters_to_lights(origin, 6);
+            if !made.is_empty() && lights.len() + made.len() <= continuum_gpu::MAX_LIGHTS {
+                println!("{} emissive faces made area lights.", made.len());
+                lights.extend(made);
+                scene = converted;
+            } else if !made.is_empty() {
+                println!(
+                    "{} emissive faces would exceed {} lights: kept as emission.",
+                    made.len(),
+                    continuum_gpu::MAX_LIGHTS
+                );
+            }
+        }
         if ground {
             // 20 radii across, just below the scene, so it casts shadows.
             let h = (10.0 * radius) as f32;
@@ -898,6 +916,7 @@ fn main() {
         (Some(path), _) => World::gltf(
             Path::new(&path),
             !std::env::args().any(|a| a == "--no-ground"),
+            std::env::args().any(|a| a == "--emitters-as-lights"),
         ),
         (None, None | Some("showcase")) => World::showcase(),
         (None, Some("room")) => World::room(),
