@@ -426,7 +426,8 @@ place, for a new conversation:
 - **Needs the user:** which candidate next; pushing this session's later
   commits (pushed through `979a80f`); a `v0.2` tag; running the NVIDIA
   benchmark on a cloud GPU (prepared: `docs/BENCHMARK.md`,
-  `scripts/cloud_bench.sh`, M4 baseline in `docs/results/bench-m4.md`);
+  `scripts/cloud_bench.sh`, M4 baseline in `docs/results/bench-m4.md`;
+  deferred until the user can pay for a rented GPU);
   any publishing.
 - **Working notes:** gate binaries are `experiments/room3d/src/bin/
   m<milestone>_gate<n>.rs`; test scenes are in `room3d::textured`

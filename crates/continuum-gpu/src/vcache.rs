@@ -169,6 +169,10 @@ pub struct CacheOptions {
     /// a guess is not charged for its sky, and one whose light a mover may
     /// change is marked invalid and baked anew.
     pub sky_later: bool,
+    /// With the sky later (M5 gate 10): a page whose sky is still a guess
+    /// shows the sky of the finest coarser resident page whose sky is baked,
+    /// if any, rather than the open sky over the pixel's normal.
+    pub coarse_sky_guess: bool,
     /// Experiments only. Each light's texels hold the shadowed share of its
     /// unshadowed light,
     /// and shading multiplies that by the unshadowed light at the pixel, with
@@ -197,6 +201,7 @@ impl Default for CacheOptions {
             glossy_rays: true,
             self_spacing: 0.01,
             sky_later: true,
+            coarse_sky_guess: false,
             light_ratio: true,
         }
     }
