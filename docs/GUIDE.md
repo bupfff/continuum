@@ -135,8 +135,11 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   blended surfaces opaque.
 - **One bounce of light, optional** (`CacheOptions::indirect`, M10 gate
   1): 1.44–1.79% from Cycles with one bounce on a textured scene, at 1.07×
-  the warm frame; re-coloring stays free (M10 gate 4). At most three
-  lights; not with movers or moving lights.
+  the warm frame; re-coloring stays free (M10 gate 4). Any number of
+  lights: past the third, bounce is baked at each light's radiance, so
+  re-coloring one re-bakes bounce light (3.07% from Cycles with five lamps
+  at night, M10 gate 22, where bounce costs 1.17× the frame). Not with
+  movers or moving lights.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **One ray per pixel for visibility,** so distant detail aliases.
