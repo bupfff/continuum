@@ -134,8 +134,10 @@ masks are cut into geometry (3.29% from Cycles, M10 gate 7), and BLEND
 materials are blended (4.71%, M10 gate 16). Double-sided materials become
 exactly back-to-back faces (M10 gates 8–9). `KHR_texture_transform` is
 applied to the texture coordinates, as Blender's importer applies it (one
-transform per primitive: a slot with another is skipped). Not yet imported:
-vertex colors.
+transform per primitive: a slot with another is skipped). Vertex colors
+(`COLOR_0`) multiply the base color (1.29% from Cycles, 1.00× the frame,
+M10 gates 17–18). Saving writes materials back, with emissive textures,
+blending and vertex colors.
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb

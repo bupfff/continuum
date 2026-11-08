@@ -37,6 +37,7 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 | Emissive textures (a sign at night) against Cycles | 6.35% | M10 G15 |
 | Alpha-blended glass and a blind against Cycles | 4.71% | M10 G16 |
 | A gradient environment sky against Cycles | 1.37% | M5 G12 |
+| Vertex colors against Cycles | 1.29% | M10 G17 |
 
 ## Limits, today
 
@@ -79,14 +80,20 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   OpenGL's convention as glTF specifies). The cache's shading uses it for
   light from lights, specular and reflections; the sky and bounce light
   keep the interpolated normal. 3.63% from Cycles on a beveled-tile scene
-  (M10 gate 5). glTF import brings normal textures (scale ignored; no
-  vertex colors yet). `KHR_texture_transform` is baked into the texture
+  (M10 gate 5). glTF import brings normal textures (scale ignored).
+  `KHR_texture_transform` is baked into the texture
   coordinates; a geometry has one set, so a slot whose set or transform
   differs from the base color's is skipped
   (`ImportStats::texture_slots_skipped`).
   Tangents are MikkTSpace's, per corner, as glTF specifies (M10 gate 13;
   no measurable difference from per-triangle frames on its test scene,
   which had no baked maps).
+- **Vertex colors.** `InstancedScene::geometry_colors` takes, per
+  geometry, a linear RGB color per triangle corner (as `Surface::tex`),
+  multiplying the base color and its texture, interpolated across each
+  triangle; kept at 8 bits per channel (sRGB-encoded), so within [0, 1].
+  1.29% from Cycles, 1.00× the frame (M10 gates 17–18). glTF's `COLOR_0`
+  (alpha ignored) is imported and saved.
 - **Alpha cutouts.** `InstancedScene::geometry_alpha_cutoff` cuts each
   geometry where its base color texture's alpha is below the cutoff, as
   geometry, before upload (`cut_out`), so shadows, sky and bounce light see
