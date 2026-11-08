@@ -19,16 +19,28 @@
 //! up, sun only), 1280×720, cache settled (32 quiet frames after the call).
 //!
 //! Pass criterion, fixed before the first run, in both views:
-//! 1. **Same image:** the warm image with hardware silhouette rays within
-//!    0.1% relative RMSE of gate 3's compute path (the same scene with the
-//!    kernel's hardware rays off).
+//! 1. **Quality as the compute path's:** relative RMSE from the
+//!    area-integrated cached image (16×16 sub-pixel offsets, each settled,
+//!    textures for 1/16 of a pixel, as gate 3) with hardware silhouette
+//!    rays at most 1.05× that of gate 3's compute path (the same scene with
+//!    the kernel's hardware rays off), measured in this run.
 //! 2. **Speed** (measured first): the warm frame with hardware silhouette
 //!    rays at most 1.5× one ray's (median of 30 frames each waited for).
 //!
 //! Reported, not gated: the share of edge pixels; the warm frame of gate 3's
-//! compute path; relative RMSE from the area-integrated cached image (16×16
-//! sub-pixel offsets) with silhouette rays and with one ray, as gate 3's
-//! criterion 1 measured.
+//! compute path; the image's distance from the compute path's; its error
+//! with one ray.
+//!
+//! Changed after this binary's first commit, before any full-size run
+//! (development runs, `edges_dev`, 640×360; the field with 100,000
+//! boulders): criterion 1 was "within 0.1% of the compute path's image",
+//! but hardware and software camera rays alone differ by 0.84% on the field
+//! with one ray per pixel, so it measured the camera rays, not the edge
+//! rays (hardware edges were 0.73% from the compute path). Development
+//! numbers: textured 1.21× one ray's frame (compute path 2.20×), 0.058%
+//! from the compute path; field 2.55× (compute path 16.0×). Reusing the
+//! pixel's color for quarters on its own object saved little (2.49×) and
+//! changed the image by 20%; not kept.
 //!
 //! `cargo run --release -p room3d --bin m7_gate4`
 
@@ -195,7 +207,6 @@ fn main() -> std::io::Result<()> {
         let one_image = one.read_colors();
         let edge_image = edge.read_colors();
         let same = relative_rmse(&edge_image, &compute_image);
-        c1 &= same <= 0.001;
         let mut reference = vec![[0.0f64; 3]; (W * H) as usize];
         one.set_footprint(1.0 / 16.0);
         for k in 0..256 {
@@ -210,15 +221,20 @@ fn main() -> std::io::Result<()> {
             }
         }
         let reference: Vec<[f32; 3]> = reference.iter().map(|s| s.map(|x| x as f32)).collect();
-        let (e_one, e_edge) = (
+        let (e_one, e_edge, e_compute) = (
             relative_rmse(&one_image, &reference),
             relative_rmse(&edge_image, &reference),
+            relative_rmse(&compute_image, &reference),
         );
+        let quality = e_edge <= 1.05 * e_compute;
+        c1 &= quality;
         say(format!(
-            "{}: 1. same image as the compute path {:.4}% (at most 0.1%): {}; 2. speed {:.2} ms against {:.2} ms one ray ({:.2}×, at most 1.5×): {}; reported: compute path {:.2} ms ({:.2}×), edge pixels {:.1}%, from the area integral {:.2}% with silhouette rays against {:.2}% one ray ({:.2}×)",
+            "{}: 1. from the area integral {:.2}% with hardware silhouette rays, {:.2}% compute path ({:.3}×, at most 1.05×): {}; 2. speed {:.2} ms against {:.2} ms one ray ({:.2}×, at most 1.5×): {}; reported: compute path {:.2} ms ({:.2}×), edge pixels {:.1}%, {:.3}% from the compute path's image, one ray {:.2}% from the area integral ({:.2}× with silhouette rays)",
             v.name,
-            100.0 * same,
-            if same <= 0.001 { "PASS" } else { "FAIL" },
+            100.0 * e_edge,
+            100.0 * e_compute,
+            e_edge / e_compute,
+            if quality { "PASS" } else { "FAIL" },
             ms(edge_time),
             ms(one_time),
             ms(edge_time) / ms(one_time),
@@ -226,7 +242,7 @@ fn main() -> std::io::Result<()> {
             ms(compute_time),
             ms(compute_time) / ms(one_time),
             100.0 * edges as f64 / (W * H) as f64,
-            100.0 * e_edge,
+            100.0 * same,
             100.0 * e_one,
             e_edge / e_one,
         ));
