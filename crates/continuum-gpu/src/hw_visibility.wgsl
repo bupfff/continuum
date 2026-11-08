@@ -10,6 +10,23 @@
 
 // Camera rays see front faces only, as `camera_hit` does.
 const HW_RAY_FLAGS: u32 = 0x1u | 0x10u; // FORCE_OPAQUE | CULL_BACK_FACING
+// The same through candidates tested here: FORCE_NO_OPAQUE | CULL_BACK_FACING.
+const HW_FRONT_FLAGS: u32 = 0x2u | 0x10u;
+
+// Whether a camera ray along `dir` sees the front of object `mesh`'s
+// triangle at primitive `primitive`.
+fn hw_front(mesh: u32, primitive: u32, dir: vec3<f32>) -> bool {
+    let t = meshes[mesh].x + primitive;
+    let v0 = tris[3u * t].xyz;
+    let n = normal_to_world(mesh, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
+    return dot(n, dir) < 0.0;
+}
+
+// Metal ignores CULL_BACK_FACING (naga 30 sets no triangle cull mode), so a
+// committed hit can be a back face, and of a double-sided card's coincident
+// front and back faces either one (M10 gate 8). A pixel whose hit is a back
+// face is traced again here, its candidates tested for facing: the nearest
+// front face, as `camera_hit` finds. Other pixels keep the opaque query.
 
 @compute @workgroup_size(8, 8)
 fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -21,7 +38,16 @@ fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rq: ray_query;
     rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
     rayQueryProceed(&rq);
-    let hit = rayQueryGetCommittedIntersection(&rq);
+    var hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.primitive_index, dir)) {
+        var fq: ray_query;
+        rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
+        while (rayQueryProceed(&fq)) {
+            let c = rayQueryGetCandidateIntersection(&fq);
+            if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+        }
+        hit = rayQueryGetCommittedIntersection(&fq);
+    }
     var mesh = 0xffffffffu;
     var tri = 0xffffffffu;
     var dist = 3.4e38;
@@ -52,7 +78,16 @@ fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rq: ray_query;
     rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
     rayQueryProceed(&rq);
-    let hit = rayQueryGetCommittedIntersection(&rq);
+    var hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.primitive_index, dir)) {
+        var fq: ray_query;
+        rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
+        while (rayQueryProceed(&fq)) {
+            let c = rayQueryGetCandidateIntersection(&fq);
+            if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+        }
+        hit = rayQueryGetCommittedIntersection(&fq);
+    }
     if (hit.kind != 0u) {
         mesh = hit.instance_custom_data;
         tri = meshes[mesh].x + hit.primitive_index;
@@ -61,7 +96,16 @@ fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
     var mq: ray_query;
     rayQueryInitialize(&mq, movers_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, dist, eye, dir));
     rayQueryProceed(&mq);
-    let moved = rayQueryGetCommittedIntersection(&mq);
+    var moved = rayQueryGetCommittedIntersection(&mq);
+    if (moved.kind != 0u && !hw_front(moved.instance_custom_data, moved.primitive_index, dir)) {
+        var fq: ray_query;
+        rayQueryInitialize(&fq, movers_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, dist, eye, dir));
+        while (rayQueryProceed(&fq)) {
+            let c = rayQueryGetCandidateIntersection(&fq);
+            if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+        }
+        moved = rayQueryGetCommittedIntersection(&fq);
+    }
     if (moved.kind != 0u && moved.t < dist) {
         mesh = moved.instance_custom_data;
         tri = meshes[mesh].x + moved.primitive_index;

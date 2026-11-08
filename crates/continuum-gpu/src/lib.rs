@@ -455,9 +455,9 @@ const HW_ENTRY_POINTS: &[&str] = &["hw_visibility", "hw_visibility_movers"];
 const VISIBILITY_BINDINGS: &[u32] = &[0, 2, 3, 6, 9, 10, 25, 26, 30, 31, 52];
 
 /// Bindings the hardware `hw_visibility` pass uses (32: the acceleration structure).
-pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[3, 6, 31, 32, 52];
+pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52];
 /// `hw_visibility_movers` adds the movers' acceleration structure (59).
-pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[3, 6, 31, 32, 52, 59];
+pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52, 59];
 
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
