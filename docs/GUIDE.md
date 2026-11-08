@@ -95,6 +95,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   halves the error far away. With hardware ray queries it costs 1.29× the
   frame on a textured scene and 3× on dense geometry from far away, where
   half the pixels are edges (M7 gate 4; compute rays 24×).
+  `CacheOptions::edge_samples` 2 traces one diagonal pair instead of four
+  quarters: about 0.8× the cost for less of the gain (development only).
 - **The sky converges slowly** in the cache: a view takes hundreds to
   thousands of frames to warm (M5 G5). With `CacheOptions::sky_later` (the
   default) pages bake their lights first and their sky later, so views come

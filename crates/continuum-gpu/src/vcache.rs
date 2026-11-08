@@ -142,6 +142,10 @@ pub struct CacheOptions {
     /// 3.03× on the field from 150 m up, where half the pixels are edges
     /// (compute rays: 1.84× and 24×).
     pub edge_rays: bool,
+    /// With `edge_rays` through ray queries: 4 quarter-rays per edge pixel,
+    /// or 2 (one diagonal pair, alternating from pixel to pixel), averaged
+    /// with the pixel's own ray.
+    pub edge_samples: u32,
     /// Experiments only: glossy reflection rays for materials (M10 gate 2;
     /// on by default).
     #[doc(hidden)]
@@ -189,6 +193,7 @@ impl Default for CacheOptions {
             indirect: false,
             indirect_sample_cost: 8,
             edge_rays: false,
+            edge_samples: 4,
             glossy_rays: true,
             self_spacing: 0.01,
             sky_later: true,
@@ -1544,7 +1549,7 @@ impl VirtualCache {
                 self.options.indirect as u32,
                 !self.options.glossy_rays as u32,
                 if self.hardware_edges {
-                    2
+                    if self.options.edge_samples == 2 { 3 } else { 2 }
                 } else {
                     self.options.edge_rays as u32
                 },

@@ -4037,7 +4037,8 @@ fn indirect_light(slot: u32, r: PageRef) -> vec3<f32> {
 // Silhouette rays through hardware ray queries (M7 gate 4): the edge pixels
 // `hw_edges` found, counted in the stats' last counter (as the compute path
 // counts edge pixels; so not with COUNT_WORK), each with its four
-// quarter-rays' hits (object, triangle, distance bits; w: the pixel).
+// quarter-rays' hits (object, triangle, distance bits; w: the pixel, its
+// top four bits the quarter), or two (`vc.indirect.w` 3).
 @group(0) @binding(81) var<storage, read_write> edge_hits: array<vec4<u32>>;
 
 // After `vc_shade`: each listed edge pixel averages its four quarter-rays,
@@ -4051,20 +4052,24 @@ fn vc_shade_edges(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     let i = gid.y * w + gid.x;
     let count = min(atomicLoad(&vc_stats[15]), arrayLength(&edge_hits) / 4u);
     if (gid.x >= w || i >= count) { return; }
-    let pixel = edge_hits[4u * i].w;
+    let pixel = edge_hits[4u * i].w & 0x0fffffffu;
     let at = vec3<u32>(pixel % w, pixel / w, 0u);
+    // Two samples (`vc.indirect.w` 3): averaged with the pixel's own ray.
+    let two = vc.indirect.w == 3u;
+    let n = select(4u, 2u, two);
+    var sum = select(vec3<f32>(0.0), colors[pixel].xyz, two);
     sub_share = 0.5;
-    var sum = vec3<f32>(0.0);
-    for (var q = 0u; q < 4u; q++) {
+    for (var j = 0u; j < n; j++) {
+        let e = edge_hits[4u * i + j];
+        let q = e.w >> 28u;
         let sd = camera_dir_at(at, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
-        let e = edge_hits[4u * i + q];
         if (e.x == NONE) {
             sum += light.sky.xyz;
         } else {
             sum += vc_hit_color(sd, hit_from(e.xyz, sd), false);
         }
     }
-    colors[pixel] = vec4<f32>(sum * 0.25, 1.0);
+    colors[pixel] = vec4<f32>(sum / select(4.0, 3.0, two), 1.0);
 }
 
 var<workgroup> fallback_count: atomic<u32>;

@@ -149,8 +149,15 @@ fn hw_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (4u * i + 3u >= arrayLength(&edge_hits)) { return; }
     let pixel = gid.y * w + gid.x;
     let eye = camera.eye.xyz;
-    for (var q = 0u; q < 4u; q++) {
+    // Two samples (`vc.indirect.w` 3): one diagonal pair of quarters,
+    // alternating from pixel to pixel; four otherwise.
+    let two = vc.indirect.w == 3u;
+    let n = select(4u, 2u, two);
+    let flip = ((gid.x + gid.y) & 1u) == 1u;
+    for (var j = 0u; j < n; j++) {
+        var q = j;
+        if (two) { q = select(select(0u, 3u, j == 1u), select(1u, 2u, j == 1u), flip); }
         let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
-        edge_hits[4u * i + q] = vec4<u32>(hw_trace(eye, sd), pixel);
+        edge_hits[4u * i + j] = vec4<u32>(hw_trace(eye, sd), pixel | (q << 28u));
     }
 }

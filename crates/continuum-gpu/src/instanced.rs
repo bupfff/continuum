@@ -37,6 +37,9 @@ pub struct FrameProfile {
     /// Planning the frame's bake on the CPU (from the requests of two frames
     /// before).
     pub planning: Duration,
+    /// The first four camera passes, in order, each submitted and waited
+    /// for alone.
+    pub passes: [Duration; 4],
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -1242,6 +1245,9 @@ impl InstancedRenderer {
             self.queue.submit([commands]);
             let submitted = submit.elapsed();
             self.wait();
+            if k < 4 {
+                profile.passes[k] = start.elapsed();
+            }
             if k == 0 {
                 profile.visibility = start.elapsed();
                 profile.visibility_submit = submitted;

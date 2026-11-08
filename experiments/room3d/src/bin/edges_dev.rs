@@ -112,6 +112,107 @@ fn main() {
             r.hardware_rays(),
         )
     };
+    if std::env::args().any(|a| a == "quality") {
+        kernel.set_hardware_rays(true);
+        let make = |edge_rays: bool, edge_samples: u32| {
+            let mut r = InstancedRenderer::with_cache_lights(
+                &kernel,
+                format,
+                W,
+                H,
+                1,
+                &lights,
+                scene,
+                origin,
+                CacheOptions {
+                    edge_rays,
+                    edge_samples,
+                    ..Default::default()
+                },
+            );
+            settle(&mut r, camera, &target);
+            r
+        };
+        let timed = |r: &mut InstancedRenderer| {
+            let mut t: Vec<f64> = (0..30)
+                .map(|_| {
+                    let s = Instant::now();
+                    r.frame(camera, &target);
+                    r.wait();
+                    s.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            t.sort_by(f64::total_cmp);
+            r.finish();
+            (t[15], r.read_colors())
+        };
+        let mut one = make(false, 4);
+        let (t1, i1) = timed(&mut one);
+        let (t4, i4) = timed(&mut make(true, 4));
+        let (t2, i2) = timed(&mut make(true, 2));
+        let mut reference = vec![[0.0f64; 3]; (W * H) as usize];
+        one.set_footprint(1.0 / 16.0);
+        for k in 0..256u32 {
+            let offset = |i: u32| (i as f32 + 0.5) / 16.0 - 0.5;
+            one.set_pixel_offset(offset(k % 16), offset(k / 16));
+            settle(&mut one, camera, &target);
+            one.finish();
+            for (s, p) in reference.iter_mut().zip(one.read_colors()) {
+                for c in 0..3 {
+                    s[c] += p[c] as f64 / 256.0;
+                }
+            }
+        }
+        let reference: Vec<[f32; 3]> = reference.iter().map(|s| s.map(|x| x as f32)).collect();
+        let e = |i: &[[f32; 3]]| 100.0 * relative_rmse(i, &reference);
+        println!(
+            "from the area integral: one ray {:.2}% ({t1:.2} ms), four quarters {:.2}% ({t4:.2} ms, {:.2}x), two quarters {:.2}% ({t2:.2} ms, {:.2}x)",
+            e(&i1),
+            e(&i4),
+            t4 / t1,
+            e(&i2),
+            t2 / t1
+        );
+        return;
+    }
+    if std::env::args().any(|a| a == "profile") {
+        kernel.set_hardware_rays(true);
+        let mut r = InstancedRenderer::with_cache_lights(
+            &kernel,
+            format,
+            W,
+            H,
+            1,
+            &lights,
+            scene,
+            origin,
+            CacheOptions {
+                edge_rays: true,
+                ..Default::default()
+            },
+        );
+        settle(&mut r, camera, &target);
+        let mut per: Vec<Vec<f64>> = Vec::new();
+        for _ in 0..30 {
+            let p = r.frame_profiled(camera, &target);
+            for (k, d) in p.passes.iter().enumerate().filter(|(_, d)| !d.is_zero()) {
+                if per.len() <= k {
+                    per.push(Vec::new());
+                }
+                per[k].push(d.as_secs_f64() * 1000.0);
+            }
+        }
+        for v in &mut per {
+            v.sort_by(f64::total_cmp);
+        }
+        println!(
+            "camera passes (median ms, each waited for): {:?}",
+            per.iter()
+                .map(|v| (v[15] * 100.0).round() / 100.0)
+                .collect::<Vec<_>>()
+        );
+        return;
+    }
     let (one, t_one, _, _) = run(true, false);
     let (hw, t_hw, e_hw, is_hw) = run(true, true);
     let (cp, t_cp, e_cp, _) = run(false, true);
