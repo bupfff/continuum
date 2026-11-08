@@ -125,7 +125,9 @@ fn main() -> std::io::Result<()> {
         let t = (f * FLIGHT / flight) as f32 / (FLIGHT - 1) as f32;
         view(300.0 * t, 1.7 + 148.3 * t, 45.0 * t)
     };
-    let renderer = |coarse_sky_guess: bool| {
+    // The option this gate tested was removed after development runs
+    // (`docs/results/m5-gate10.md`); both configurations now render alike.
+    let renderer = |_coarse_sky_guess: bool| {
         InstancedRenderer::with_cache_lights(
             &kernel,
             format,
@@ -138,7 +140,6 @@ fn main() -> std::io::Result<()> {
             CacheOptions {
                 bake_budget: 11_000,
                 frame_target_ms: 0.0,
-                coarse_sky_guess,
                 ..Default::default()
             },
         )

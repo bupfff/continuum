@@ -419,6 +419,10 @@ place, for a new conversation:
   research, not a contained fix);
   over-count-free coverage for a dark state (unblocks 4); the sky later in
   flights (measure); bounce light with movers.
+- **Tried after the list (development only, reverted):** a guessed sky
+  from coarser pages (M5 G10: no gain in flight, 1.00×; the flight's error
+  is the cache's softness in motion, not the sky;
+  `docs/results/m5-gate10.md`).
 - **Known issues:** the total sky work is still large (the sky later orders
   it); sustained speed on the fanless Air (M5 G8); Metal only measured.
   Naga 30's Metal backend ignores ray flags' face culling (worked around in
