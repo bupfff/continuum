@@ -389,7 +389,9 @@ place, for a new conversation:
 - **The user's direction:** make the engine complete. Pick the next
   feature by judgment, finish usable features before new research, and keep
   usage low. The NVIDIA benchmark is ready but waits until the user can pay
-  for a rented GPU.
+  for a rented GPU (not soon, as of 2026-11-08).
+- **`v0.2.0` is tagged** (2026-11-08, approved by the user) on the commit
+  that bumps the workspace version, after CI passed.
 - **The fourth session** took the third session's list in order (results
   in `docs/results/`):
   - *viewer `--env`*: `--env gradient|sky.hdr|sky.png`, `--env-strength`;
@@ -483,8 +485,7 @@ place, for a new conversation:
     object textures, the blend clear in the transforms' row 3, the
     environment as an extra base color layer).
 - **Needs the user:**
-  - running the NVIDIA benchmark (needs funds);
-  - a `v0.2` tag;
+  - running the NVIDIA benchmark (needs funds; not soon);
   - any publishing or upstream report.
 - **Working notes:**
   - Gate binaries are `experiments/room3d/src/bin/m<milestone>_gate<n>.rs`.

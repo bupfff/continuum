@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_continuum"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "continuum",
@@ -1564,14 +1564,14 @@ dependencies = [
 
 [[package]]
 name = "continuum"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam 0.34.1",
 ]
 
 [[package]]
 name = "continuum-gltf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "continuum",
  "continuum-gpu",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "continuum-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy_mikktspace",
  "bytemuck",
@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "flatland"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "continuum",
  "png 0.17.16",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "room3d"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "continuum",
  "continuum-gltf",
@@ -4116,7 +4116,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "viewer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "continuum",
  "continuum-gltf",

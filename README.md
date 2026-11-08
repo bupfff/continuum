@@ -5,7 +5,8 @@ rendering. Every visibility question is asked by a cone that answers in bits,
 and cached answers are recomputed only when they could have changed by more
 than a chosen, invisible error bound.
 
-Status: experimental; `v0.1.0` is tagged, and later work is on `main`. The
+Status: experimental; `v0.2.0` is tagged (2026-11-08), and later work is
+on `main`. The
 core bets were tested in 2D (M0) and in 3D on the CPU (M1). On the GPU,
 Continuum renders:
 

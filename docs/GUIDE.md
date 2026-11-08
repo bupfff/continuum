@@ -1,6 +1,6 @@
 # Using Continuum as a library
 
-Continuum v0.1 is experimental. This guide covers what works today, how to
+Continuum v0.2 is experimental. This guide covers what works today, how to
 use it, and what to expect. Measured results live in `docs/results/`, and the
 design and its honest status in `docs/DESIGN.md` (§3.6).
 
