@@ -147,7 +147,8 @@ fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
     if (layer != NONE) {
         let b = barycentric(m, t, p);
         let uv = tri_tex[3u * t] * b.x + tri_tex[3u * t + 1u] * b.y + tri_tex[3u * t + 2u] * b.z;
-        a *= textureSampleLevel(base_color, base_sampler, uv, i32(layer), 0.0).w;
+        let size = f32(textureDimensions(base_color).x);
+        a *= textureSampleLevel(base_color, base_sampler, wrap_uv(m, SLOT_BASE, uv, size, 0.0), i32(layer), 0.0).w;
     }
     return clamp(a, 0.0, 1.0);
 }

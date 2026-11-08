@@ -465,6 +465,25 @@ fn render_instanced_inner(
             },
         )
         .collect();
+    // Each geometry's base color texture's extension (M10 gate 20): Cycles
+    // has one mode for both axes, so mixed modes stay REPEAT.
+    let extensions: Vec<String> = (0..scene.geometries.len())
+        .map(|g| {
+            let w = scene
+                .geometry_textures
+                .get(g)
+                .copied()
+                .flatten()
+                .and_then(|t| scene.texture_wrap.get(t as usize).copied())
+                .unwrap_or_default();
+            match w {
+                [continuum_gpu::Wrap::Clamp, continuum_gpu::Wrap::Clamp] => "\"EXTEND\"",
+                [continuum_gpu::Wrap::Mirror, continuum_gpu::Wrap::Mirror] => "\"MIRROR\"",
+                _ => "\"REPEAT\"",
+            }
+            .to_string()
+        })
+        .collect();
     // Each geometry's blend opacity (M10 gate 16), or null.
     let blend: Vec<String> = (0..scene.geometries.len())
         .map(|g| match scene.geometry_blend.get(g).copied().flatten() {
@@ -485,7 +504,7 @@ fn render_instanced_inner(
         })
         .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "colors": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -499,6 +518,7 @@ fn render_instanced_inner(
         emission_textures.join(", "),
         blend.join(", "),
         colors.join(", "),
+        extensions.join(", "),
         instances.to_string_lossy(),
         exr.to_string_lossy(),
         out.to_string_lossy(),

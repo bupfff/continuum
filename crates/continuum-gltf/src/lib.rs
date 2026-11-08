@@ -66,7 +66,7 @@ use std::path::Path;
 
 use continuum::glam::{DMat4, DVec3, Mat3, Vec2, Vec3};
 use continuum::mesh::{Surface, Tri};
-use continuum_gpu::{Instance, InstancedScene, Light, Material, Spot, Texture};
+use continuum_gpu::{Instance, InstancedScene, Light, Material, Spot, Texture, Wrap};
 
 /// What kind of punctual light.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -347,8 +347,10 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         meshes: document.meshes().len(),
         ..Default::default()
     };
-    // Base color textures, imported once per image.
+    // Base color textures, imported once per image, with the wrap modes of
+    // the first sampler that reads each.
     let mut textures: Vec<Texture> = Vec::new();
+    let mut texture_wrap: Vec<[Wrap; 2]> = Vec::new();
     let mut texture_of_image: Vec<Option<Option<u32>>> = vec![None; images.len()];
     // Primitives per mesh.
     let mut meshes: Vec<Vec<Primitive>> = Vec::new();
@@ -398,7 +400,8 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             let mut texcoords: Option<Vec<Vec2>> = None;
             let mut chosen: Option<UvSlot> = None;
             let mut skipped = 0;
-            let mut slot_texture = |slot: UvSlot, image: usize| -> Option<u32> {
+            let mut slot_texture = |slot: UvSlot, texture: gltf::Texture| -> Option<u32> {
+                let image = texture.source().index();
                 if chosen.is_some_and(|c| c != slot) {
                     skipped += 1;
                     return None;
@@ -406,6 +409,8 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 let index = (*texture_of_image[image].get_or_insert_with(|| {
                     to_rgba(&images[image]).map(|t| {
                         textures.push(t);
+                        let sampler = texture.sampler();
+                        texture_wrap.push([sampler.wrap_s(), sampler.wrap_t()].map(wrap_of));
                         textures.len() as u32 - 1
                     })
                 }))?;
@@ -418,18 +423,18 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             };
             let texture = pbr
                 .base_color_texture()
-                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture().source().index()));
+                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture()));
             let normal_map = material
                 .normal_texture()
-                .and_then(|i| slot_texture(UvSlot::of_normal(&i), i.texture().source().index()));
+                .and_then(|i| slot_texture(UvSlot::of_normal(&i), i.texture()));
             // The emissive texture (sRGB, M10 gate 14).
             let emissive_texture = material
                 .emissive_texture()
-                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture().source().index()));
+                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture()));
             let metallic_roughness = pbr
                 .metallic_roughness_texture()
                 .filter(|_| surface.is_some())
-                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture().source().index()));
+                .and_then(|i| slot_texture(UvSlot::of(&i), i.texture()));
             stats.texture_slots_skipped += skipped;
             let chosen = chosen.unwrap_or_default();
             let alpha_cutoff = match material.alpha_mode() {
@@ -524,6 +529,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         .count();
     let mut scene = InstancedScene {
         textures,
+        texture_wrap,
         ..Default::default()
     };
     let mut geometry_of: std::collections::HashMap<GeometryKey, usize> =
@@ -788,6 +794,15 @@ impl Imported {
 /// Places primitive `p` with world matrix `m` (Z-up): an instance of its
 /// geometry if `m` is rotation, uniform scale and translation; otherwise a
 /// copy of the geometry with `m` baked in.
+/// A glTF sampler's wrap mode.
+fn wrap_of(mode: gltf::texture::WrappingMode) -> Wrap {
+    match mode {
+        gltf::texture::WrappingMode::ClampToEdge => Wrap::Clamp,
+        gltf::texture::WrappingMode::MirroredRepeat => Wrap::Mirror,
+        gltf::texture::WrappingMode::Repeat => Wrap::Repeat,
+    }
+}
+
 /// Per-corner vertex colors for `Surface::from_mesh(triangles, ..)`: those
 /// of the triangles it keeps.
 fn kept_colors(triangles: &[Tri], colors: Option<&Vec<[Vec3; 3]>>) -> Option<Vec<[Vec3; 3]>> {
@@ -1112,8 +1127,32 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
         ));
     }
     let node_list: Vec<String> = (0..nodes.len()).map(|k| k.to_string()).collect();
+    // A sampler per distinct pair of wrap modes.
+    let gl = |w: Wrap| match w {
+        Wrap::Repeat => 10497,
+        Wrap::Clamp => 33071,
+        Wrap::Mirror => 33648,
+    };
+    let mut samplers: Vec<[Wrap; 2]> = Vec::new();
     let textures: Vec<String> = (0..images.len())
-        .map(|k| format!(r#"{{"source":{k},"sampler":0}}"#))
+        .map(|k| {
+            let w = scene.texture_wrap.get(k).copied().unwrap_or_default();
+            let s = samplers.iter().position(|&x| x == w).unwrap_or_else(|| {
+                samplers.push(w);
+                samplers.len() - 1
+            });
+            format!(r#"{{"source":{k},"sampler":{s}}}"#)
+        })
+        .collect();
+    let samplers: Vec<String> = samplers
+        .iter()
+        .map(|w| {
+            format!(
+                r#"{{"magFilter":9729,"minFilter":9987,"wrapS":{},"wrapT":{}}}"#,
+                gl(w[0]),
+                gl(w[1])
+            )
+        })
         .collect();
     while !bin.len().is_multiple_of(4) {
         bin.push(0);
@@ -1134,9 +1173,10 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     if !images.is_empty() {
         write!(
             json,
-            r#","images":[{}],"textures":[{}],"samplers":[{{"magFilter":9729,"minFilter":9987,"wrapS":10497,"wrapT":10497}}]"#,
+            r#","images":[{}],"textures":[{}],"samplers":[{}]"#,
             images.join(","),
-            textures.join(",")
+            textures.join(","),
+            samplers.join(",")
         )
         .unwrap();
     }

@@ -1386,8 +1386,9 @@ impl MaskConeKernel {
         let albedo: Vec<[f32; 4]> = scene.instances.iter().map(|i| v4(i.albedo)).collect();
         // Per object, its texture layer (NONE: none), then per object its
         // emission as two words of half floats (for bounce samples, which
-        // cannot bind the materials buffer: M10 gate 11); per geometry
-        // triangle, its corners' texture coordinates (zero without).
+        // cannot bind the materials buffer: M10 gate 11), then per object its
+        // wrap modes; per geometry triangle, its corners' texture coordinates
+        // (zero without).
         let mut object_textures: Vec<u32> = scene
             .instances
             .iter()
@@ -1421,6 +1422,27 @@ impl MaskConeKernel {
                 .to_array()
                 .map(half_bits);
             object_textures.extend([e[0] | e[1] << 16, e[2] | emissive_of(i) << 16]);
+        }
+        // Per object, its texture slots' wrap modes (M10 gate 20): four bits
+        // a slot (two for u, then two for v), base color, emissive, normal
+        // map, then metallic-roughness.
+        for i in &scene.instances {
+            let g = i.geometry;
+            let slots = [
+                scene.geometry_textures.get(g),
+                scene.geometry_emissive_textures.get(g),
+                scene.geometry_normal_maps.get(g),
+                scene.geometry_metallic_roughness.get(g),
+            ];
+            let mut word = 0u32;
+            for (k, slot) in slots.into_iter().enumerate() {
+                if let Some(&Some(t)) = slot
+                    && let Some(w) = scene.texture_wrap.get(t as usize)
+                {
+                    word |= (w[0].code() | w[1].code() << 2) << (4 * k);
+                }
+            }
+            object_textures.push(word);
         }
         // Per object, its material: metallic and roughness (roughness below
         // zero: Lambertian), and its emission as half floats.
@@ -2345,6 +2367,44 @@ pub struct InstancedScene {
     /// at 8 bits per channel (sRGB-encoded), so within `[0, 1]`. glTF's
     /// `COLOR_0`. Ignored unless it has one entry per triangle.
     pub geometry_colors: Vec<Option<Vec<[Vec3; 3]>>>,
+    /// Each texture's wrap modes along u and v, as glTF samplers give them
+    /// (empty, or past its end: repeat; M10 gate 20).
+    pub texture_wrap: Vec<[Wrap; 2]>,
+}
+
+/// How a texture continues past its edges (glTF sampler wrap modes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Wrap {
+    /// Tiles (glTF `REPEAT`, the default).
+    #[default]
+    Repeat,
+    /// Holds the edge texels (glTF `CLAMP_TO_EDGE`).
+    Clamp,
+    /// Tiles mirrored every other time (glTF `MIRRORED_REPEAT`).
+    Mirror,
+}
+
+impl Wrap {
+    /// Its two-bit code in the kernel's wrap words.
+    fn code(self) -> u32 {
+        match self {
+            Wrap::Repeat => 0,
+            Wrap::Clamp => 1,
+            Wrap::Mirror => 2,
+        }
+    }
+
+    /// Texel index `i` of a row or column of `n` texels under this mode.
+    pub(crate) fn texel(self, i: i64, n: i64) -> i64 {
+        match self {
+            Wrap::Repeat => i.rem_euclid(n),
+            Wrap::Clamp => i.clamp(0, n - 1),
+            Wrap::Mirror => {
+                let k = i.rem_euclid(2 * n);
+                if k < n { k } else { 2 * n - 1 - k }
+            }
+        }
+    }
 }
 
 impl InstancedScene {
@@ -2398,6 +2458,10 @@ impl InstancedScene {
                 &self.geometries[g],
                 colors,
                 &self.textures[texture as usize],
+                self.texture_wrap
+                    .get(texture as usize)
+                    .copied()
+                    .unwrap_or_default(),
                 cutoff,
             );
             scene.geometries[g] = surface;

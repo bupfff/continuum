@@ -111,6 +111,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),
         geometry_colors: Vec::new(),
+        texture_wrap: Vec::new(),
     }
 }
 
@@ -450,6 +451,7 @@ fn gltf_round_trip_keeps_materials() {
     s.geometry_emission[0] = Vec3::new(0.5, 0.25, 0.125);
     s.geometry_emissive_textures = vec![Some(0), None, None];
     s.geometry_blend = vec![None, Some(0.4), None];
+    s.texture_wrap = vec![[continuum_gpu::Wrap::Clamp, continuum_gpu::Wrap::Mirror]];
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
     let imported = continuum_gltf::load(&path).unwrap().scene;
@@ -509,6 +511,16 @@ fn gltf_round_trip_keeps_materials() {
         let blend =
             |scene: &InstancedScene, g: usize| scene.geometry_blend.get(g).copied().flatten();
         assert_eq!(blend(&s, a.geometry), blend(&imported, b.geometry));
+        let wrap = |scene: &InstancedScene, g: usize| {
+            scene.geometry_textures.get(g).copied().flatten().map(|t| {
+                scene
+                    .texture_wrap
+                    .get(t as usize)
+                    .copied()
+                    .unwrap_or_default()
+            })
+        };
+        assert_eq!(wrap(&s, a.geometry), wrap(&imported, b.geometry));
     }
 }
 

@@ -71,7 +71,8 @@ for g, path in enumerate(job["geometries"]):
         image.image = bpy.data.images.load(texture)
         image.image.colorspace_settings.name = "sRGB"
         image.interpolation = "Linear"
-        image.extension = "REPEAT"
+        # Wrap modes (M10 gate 20): REPEAT, EXTEND (clamp) or MIRROR.
+        image.extension = (job.get("extensions") or ["REPEAT"] * len(job["geometries"]))[g]
         multiply = nodes.new("ShaderNodeMix")
         multiply.data_type = "RGBA"
         multiply.blend_type = "MULTIPLY"

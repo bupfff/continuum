@@ -140,8 +140,9 @@ exactly back-to-back faces (M10 gates 8–9). `KHR_texture_transform` is
 applied to the texture coordinates, as Blender's importer applies it (one
 transform per primitive: a slot with another is skipped). Vertex colors
 (`COLOR_0`) multiply the base color (1.29% from Cycles, 1.00× the frame,
-M10 gates 17–18). Saving writes materials back, with emissive textures,
-blending and vertex colors.
+M10 gates 17–18), and samplers clamp or mirror (2.18%, M10 gate 20).
+Saving writes materials back, with emissive textures, blending, vertex
+colors and samplers.
 
 ```bash
 cargo run --release -p viewer -- --gltf scene.glb

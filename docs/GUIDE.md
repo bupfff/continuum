@@ -38,6 +38,7 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 | Alpha-blended glass and a blind against Cycles | 4.71% | M10 G16 |
 | A gradient environment sky against Cycles | 1.37% | M5 G12 |
 | Vertex colors against Cycles | 1.29% | M10 G17 |
+| Clamped and mirrored textures against Cycles | 2.18% | M10 G20 |
 
 ## Limits, today
 
@@ -99,6 +100,12 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   triangle; kept at 8 bits per channel (sRGB-encoded), so within [0, 1].
   1.29% from Cycles, 1.00× the frame (M10 gates 17–18). glTF's `COLOR_0`
   (alpha ignored) is imported and saved.
+- **Texture wrap modes.** `InstancedScene::texture_wrap` gives each
+  texture's mode along u and v (`Wrap::Repeat`, the default; `Clamp`;
+  `Mirror`), as glTF samplers do (imported and saved). 2.18% from Cycles
+  with clamped and mirrored textures, 1.00× the frame (M10 gate 20). Past a
+  clamped edge along one axis only, isotropic mips average a few edge rows
+  far away.
 - **Alpha cutouts.** `InstancedScene::geometry_alpha_cutoff` cuts each
   geometry where its base color texture's alpha is below the cutoff, as
   geometry, before upload (`cut_out`), so shadows, sky and bounce light see

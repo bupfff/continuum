@@ -12,19 +12,20 @@
 use continuum::glam::{Vec2, Vec3};
 use continuum::mesh::{Surface, Tri};
 
-use crate::Texture;
+use crate::{Texture, Wrap};
 
 /// Texels a triangle spans at most along each texture axis at the mip its
 /// cut is made at.
 pub const MAX_CELLS: f32 = 128.0;
 
-/// An alpha mip pyramid: box-filtered, read repeating.
+/// An alpha mip pyramid: box-filtered, read with the texture's wrap modes.
 struct AlphaMips {
     levels: Vec<(usize, usize, Vec<f32>)>,
+    wrap: [Wrap; 2],
 }
 
 impl AlphaMips {
-    fn new(t: &Texture) -> AlphaMips {
+    fn new(t: &Texture, wrap: [Wrap; 2]) -> AlphaMips {
         let (w, h) = (t.width.max(1) as usize, t.height.max(1) as usize);
         let base: Vec<f32> = (0..w * h)
             .map(|i| t.rgba.get(4 * i + 3).map_or(1.0, |&a| a as f32 / 255.0))
@@ -47,12 +48,16 @@ impl AlphaMips {
             }
             levels.push((nw, nh, next));
         }
-        AlphaMips { levels }
+        AlphaMips { levels, wrap }
     }
 
     fn at(&self, level: usize, x: i64, y: i64) -> f32 {
         let (w, h, a) = &self.levels[level];
-        a[y.rem_euclid(*h as i64) as usize * w + x.rem_euclid(*w as i64) as usize]
+        let (x, y) = (
+            self.wrap[0].texel(x, *w as i64),
+            self.wrap[1].texel(y, *h as i64),
+        );
+        a[y as usize * w + x as usize]
     }
 }
 
@@ -78,15 +83,17 @@ fn clip(p: &[Vec2], a: Vec2, b: Vec2, side: f32) -> Vec<Vec2> {
 /// is at least `cutoff`. Triangles without texture coordinates, or with
 /// degenerate ones, are kept whole.
 pub fn cut_out(surface: &Surface, texture: &Texture, cutoff: f32) -> Surface {
-    cut_out_colored(surface, None, texture, cutoff).0
+    cut_out_colored(surface, None, texture, [Wrap::Repeat; 2], cutoff).0
 }
 
 /// [`cut_out`], with the surface's vertex colors (per triangle corner, M10
-/// gate 17) interpolated into the triangles it makes.
+/// gate 17) interpolated into the triangles it makes, and the texture read
+/// with wrap modes `wrap` (M10 gate 20).
 pub(crate) fn cut_out_colored(
     surface: &Surface,
     colors: Option<&[[Vec3; 3]]>,
     texture: &Texture,
+    wrap: [Wrap; 2],
     cutoff: f32,
 ) -> (Surface, Option<Vec<[Vec3; 3]>>) {
     let colors = colors.filter(|c| c.len() == surface.triangles.len());
@@ -94,7 +101,7 @@ pub(crate) fn cut_out_colored(
         return (surface.clone(), colors.map(|c| c.to_vec()));
     }
     let mut out_colors: Vec<[Vec3; 3]> = Vec::new();
-    let mips = AlphaMips::new(texture);
+    let mips = AlphaMips::new(texture, wrap);
     let (tw, th) = (texture.width.max(1) as f32, texture.height.max(1) as f32);
     let mut tris: Vec<Tri> = Vec::new();
     let mut normals: Vec<[Vec3; 3]> = Vec::new();

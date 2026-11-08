@@ -288,6 +288,7 @@ impl Textured {
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
             geometry_colors: Vec::new(),
+            texture_wrap: Vec::new(),
         };
         // The camera stands at 1.5 m looking along +y, slightly down; the sun
         // is 30° up behind and to the left, 1 km away, 0.5° across.
@@ -326,6 +327,15 @@ impl Textured {
 }
 
 impl Textured {
+    /// M10 gate 20's wrap modes: the ground's tiles clamped (its coordinates
+    /// run from −7.5 to 7.5), the boulders' lichen and the block's bricks
+    /// mirrored.
+    pub fn with_wrap(mut self) -> Textured {
+        use continuum_gpu::Wrap;
+        self.scene.texture_wrap = vec![[Wrap::Clamp; 2], [Wrap::Mirror; 2], [Wrap::Mirror; 2]];
+        self
+    }
+
     /// M10 gate 17's vertex colors: the boulders get a smooth color field
     /// over their corners (multiplying their lichen), and the brick block
     /// loses its texture for a color per corner (a gradient along each

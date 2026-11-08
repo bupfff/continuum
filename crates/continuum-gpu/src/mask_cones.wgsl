@@ -1598,13 +1598,67 @@ fn barycentric(m: u32, t: u32, world_p: vec3<f32>) -> vec3<f32> {
 @group(0) @binding(55) var base_color: texture_2d_array<f32>;
 @group(0) @binding(56) var base_sampler: sampler;
 // Per object its texture layer, then per object its emission as two words
-// of half floats (`bounce_emission`).
+// of half floats (`bounce_emission`), then per object its texture slots'
+// wrap modes (`wrap_uv`).
 @group(0) @binding(57) var<storage, read> object_texture: array<u32>;
+
+// Texture slots in the wrap words (M10 gate 20).
+const SLOT_BASE: u32 = 0u;
+const SLOT_EMISSIVE: u32 = 1u;
+const SLOT_NORMAL: u32 = 2u;
+const SLOT_MR: u32 = 3u;
+
+// Texture coordinates `uv` under object `m`'s wrap modes for texture slot
+// `slot` (glTF samplers, M10 gate 20), for a texture `size` texels across
+// read at level of detail `lod` with the repeating sampler: clamping keeps
+// them half a texel (at the coarser level read) inside the edges, so
+// filtering never reaches the far edge; mirroring folds them into [0, 1]
+// every two tiles, then clamps the same way (the edge texel repeats at each
+// fold, as glTF's mirrored repeat does).
+fn wrap_uv(m: u32, slot: u32, uv: vec2<f32>, size: f32, lod: f32) -> vec2<f32> {
+    let modes = wrap_modes(m, slot);
+    if (modes == 0u) { return uv; }
+    let level = clamp(ceil(lod), 0.0, log2(max(size, 1.0)));
+    let half = 0.5 * exp2(level) / max(size, 1.0);
+    return vec2<f32>(wrap_axis(uv.x, modes & 3u, half), wrap_axis(uv.y, modes >> 2u, half));
+}
+
+// Object `m`'s wrap modes for texture slot `slot`: two bits for u, then two
+// for v (0 repeat, 1 clamp, 2 mirror).
+fn wrap_modes(m: u32, slot: u32) -> u32 {
+    let n = arrayLength(&object_texture) / 4u;
+    if (m >= n) { return 0u; }
+    return (object_texture[3u * n + m] >> (4u * slot)) & 15u;
+}
+
+// Per axis, 0 where `uv` lies past a clamped edge (the texture does not
+// vary along that axis there), else 1: a footprint's extent after
+// wrapping, for choosing its level of detail.
+fn wrap_extent(modes: u32, uv: vec2<f32>) -> vec2<f32> {
+    let out_u = (modes & 3u) == 1u && (uv.x < 0.0 || uv.x > 1.0);
+    let out_v = (modes >> 2u) == 1u && (uv.y < 0.0 || uv.y > 1.0);
+    return vec2<f32>(select(1.0, 0.0, out_u), select(1.0, 0.0, out_v));
+}
+
+// Level of detail `lod`, chosen for a footprint at `uv` without wrapping,
+// as wrapping leaves it: the base level where both axes lie past clamped
+// edges. (With one axis past its edge, the isotropic level stays: only the
+// box filter knows the footprint per axis.)
+fn wrap_lod(m: u32, slot: u32, uv: vec2<f32>, lod: f32) -> f32 {
+    let e = wrap_extent(wrap_modes(m, slot), uv);
+    return select(lod, -8.0, e.x == 0.0 && e.y == 0.0);
+}
+
+fn wrap_axis(u: f32, mode: u32, half: f32) -> f32 {
+    if (mode == 1u) { return clamp(u, half, 1.0 - half); }
+    if (mode == 2u) { return clamp(1.0 - abs(fract(u * 0.5) * 2.0 - 1.0), half, 1.0 - half); }
+    return u;
+}
 
 // Object `m`'s emission, from `object_texture` (for bounce samples, which
 // cannot bind `materials` within the buffer limit; M10 gate 11).
 fn bounce_emission(m: u32) -> vec3<f32> {
-    let i = arrayLength(&object_texture) / 3u + 2u * m;
+    let i = arrayLength(&object_texture) / 4u + 2u * m;
     if (i + 1u >= arrayLength(&object_texture)) { return vec3<f32>(0.0); }
     return vec3<f32>(unpack2x16float(object_texture[i]), unpack2x16float(object_texture[i + 1u]).x);
 }
@@ -1612,7 +1666,7 @@ fn bounce_emission(m: u32) -> vec3<f32> {
 // `bounce_emission` times its emissive texture at `p` on triangle `t`
 // (M10 gate 14), read for `footprint` world units.
 fn bounce_emission_at(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
-    let i = arrayLength(&object_texture) / 3u + 2u * m;
+    let i = arrayLength(&object_texture) / 4u + 2u * m;
     if (i + 1u >= arrayLength(&object_texture)) { return vec3<f32>(0.0); }
     return emission_textured(m, t, p, bounce_emission(m), object_texture[i + 1u] >> 16u, footprint);
 }
@@ -1673,8 +1727,8 @@ fn mapped_normal(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir:
     let texel = sqrt(world_area / max(texel_area, 1e-12));
     let footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share;
     let pixel = footprint * distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
-    let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
-    let s = textureSampleLevel(normal_maps, base_sampler, uv, i32(layer - 1u), lod).xyz * 2.0 - vec3<f32>(1.0);
+    let lod = wrap_lod(m, SLOT_NORMAL, uv, log2(max(pixel / max(texel, 1e-12), 1e-6)));
+    let s = textureSampleLevel(normal_maps, base_sampler, wrap_uv(m, SLOT_NORMAL, uv, size, lod), i32(layer - 1u), lod).xyz * 2.0 - vec3<f32>(1.0);
     let bent = tangent * s.x + bitangent * s.y + n * s.z;
     if (dot(bent, bent) < 1e-12) { return n; }
     return normalize(bent);
@@ -1727,8 +1781,8 @@ fn surface_albedo(m: u32, t: u32, p: vec3<f32>, distance: f32, dir: vec3<f32>, n
     // the pixel).
     let footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share;
     let pixel = footprint * distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
-    let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
-    return base * textureSampleLevel(base_color, base_sampler, uv, i32(layer), lod).xyz;
+    let lod = wrap_lod(m, SLOT_BASE, uv, log2(max(pixel / max(texel, 1e-12), 1e-6)));
+    return base * textureSampleLevel(base_color, base_sampler, wrap_uv(m, SLOT_BASE, uv, size, lod), i32(layer), lod).xyz;
 }
 
 // The texture over a pixel's footprint (M7 gate 2): the camera ray's change
@@ -1773,11 +1827,17 @@ fn texture_box(m: u32, t: u32, dir: vec3<f32>, distance: f32, uv: vec2<f32>, siz
     let by = (g11 * dot(dpy, e2) - g12 * dot(dpy, e1)) / det;
     let dux = ax * u1 + bx * u2;
     let duy = ay * u1 + by * u2;
-    let lod = log2(max(0.5 * max(length(dux), length(duy)) * size, 1e-6));
+    var lod = log2(max(0.5 * max(length(dux), length(duy)) * size, 1e-6));
+    // Past a clamped edge the texture does not vary along that axis: the
+    // footprint's extent along it is dropped (M10 gate 20).
+    let e = wrap_extent(wrap_modes(m, SLOT_BASE), uv);
+    if (e.x == 0.0 || e.y == 0.0) {
+        lod = log2(max(0.5 * max(length(dux * e), length(duy * e)) * size, 1e-6));
+    }
     var sum = vec3<f32>(0.0);
     for (var q = 0u; q < 4u; q++) {
         let o = (f32(q & 1u) - 0.5) * 0.5 * dux + (f32(q >> 1u) - 0.5) * 0.5 * duy;
-        sum += textureSampleLevel(base_color, base_sampler, uv + o, i32(layer), lod).xyz;
+        sum += textureSampleLevel(base_color, base_sampler, wrap_uv(m, SLOT_BASE, uv + o, size, lod), i32(layer), lod).xyz;
     }
     return vec4<f32>(sum * 0.25, 1.0);
 }
@@ -2651,8 +2711,8 @@ fn emission_textured(m: u32, t: u32, p: vec3<f32>, factor: vec3<f32>, layer: u32
     let e1 = (t1 - t0) * size;
     let e2 = (t2 - t0) * size;
     let texel = sqrt(world_area / max(0.5 * abs(e1.x * e2.y - e1.y * e2.x), 1e-12));
-    let lod = log2(max(footprint / max(texel, 1e-12), 1e-6));
-    return factor * textureSampleLevel(base_color, base_sampler, uv, i32(layer - 1u), lod).xyz;
+    let lod = wrap_lod(m, SLOT_EMISSIVE, uv, log2(max(footprint / max(texel, 1e-12), 1e-6)));
+    return factor * textureSampleLevel(base_color, base_sampler, wrap_uv(m, SLOT_EMISSIVE, uv, size, lod), i32(layer - 1u), lod).xyz;
 }
 
 // `emission_textured` with the layer from the materials buffer.
@@ -2683,8 +2743,8 @@ fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: v
     let texel = sqrt(world_area / max(texel_area, 1e-12));
     let footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share;
     let pixel = footprint * distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(n, dir)), 0.2);
-    let lod = log2(max(pixel / max(texel, 1e-12), 1e-6));
-    let s = textureSampleLevel(normal_maps, base_sampler, uv, i32(layer - 1u), lod);
+    let lod = wrap_lod(m, SLOT_MR, uv, log2(max(pixel / max(texel, 1e-12), 1e-6)));
+    let s = textureSampleLevel(normal_maps, base_sampler, wrap_uv(m, SLOT_MR, uv, size, lod), i32(layer - 1u), lod);
     return vec2<f32>(mat.x * s.z, mat.y * s.y);
 }
 // Movers under a sky (M9 gate 3). Per slot: the sky ledger (the charges
@@ -3986,8 +4046,8 @@ fn bounce_albedo(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
     let e2 = (t2 - t0) * size;
     let texel_area = 0.5 * abs(e1.x * e2.y - e1.y * e2.x);
     let texel = sqrt(world_area / max(texel_area, 1e-12));
-    let lod = log2(max(footprint / max(texel, 1e-12), 1e-6));
-    return base * textureSampleLevel(base_color, base_sampler, uv, i32(layer), lod).xyz;
+    let lod = wrap_lod(m, SLOT_BASE, uv, log2(max(footprint / max(texel, 1e-12), 1e-6)));
+    return base * textureSampleLevel(base_color, base_sampler, wrap_uv(m, SLOT_BASE, uv, size, lod), i32(layer), lod).xyz;
 }
 
 // Bin `b`'s corner `q` (0–3, around it) in the hemicube's frame (z along
