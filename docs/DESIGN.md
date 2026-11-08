@@ -367,7 +367,13 @@ place, for a new conversation:
     150 m, against 1.5×);
   - measured, not gated: moving lights' mixed texels
     (`m9-mixed-texels-diagnostics.md`);
-  - deferred by the user after an estimate: movers under a sky.
+  - deferred by the user after an estimate: movers under a sky;
+  - after the list: the NVIDIA benchmark prepared (deferred: no funds for a
+    rented GPU); M5 G10 a guessed sky from coarser pages (development only,
+    no gain, removed); M10 G11–G12 emission lights its surroundings
+    (failed on the absolute bound, 7.46% against 5%, kept); M10 G13
+    MikkTSpace tangents (failed: no difference on its scene, kept); flight
+    spikes diagnosed (`flight-spikes-diagnostics.md`).
 - **Done since the `v0.1.0` tag** (each with its results file):
   - passed: M9 G1 movers in the view cache; M10 G4 re-coloring with bounce
     light; M10 G5 normal maps (measured before M10 G10's fix); M10 G7 alpha
