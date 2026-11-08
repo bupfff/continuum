@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-08, after M5 gate 12)
+## 3.6 Where we stand (updated 2026-11-08, after M10 gate 19)
 
 Against the goal in §1, honestly:
 
@@ -261,9 +261,11 @@ Against the goal in §1, honestly:
     (M10 G5: 3.63% from Cycles with them), metallic-roughness textures,
     and alpha masks cut into geometry (M10 G7: 3.29% from Cycles).
     Since then: emissive textures (M10 G15), BLEND materials as blending
-    (M10 G16) and double-sided materials as back-to-back faces. Not yet:
-    `KHR_texture_transform`, vertex colors, and saving emissive textures
-    or blending back to glTF.
+    (M10 G16), double-sided materials as back-to-back faces,
+    `KHR_texture_transform` (Blender's sign), and vertex colors (M10
+    G17–G18: 1.29% from Cycles, 1.00× the frame). Saving writes all of
+    these back. Not yet: sampler wrap modes other than repeat, and a
+    second texture coordinate set.
 - **One bounce of light in the view cache** (M10 G1, failed on its
   re-coloring check only).
   - On M6's textured scene, the cached image with bounce light is 1.79%
@@ -326,7 +328,8 @@ Against the goal in §1, honestly:
   new; rays that miss read the image. 1.37% from Cycles on a gradient sky
   (the best uniform sky: 19.92%), 1.04× the frame. Seen directly it has
   8-bit range (a sun belongs in a light); bounce light and the per-pixel
-  path use its mean.
+  path use its mean. The viewer takes `--env` (a gradient, or an `.hdr` or
+  `.png` image through `continuum_gltf::load_environment`).
 - **Texture filtering for the area integral** (M7 G2, passed): a box
   filter over the pixel's footprint (ray differentials, four taps) halves
   the textured scene's error against the area-integrated image (7.11% to
@@ -377,90 +380,62 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-08)
+### 3.8 Next steps, in order (updated 2026-11-08, fourth session)
 
-**Start here (end of the third session, 2026-11-08).** The state in one
+**Start here (end of the fourth session, 2026-11-08).** The state in one
 place, for a new conversation:
 
 - **The user's direction:** make the engine complete. Pick the next
   feature by judgment, finish usable features before new research, and keep
   usage low. The NVIDIA benchmark is ready but waits until the user can pay
   for a rented GPU.
-- **This session** first took the second session's six candidates in
-  order, then added features. Each result is in `docs/results/`:
-  - **passed:**
-    - M5 G9: the sky later, on by default;
-    - M10 G10: materials, 5.85% from Cycles; the light-size normalization
-      had been applied twice;
-    - M10 G15: emissive textures, 6.35%;
-    - M5 G12: environment light, 1.37% against 19.92% for a uniform sky,
-      1.04× the frame.
-  - **failed but kept:**
-    - M10 G8–G9: exactly back-to-back faces. Bake speed is fixed. Two bugs
-      were fixed: smooth normals cancelling to NaN, and Metal ignoring
-      back-face culling.
-    - M7 G4: silhouette rays through ray queries. 1.29× the frame on the
-      textured scene, 3.03× on the field.
-    - M10 G11–G12: emission lights its surroundings, 7.46% against a 5%
-      bound.
-    - M10 G13: MikkTSpace tangents. No difference on its scene.
-    - M10 G16: alpha blending. Accurate at 4.71%, but 1.33× the frame
-      against a 1.3× limit.
-  - **failed on the scene or reference, then re-run:**
-    - M10 G14: coincident faces in the Cycles scene (re-run as G15);
-    - M5 G11: the visible sky read from the harmonics (re-run as G12).
-  - **development only:**
-    - M5 G10: a guessed sky from coarser pages, removed;
-    - M9 G5: the sky later with movers, kept;
-    - `edge_samples` 2.
-  - **diagnosed:**
-    - moving lights' mixed texels (`m9-mixed-texels-diagnostics.md`);
-    - flight spikes (`flight-spikes-diagnostics.md`).
-  - **library:**
-    - `RendererOptions::environment`;
-    - glTF import of emissive textures and of BLEND as blending;
-    - the NVIDIA benchmark prepared: `docs/BENCHMARK.md`,
-      `scripts/cloud_bench.sh`, M4 baseline in `docs/results/bench-m4.md`.
-- **Next, in the order I would take them.** These are completeness
-  features: small, usable, and each checked against Cycles where it
-  changes the image.
-  1. *A viewer option for the environment sky.* **Done (fourth session):**
-     `--env gradient|file.hdr|file.png` and `--env-strength`, through
-     `continuum_gltf::load_environment` (Radiance RGBE, flat or RLE; PNG
-     from sRGB). A round-trip test reads back the HDR Cycles was checked
-     against in M5 G12. Not gated: it uses M5 G12's path.
-  2. *glTF `KHR_texture_transform`.* **Done (fourth session):** baked into
-     the texture coordinates at import. The test checks against Blender's
-     importer's route (`conversion.py`, then a Mapping node), whose
-     rotation sign is the transpose of the extension's GLSL sample read
-     column-major; we follow Blender. One set and transform per geometry:
-     a slot with another is skipped and counted.
-  3. *Vertex colors.* **Done (fourth session):**
-     `InstancedScene::geometry_colors`, carried in the triangle buffer's
-     unused w (1 plus an sRGB byte per channel, an exact integer), so no
-     new binding. M10 G17: 1.29% from Cycles; its speed miss (1.15×) was a
-     transient, and G18 measured 1.004×. glTF `COLOR_0` import and save;
-     cutouts carry colors.
-  4. *Saving the new material fields back to glTF.* **Done (fourth
-     session):** emissive textures, BLEND (the opacity as the base color
-     factor's alpha; a cutoff wins over blending), vertex colors. Round-trip
-     tests. The environment is not part of glTF.
-  5. *Blending speed.* **Done (fourth session), M10 G19 passed:** 1.23×
-     the frame (G16: 1.33×), 4.70% from Cycles. Two full-screen passes
-     that most pixels left at once cost about 0.25 ms each: the layers are
-     now traced in the visibility pass, and the list's shading is
-     dispatched over the list alone.
-  6. *Flight spikes:* predict each page's bake cost (it varies 2–3× with
-     content, likely SIMD divergence on coarse pages) and budget by
-     predicted cost.
-  7. *Emissive quads as area lights:* sharp shadows from emitters, past
-     bounce light's 3×3 samples a page (the rest of M10 G12's 7.46%).
-  8. Research, not contained fixes:
+- **The fourth session** took the third session's list in order (results
+  in `docs/results/`):
+  - *viewer `--env`*: `--env gradient|sky.hdr|sky.png`, `--env-strength`;
+    `continuum_gltf::load_environment` reads Radiance HDR (flat or RLE)
+    and PNG. Not gated (M5 G12's path); a test reads back the HDR Cycles
+    was checked against.
+  - *glTF `KHR_texture_transform`*: baked into texture coordinates, with
+    Blender's rotation sign (the extension's GLSL sample, read
+    column-major, is its transpose); checked against Blender's importer's
+    route. One set and transform per geometry; other slots are skipped and
+    counted.
+  - *vertex colors*: `InstancedScene::geometry_colors`, carried in the
+    triangle buffer's unused w (no new binding). M10 G17 accuracy passed
+    (1.29% from Cycles) but speed failed on a transient (1.15×); M10 G18
+    re-measured it in interleaved rounds: 1.004×. glTF `COLOR_0` import
+    and save.
+  - *glTF save* of emissive textures, BLEND and vertex colors, with
+    round-trip tests.
+  - *blending speed*: M10 G19 passed, 1.23× the frame (G16: 1.33×), 4.70%
+    from Cycles. The layers are traced in the visibility pass, and the
+    extra-samples list is shaded by an indirect dispatch over the list.
+- **Next, in the order I would take them:**
+  1. *Emissive quads as area lights:* a planar rectangle with uniform
+     emission (no emissive texture) becomes a rectangular light per
+     instance, so emitters cast sharp, exact shadows past bounce light's
+     3×3 samples a page (the rest of M10 G12's 7.46%). Exclude those
+     geometries from emission bounce, or light is counted twice. Gate it
+     against Cycles on M10 G12's scene.
+  2. *glTF sampler wrap modes* (clamp, mirror): textures always repeat now.
+     Small; exact by construction.
+  3. *Flight spikes:* the light bake's cost per page varies 2–3× with
+     content (likely SIMD divergence on coarse pages), and no planned count
+     predicted it (`flight-spikes-diagnostics.md`). Research, not a
+     contained fix.
+  4. Research, not contained fixes:
      - movers under a sky (texel-level charges with the cosine; M9 G3);
      - coverage that cannot over-count, for moving lights' dark state (M9
        G4);
      - more than one bounce;
      - bounce light with movers.
+- **Third session's results** (for reference): passed M5 G9 (the sky
+  later), M10 G10 (materials, 5.85%), M10 G15 (emissive textures, 6.35%),
+  M5 G12 (environment light, 1.37%); failed but kept M10 G8–G9
+  (back-to-back faces), M7 G4 (silhouette rays), M10 G11–G12 (emission via
+  bounce, 7.46%), M10 G13 (MikkTSpace), M10 G16 (blending, since fixed by
+  G19); `RendererOptions::environment`; the NVIDIA benchmark prepared
+  (`docs/BENCHMARK.md`).
 - **Earlier candidates, as left:**
   - *Movers under a sky:* deferred. A per-sample bound with the cosine
     and the horizon would clear ground beyond about 10 m from the movers,
@@ -514,7 +489,11 @@ place, for a new conversation:
     `cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`
     first and commit only if it passes (two lint slips reached `main`).
   - Development tools: `backface_dev`, `ledger_dev`, `edges_dev`,
-    `spikes_dev` (work and passes modes) and `bench`.
+    `spikes_dev` (work and passes modes), `vcolor_dev`, `blend_dev` (each
+    camera pass alone) and `bench`.
+  - Speed criteria comparing two renderers: settle both, then five
+    interleaved rounds of 30 warm frames each, median ratio (M10 G18). A
+    single back-to-back pair met a transient in G17.
 
 **Decided 2026-11-07: a more complete paradigm before the tag.** The
 user's order (all attempted; results above and below):
