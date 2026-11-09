@@ -446,32 +446,47 @@ place, for a new conversation:
     `InstancedScene::emitters_to_lights` and the viewer's
     `--emitters-as-lights`. M10 G23 failed before its accuracy check (the
     view never settled with bounce light at a sub-pixel offset).
-- **Next, in the order I would take them:**
-  1. *Emissive faces as area lights: settle them.* M10 G23 failed before
-     its accuracy check (`InstancedScene::emitters_to_lights`, kept as
-     experimental). With bounce light the view never went quiet at a
-     sub-pixel offset: one page re-baked every frame and bursts of bounce
-     re-bakes, a loop through bounce samples' "incomplete" path. Settling
-     took 6–12× the frames, the budget at its floor: texels right by the
-     lights (1 mm off the faces, touching the ground) bake slowly. Find the
-     looping page; measure those texels' cost; then re-run the gate.
-  2. *Cheaper bounce shading:* bounce costs about 0.45 ms a warm frame on
-     M10 G22's night scene (3×3 samples × five channels read per pixel),
-     1.16× the frame. Levers: fewer channels read where lights contribute
-     nothing; a combined channel kept beside the per-light ones.
-  3. *A second texture coordinate set* (glTF `TEXCOORD_1`): low value
-     here, as its main uses (baked occlusion and lightmaps) are what the
-     engine computes itself; a slot on another set is skipped.
-  4. *Flight spikes:* the light bake's cost per page varies 2–3× with
-     content (likely SIMD divergence on coarse pages), and no planned count
-     predicted it (`flight-spikes-diagnostics.md`). Research, not a
-     contained fix.
-  5. Research, not contained fixes:
-     - movers under a sky (texel-level charges with the cosine; M9 G3);
-     - coverage that cannot over-count, for moving lights' dark state (M9
-       G4);
-     - more than one bounce;
-     - bounce light with movers.
+- **Core first (the user's direction, 2026-11-08):** before more
+  features, make the fundamentals hold up at extreme scale and detail
+  (unique geometry close up and kilometers of open world, both), then
+  branch out: in this paradigm one primitive (cones over a prefiltered
+  hierarchy, with a certified cache) serves shadows, anti-aliasing, level
+  of detail, reflections and GI, so strengthening it strengthens all of
+  them. A **quality dial** grows alongside: the quality contract (§3.3), an
+  error bound and a frame budget, one guaranteed and the other reported,
+  each core item exposing its knob to it rather than fixed presets.
+- **Next, in the order I would take them (core first):**
+  1. *Sub-pixel detail without aliasing (M13, prefiltered appearance).*
+     One ray per pixel aliases wherever a pixel holds more than one
+     surface (the field from 150 m is noise: 23.49% from the
+     area-integrated image, M7 G1). M7 G1's pixel cones resolved every
+     pixel to an eighth of a pixel and cost hundreds of node tests per
+     pixel (105 ms on the textured scene, 10–87 s on the field). The plan
+     §3.4 always had: hierarchy nodes keep prefiltered **appearance**
+     (color and lit radiance) beside the coverage they keep for shadows,
+     and a pixel's cone stops at nodes about its own size, so cost is
+     bounded by the screen, not the scene. Steps, each gated: (a) the walk
+     stopping at pixel-size nodes, its cost on the field from 150 m and
+     standing; (b) per-instance and per-node lit appearance from the
+     cache's coarse pages; (c) accuracy against M7 G1's area-integrated
+     references, at a frame cost the quality dial can trade.
+  2. *Unique geometry at scale (M14).* The 10¹⁰ triangles are a million
+     copies of one boulder; everything must be resident. Stream geometry
+     (and its hierarchy nodes) by need, with the prefiltered nodes of item
+     1 standing in for what is not loaded, so a scene several times GPU
+     memory flies at frame rate.
+  3. *Frame-time stability:* flight spikes (the slowest 1% of frames about
+     2× the mean; cost per page varies 2–3× with content,
+     `flight-spikes-diagnostics.md`).
+  4. *Lighting fundamentals:* the cache that never settles with bounce
+     light (M10 G23's loop, a core bug), the sky's slow warm-up, more than
+     one bounce, bounce light with movers, cheaper bounce shading (1.16×
+     the frame at night, M10 G22).
+  5. *Speed beyond one laptop:* the NVIDIA benchmark, when the user can
+     fund it.
+  - Parked features (after the core): emissive faces as lights (M10 G23,
+    blocked by item 4's loop), a second texture coordinate set, movers
+    under a sky, moving lights' dark state.
 - **Third session's results** (for reference): passed M5 G9 (the sky
   later), M10 G10 (materials, 5.85%), M10 G15 (emissive textures, 6.35%),
   M5 G12 (environment light, 1.37%); failed but kept M10 G8–G9
@@ -727,6 +742,8 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run (**passed**: 3.29% from Cycles masking the cards, 34.07% with them opaque; warm frame 1.15×, `docs/results/m10-gate7.md`); G8 exactly back-to-back faces (**failed** on accuracy: speed fixed, 1.03× the 1 mm scene's bake time; but Metal ray queries ignore `CULL_BACK_FACING`, so camera rays hit either coincident face, 5.01% from Cycles, `docs/results/m10-gate8.md`); G10 gate 2 re-run (**passed**: 5.85% from Cycles, warm frame 1.68×; specular from lights had applied Karis's normalization twice, so sun highlights on metal were low, `docs/results/m10-gate10.md`); G9 gate 8 re-run with back-face hits re-traced (**failed** on its 0.5% bound against the 1 mm control, 1.08%, which mostly measures that control's own offset: 1 mm to 2 mm moves the image as much; 3.42% from Cycles against the control's 3.37%; bake 1.21×, warm frame 1.04×; fixes kept, `docs/results/m10-gate9.md`); G11 emission lights its surroundings (**failed**: scored over all pixels, which the lights' visible disks decide, 109.67%; 1.00×, `docs/results/m10-gate11.md`); G12 the same over surfaces (**failed** on the absolute bound: 7.46% from Cycles against 5%, 18.00% without (0.41×); 1.00×; kept, `docs/results/m10-gate12.md`); G13 MikkTSpace tangents (**failed**: 11.80% against the triangles' frames' 11.75% where they differ; 1.00×; kept, `docs/results/m10-gate13.md`); G14 emissive textures (**failed** from the reference: 62.86%, Cycles lit the double-sided sign from its coincident faces, `docs/results/m10-gate14.md`); G15 re-run with a one-sided sign (**passed**: 6.35% over surfaces, texture ignored 491.34%; 1.00×, `docs/results/m10-gate15.md`); G16 alpha blending (**failed** on speed: 4.71% from Cycles, panes opaque 57.31%; 1.33× the frame against 1.3×; kept, `docs/results/m10-gate16.md`); G17 vertex colors (**failed** on speed: 1.29% from Cycles, colors ignored 57.63%; but 1.15× the frame against 1.1×, a transient that development runs did not reproduce, `docs/results/m10-gate17.md`); G18 its speed re-measured in five interleaved rounds (**passed**: 1.004×, `docs/results/m10-gate18.md`); G19 blending's speed (**passed**: 1.226× the frame against 1.3×, layers traced in the visibility pass and the list shaded by an indirect dispatch; 4.70% from Cycles, `docs/results/m10-gate19.md`); G20 texture wrap modes (**passed**: 2.18% from Cycles with clamped and mirrored textures, 67.44% repeating; 0.996× the frame, `docs/results/m10-gate20.md`); G21 bounce light with more than three lights (**failed**, no result: crashed at re-coloring on a missing buffer usage, output lost, `docs/results/m10-gate21.md`); G22 its re-run (**failed** on speed: 1.167× the frame with bounce against 1.15×, bounce light's own cost on that night scene, 1.165× with three lights too; accuracy 3.07% from Cycles against 17.78% without bounce; re-coloring a later light 0.407% from a fresh renderer; kept, `docs/results/m10-gate22.md`); G23 emissive faces as area lights (**failed**, accuracy not reached: 1.286× the frame, then the view never settled at a sub-pixel offset, a loop with bounce samples; settling 6× slower; kept as experimental, `docs/results/m10-gate23.md`) |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
+| M13 prefiltered appearance (core first, item 1) | Hierarchy nodes keep lit appearance; pixel cones stop at pixel-size nodes | Sub-pixel detail without aliasing, cost bounded by the screen; not started |
+| M14 unique geometry at scale (core first, item 2) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate; not started |
 
 ## 7. Benchmark protocol
 
