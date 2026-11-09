@@ -20,6 +20,18 @@ pub(crate) struct HwScene {
 }
 
 impl HwScene {
+    /// Points object `object` (of geometry `geometry`) at `blas`, or at its
+    /// geometry's own structure (None), from the next top-level build (M14:
+    /// camera levels).
+    pub(crate) fn point_at(&mut self, object: usize, geometry: usize, blas: Option<&wgpu::Blas>) {
+        let Some(b) = blas.or(self.blas[geometry].as_ref()) else {
+            return;
+        };
+        if let Some(inst) = &mut self.tlas[object] {
+            inst.set_blas(b);
+        }
+    }
+
     /// Rebuilds the movers' structure with their placements now (one per
     /// mover, in the order given at build), in `encoder`.
     pub(crate) fn update_movers(

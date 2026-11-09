@@ -112,6 +112,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_alpha_cutoff: Vec::new(),
         geometry_colors: Vec::new(),
         texture_wrap: Vec::new(),
+        geometry_levels: Vec::new(),
     }
 }
 

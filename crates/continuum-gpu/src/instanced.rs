@@ -9,6 +9,7 @@ use continuum::glam::{DVec3, Mat3, Vec3};
 use crate::hierarchy::{MoverTree, NodeGpu, Placement, mesh_bounds, mover_subtree, union_root};
 use crate::hw::HwScene;
 use crate::live::{DisplayDims, display_bind, display_pipeline};
+use crate::stream::{StreamOptions, StreamStats, Streamer, Targets};
 use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
@@ -364,6 +365,29 @@ pub struct InstancedRenderer {
     movers: Option<Movers>,
     /// Lights that may move (`set_light`).
     moving: Vec<usize>,
+    /// Camera levels streamed by need (M14 gate 1).
+    stream: Option<Streamer>,
+    /// The visibility buffer (binding 31), once the targets are made.
+    vis: Option<wgpu::Buffer>,
+}
+
+/// The buffers camera levels upload into (M14 gate 1).
+fn stream_targets<'a>(scene: &'a [(u32, wgpu::Buffer)], cache: Option<&'a Cache>) -> Targets<'a> {
+    let find = |b: u32| {
+        &scene
+            .iter()
+            .find(|(x, _)| *x == b)
+            .expect("a scene buffer")
+            .1
+    };
+    Targets {
+        tris: find(2),
+        normals: find(24),
+        tex: find(58),
+        uv: cache.map(|c| c.state.buffer(23)),
+        chart: cache.map(|c| c.state.buffer(35)),
+        xforms: find(30),
+    }
 }
 
 fn bind_group(
@@ -446,6 +470,7 @@ impl InstancedRenderer {
             None,
             &[],
             &[],
+            None,
         )
     }
 
@@ -477,6 +502,7 @@ impl InstancedRenderer {
             Some(options),
             &[],
             &[],
+            None,
         )
     }
 
@@ -505,6 +531,7 @@ impl InstancedRenderer {
             None,
             &[],
             &[],
+            None,
         )
     }
 
@@ -535,6 +562,7 @@ impl InstancedRenderer {
             Some(options),
             &[],
             &[],
+            None,
         )
     }
 
@@ -569,6 +597,39 @@ impl InstancedRenderer {
             cache,
             movable,
             moving_lights,
+            None,
+        )
+    }
+
+    /// [`Self::with_movers`] without movers, with camera levels streamed by
+    /// need (M14 gate 1): the scene's `geometry_levels` stream within
+    /// `stream`'s budget (with hardware camera rays; otherwise ignored).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_streaming(
+        kernel: &MaskConeKernel,
+        target_format: wgpu::TextureFormat,
+        target_width: u32,
+        target_height: u32,
+        scale: u32,
+        lights: &[Light],
+        scene: &InstancedScene,
+        origin: DVec3,
+        cache: Option<CacheOptions>,
+        stream: StreamOptions,
+    ) -> Self {
+        Self::build(
+            kernel,
+            target_format,
+            target_width,
+            target_height,
+            scale,
+            lights,
+            scene,
+            origin,
+            cache,
+            &[],
+            &[],
+            Some(stream),
         )
     }
 
@@ -775,6 +836,7 @@ impl InstancedRenderer {
         cache: Option<CacheOptions>,
         movable: &[usize],
         moving_lights: &[usize],
+        stream: Option<StreamOptions>,
     ) -> Self {
         // Alpha blending needs the cache's extra-samples pass: hardware camera
         // rays, no movers (M10 gate 16); otherwise its fallback.
@@ -795,7 +857,14 @@ impl InstancedRenderer {
         let device = kernel.device.clone();
         let scale = scale.max(1);
         let (width, height) = (target_width.div_ceil(scale), target_height.div_ceil(scale));
-        let (scene_buffers, tree) = kernel.instanced_buffers(lights, scene, origin, movable);
+        // Camera levels stream with hardware camera rays only (M14 gate 1).
+        let stream = stream.filter(|_| kernel.uses_hardware_rays() && !kernel.pixel_cones.get());
+        assert!(
+            stream.is_none() || movable.is_empty(),
+            "streamed camera levels with movers are not supported yet"
+        );
+        let pool = stream.map_or(0, |o| crate::stream::pool_triangles(scene, &o));
+        let (scene_buffers, tree) = kernel.instanced_buffers(lights, scene, origin, movable, pool);
         let movers = tree.map(|tree| {
             let local: Vec<(Vec3, Vec3)> = scene
                 .geometries
@@ -961,6 +1030,7 @@ impl InstancedRenderer {
                 movable.len() as u32,
                 moving_lights,
                 &lights.iter().map(LightGpu::from).collect::<Vec<_>>(),
+                pool,
             ),
             movers: (!movable.is_empty() || !moving_lights.is_empty()).then(|| {
                 (
@@ -1032,7 +1102,27 @@ impl InstancedRenderer {
             texture_box: true,
             movers,
             moving: moving_lights.to_vec(),
+            stream: None,
+            vis: None,
         };
+        if let (Some(options), true) = (stream, pool > 0) {
+            let base = scene
+                .geometries
+                .iter()
+                .map(|g| g.triangles.len())
+                .sum::<usize>() as u32;
+            let hw = renderer.hw.as_mut().expect("hardware camera rays");
+            let targets = stream_targets(&renderer.scene, renderer.cache.as_ref());
+            renderer.stream = Some(Streamer::new(
+                &renderer.device,
+                &renderer.queue,
+                scene,
+                options,
+                base,
+                hw,
+                &targets,
+            ));
+        }
         renderer.targets();
         renderer.bake_self_masks(kernel);
         renderer
@@ -1091,9 +1181,12 @@ impl InstancedRenderer {
         let vis = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("visibility"),
             size: (width as u64 * height as u64 * 16).max(16),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        if let Some(stream) = &mut self.stream {
+            stream.bind(device, &vis);
+        }
         if let Some(cache) = &mut self.cache {
             cache.state.resize(device, width, height);
         }
@@ -1172,6 +1265,7 @@ impl InstancedRenderer {
             }
         }
         self.display_bind = display_bind(device, &self.display, &self.colors, &self.dims_buf);
+        self.vis = Some(vis);
     }
 
     /// Camera pass `k` (of `passes`), timed on the GPU where the cache has
@@ -1309,10 +1403,27 @@ impl InstancedRenderer {
             );
             cache.encode_bake(&mut encoder, counts);
         }
+        if let (Some(stream), Some(hw)) = (&mut self.stream, &mut self.hw) {
+            let targets = stream_targets(&self.scene, self.cache.as_ref());
+            let per_meter =
+                2.0 * (camera.vertical_fov_degrees.to_radians() * 0.5).tan() / self.height as f32;
+            stream.begin_frame(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                hw,
+                &targets,
+                (self.width, self.height),
+                per_meter,
+            );
+        }
         for k in 0..self.passes.len() {
             self.encode_camera_pass(&mut encoder, k);
         }
         self.encode_camera_end(&mut encoder);
+        if let Some(stream) = &self.stream {
+            stream.encode_feedback(&mut encoder, (self.width, self.height));
+        }
         if let Some(cache) = &mut self.cache {
             cache.state.encode_readback(&mut encoder);
         }
@@ -1329,9 +1440,59 @@ impl InstancedRenderer {
             cache.state.encode_timestamps(&mut encoder);
         }
         let index = self.queue.submit([encoder.finish()]);
+        if let Some(stream) = &mut self.stream {
+            stream.after_submit(index.clone());
+        }
         if let Some(cache) = &mut self.cache {
             cache.state.after_submit(index);
         }
+    }
+
+    /// What camera-level streaming did in every frame so far (M14 gate 1;
+    /// empty without it).
+    pub fn stream_log(&self) -> &[StreamStats] {
+        self.stream.as_ref().map_or(&[], |s| s.log())
+    }
+
+    /// Bytes of camera levels kept in CPU memory for streaming (M14 gate
+    /// 1; 0 without streaming).
+    pub fn stream_cpu_bytes(&self) -> u64 {
+        self.stream.as_ref().map_or(0, |s| s.cpu_bytes())
+    }
+
+    /// Triangles of every streamed geometry's finest camera level (M14
+    /// gate 1; 0 without streaming).
+    pub fn stream_finest_triangles(&self) -> u64 {
+        self.stream.as_ref().map_or(0, |s| s.finest_triangles())
+    }
+
+    /// The object each pixel's camera ray hit in the latest frame (`u32::MAX`
+    /// for none), waiting for the GPU. For tests and gates.
+    pub fn read_visibility(&self) -> Vec<u32> {
+        let vis = self.vis.as_ref().expect("targets made");
+        let size = vis.size();
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("visibility readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(vis, 0, &staging, 0, size);
+        self.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let words: Vec<u32> = bytemuck::cast_slice::<u8, u32>(
+            &staging
+                .slice(..)
+                .get_mapped_range()
+                .expect("mapped visibility"),
+        )
+        .to_vec();
+        let n = (self.width * self.height) as usize;
+        words.chunks(4).take(n).map(|v| v[0]).collect()
     }
 
     /// Waits for every submitted frame and reads back what the cache has not

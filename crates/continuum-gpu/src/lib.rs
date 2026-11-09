@@ -125,6 +125,7 @@ mod instanced;
 mod lightmap;
 mod live;
 mod renderer;
+mod stream;
 mod tangents;
 mod vcache;
 
@@ -132,6 +133,7 @@ pub use cutout::cut_out;
 pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 pub use renderer::{Renderer, RendererOptions};
+pub use stream::{Level, Levels, StreamOptions, StreamStats};
 pub use vcache::{CacheOptions, CacheStats};
 
 // Experiment-only: used by the gates in `experiments/`, not part of the
@@ -1269,7 +1271,7 @@ impl MaskConeKernel {
         origin: DVec3,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration, u64) {
-        let (buffers, _) = self.instanced_buffers(lights, scene, origin, &[]);
+        let (buffers, _) = self.instanced_buffers(lights, scene, origin, &[], 0);
         let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
         let cam = camera_uniform(camera, width, height, lights[0].radiance.x);
         let hw_scene = self
@@ -1312,6 +1314,7 @@ impl MaskConeKernel {
         scene: &InstancedScene,
         origin: DVec3,
         movable: &[usize],
+        pool: u32,
     ) -> (Vec<(u32, wgpu::Buffer)>, Option<hierarchy::MoverTree>) {
         // Paths without the list read the first light as a rectangle; a
         // sphere stands there as a tiny square at its center.
@@ -1537,6 +1540,17 @@ impl MaskConeKernel {
         if tex.is_empty() {
             tex.push([0.0; 2]);
         }
+        // Camera levels' pool (M14 gate 1): after the lighting level's
+        // triangles in every per-triangle buffer the camera's shading reads.
+        if pool > 0 {
+            let lit: usize = scene.geometries.iter().map(|g| g.triangles.len()).sum();
+            let all = 3 * (lit + pool as usize);
+            flat.tris.resize(all, [0.0; 4]);
+            normals.resize(all, [0.0; 4]);
+            if stream::textured(scene) {
+                tex.resize(all, [0.0; 2]);
+            }
+        }
         let mut uniform = light.uniform(
             scene.instances.len(),
             0,
@@ -1563,12 +1577,27 @@ impl MaskConeKernel {
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 })
         };
+        // With a pool, camera levels' bottom-level structures build straight
+        // from the triangles' buffer (M14 gate 1).
+        let tris = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("tris"),
+                contents: bytemuck::cast_slice(&flat.tris),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | if pool > 0 {
+                        wgpu::BufferUsages::BLAS_INPUT
+                    } else {
+                        wgpu::BufferUsages::empty()
+                    },
+            });
         let buffers = vec![
             (
                 0,
                 uniform_buffer(&self.device, "light", bytemuck::bytes_of(&uniform)),
             ),
-            (2, storage("tris", bytemuck::cast_slice(&flat.tris))),
+            (2, tris),
             (3, storage("objects", bytemuck::cast_slice(&flat.ranges))),
             (5, storage("debug", &[0; 256])),
             (8, storage("albedo", bytemuck::cast_slice(&albedo))),
@@ -2416,6 +2445,11 @@ pub struct InstancedScene {
     /// Each texture's wrap modes along u and v, as glTF samplers give them
     /// (empty, or past its end: repeat; M10 gate 20).
     pub texture_wrap: Vec<[Wrap; 2]>,
+    /// Each geometry's finer camera levels, if any (empty: none; M14 gate
+    /// 1): camera rays see the finest one resident, streamed by need within
+    /// a budget ([`StreamOptions`], with hardware camera rays); lighting
+    /// keeps the geometry itself.
+    pub geometry_levels: Vec<Option<Levels>>,
 }
 
 /// How a texture continues past its edges (glTF sampler wrap modes).

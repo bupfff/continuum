@@ -900,6 +900,7 @@ impl VirtualCache {
         movers: u32,
         moving: &[usize],
         poses: &[crate::LightGpu],
+        pool: u32,
     ) -> Self {
         let channels = lights + 1;
         assert!(
@@ -935,7 +936,14 @@ impl VirtualCache {
             options.sky_sample_cost >= 1,
             "a sky sample costs at least 1"
         );
-        let tables = chart_tables(&scene.geometries);
+        let mut tables = chart_tables(&scene.geometries);
+        // Camera levels' pool (M14 gate 1): their charts and chart
+        // coordinates follow the lighting level's triangles'.
+        if pool > 0 {
+            let lit: usize = scene.geometries.iter().map(|g| g.triangles.len()).sum();
+            tables.tri_chart.resize(lit + pool as usize, 0);
+            tables.tri_uv.resize(3 * (lit + pool as usize), [0.0; 2]);
+        }
         let own = self_tables(scene, &tables, if sky { options.self_spacing } else { 0.0 });
         let inv_base = 1.0 / options.base_texel;
         let chart_size: Vec<Vec2> = tables

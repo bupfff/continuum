@@ -13,10 +13,23 @@ const HW_RAY_FLAGS: u32 = 0x1u | 0x10u; // FORCE_OPAQUE | CULL_BACK_FACING
 // The same through candidates tested here: FORCE_NO_OPAQUE | CULL_BACK_FACING.
 const HW_FRONT_FLAGS: u32 = 0x2u | 0x10u;
 
+// The triangle a camera ray's hit names: object `mesh`'s geometry at its
+// resident camera level (M14 gate 1), whose first triangle its transform's
+// spare word holds, flagged (0: none, the lighting level).
+fn cam_tri(mesh: u32, primitive: u32) -> u32 {
+    let x = meshes[mesh].w;
+    var first = meshes[mesh].x;
+    if (x != NONE) {
+        let word = bitcast<u32>(xforms[4u * x + 3u].w);
+        if ((word & 0x40000000u) != 0u) { first = word & 0x3fffffffu; }
+    }
+    return first + primitive;
+}
+
 // Whether a camera ray along `dir` sees the front of object `mesh`'s
 // triangle at primitive `primitive`.
 fn hw_front(mesh: u32, primitive: u32, dir: vec3<f32>) -> bool {
-    let t = meshes[mesh].x + primitive;
+    let t = cam_tri(mesh, primitive);
     let v0 = tris[3u * t].xyz;
     let n = normal_to_world(mesh, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
     return dot(n, dir) < 0.0;
@@ -53,7 +66,7 @@ fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dist = 3.4e38;
     if (hit.kind != 0u) {
         mesh = hit.instance_custom_data;
-        tri = meshes[mesh].x + hit.primitive_index;
+        tri = cam_tri(mesh, hit.primitive_index);
         dist = hit.t;
     }
     vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
@@ -90,7 +103,7 @@ fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     if (hit.kind != 0u) {
         mesh = hit.instance_custom_data;
-        tri = meshes[mesh].x + hit.primitive_index;
+        tri = cam_tri(mesh, hit.primitive_index);
         dist = hit.t;
     }
     var mq: ray_query;
@@ -108,7 +121,7 @@ fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     if (moved.kind != 0u && moved.t < dist) {
         mesh = moved.instance_custom_data;
-        tri = meshes[mesh].x + moved.primitive_index;
+        tri = cam_tri(mesh, moved.primitive_index);
         dist = moved.t;
     }
     vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
@@ -133,7 +146,7 @@ fn hw_trace(eye: vec3<f32>, dir: vec3<f32>, t_min: f32) -> vec3<u32> {
     }
     if (hit.kind == 0u) { return vec3<u32>(0xffffffffu, 0xffffffffu, bitcast<u32>(3.4e38)); }
     let mesh = hit.instance_custom_data;
-    return vec3<u32>(mesh, meshes[mesh].x + hit.primitive_index, bitcast<u32>(hit.t));
+    return vec3<u32>(mesh, cam_tri(mesh, hit.primitive_index), bitcast<u32>(hit.t));
 }
 
 // The opacity at world point `p` on triangle `t` of object `m`: 1 unless

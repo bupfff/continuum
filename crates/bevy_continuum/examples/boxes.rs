@@ -96,6 +96,7 @@ fn scene() -> ContinuumScene {
             geometry_alpha_cutoff: Vec::new(),
             geometry_colors: Vec::new(),
             texture_wrap: Vec::new(),
+            geometry_levels: Vec::new(),
         }),
         lights: vec![
             Light::sun(

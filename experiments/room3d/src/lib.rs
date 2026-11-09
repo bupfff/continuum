@@ -4,6 +4,7 @@
 pub mod cycles;
 pub mod field;
 pub mod outdoor;
+pub mod rocks;
 pub mod showcase;
 pub mod textured;
 

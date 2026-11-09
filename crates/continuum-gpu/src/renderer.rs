@@ -31,6 +31,7 @@ use continuum::glam::{DVec3, Mat3, Vec3};
 
 use crate::{
     CacheOptions, CacheStats, Camera, InstancedRenderer, InstancedScene, Light, MaskConeKernel,
+    StreamOptions, StreamStats,
 };
 
 /// How a [`Renderer`] renders.
@@ -70,6 +71,12 @@ pub struct RendererOptions {
     /// `CacheOptions::ledger_epsilon` off (M9 gate 2). Not yet with movers
     /// or a sky in the cache.
     pub moving_lights: Vec<usize>,
+    /// Camera levels streamed by need (M14 gate 1): geometries with
+    /// `InstancedScene::geometry_levels` show camera rays their finest level
+    /// resident, kept within the budget where the view needs the detail;
+    /// lighting keeps each geometry itself. With hardware camera rays and
+    /// no movers. None (the default): only the geometries themselves.
+    pub streaming: Option<StreamOptions>,
 }
 
 impl Default for RendererOptions {
@@ -83,6 +90,7 @@ impl Default for RendererOptions {
             pixel_cones: false,
             movable: Vec::new(),
             moving_lights: Vec::new(),
+            streaming: None,
         }
     }
 }
@@ -122,19 +130,36 @@ impl Renderer {
         kernel.set_sky(options.sky.unwrap_or(Vec3::ZERO));
         kernel.set_environment(options.environment.as_ref());
         kernel.set_pixel_cones(options.pixel_cones);
-        let inner = InstancedRenderer::with_movers(
-            &kernel,
-            format,
-            width,
-            height,
-            options.scale,
-            lights,
-            scene,
-            origin,
-            options.cache.then_some(options.cache_options),
-            &options.movable,
-            &options.moving_lights,
-        );
+        let cache = options.cache.then_some(options.cache_options);
+        let inner = match options.streaming {
+            Some(stream) if options.movable.is_empty() && options.moving_lights.is_empty() => {
+                InstancedRenderer::with_streaming(
+                    &kernel,
+                    format,
+                    width,
+                    height,
+                    options.scale,
+                    lights,
+                    scene,
+                    origin,
+                    cache,
+                    stream,
+                )
+            }
+            _ => InstancedRenderer::with_movers(
+                &kernel,
+                format,
+                width,
+                height,
+                options.scale,
+                lights,
+                scene,
+                origin,
+                cache,
+                &options.movable,
+                &options.moving_lights,
+            ),
+        };
         Renderer { kernel, inner }
     }
 
@@ -199,6 +224,12 @@ impl Renderer {
     /// The last frame the cache has reported on (`None` without the cache).
     pub fn stats(&self) -> Option<CacheStats> {
         self.inner.cache_stats()
+    }
+
+    /// What camera-level streaming did in the latest frame (`None` without
+    /// it; M14 gate 1).
+    pub fn stream_stats(&self) -> Option<StreamStats> {
+        self.inner.stream_log().last().copied()
     }
 
     /// Whether the cache baked nothing and was asked for nothing in the last
