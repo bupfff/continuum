@@ -97,7 +97,7 @@ pub struct MaskConeKernel {
     sky_object_frame: std::cell::Cell<bool>,
     object_prefilter: std::cell::Cell<bool>,
     nearest_first: std::cell::Cell<bool>,
-    profile_stage: std::cell::Cell<u32>,
+    pub(crate) profile_stage: std::cell::Cell<u32>,
     split: std::cell::Cell<bool>,
     /// The GPU's name, as the adapter reports it.
     pub adapter_name: String,
@@ -575,6 +575,7 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_bake_indirect",
     "vc_shade_edges",
     "vc_args_edges",
+    "m13_coverage",
 ];
 
 /// The hardware-ray module's entry points (`hw_visibility.wgsl`).
@@ -594,6 +595,8 @@ pub(crate) const HW_VISIBILITY_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52];
 pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 52, 59];
 /// `hw_edges` (M7 gate 4): silhouette rays through ray queries.
 pub(crate) const HW_EDGES_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 41, 42, 55, 56, 57, 58, 76, 81];
+/// `m13_coverage` (M13): the scalar coverage walk alone.
+pub(crate) const M13_COVERAGE_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =

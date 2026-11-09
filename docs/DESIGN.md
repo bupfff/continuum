@@ -476,9 +476,14 @@ place, for a new conversation:
      frame. **M13 G2 failed:** a scalar per-node test is accurate (0.26–0.29×
      one ray's error off the horizon) but loses correlation within a pixel
      at the horizon (one row, 0.632 covered, ours 1.0), and still costs
-     about 2 ns a node visit (257–281 ms): latency- and occupancy-bound. Next:
-     its own entry point (it ran inside M7's heavy one), a few sub-pixel
-     bins (4×4) for correlation, then a walk shared by a tile of pixels.
+     about 2 ns a node visit (257–281 ms). Development after it: the object
+     walk alone takes 10.7–14.3 ms (0.3 ns a visit, neighboring pixels
+     share nodes); walking each small instance's triangle hierarchy per
+     pixel is the cost (3 ns a visit, scattered loads); its own entry point
+     changes nothing. Next (G3): per-geometry directional coverage maps
+     (opacity from a set of directions, a few texels across) read for
+     instances a few pixels across, keeping the object walk, and keeping
+     correlation within a pixel.
   2. *Unique geometry at scale (M14).* The 10¹⁰ triangles are a million
      copies of one boulder; everything must be resident. Stream geometry
      (and its hierarchy nodes) by need, with the prefiltered nodes of item

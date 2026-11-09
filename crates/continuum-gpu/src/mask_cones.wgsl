@@ -5394,3 +5394,14 @@ fn scalar_coverage(gid: vec3<u32>) -> vec3<f32> {
     }
     return vec3<f32>(total, f32(object_nodes), f32(sc_tri_nodes));
 }
+
+// M13: `scalar_coverage` in its own entry point (profile stage 14 selects
+// it), writing (coverage, object nodes, triangle nodes).
+@compute @workgroup_size(8, 8)
+fn m13_coverage(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    colors[gid.y * w + gid.x] = vec4<f32>(scalar_coverage(gid), 1.0);
+}

@@ -173,7 +173,11 @@ fn main() -> std::io::Result<()> {
         // 2. Speed, first: the scalar coverage pass (the prefilter on, so
         // object nodes keep their coverage).
         kernel.set_prefilter(8.0);
-        kernel.set_profile_stage(12);
+        kernel.set_profile_stage(if std::env::var_os("M13_OWN_ENTRY").is_some() {
+            14
+        } else {
+            12
+        });
         let mut r = renderer(&kernel, &field, origin, &lights);
         frame(&mut r, camera, &view_target);
         let mut times: Vec<Duration> = (0..10)

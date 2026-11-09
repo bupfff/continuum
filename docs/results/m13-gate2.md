@@ -49,3 +49,32 @@ combine as independent occluders.
   fragment walk (its 68-value buffers), so it likely runs at that entry's
   low occupancy. Next to try: its own entry point; then sharing the walk
   across a tile of pixels.
+
+## Where the time goes (development, after the gate)
+
+`M13_DEV=1` (10,000 boulders; numbers not the gate's), the walk in its own
+entry point (`m13_coverage`, profile stage 14, `M13_OWN_ENTRY=1`), with
+parts switched off by a branch never taken (so the code, and its register
+cost, stays):
+
+| Variant | Standing | 150 m up |
+|---|---|---|
+| As in the gate, inside the pixel-cone entry | 190 ms | 114 ms |
+| Its own entry point | 192 ms | 113 ms |
+| Object hierarchy only (objects never entered) | **14.3 ms** | **10.7 ms** |
+| No exact triangle clipping | 211 ms | 110 ms |
+
+- **Occupancy was not it:** its own entry point changes nothing.
+- **The object walk is cheap:** about 0.3 ns a node visit across the GPU,
+  about 30–47 visits per pixel. Neighboring pixels walk the same nodes, so
+  loads are shared.
+- **Walking each instance's triangle hierarchy is the cost:** about 3 ns a
+  visit, ten times an object node's, for 35–50 visits per pixel, with or
+  without the exact triangle clipping. Neighboring pixels enter different
+  boulders and walk different paths, so their loads scatter.
+
+So the next gate should keep the object walk and avoid per-pixel walks
+inside small instances: give each geometry a small directional coverage
+map (its opacity seen from a set of directions, a few texels across), read
+for instances a few pixels across or less. That also keeps correlation
+within a pixel, which one number per node loses (the horizon row).
