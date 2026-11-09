@@ -1,4 +1,4 @@
-Required Notice: Copyright 2026 [LEGAL NAME], doing business as Penumbral Labs
+Required Notice: Copyright 2026 Gabriel Kirrane, doing business as Penumbral Labs
 
 Files under `third_party/` keep their own licenses (MIT or Apache-2.0).
 

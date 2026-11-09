@@ -404,15 +404,13 @@ place, for a new conversation:
   alongside (the quality contract, §3.3: an error bound and a frame budget,
   one guaranteed, the other reported), each core item exposing its knob to
   it. Keep usage low; the NVIDIA benchmark waits for funds (not soon).
-- **Releases and going public:** `v0.2.0` is tagged (2026-11-08). The user
-  decided to make the repository public under the PolyForm Noncommercial
-  License 1.0.0 (`LICENSE.md`), branded Penumbral Labs, copyright
-  "[legal name], doing business as Penumbral Labs"; the README was rebuilt
-  for a wide audience (logo, explainer diagrams, engine GIFs, Cycles
-  comparisons, an honest comparison of methods). **Still needed from the
-  user before it goes public:** the legal name for `LICENSE.md`, the
-  commercial-license contact (the README says "open an issue"), and the go
-  to flip visibility.
+- **Releases and going public:** `v0.2.0` is tagged (2026-11-08). The
+  repository is public (2026-11-09, the user's go-ahead) under the PolyForm
+  Noncommercial License 1.0.0 (`LICENSE.md`: "Copyright 2026 Gabriel
+  Kirrane, doing business as Penumbral Labs"); commercial-license requests
+  come through issues. The README was rebuilt for a wide audience (logo,
+  explainer diagrams, engine GIFs, Cycles comparisons, an honest comparison
+  of methods).
 - **M13, sub-pixel detail (item 1 below), this session:** coverage only so
   far, on the million-boulder field without its ground, against 16×16 rays
   per pixel (`docs/results/m13-gate1.md` … `m13-gate4.md`):

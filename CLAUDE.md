@@ -39,7 +39,7 @@
     (`docs/images/how/`), GIFs from the `readme_media` binary's frames
     through `scripts/make_gif.py`, Cycles comparisons in
     `docs/images/compare/`, the logo in `docs/images/brand/`. License:
-    PolyForm Noncommercial 1.0.0 (`LICENSE.md`), by Penumbral Labs.
+    PolyForm Noncommercial 1.0.0 (`LICENSE.md`), by Penumbral Labs; the repository is public.
 - Gate workflow:
   1. Write the gate's binary as a stub whose doc comment states the pass
      criterion, and commit it before implementing or running.
