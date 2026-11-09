@@ -48,3 +48,28 @@ matching a bin) per bin; larger instances walk their triangles per bin.
   (the nearest direction, offsets hoisted); one walk shared by a tile of
   pixels (coherent loads, the cost gates 2 and 3 found in scattered
   per-pixel walks); hardware rays for surfaces larger than a few pixels.
+
+## Where the time goes now (development, after the gate)
+
+`M13_DEV=1` (10,000 boulders; numbers not the gate's), after three changes
+that leave the result alone or nearly (nodes over full bins skipped; far
+object nodes no taller than a bin splatted; map addressing hoisted), with
+parts switched off by branches never taken:
+
+| Variant | Standing | 150 m up |
+|---|---|---|
+| All parts | 208 ms | 100 ms |
+| Without walks inside instances over 8 px | 25.2 ms | 26.0 ms |
+| Without those or the map reads (the object walk) | 16.6 ms | 13.0 ms |
+
+- Walking the triangles of instances larger than 8 pixels, per pixel, is
+  75–180 ms of it. These are the near, resolved surfaces, where one ray per
+  pixel is right except at their edges.
+- The map reads cost about 10–13 ms, and the object walk alone 13–17 ms:
+  even without the near field, about 25 ms against a 10 ms target.
+
+So a 10 ms coverage pass needs both: the near field resolved cheaply (a
+grid of hardware rays at pixel corners: a pixel whose corners all hit the
+same large object is covered, and only edge pixels walk), and the far
+field's walk shared by a tile of pixels (coherent loads) or the quality
+dial trading resolution for time.

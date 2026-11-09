@@ -5434,6 +5434,16 @@ fn bins_full(m: bool) -> bool {
     return true;
 }
 
+// Whether the box's projected rectangle overlaps a bin not yet full.
+fn touches_open_bin(sb: ScreenBox, pix: vec2<f32>) -> bool {
+    for (var b = 0u; b < 16u; b++) {
+        if (pbin[b] >= 0.9999) { continue; }
+        let lo = bin_lo(pix, b);
+        if (sb.hi.x > lo.x && sb.hi.y > lo.y && sb.lo.x < lo.x + 0.25 && sb.lo.y < lo.y + 0.25) { return true; }
+    }
+    return false;
+}
+
 fn bin_lo(pix: vec2<f32>, b: u32) -> vec2<f32> {
     return pix + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25;
 }
@@ -5561,26 +5571,30 @@ fn oct_decode(p: vec2<f32>) -> vec3<f32> {
     return normalize(d);
 }
 
-fn map_texel(base: u32, di: u32, level: u32, x: i32, y: i32) -> f32 {
-    let side = i32(MAP_TEXELS >> level);
-    if (x < 0 || y < 0 || x >= side || y >= side) { return 0.0; }
+// The word where level `level` of map `di` begins.
+fn map_level_at(base: u32, di: u32, level: u32) -> u32 {
     var off = 0u;
     for (var l = 0u; l < level; l++) { off += (MAP_TEXELS >> l) * (MAP_TEXELS >> l); }
-    return bitcast<f32>(cov_maps[base + di * MAP_PER_DIR + off + u32(y) * u32(side) + u32(x)]);
+    return base + di * MAP_PER_DIR + off;
 }
 
-// Map `di` at level `level`, bilinearly, at `uv` in [−1, 1]² (0 outside).
-fn map_sample(base: u32, di: u32, level: u32, uv: vec2<f32>) -> f32 {
-    let side = f32(MAP_TEXELS >> level);
-    let g = (uv + vec2<f32>(1.0)) * 0.5 * side - vec2<f32>(0.5);
+fn map_texel(at: u32, side: i32, x: i32, y: i32) -> f32 {
+    if (x < 0 || y < 0 || x >= side || y >= side) { return 0.0; }
+    return bitcast<f32>(cov_maps[at + u32(y * side + x)]);
+}
+
+// The map level beginning at word `at` (`side` texels across), bilinearly,
+// at `uv` in [−1, 1]² (0 outside).
+fn map_sample(at: u32, side: i32, uv: vec2<f32>) -> f32 {
+    let g = (uv + vec2<f32>(1.0)) * 0.5 * f32(side) - vec2<f32>(0.5);
     let i0 = floor(g);
     let f = g - i0;
     let x = i32(i0.x);
     let y = i32(i0.y);
-    let t00 = map_texel(base, di, level, x, y);
-    let t10 = map_texel(base, di, level, x + 1, y);
-    let t01 = map_texel(base, di, level, x, y + 1);
-    let t11 = map_texel(base, di, level, x + 1, y + 1);
+    let t00 = map_texel(at, side, x, y);
+    let t10 = map_texel(at, side, x + 1, y);
+    let t01 = map_texel(at, side, x, y + 1);
+    let t11 = map_texel(at, side, x + 1, y + 1);
     return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
 }
 
@@ -5613,13 +5627,14 @@ fn instance_map_bins(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
     let texels_per_bin = 0.25 * depth / f / (2.0 * radius / f32(MAP_TEXELS));
     let level = u32(clamp(round(log2(max(texels_per_bin, 1e-6))), 0.0, 4.0));
     var dirs: array<u32, 4>;
+    let side = i32(MAP_TEXELS >> level);
     var weights: array<f32, 4>;
     var us: array<vec3<f32>, 4>;
     var vs: array<vec3<f32>, 4>;
     for (var k = 0u; k < 4u; k++) {
         let ix = u32(clamp(i32(i0.x) + i32(k & 1u), 0, i32(MAP_DIRS) - 1));
         let iy = u32(clamp(i32(i0.y) + i32(k >> 1u), 0, i32(MAP_DIRS) - 1));
-        dirs[k] = iy * MAP_DIRS + ix;
+        dirs[k] = map_level_at(base, iy * MAP_DIRS + ix, level);
         weights[k] = select(1.0 - fr.x, fr.x, (k & 1u) == 1u) * select(1.0 - fr.y, fr.y, (k >> 1u) == 1u);
         let dk = oct_decode((vec2<f32>(f32(ix), f32(iy)) + vec2<f32>(0.5)) / f32(MAP_DIRS) * 2.0 - vec2<f32>(1.0));
         let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(dk.z) < 0.999);
@@ -5640,7 +5655,7 @@ fn instance_map_bins(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
         var cov = 0.0;
         for (var k = 0u; k < 4u; k++) {
             if (weights[k] <= 0.0) { continue; }
-            cov += weights[k] * map_sample(base, dirs[k], level, vec2<f32>(dot(q, us[k]), dot(q, vs[k])));
+            cov += weights[k] * map_sample(dirs[k], side, vec2<f32>(dot(q, us[k]), dot(q, vs[k])));
         }
         pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - clamp(cov, 0.0, 1.0));
     }
@@ -5664,8 +5679,13 @@ fn map_coverage(gid: vec3<u32>) -> vec3<f32> {
         let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
         if (sb.behind == 2u) { continue; }
         if (sb.behind == 0u && rect_overlap(sb, pix) <= 0.0) { continue; }
+        // A node over full bins only cannot change the pixel.
+        if (sb.behind == 0u && !touches_open_bin(sb, pix)) { continue; }
+        // Within a pixel, or (far, at grazing views) no taller than a bin:
+        // splat, spread over its projected box.
+        let extent = sb.hi - sb.lo;
         if (sb.behind == 0u && node.info.z == 0u && light.objects.x != NONE
-            && max(sb.hi.x - sb.lo.x, sb.hi.y - sb.lo.y) <= 1.0) {
+            && (max(extent.x, extent.y) <= 1.0 || min(extent.x, extent.y) <= 0.25)) {
             let dir = normalize(camera.eye.xyz - (node.lo.xyz + node.hi.xyz) * 0.5);
             let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
             if (sil > 1e-30) {
