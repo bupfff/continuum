@@ -5405,3 +5405,308 @@ fn m13_coverage(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     if (gid.x >= w || gid.y >= h) { return; }
     colors[gid.y * w + gid.x] = vec4<f32>(scalar_coverage(gid), 1.0);
 }
+
+// --- M13 gate 3: coverage through 4×4 sub-pixel bins and directional
+// coverage maps (`coverage_maps.rs` builds them; same conventions). ---
+
+@group(0) @binding(82) var<storage, read> cov_maps: array<u32>;
+
+// Object space (transform `x`, NONE: world) to world.
+fn m13_to_world(x: u32, p: vec3<f32>) -> vec3<f32> {
+    if (x == NONE) { return p; }
+    return rotate_to_world(x, p * xforms[4u * x + 3u].x) + translation(x);
+}
+
+const MAP_DIRS: u32 = 16u;
+const MAP_TEXELS: u32 = 16u;
+const MAP_PER_DIR: u32 = 341u;
+// Instances at most this many pixels across read their map.
+const MAP_LIMIT_PX: f32 = 8.0;
+
+// The pixel's bins, and the bins of the object being walked.
+var<private> pbin: array<f32, 16>;
+var<private> mbin: array<f32, 16>;
+
+fn bins_full(m: bool) -> bool {
+    for (var b = 0u; b < 16u; b++) {
+        if (select(pbin[b], mbin[b], m) < 0.9999) { return false; }
+    }
+    return true;
+}
+
+fn bin_lo(pix: vec2<f32>, b: u32) -> vec2<f32> {
+    return pix + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25;
+}
+
+// A node's splat into the bins: opacity `alpha` over silhouette `sil`
+// (world area at its centre), spread evenly over its projected box; into
+// the object's bins (summed) or the pixel's (independent).
+fn splat_bins(sb: ScreenBox, pix: vec2<f32>, alpha: f32, sil: f32, into_mesh: bool) {
+    let f = camera.params.y / (2.0 * camera.params.z) / max(sb.depth, 1e-3);
+    let area = max((sb.hi.x - sb.lo.x) * (sb.hi.y - sb.lo.y), 1e-12);
+    let k = alpha * sil * f * f / area * 16.0;
+    for (var b = 0u; b < 16u; b++) {
+        let lo = bin_lo(pix, b);
+        let d = max(min(sb.hi, lo + vec2<f32>(0.25)) - max(sb.lo, lo), vec2<f32>(0.0));
+        let o = d.x * d.y;
+        if (o <= 0.0) { continue; }
+        let c = clamp(k * o, 0.0, 1.0);
+        if (into_mesh) { mbin[b] = min(mbin[b] + c, 1.0); } else { pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - c); }
+    }
+}
+
+// Triangle `t` (view `v`) covers the bins whose centres it contains (front
+// faces, every corner in front of the eye).
+fn triangle_bins(t: u32, v: View3, pix: vec2<f32>) {
+    let c0 = to_camera(v, tris[3u * t].xyz);
+    let c1 = to_camera(v, tris[3u * t + 1u].xyz);
+    let c2 = to_camera(v, tris[3u * t + 2u].xyz);
+    if (c0.z <= 1e-3 || c1.z <= 1e-3 || c2.z <= 1e-3) { return; }
+    if (dot(cross(c1 - c0, c2 - c0), -c0) <= 0.0) { return; }
+    let a = cam_to_pixels(c0);
+    let b = cam_to_pixels(c1);
+    let c = cam_to_pixels(c2);
+    let lo = min(a, min(b, c));
+    let hi = max(a, max(b, c));
+    if (hi.x <= pix.x || hi.y <= pix.y || lo.x >= pix.x + 1.0 || lo.y >= pix.y + 1.0) { return; }
+    let orient = sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+    if (orient == 0.0) { return; }
+    for (var k = 0u; k < 16u; k++) {
+        let p = bin_lo(pix, k) + vec2<f32>(0.125);
+        let e0 = orient * ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
+        let e1 = orient * ((c.x - b.x) * (p.y - b.y) - (c.y - b.y) * (p.x - b.x));
+        let e2 = orient * ((a.x - c.x) * (p.y - c.y) - (a.y - c.y) * (p.x - c.x));
+        if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) { mbin[k] = 1.0; }
+    }
+}
+
+// Object `m` walked by its triangle hierarchy into `mbin` (as
+// `mesh_scalar_cover`, per bin), then combined into the pixel's bins.
+fn mesh_bins(m: u32, pix: vec2<f32>, base: u32) {
+    let range = meshes[m];
+    let x = range.w;
+    let v = view_object(x);
+    for (var b = 0u; b < 16u; b++) { mbin[b] = 0.0; }
+    if (range.z == NONE) {
+        for (var t = range.x; t < range.x + range.y; t++) { triangle_bins(t, v, pix); }
+    } else {
+        let eye = point_to_object(m, camera.eye.xyz);
+        let scale = select(1.0, xforms[4u * x + 3u].x, x != NONE);
+        var sp = base + 1u;
+        stack_set(base, range.z);
+        while (sp > base) {
+            sp--;
+            let n = stack_get(sp);
+            let node = blas[n];
+            sc_tri_nodes++;
+            let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+            if (sb.behind == 2u) { continue; }
+            if (sb.behind == 0u && rect_overlap(sb, pix) <= 0.0) { continue; }
+            if (sb.behind == 0u && max(sb.hi.x - sb.lo.x, sb.hi.y - sb.lo.y) <= 1.0) {
+                let dir = normalize(eye - (node.lo.xyz + node.hi.xyz) * 0.5);
+                let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
+                if (sil > 1e-30) {
+                    splat_bins(sb, pix, min(node_front_area(n, dir) / sil, 1.0), sil * scale * scale, true);
+                }
+                continue;
+            }
+            if (node.info.y > 0u) {
+                for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                    triangle_bins(blas_items[k], v, pix);
+                }
+                if (bins_full(true)) { break; }
+            } else if (sp + 2u <= STACK) {
+                var near = node.info.x;
+                var far = node.info.x + 1u;
+                let a = blas[near];
+                let b = blas[far];
+                if (to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z) {
+                    near = node.info.x + 1u;
+                    far = node.info.x;
+                }
+                stack_set(sp, far);
+                stack_set(sp + 1u, near);
+                sp += 2u;
+            }
+        }
+    }
+    for (var b = 0u; b < 16u; b++) { pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - mbin[b]); }
+}
+
+// The header of the maps for triangle-hierarchy root `root`, or NONE.
+fn map_header(root: u32) -> u32 {
+    let n = cov_maps[0];
+    for (var k = 0u; k < n; k++) {
+        if (cov_maps[1u + 8u * k] == root) { return 1u + 8u * k; }
+    }
+    return NONE;
+}
+
+fn oct_encode(d: vec3<f32>) -> vec2<f32> {
+    var p = d.xy / (abs(d.x) + abs(d.y) + abs(d.z));
+    if (d.z < 0.0) {
+        p = (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
+    }
+    return p;
+}
+
+fn oct_decode(p: vec2<f32>) -> vec3<f32> {
+    var d = vec3<f32>(p.x, p.y, 1.0 - abs(p.x) - abs(p.y));
+    if (d.z < 0.0) {
+        let x = d.x;
+        let y = d.y;
+        d.x = (1.0 - abs(y)) * select(-1.0, 1.0, x >= 0.0);
+        d.y = (1.0 - abs(x)) * select(-1.0, 1.0, y >= 0.0);
+    }
+    return normalize(d);
+}
+
+fn map_texel(base: u32, di: u32, level: u32, x: i32, y: i32) -> f32 {
+    let side = i32(MAP_TEXELS >> level);
+    if (x < 0 || y < 0 || x >= side || y >= side) { return 0.0; }
+    var off = 0u;
+    for (var l = 0u; l < level; l++) { off += (MAP_TEXELS >> l) * (MAP_TEXELS >> l); }
+    return bitcast<f32>(cov_maps[base + di * MAP_PER_DIR + off + u32(y) * u32(side) + u32(x)]);
+}
+
+// Map `di` at level `level`, bilinearly, at `uv` in [−1, 1]² (0 outside).
+fn map_sample(base: u32, di: u32, level: u32, uv: vec2<f32>) -> f32 {
+    let side = f32(MAP_TEXELS >> level);
+    let g = (uv + vec2<f32>(1.0)) * 0.5 * side - vec2<f32>(0.5);
+    let i0 = floor(g);
+    let f = g - i0;
+    let x = i32(i0.x);
+    let y = i32(i0.y);
+    let t00 = map_texel(base, di, level, x, y);
+    let t10 = map_texel(base, di, level, x + 1, y);
+    let t01 = map_texel(base, di, level, x, y + 1);
+    let t11 = map_texel(base, di, level, x + 1, y + 1);
+    return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+}
+
+// Object `m`, at most MAP_LIMIT_PX across, read from its maps (header
+// `hdr`) into the pixel's bins. False if it is too large or too near (walk
+// it instead).
+fn instance_map_bins(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
+    let x = meshes[m].w;
+    let c_obj = vec3<f32>(bitcast<f32>(cov_maps[hdr + 2u]), bitcast<f32>(cov_maps[hdr + 3u]), bitcast<f32>(cov_maps[hdr + 4u]));
+    let r_obj = bitcast<f32>(cov_maps[hdr + 5u]);
+    let base = cov_maps[hdr + 1u];
+    let scale = select(1.0, xforms[4u * x + 3u].x, x != NONE);
+    let centre = m13_to_world(x, c_obj);
+    let radius = r_obj * scale;
+    let rel = centre - camera.eye.xyz;
+    let depth = dot(rel, camera.forward.xyz);
+    if (depth - radius <= 1e-2) { return false; }
+    let f = camera.params.y / (2.0 * camera.params.z);
+    let rad = radius * f / depth;
+    if (2.0 * rad > MAP_LIMIT_PX) { return false; }
+    let cp = cam_to_pixels(to_camera(view_world(), centre));
+    if (cp.x + rad <= pix.x || cp.y + rad <= pix.y || cp.x - rad >= pix.x + 1.0 || cp.y - rad >= pix.y + 1.0) { return true; }
+    let dw = normalize(rel);
+    var d = dw;
+    if (x != NONE) { d = normalize(rotate_to_object(x, dw)); }
+    let g = (oct_encode(d) + vec2<f32>(1.0)) * 0.5 * f32(MAP_DIRS) - vec2<f32>(0.5);
+    let i0 = floor(g);
+    let fr = g - i0;
+    // The level whose texels match a bin's footprint.
+    let texels_per_bin = 0.25 * depth / f / (2.0 * radius / f32(MAP_TEXELS));
+    let level = u32(clamp(round(log2(max(texels_per_bin, 1e-6))), 0.0, 4.0));
+    var dirs: array<u32, 4>;
+    var weights: array<f32, 4>;
+    var us: array<vec3<f32>, 4>;
+    var vs: array<vec3<f32>, 4>;
+    for (var k = 0u; k < 4u; k++) {
+        let ix = u32(clamp(i32(i0.x) + i32(k & 1u), 0, i32(MAP_DIRS) - 1));
+        let iy = u32(clamp(i32(i0.y) + i32(k >> 1u), 0, i32(MAP_DIRS) - 1));
+        dirs[k] = iy * MAP_DIRS + ix;
+        weights[k] = select(1.0 - fr.x, fr.x, (k & 1u) == 1u) * select(1.0 - fr.y, fr.y, (k >> 1u) == 1u);
+        let dk = oct_decode((vec2<f32>(f32(ix), f32(iy)) + vec2<f32>(0.5)) / f32(MAP_DIRS) * 2.0 - vec2<f32>(1.0));
+        let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(dk.z) < 0.999);
+        us[k] = normalize(cross(helper, dk));
+        vs[k] = cross(dk, us[k]);
+    }
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    for (var b = 0u; b < 16u; b++) {
+        let p = bin_lo(pix, b) + vec2<f32>(0.125);
+        if (abs(p.x - cp.x) > rad || abs(p.y - cp.y) > rad) { continue; }
+        let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
+        let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
+        let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+        let qw = camera.eye.xyz + dir * dot(rel, dir) - centre;
+        var q = qw / r_obj;
+        if (x != NONE) { q = rotate_to_object(x, qw) / (scale * r_obj); }
+        var cov = 0.0;
+        for (var k = 0u; k < 4u; k++) {
+            if (weights[k] <= 0.0) { continue; }
+            cov += weights[k] * map_sample(base, dirs[k], level, vec2<f32>(dot(q, us[k]), dot(q, vs[k])));
+        }
+        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - clamp(cov, 0.0, 1.0));
+    }
+    return true;
+}
+
+fn map_coverage(gid: vec3<u32>) -> vec3<f32> {
+    let pix = vec2<f32>(f32(gid.x), f32(gid.y));
+    set_pixel_frustum(pix);
+    let v = view_world();
+    for (var b = 0u; b < 16u; b++) { pbin[b] = 0.0; }
+    var object_nodes = 0u;
+    sc_tri_nodes = 0u;
+    var sp = 1u;
+    stack_set(0u, 0u);
+    while (sp > 0u) {
+        sp--;
+        let n = stack_get(sp);
+        let node = nodes[n];
+        object_nodes++;
+        let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+        if (sb.behind == 2u) { continue; }
+        if (sb.behind == 0u && rect_overlap(sb, pix) <= 0.0) { continue; }
+        if (sb.behind == 0u && node.info.z == 0u && light.objects.x != NONE
+            && max(sb.hi.x - sb.lo.x, sb.hi.y - sb.lo.y) <= 1.0) {
+            let dir = normalize(camera.eye.xyz - (node.lo.xyz + node.hi.xyz) * 0.5);
+            let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
+            if (sil > 1e-30) {
+                splat_bins(sb, pix, 1.0 - exp(-node_front_area(light.objects.x + n, dir) / sil), sil, false);
+                if (bins_full(false)) { break; }
+            }
+            continue;
+        }
+        if (node.info.y > 0u) {
+            for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                let m = items[k];
+                let hdr = map_header(meshes[m].z);
+                if (!(hdr != NONE && instance_map_bins(m, hdr, pix))) { mesh_bins(m, pix, sp); }
+            }
+            if (bins_full(false)) { break; }
+        } else if (sp + 2u <= STACK) {
+            var near = node.info.x;
+            var far = node.info.x + 1u;
+            let a = nodes[near];
+            let b = nodes[far];
+            if (to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z) {
+                near = node.info.x + 1u;
+                far = node.info.x;
+            }
+            stack_set(sp, far);
+            stack_set(sp + 1u, near);
+            sp += 2u;
+        }
+    }
+    var sum = 0.0;
+    for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }
+    return vec3<f32>(sum / 16.0, f32(object_nodes), f32(sc_tri_nodes));
+}
+
+// M13 gate 3 (profile stage 15 selects it): `map_coverage`, writing
+// (coverage, object nodes, triangle nodes).
+@compute @workgroup_size(8, 8)
+fn m13_coverage_maps(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    colors[gid.y * w + gid.x] = vec4<f32>(map_coverage(gid), 1.0);
+}

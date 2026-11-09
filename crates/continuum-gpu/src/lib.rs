@@ -98,6 +98,8 @@ pub struct MaskConeKernel {
     object_prefilter: std::cell::Cell<bool>,
     nearest_first: std::cell::Cell<bool>,
     pub(crate) profile_stage: std::cell::Cell<u32>,
+    /// M13 gate 3: the coverage maps' build time and bytes, as last built.
+    m13_maps_info: std::cell::RefCell<(std::time::Duration, usize)>,
     split: std::cell::Cell<bool>,
     /// The GPU's name, as the adapter reports it.
     pub adapter_name: String,
@@ -115,6 +117,7 @@ struct Frame<'a> {
     hierarchy: Hierarchy,
 }
 
+mod coverage_maps;
 mod cutout;
 mod hierarchy;
 mod hw;
@@ -576,6 +579,7 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_shade_edges",
     "vc_args_edges",
     "m13_coverage",
+    "m13_coverage_maps",
 ];
 
 /// The hardware-ray module's entry points (`hw_visibility.wgsl`).
@@ -597,6 +601,8 @@ pub(crate) const HW_VISIBILITY_MOVERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 
 pub(crate) const HW_EDGES_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 41, 42, 55, 56, 57, 58, 76, 81];
 /// `m13_coverage` (M13): the scalar coverage walk alone.
 pub(crate) const M13_COVERAGE_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30];
+/// `m13_coverage_maps` (M13 gate 3): with the coverage maps (82).
+pub(crate) const M13_MAPS_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 82];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
@@ -813,6 +819,7 @@ impl MaskConeKernel {
             object_prefilter: std::cell::Cell::new(true),
             nearest_first: std::cell::Cell::new(true),
             profile_stage: std::cell::Cell::new(0),
+            m13_maps_info: std::cell::RefCell::new((std::time::Duration::ZERO, 0)),
             split: std::cell::Cell::new(false),
             adapter_name,
         }
@@ -1063,6 +1070,13 @@ impl MaskConeKernel {
     #[doc(hidden)]
     pub fn set_profile_stage(&self, stage: u32) {
         self.profile_stage.set(stage);
+    }
+
+    /// Diagnostics (M13 gate 3): the coverage maps' build time and size in
+    /// bytes, as last built (profile stage 15).
+    #[doc(hidden)]
+    pub fn m13_maps_info(&self) -> (std::time::Duration, usize) {
+        *self.m13_maps_info.borrow()
     }
 
     /// Primary visibility through pixel cones (M7) instead of one camera
@@ -1579,6 +1593,29 @@ impl MaskConeKernel {
             ),
             (76, storage("materials", bytemuck::cast_slice(&materials))),
         ];
+        let mut buffers = buffers;
+        // M13 gate 3 (profile stage 15): each placed geometry's directional
+        // coverage maps.
+        if self.profile_stage.get() == 15 {
+            let start = std::time::Instant::now();
+            let tris: Vec<(&[continuum::mesh::Tri], Option<u32>)> = scene
+                .geometries
+                .iter()
+                .enumerate()
+                .map(|(g, s)| {
+                    let root = scene
+                        .instances
+                        .iter()
+                        .position(|i| i.geometry == g)
+                        .map(|i| flat.ranges[i][2])
+                        .filter(|&r| r != hierarchy::NONE);
+                    (s.triangles.as_slice(), root)
+                })
+                .collect();
+            let maps = coverage_maps::build(&tris);
+            *self.m13_maps_info.borrow_mut() = (start.elapsed(), maps.len() * 4);
+            buffers.push((82, storage("coverage maps", bytemuck::cast_slice(&maps))));
+        }
         (buffers, movers)
     }
 

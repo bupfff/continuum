@@ -14,12 +14,12 @@ use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_EDGES_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS,
     HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu, M13_COVERAGE_BINDINGS,
-    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
-    VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
-    VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    M13_MAPS_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
+    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
+    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS,
+    VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS,
+    VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS,
+    camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -874,6 +874,12 @@ impl InstancedRenderer {
             // M13: the scalar coverage walk in its own entry point (profile
             // stage 14), so it does not run at the pixel-cone entry's
             // occupancy.
+            (false, _) if pixel_cones && kernel.profile_stage.get() == 15 => {
+                vec![(
+                    kernel.entry("m13_coverage_maps"),
+                    M13_MAPS_BINDINGS.to_vec(),
+                )]
+            }
             (false, _) if pixel_cones && kernel.profile_stage.get() == 14 => {
                 vec![(kernel.entry("m13_coverage"), M13_COVERAGE_BINDINGS.to_vec())]
             }
