@@ -31,6 +31,10 @@
   - **Viewer:** `apps/viewer` (`cargo run --release -p viewer -- --scene
     field --scale 2`).
   - **Patched wgpu-core:** `third_party/` (see its README).
+  - **Sub-pixel detail (M13):** `coverage_maps.rs` builds directional
+    coverage maps; `mask_cones.wgsl` sections "M13 gate 2/3/4" and
+    `hw_visibility.wgsl`'s `hw_m13_*` read them; profile stages 10–16
+    select the diagnostic paths (DESIGN §3.8, working notes).
   - **README media:** diagrams from `scripts/readme_diagrams.py`
     (`docs/images/how/`), GIFs from the `readme_media` binary's frames
     through `scripts/make_gif.py`, Cycles comparisons in
@@ -43,6 +47,9 @@
      but must be disclosed.
   3. Record pass or fail with exact numbers in `docs/results/<gate>.md`.
      Never tune and re-run after a near miss; fixes go into a new gate.
+     Save the run's output as it runs (`| tee`), and give the binary a
+     development mode run once before the gate (a shader that fails to
+     compile would otherwise cost the gate its only run).
   4. Update the milestone table, §3.6–3.8 and the README, and commit.
 
   Commits end with "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>".

@@ -181,6 +181,26 @@ Honest about where it stands:
 - **Transparency** needs hardware ray queries.
 - **Fanless laptops** slow down under minutes of sustained load.
 
+## Where it is going
+
+Core first: before more features, the fundamentals have to hold up at
+extreme scale and detail. In order:
+
+1. **Detail smaller than a pixel, without shimmer** (in progress). Each
+   object type gets a small precomputed map of how it looks from every
+   direction, and pixels read those instead of tracing every tiny
+   surface. The accuracy question is answered: on the million-boulder
+   field, about a fifth of one-ray-per-pixel's error from standing height
+   and an eighth from 150 m up. Speed is not there yet (122–135 ms a frame
+   on the laptop), so it is not in the renderer yet.
+2. **Unique geometry at scale:** worlds bigger than GPU memory, streamed
+   by need, with those maps standing in for what is not loaded.
+3. **Steady frame times, then the lighting fundamentals** (multiple
+   bounces, faster sky warm-up).
+
+A quality dial grows alongside: one setting for "how close to the
+reference" against "how fast", instead of fixed presets.
+
 ## Try it
 
 You need [Rust](https://rustup.rs) and a GPU wgpu supports.

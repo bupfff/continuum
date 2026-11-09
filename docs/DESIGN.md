@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-08, after M10 gate 19)
+## 3.6 Where we stand (updated 2026-11-09, after M13 gate 4)
 
 Against the goal in §1, honestly:
 
@@ -335,6 +335,15 @@ Against the goal in §1, honestly:
   filter over the pixel's footprint (ray differentials, four taps) halves
   the textured scene's error against the area-integrated image (7.11% to
   3.99%) at 1.03× the warm frame. On by default.
+- **Sub-pixel detail, coverage** (M13 G1–G4, failed on speed, accuracy
+  solved): per-geometry directional coverage maps (opacity from 256
+  directions, 16×16 texels with mips) read for instances up to 8 px, 4×4
+  sub-pixel bins, the object hierarchy walked per pixel with prefiltered
+  splats for far nodes, and hardware rays (pixel corners, then bins) for
+  larger surfaces. On the million-boulder field: 0.218× one ray's coverage
+  error standing, 0.132× from 150 m (one ray: 8.69% and 57.99%), at 122–135
+  ms a frame on the M4 (the far field's walk is the cost). Not in the
+  renderer yet: a diagnostic path (profile stage 16), coverage only.
 - **Silhouette rays** (M7 G3–G4, failed on speed): four rays at edge
   pixels halve the field's error from 150 m. As compute rays they cost
   13–24× the frame there. Through ray queries, in their own passes (M7 G4),
@@ -381,130 +390,77 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-08, fourth session)
+### 3.8 Next steps, in order (updated 2026-11-09, fifth session)
 
-**Start here (end of the fourth session, 2026-11-08).** The state in one
+**Start here (end of the fifth session, 2026-11-09).** The state in one
 place, for a new conversation:
 
-- **The user's direction:** make the engine complete. Pick the next
-  feature by judgment, finish usable features before new research, and keep
-  usage low. The NVIDIA benchmark is ready but waits until the user can pay
-  for a rented GPU (not soon, as of 2026-11-08).
-- **`v0.2.0` is tagged** (2026-11-08, approved by the user) on the commit
-  that bumps the workspace version, after CI passed.
-- **Going public (the user's decision, 2026-11-08):** the repository is to
-  become public under the PolyForm Noncommercial License 1.0.0
-  (`LICENSE.md`), branded Penumbral Labs, with the copyright line
-  "[legal name], doing business as Penumbral Labs". The README was rebuilt
-  for a wide audience (diagrams, engine GIFs, Cycles comparisons, an honest
-  comparison of methods). Before flipping it public: the legal name in
-  `LICENSE.md`, and the commercial-license contact (the README says "open
-  an issue").
-- **The fourth session** took the third session's list in order (results
-  in `docs/results/`):
-  - *viewer `--env`*: `--env gradient|sky.hdr|sky.png`, `--env-strength`;
-    `continuum_gltf::load_environment` reads Radiance HDR (flat or RLE)
-    and PNG. Not gated (M5 G12's path); a test reads back the HDR Cycles
-    was checked against.
-  - *glTF `KHR_texture_transform`*: baked into texture coordinates, with
-    Blender's rotation sign (the extension's GLSL sample, read
-    column-major, is its transpose); checked against Blender's importer's
-    route. One set and transform per geometry; other slots are skipped and
-    counted.
-  - *vertex colors*: `InstancedScene::geometry_colors`, carried in the
-    triangle buffer's unused w (no new binding). M10 G17 accuracy passed
-    (1.29% from Cycles) but speed failed on a transient (1.15×); M10 G18
-    re-measured it in interleaved rounds: 1.004×. glTF `COLOR_0` import
-    and save.
-  - *glTF save* of emissive textures, BLEND and vertex colors, with
-    round-trip tests.
-  - *blending speed*: M10 G19 passed, 1.23× the frame (G16: 1.33×), 4.70%
-    from Cycles. The layers are traced in the visibility pass, and the
-    extra-samples list is shaded by an indirect dispatch over the list.
-  - *glTF animations*: `Imported::animations` (`Animations::instances`
-    and `pose`: translation and rotation channels, step, linear and
-    cubic-spline, through the node hierarchy), tested against poses worked
-    out from the spec; the viewer plays a file's first animation through
-    movable instances (not with a sky). Not gated: movers are M9 G1's.
-  - *Bevy movers*: `ContinuumInstance(index)` makes a movable instance
-    follow its entity's `GlobalTransform` (a unit test checks the change
-    of axes for rotations); the `boxes` example's `--spin`.
-  - *exposure*: `Renderer::set_exposure` scales the drawn colors before
-    the tone curve (a test reads a float target back: exactly the colors
-    times the factor); the viewer's `[`, `]` and `--exposure`.
-  - *texture wrap modes*: `InstancedScene::texture_wrap` (repeat, clamp,
-    mirror per axis), from glTF samplers and saved back. M10 G20 passed:
-    2.18% from Cycles (67.44% repeating), 0.996× the frame.
-  - *`v0.2.0` tagged* after CI passed.
-  - *bounce light with any number of lights*: lights past the third
-    bounce through the absolute emission channel; re-coloring one clears
-    bounce light, which re-bakes. M10 G21 crashed (no result); M10 G22:
-    3.07% from Cycles, re-coloring 0.407% from a fresh renderer, but 1.167×
-    the frame against 1.15× (bounce light's own cost at night, the same
-    with three lights). Kept.
-  - *emissive faces as area lights*, experimental:
-    `InstancedScene::emitters_to_lights` and the viewer's
-    `--emitters-as-lights`. M10 G23 failed before its accuracy check (the
-    view never settled with bounce light at a sub-pixel offset).
-- **Core first (the user's direction, 2026-11-08):** before more
-  features, make the fundamentals hold up at extreme scale and detail
-  (unique geometry close up and kilometers of open world, both), then
-  branch out: in this paradigm one primitive (cones over a prefiltered
-  hierarchy, with a certified cache) serves shadows, anti-aliasing, level
-  of detail, reflections and GI, so strengthening it strengthens all of
-  them. A **quality dial** grows alongside: the quality contract (§3.3), an
-  error bound and a frame budget, one guaranteed and the other reported,
-  each core item exposing its knob to it rather than fixed presets.
-- **Next, in the order I would take them (core first):**
-  1. *Sub-pixel detail without aliasing (M13, prefiltered appearance).*
-     One ray per pixel aliases wherever a pixel holds more than one
-     surface (the field from 150 m is noise: 23.49% from the
-     area-integrated image, M7 G1). M7 G1's pixel cones resolved every
-     pixel to an eighth of a pixel and cost hundreds of node tests per
-     pixel (105 ms on the textured scene, 10–87 s on the field). The plan
-     §3.4 always had: hierarchy nodes keep prefiltered **appearance**
-     (color and lit radiance) beside the coverage they keep for shadows,
-     and a pixel's cone stops at nodes about its own size, so cost is
-     bounded by the screen, not the scene. Steps, each gated: (a) the walk
-     stopping at pixel-size nodes, its cost on the field from 150 m and
-     standing; (b) per-instance and per-node lit appearance from the
-     cache's coarse pages; (c) accuracy against M7 G1's area-integrated
-     references, at a frame cost the quality dial can trade. **M13 G1
-     (step a) failed:** prefiltering at the pixel works from 150 m (0.38×
-     one ray's coverage error) but the light cones' per-node test (an 8×8
-     bin rasterization) costs about 9 ns a visit per pixel: 1.2–2 s a
-     frame. **M13 G2 failed:** a scalar per-node test is accurate (0.26–0.29×
-     one ray's error off the horizon) but loses correlation within a pixel
-     at the horizon (one row, 0.632 covered, ours 1.0), and still costs
-     about 2 ns a node visit (257–281 ms). Development after it: the object
-     walk alone takes 10.7–14.3 ms (0.3 ns a visit, neighboring pixels
-     share nodes); walking each small instance's triangle hierarchy per
-     pixel is the cost (3 ns a visit, scattered loads); its own entry point
-     changes nothing. **M13 G3: accuracy solved, speed not.** Directional
-     coverage maps (per geometry, 256 directions × 16×16 texels, read for
-     instances up to 8 px) with 4×4 sub-pixel bins pass accuracy in both
-     views (0.23–0.26× one ray's error), at 178–707 ms a frame. Next (G4,
-     speed only, same accuracy bar): skip nodes over full bins (the long
-     tails at the horizon), lighter map reads, then a walk shared by a
-     tile of pixels, and hardware rays for surfaces larger than a few
-     pixels.
-  2. *Unique geometry at scale (M14).* The 10¹⁰ triangles are a million
-     copies of one boulder; everything must be resident. Stream geometry
-     (and its hierarchy nodes) by need, with the prefiltered nodes of item
-     1 standing in for what is not loaded, so a scene several times GPU
-     memory flies at frame rate.
-  3. *Frame-time stability:* flight spikes (the slowest 1% of frames about
-     2× the mean; cost per page varies 2–3× with content,
-     `flight-spikes-diagnostics.md`).
+- **The user's direction: core first** (2026-11-08). Before more features,
+  make the fundamentals hold up at extreme scale and detail (unique
+  geometry close up, and kilometers of open world), then branch out: one
+  primitive (cones over a prefiltered hierarchy, with a certified cache)
+  serves shadows, anti-aliasing, level of detail, reflections and GI, so
+  strengthening it strengthens all of them. A **quality dial** grows
+  alongside (the quality contract, §3.3: an error bound and a frame budget,
+  one guaranteed, the other reported), each core item exposing its knob to
+  it. Keep usage low; the NVIDIA benchmark waits for funds (not soon).
+- **Releases and going public:** `v0.2.0` is tagged (2026-11-08). The user
+  decided to make the repository public under the PolyForm Noncommercial
+  License 1.0.0 (`LICENSE.md`), branded Penumbral Labs, copyright
+  "[legal name], doing business as Penumbral Labs"; the README was rebuilt
+  for a wide audience (logo, explainer diagrams, engine GIFs, Cycles
+  comparisons, an honest comparison of methods). **Still needed from the
+  user before it goes public:** the legal name for `LICENSE.md`, the
+  commercial-license contact (the README says "open an issue"), and the go
+  to flip visibility.
+- **M13, sub-pixel detail (item 1 below), this session:** coverage only so
+  far, on the million-boulder field without its ground, against 16×16 rays
+  per pixel (`docs/results/m13-gate1.md` … `m13-gate4.md`):
+  - G1 (pixel cones prefiltered at the pixel, bins rasterized per node):
+    1.2–2 s a frame. G2 (one number per node): 257–281 ms, and one horizon
+    row saturates (correlation within a pixel lost).
+  - G3 (directional coverage maps per geometry, 4×4 sub-pixel bins):
+    **accuracy passes both views** (0.26× and 0.23× one ray's error), at
+    178–707 ms.
+  - G4 (hardware rays at pixel corners and bins for surfaces over 8 px;
+    maps and the object walk for the rest): accuracy **0.218× standing,
+    0.132× from 150 m**; 122–135 ms against a 50 ms intermediate bar. What
+    remains is the far field's per-pixel object walk (the horizon's long
+    tail; about 67 object nodes and several map reads per pixel from 150 m).
+  - Appearance (color and light from the cache at maps and splats) is not
+    started; coverage was the open question, and it is answered.
+- **Next, in order (the user agreed 2026-11-09):**
+  1. *Unique geometry at scale (M14).* The 10¹⁰ triangles so far are a
+     million copies of one boulder, all resident. Stream geometry (and its
+     hierarchy nodes) by need, with M13's coverage maps standing in for
+     what is not loaded, so a scene several times the memory budget flies
+     at frame rate. First gate to design: a field of many unique
+     geometries (generated variants) whose triangles exceed a set budget
+     several times; pass if flights hold frame rate within the budget and
+     coverage stays within a bound of the fully resident image. Shape the
+     stand-ins so M13's far-field work can share them.
+  2. *M13's far field, for speed:* one walk shared by a tile of pixels
+     (coherent loads; the horizon's long walk paid once per tile), or a
+     coarser far field through the quality dial; then appearance (gate:
+     color against the area-integrated image at a frame cost the dial can
+     trade). M13's goal stays a 10 ms coverage pass at 1280×720 on the M4.
+  3. *Frame-time stability:* flight spikes (`flight-spikes-diagnostics.md`).
   4. *Lighting fundamentals:* the cache that never settles with bounce
-     light (M10 G23's loop, a core bug), the sky's slow warm-up, more than
-     one bounce, bounce light with movers, cheaper bounce shading (1.16×
-     the frame at night, M10 G22).
-  5. *Speed beyond one laptop:* the NVIDIA benchmark, when the user can
-     fund it.
-  - Parked features (after the core): emissive faces as lights (M10 G23,
-    blocked by item 4's loop), a second texture coordinate set, movers
-    under a sky, moving lights' dark state.
+     light (M10 G23's loop, a core bug; `CONTINUUM_TRACE_BAKES` logs every
+     planned page and bounce retry for finding it), the sky's slow warm-up,
+     more than one bounce, bounce with movers, cheaper bounce shading.
+  5. *Speed beyond one laptop:* the NVIDIA benchmark, when funded.
+  - Parked features: emissive faces as lights (M10 G23), a second texture
+    coordinate set, movers under a sky, moving lights' dark state.
+- **The fourth session's features** (all in `docs/results/` and the
+  milestone table): viewer `--env` (HDR/PNG environment images);
+  `KHR_texture_transform` (Blender's sign); vertex colors (M10 G17–G18:
+  1.29% from Cycles, 1.00× the frame); glTF save of emissive textures,
+  BLEND and colors; blending speed (M10 G19: 1.23× the frame); glTF node
+  animations through movers; Bevy `ContinuumInstance` movers;
+  `Renderer::set_exposure`; texture wrap modes (M10 G20: 2.18%); bounce
+  light with any number of lights (M10 G22: 3.07%, speed 1.167× against
+  1.15×, kept); emissive faces as lights (M10 G23 failed, experimental).
 - **Third session's results** (for reference): passed M5 G9 (the sky
   later), M10 G10 (materials, 5.85%), M10 G15 (emissive textures, 6.35%),
   M5 G12 (environment light, 1.37%); failed but kept M10 G8–G9
@@ -569,6 +525,18 @@ place, for a new conversation:
   - Speed criteria comparing two renderers: settle both, then five
     interleaved rounds of 30 warm frames each, median ratio (M10 G18). A
     single back-to-back pair met a transient in G17.
+  - Save a gate's output as it runs (`… | tee file`), and never show it
+    only through `tail`: M10 G21 lost two criteria's lines to a crash.
+  - Give a gate binary a development mode (`M13_DEV=1`: a smaller scene,
+    no reference) and run it once before the gate: a shader that fails to
+    compile otherwise costs the gate its only run.
+  - M13's code: `mask_cones.wgsl`, sections "M13 gate 2" (the scalar walk,
+    `View3`, screen boxes, the pixel frustum), "M13 gate 3" (bins,
+    `cov_maps`, `map_coverage`) and "M13 gate 4" (`m13_large`);
+    `hw_visibility.wgsl` (`hw_m13_corners`, `hw_m13_near`);
+    `coverage_maps.rs` (building the maps). Profile stages select them:
+    10–11 (G1), 12–14 (G2), 15 (G3), 16 (G4); `kernel.set_pixel_cones(true)`
+    with the stage set before the renderer is made.
 
 **Decided 2026-11-07: a more complete paradigm before the tag.** The
 user's order (all attempted; results above and below):
