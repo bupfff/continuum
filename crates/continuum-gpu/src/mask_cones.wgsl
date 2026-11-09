@@ -5663,10 +5663,18 @@ fn instance_map_bins(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
 }
 
 fn map_coverage(gid: vec3<u32>) -> vec3<f32> {
+    for (var b = 0u; b < 16u; b++) { pbin[b] = 0.0; }
+    return map_coverage_from(gid, false);
+}
+
+// `map_coverage` from the pixel's bins as they are; with `rays_did_large`
+// (M13 gate 4) large instances are left out of the walk: the bins' hardware
+// rays covered them.
+fn map_coverage_from(gid: vec3<u32>, rays_did_large: bool) -> vec3<f32> {
     let pix = vec2<f32>(f32(gid.x), f32(gid.y));
     set_pixel_frustum(pix);
     let v = view_world();
-    for (var b = 0u; b < 16u; b++) { pbin[b] = 0.0; }
+    if (bins_full(false)) { return vec3<f32>(1.0, 0.0, 0.0); }
     var object_nodes = 0u;
     sc_tri_nodes = 0u;
     var sp = 1u;
@@ -5697,8 +5705,9 @@ fn map_coverage(gid: vec3<u32>) -> vec3<f32> {
         if (node.info.y > 0u) {
             for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
                 let m = items[k];
+                if (rays_did_large && m13_large(m)) { continue; }
                 let hdr = map_header(meshes[m].z);
-                if (!(hdr != NONE && instance_map_bins(m, hdr, pix))) { mesh_bins(m, pix, sp); }
+                if (!(hdr != NONE && instance_map_bins(m, hdr, pix)) && !rays_did_large) { mesh_bins(m, pix, sp); }
             }
             if (bins_full(false)) { break; }
         } else if (sp + 2u <= STACK) {
@@ -5729,4 +5738,21 @@ fn m13_coverage_maps(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
     colors[gid.y * w + gid.x] = vec4<f32>(map_coverage(gid), 1.0);
+}
+
+// --- M13 gate 4: near surfaces resolved by the corner rays. ---
+
+// Whether object `m` is too large (or too near, or without maps) to be read
+// from its coverage map: `instance_map_bins` would walk it.
+fn m13_large(m: u32) -> bool {
+    let hdr = map_header(meshes[m].z);
+    if (hdr == NONE) { return true; }
+    let x = meshes[m].w;
+    let c_obj = vec3<f32>(bitcast<f32>(cov_maps[hdr + 2u]), bitcast<f32>(cov_maps[hdr + 3u]), bitcast<f32>(cov_maps[hdr + 4u]));
+    let scale = select(1.0, xforms[4u * x + 3u].x, x != NONE);
+    let radius = bitcast<f32>(cov_maps[hdr + 5u]) * scale;
+    let depth = dot(m13_to_world(x, c_obj) - camera.eye.xyz, camera.forward.xyz);
+    if (depth - radius <= 1e-2) { return true; }
+    let f = camera.params.y / (2.0 * camera.params.z);
+    return 2.0 * radius * f / depth > MAP_LIMIT_PX;
 }

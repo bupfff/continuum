@@ -247,3 +247,60 @@ fn hw_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     quarters |= (0xffffu << (4u * n)) & 0xffffu;
     list_extra(pixel, samples, n, own_weight, quarters);
 }
+
+// M13 gate 4: per pixel, a ray through its top-left corner, recording
+// (the object hit or NONE, 1 if that object is large for the coverage maps,
+// its distance's bits, 0) for `m13_coverage_near`.
+@compute @workgroup_size(8, 8)
+fn hw_m13_corners(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    let sx = (f32(gid.x) / camera.params.x * 2.0 - 1.0) * tz * aspect;
+    let sy = (1.0 - f32(gid.y) / camera.params.y * 2.0) * tz;
+    let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+    let hit = hw_trace(camera.eye.xyz, dir, 0.0);
+    var large = 0u;
+    if (hit.x != NONE && m13_large(hit.x)) { large = 1u; }
+    vis[gid.y * w + gid.x] = vec4<u32>(hit.x, large, hit.z, 0u);
+}
+
+// After `hw_m13_corners` (M13 gate 4): a pixel whose four corners hit the
+// same large object is wholly covered by it. Every other pixel casts a
+// hardware ray through each of its 4×4 bins' centres: a bin whose ray meets
+// a large object is covered; then the walk adds the small instances (their
+// maps) and far object nodes, leaving large instances out. Writes
+// (coverage, object nodes, triangle nodes): no nodes for a pixel its
+// corners resolved.
+@compute @workgroup_size(8, 8)
+fn hw_m13_near(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let pixel = gid.y * w + gid.x;
+    if (gid.x + 1u < w && gid.y + 1u < h) {
+        let a = vis[pixel];
+        let b = vis[pixel + 1u];
+        let c = vis[pixel + w];
+        let d = vis[pixel + w + 1u];
+        if (a.x != NONE && a.y == 1u && b.x == a.x && c.x == a.x && d.x == a.x) {
+            colors[pixel] = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+            return;
+        }
+    }
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    for (var k = 0u; k < 16u; k++) {
+        let p = vec2<f32>(f32(gid.x), f32(gid.y)) + (vec2<f32>(f32(k % 4u), f32(k / 4u)) + vec2<f32>(0.5)) * 0.25;
+        let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
+        let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
+        let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+        let hit = hw_trace(camera.eye.xyz, dir, 0.0);
+        pbin[k] = select(0.0, 1.0, hit.x != NONE && m13_large(hit.x));
+    }
+    colors[pixel] = vec4<f32>(map_coverage_from(gid, true), 1.0);
+}
+

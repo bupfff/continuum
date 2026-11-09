@@ -588,6 +588,8 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_visibility_movers",
     "hw_visibility_blend",
     "hw_edges",
+    "hw_m13_corners",
+    "hw_m13_near",
 ];
 
 /// Bindings the `visibility` pass uses.
@@ -603,6 +605,10 @@ pub(crate) const HW_EDGES_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 41, 42, 55, 
 pub(crate) const M13_COVERAGE_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30];
 /// `m13_coverage_maps` (M13 gate 3): with the coverage maps (82).
 pub(crate) const M13_MAPS_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 82];
+/// M13 gate 4: the corner rays (`hw_m13_corners`), and the coverage pass
+/// after them (`m13_coverage_near`).
+pub(crate) const HW_M13_CORNERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 82];
+pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 31, 32, 82];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
@@ -1596,7 +1602,7 @@ impl MaskConeKernel {
         let mut buffers = buffers;
         // M13 gate 3 (profile stage 15): each placed geometry's directional
         // coverage maps.
-        if self.profile_stage.get() == 15 {
+        if matches!(self.profile_stage.get(), 15 | 16) {
             let start = std::time::Instant::now();
             let tris: Vec<(&[continuum::mesh::Tri], Option<u32>)> = scene
                 .geometries
