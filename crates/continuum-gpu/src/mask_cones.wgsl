@@ -5038,6 +5038,17 @@ fn render_cones(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
         colors[pixel] = vec4<f32>(sum / 64.0, f32(work_a.x), f32(work_a.w), 1.0);
         return;
     }
+    // M13 gate 2: stage 13, one ray at the pixel offset, 1 if it hits
+    // anything.
+    if (u32(light.params.z) == 13u) {
+        let hit = primary_hit(camera.eye.xyz, camera_dir(gid));
+        colors[pixel] = vec4<f32>(select(0.0, 1.0, hit.mesh != NONE), 0.0, 0.0, 1.0);
+        return;
+    }
+    if (u32(light.params.z) == 12u) {
+        colors[pixel] = vec4<f32>(scalar_coverage(gid), 1.0);
+        return;
+    }
     if (u32(light.params.z) == 11u) {
         let hit = primary_hit(camera.eye.xyz, camera_dir(gid));
         colors[pixel] = vec4<f32>(select(0.0, 1.0, hit.mesh != NONE && hit.mesh != 0u), 0.0, 0.0, 1.0);
@@ -5105,4 +5116,281 @@ fn vc_shade_cones(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
         let count = atomicLoad(&fallback_count);
         if (count > 0u) { atomicAdd(&vc_stats[0], count); }
     }
+}
+
+// --- M13 gate 2: a pixel's coverage by geometry, a scalar test per node. ---
+//
+// Boxes are tested in screen space (pixels): a box within one pixel adds the
+// share of the pixel its projected box covers times its prefiltered opacity
+// (no bins); larger boxes are opened, nearer child first, and triangles add
+// the exact area of the pixel they cover. Within an object, contributions add
+// up to 1; objects combine as independent occluders; the walk stops once the
+// pixel is covered. Points go to camera space with one transform per object
+// (`View3`). Returns (coverage, object nodes visited, triangle-hierarchy
+// nodes visited).
+
+// Camera space (x right, y up, z along the view) from a space: cam = (r0·p,
+// r1·p, r2·p) + t.
+struct View3 {
+    r0: vec3<f32>,
+    r1: vec3<f32>,
+    r2: vec3<f32>,
+    t: vec3<f32>,
+};
+
+fn view_world() -> View3 {
+    let e = camera.eye.xyz;
+    return View3(camera.right.xyz, camera.up.xyz, camera.forward.xyz,
+        -vec3<f32>(dot(camera.right.xyz, e), dot(camera.up.xyz, e), dot(camera.forward.xyz, e)));
+}
+
+// The view of object space for transform `x` (NONE: world).
+fn view_object(x: u32) -> View3 {
+    let w = view_world();
+    if (x == NONE) { return w; }
+    let s = xforms[4u * x + 3u].x;
+    let a = xforms[4u * x].xyz;
+    let b = xforms[4u * x + 1u].xyz;
+    let c = xforms[4u * x + 2u].xyz;
+    let tr = translation(x);
+    // world = s (a·p, b·p, c·p) + tr.
+    let r0 = s * (w.r0.x * a + w.r0.y * b + w.r0.z * c);
+    let r1 = s * (w.r1.x * a + w.r1.y * b + w.r1.z * c);
+    let r2 = s * (w.r2.x * a + w.r2.y * b + w.r2.z * c);
+    return View3(r0, r1, r2, vec3<f32>(dot(w.r0, tr), dot(w.r1, tr), dot(w.r2, tr)) + w.t);
+}
+
+fn to_camera(v: View3, p: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(v.r0, p), dot(v.r1, p), dot(v.r2, p)) + v.t;
+}
+
+// A camera-space point in pixels (x right, y down).
+fn cam_to_pixels(q: vec3<f32>) -> vec2<f32> {
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    return vec2<f32>((q.x / q.z / (tz * aspect) + 1.0) * 0.5 * camera.params.x, (1.0 - q.y / q.z / tz) * 0.5 * camera.params.y);
+}
+
+struct ScreenBox {
+    lo: vec2<f32>,
+    hi: vec2<f32>,
+    // The box's centre's depth along the view.
+    depth: f32,
+    // 0: every corner in front of the eye; 1: some behind; 2: all behind.
+    behind: u32,
+};
+
+// The pixel's frustum, as tangent bounds (x left, x right, y bottom, y top)
+// of its four side planes through the eye.
+var<private> sc_frustum: vec4<f32> = vec4<f32>(0.0);
+
+fn set_pixel_frustum(pix: vec2<f32>) {
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    sc_frustum = vec4<f32>(
+        (2.0 * pix.x / camera.params.x - 1.0) * tz * aspect,
+        (2.0 * (pix.x + 1.0) / camera.params.x - 1.0) * tz * aspect,
+        (1.0 - 2.0 * (pix.y + 1.0) / camera.params.y) * tz,
+        (1.0 - 2.0 * pix.y / camera.params.y) * tz,
+    );
+}
+
+// `behind` 2 also when the box lies wholly outside one of the pixel
+// frustum's side planes (they hold on both sides of the eye).
+fn screen_box(lo: vec3<f32>, hi: vec3<f32>, v: View3) -> ScreenBox {
+    var sb = ScreenBox(vec2<f32>(3.4e38), vec2<f32>(-3.4e38), 0.0, 0u);
+    var behind = 0u;
+    var out = vec4<u32>(0u);
+    for (var k = 0u; k < 8u; k++) {
+        let corner = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), select(lo.z, hi.z, (k & 4u) != 0u));
+        let q = to_camera(v, corner);
+        let left = sc_frustum.x * q.z - q.x;
+        let right = q.x - sc_frustum.y * q.z;
+        let bottom = sc_frustum.z * q.z - q.y;
+        let top = q.y - sc_frustum.w * q.z;
+        out += select(vec4<u32>(0u), vec4<u32>(1u), vec4<f32>(left, right, bottom, top) > vec4<f32>(0.0));
+        if (q.z <= 1e-3) { behind++; continue; }
+        let s = cam_to_pixels(q);
+        sb.lo = min(sb.lo, s);
+        sb.hi = max(sb.hi, s);
+    }
+    sb.behind = select(select(0u, 1u, behind > 0u), 2u, behind == 8u || any(out == vec4<u32>(8u)));
+    sb.depth = to_camera(v, (lo + hi) * 0.5).z;
+    return sb;
+}
+
+// The area of pixel `pix`'s square inside the box's rectangle.
+fn rect_overlap(sb: ScreenBox, pix: vec2<f32>) -> f32 {
+    let lo = max(sb.lo, pix);
+    let hi = min(sb.hi, pix + vec2<f32>(1.0));
+    let d = max(hi - lo, vec2<f32>(0.0));
+    return d.x * d.y;
+}
+
+// A node's splat: opacity `alpha` over its silhouette `sil` (world area
+// across the view at its centre), spread evenly over its projected box.
+fn box_splat(sb: ScreenBox, pix: vec2<f32>, alpha: f32, sil: f32) -> f32 {
+    let f = camera.params.y / (2.0 * camera.params.z) / max(sb.depth, 1e-3);
+    let area = max((sb.hi.x - sb.lo.x) * (sb.hi.y - sb.lo.y), 1e-12);
+    return clamp(alpha * sil * f * f * rect_overlap(sb, pix) / area, 0.0, 1.0);
+}
+
+fn box_silhouette(lo: vec3<f32>, hi: vec3<f32>, v: vec3<f32>) -> f32 {
+    let e = hi - lo;
+    return abs(v.x) * e.y * e.z + abs(v.y) * e.x * e.z + abs(v.z) * e.x * e.y;
+}
+
+// The area of pixel `pix`'s square covered by triangle `t` seen through
+// view `v` (front faces; none if a corner is behind the eye).
+fn triangle_cover(t: u32, v: View3, pix: vec2<f32>) -> f32 {
+    let c0 = to_camera(v, tris[3u * t].xyz);
+    let c1 = to_camera(v, tris[3u * t + 1u].xyz);
+    let c2 = to_camera(v, tris[3u * t + 2u].xyz);
+    if (c0.z <= 1e-3 || c1.z <= 1e-3 || c2.z <= 1e-3) { return 0.0; }
+    if (dot(cross(c1 - c0, c2 - c0), -c0) <= 0.0) { return 0.0; }
+    let a = cam_to_pixels(c0);
+    let b = cam_to_pixels(c1);
+    let c = cam_to_pixels(c2);
+    let lo = min(a, min(b, c));
+    let hi = max(a, max(b, c));
+    if (hi.x <= pix.x || hi.y <= pix.y || lo.x >= pix.x + 1.0 || lo.y >= pix.y + 1.0) { return 0.0; }
+    let orient = sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+    if (orient == 0.0) { return 0.0; }
+    var poly: array<vec2<f32>, 8>;
+    var n = 4u;
+    poly[0] = pix;
+    poly[1] = pix + vec2<f32>(1.0, 0.0);
+    poly[2] = pix + vec2<f32>(1.0, 1.0);
+    poly[3] = pix + vec2<f32>(0.0, 1.0);
+    let edges = array<vec2<f32>, 3>(a, b, c);
+    for (var e = 0u; e < 3u; e++) {
+        let p0 = edges[e];
+        let p1 = edges[(e + 1u) % 3u];
+        var out: array<vec2<f32>, 8>;
+        var m = 0u;
+        for (var i = 0u; i < n; i++) {
+            let u = poly[i];
+            let w = poly[(i + 1u) % n];
+            let du = orient * ((p1.x - p0.x) * (u.y - p0.y) - (p1.y - p0.y) * (u.x - p0.x));
+            let dw = orient * ((p1.x - p0.x) * (w.y - p0.y) - (p1.y - p0.y) * (w.x - p0.x));
+            if (du >= 0.0 && m < 8u) { out[m] = u; m++; }
+            if ((du >= 0.0) != (dw >= 0.0) && m < 8u) { out[m] = u + (w - u) * (du / (du - dw)); m++; }
+        }
+        n = m;
+        poly = out;
+        if (n < 3u) { return 0.0; }
+    }
+    var area = 0.0;
+    for (var i = 0u; i < n; i++) {
+        let u = poly[i];
+        let w = poly[(i + 1u) % n];
+        area += u.x * w.y - w.x * u.y;
+    }
+    return abs(area) * 0.5;
+}
+
+var<private> sc_tri_nodes: u32 = 0u;
+
+// Object `m`'s coverage of pixel `pix`, its triangle hierarchy walked with
+// the stack from `base` up, nearer child first.
+fn mesh_scalar_cover(m: u32, pix: vec2<f32>, base: u32) -> f32 {
+    let range = meshes[m];
+    let x = range.w;
+    let v = view_object(x);
+    var cm = 0.0;
+    if (range.z == NONE) {
+        for (var t = range.x; t < range.x + range.y; t++) { cm += triangle_cover(t, v, pix); }
+        return min(cm, 1.0);
+    }
+    // The eye in object space, for nodes' view directions.
+    let eye = point_to_object(m, camera.eye.xyz);
+    let scale = select(1.0, xforms[4u * x + 3u].x, x != NONE);
+    var sp = base + 1u;
+    stack_set(base, range.z);
+    while (sp > base && cm < 0.9999) {
+        sp--;
+        let n = stack_get(sp);
+        let node = blas[n];
+        sc_tri_nodes++;
+        let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+        if (sb.behind == 2u) { continue; }
+        if (sb.behind == 0u && rect_overlap(sb, pix) <= 0.0) { continue; }
+        if (sb.behind == 0u && max(sb.hi.x - sb.lo.x, sb.hi.y - sb.lo.y) <= 1.0) {
+            let dir = normalize(eye - (node.lo.xyz + node.hi.xyz) * 0.5);
+            let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
+            if (sil > 1e-30) {
+                let alpha = min(node_front_area(n, dir) / sil, 1.0);
+                cm += box_splat(sb, pix, alpha, sil * scale * scale);
+            }
+            continue;
+        }
+        if (node.info.y > 0u) {
+            for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                cm += triangle_cover(blas_items[k], v, pix);
+            }
+        } else if (sp + 2u <= STACK) {
+            var near = node.info.x;
+            var far = node.info.x + 1u;
+            let a = blas[near];
+            let b = blas[far];
+            if (to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z) {
+                near = node.info.x + 1u;
+                far = node.info.x;
+            }
+            stack_set(sp, far);
+            stack_set(sp + 1u, near);
+            sp += 2u;
+        }
+    }
+    return min(cm, 1.0);
+}
+
+fn scalar_coverage(gid: vec3<u32>) -> vec3<f32> {
+    let pix = vec2<f32>(f32(gid.x), f32(gid.y));
+    set_pixel_frustum(pix);
+    let v = view_world();
+    var total = 0.0;
+    var object_nodes = 0u;
+    sc_tri_nodes = 0u;
+    var sp = 1u;
+    stack_set(0u, 0u);
+    while (sp > 0u && total < 0.9999) {
+        sp--;
+        let n = stack_get(sp);
+        let node = nodes[n];
+        object_nodes++;
+        let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+        if (sb.behind == 2u) { continue; }
+        if (sb.behind == 0u && rect_overlap(sb, pix) <= 0.0) { continue; }
+        if (sb.behind == 0u && node.info.z == 0u && light.objects.x != NONE
+            && max(sb.hi.x - sb.lo.x, sb.hi.y - sb.lo.y) <= 1.0) {
+            let dir = normalize(camera.eye.xyz - (node.lo.xyz + node.hi.xyz) * 0.5);
+            let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
+            if (sil > 1e-30) {
+                let alpha = 1.0 - exp(-node_front_area(light.objects.x + n, dir) / sil);
+                let c = box_splat(sb, pix, alpha, sil);
+                total = 1.0 - (1.0 - total) * (1.0 - c);
+            }
+            continue;
+        }
+        if (node.info.y > 0u) {
+            for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                let c = mesh_scalar_cover(items[k], pix, sp);
+                total = 1.0 - (1.0 - total) * (1.0 - c);
+            }
+        } else if (sp + 2u <= STACK) {
+            var near = node.info.x;
+            var far = node.info.x + 1u;
+            let a = nodes[near];
+            let b = nodes[far];
+            if (to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z) {
+                near = node.info.x + 1u;
+                far = node.info.x;
+            }
+            stack_set(sp, far);
+            stack_set(sp + 1u, near);
+            sp += 2u;
+        }
+    }
+    return vec3<f32>(total, f32(object_nodes), f32(sc_tri_nodes));
 }
