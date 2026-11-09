@@ -5019,6 +5019,30 @@ fn render_cones(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     if (gid.x >= w || gid.y >= h) { return; }
     let pixel = gid.y * w + gid.x;
     let c = pixel_cone(gid);
+    // M13 gate 1 (profile stages 10 and 11): the share of the pixel covered
+    // by objects other than object 0 (the ground). Stage 10: the pixel's
+    // cone walked as light cones are, prefiltered at the light's threshold
+    // (bins), objects as independent occluders; x the coverage, y object
+    // nodes tested, z triangle-hierarchy nodes tested (with `COUNT_WORK`).
+    // Stage 11: one ray at the pixel offset, 1 if it hits such an object.
+    if (u32(light.params.z) == 10u) {
+        prefilter_bins = light.params.x;
+        independent_occluders = true;
+        skip_object = 0u;
+        var cov: array<f32, 64>;
+        for (var b = 0u; b < 64u; b++) { cov[b] = 0.0; }
+        var full = 0u;
+        scene_coverage(c, 0u, &cov, &full);
+        var sum = 0.0;
+        for (var b = 0u; b < 64u; b++) { sum += cov[b]; }
+        colors[pixel] = vec4<f32>(sum / 64.0, f32(work_a.x), f32(work_a.w), 1.0);
+        return;
+    }
+    if (u32(light.params.z) == 11u) {
+        let hit = primary_hit(camera.eye.xyz, camera_dir(gid));
+        colors[pixel] = vec4<f32>(select(0.0, 1.0, hit.mesh != NONE && hit.mesh != 0u), 0.0, 0.0, 1.0);
+        return;
+    }
     let seen = cone_pixel_setup(gid, c);
     if (u32(light.params.z) == 9u) {
         colors[pixel] = vec4<f32>(vec3<f32>(pc_work), f32(frag_count));
