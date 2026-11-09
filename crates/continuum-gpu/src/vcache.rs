@@ -2443,6 +2443,12 @@ impl VirtualCache {
                     self.indirect_jobs.push([index, k]);
                 }
             }
+            if trace_bakes() {
+                eprintln!(
+                    "bake frame {} page m{m} c{c} mip{mip} {page:?} slot {slot} priority {priority:#x}",
+                    self.frame
+                );
+            }
             self.texels += inside[0] * inside[1];
             self.spent += cost;
             self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] += cost;
@@ -2467,6 +2473,12 @@ impl VirtualCache {
                 continue;
             }
             let (m, c, mip, page) = unpack(k);
+            if trace_bakes() {
+                eprintln!(
+                    "retry frame {} page m{m} c{c} mip{mip} {page:?} slot {slot}",
+                    self.frame
+                );
+            }
             let index = self.bake_list.len() as u32;
             self.bake_list.push([k[0], k[1], k[2], slot]);
             let b = self.page_bounds(m, c, mip, page);
@@ -2483,6 +2495,13 @@ impl VirtualCache {
             self.spent += bounce;
         }
     }
+}
+
+/// Diagnostics: `CONTINUUM_TRACE_BAKES` set prints every page planned and
+/// every bounce retry (stderr).
+fn trace_bakes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CONTINUUM_TRACE_BAKES").is_some())
 }
 
 /// Waits for submission `index`, after which `buffer` (whose mapping was
