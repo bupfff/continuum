@@ -3,6 +3,7 @@ name = "room3d"
 description = "3D experiments (milestone M1): mask cones and ledgers on triangle scenes."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

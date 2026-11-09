@@ -392,6 +392,14 @@ place, for a new conversation:
   for a rented GPU (not soon, as of 2026-11-08).
 - **`v0.2.0` is tagged** (2026-11-08, approved by the user) on the commit
   that bumps the workspace version, after CI passed.
+- **Going public (the user's decision, 2026-11-08):** the repository is to
+  become public under the PolyForm Noncommercial License 1.0.0
+  (`LICENSE.md`), branded Penumbral Labs, with the copyright line
+  "[legal name], doing business as Penumbral Labs". The README was rebuilt
+  for a wide audience (diagrams, engine GIFs, Cycles comparisons, an honest
+  comparison of methods). Before flipping it public: the legal name in
+  `LICENSE.md`, and the commercial-license contact (the README says "open
+  an issue").
 - **The fourth session** took the third session's list in order (results
   in `docs/results/`):
   - *viewer `--env`*: `--env gradient|sky.hdr|sky.png`, `--env-strength`;

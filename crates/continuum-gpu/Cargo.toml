@@ -3,6 +3,7 @@ name = "continuum-gpu"
 description = "GPU (wgpu compute) backend for Continuum."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 bevy_mikktspace = "1"

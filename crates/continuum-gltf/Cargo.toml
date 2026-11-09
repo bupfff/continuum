@@ -3,6 +3,7 @@ name = "continuum-gltf"
 description = "glTF import for Continuum: meshes, instances and materials as an instanced scene."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 continuum = { path = "../continuum" }

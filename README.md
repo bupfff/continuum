@@ -1,164 +1,298 @@
-# Continuum
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/logo-dark.svg">
+    <img alt="Continuum, by Penumbral Labs" src="docs/images/brand/logo-light.svg" width="440">
+  </picture>
+</p>
 
-A real-time renderer built on an original paradigm: certified incremental cone
-rendering. Every visibility question is asked by a cone that answers in bits,
-and cached answers are recomputed only when they could have changed by more
-than a chosen, invisible error bound.
+<p align="center">
+  <b>Real-time lighting that is computed, not approximated.</b><br>
+  Exact soft shadows from area lights, no noise, and nothing blended from past frames.
+</p>
 
-Status: experimental; `v0.2.0` is tagged (2026-11-08), and later work is
-on `main`. The
-core bets were tested in 2D (M0) and in 3D on the CPU (M1). On the GPU,
-Continuum renders:
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-0.2.0-ffc15e">
+  <img alt="status" src="https://img.shields.io/badge/status-experimental-a9aeb8">
+  <img alt="license" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-5b6577">
+  <img alt="built with" src="https://img.shields.io/badge/Rust%20%C2%B7%20wgpu-compute%20only-171a22">
+</p>
 
-- a procedural showcase in real time, with moving objects, exact soft shadows
-  and one bounce of indirect light (M2–M3);
-- a million-boulder field of ten billion triangles through a view-dependent
-  lighting cache (M4);
-- area, sun, point and spot lights and a sky (M5);
-- glTF files with textures (M6);
-- objects moving among a million static ones, the cache updated exactly in
-  the frame they move, with no stale light (M9 gate 1);
-- moving lights through an error ledger, experimental: never stale, but
-  with heavy fallback while a light moves (M9 gate 2, failed on that);
-- moving objects under a sky, experimental: never stale, but slow, since
-  nearly every page re-bakes its sky while objects move (M9 gate 3,
-  failed on that);
-- one bounce of light in the cache, 1.79% from Cycles with one bounce
-  (M10 gate 1);
-- metallic-roughness materials with glossy reflections (5.85% from
-  Cycles, M10 gate 10);
-- normal maps, 3.63% from Cycles (M10 gate 5), alpha cutouts, 3.29% (M10
-  gate 7), and exactly back-to-back double-sided faces (M10 gates 8–9);
-- emission that lights its surroundings through bounce light (7.46%, M10
-  gate 12), and emissive textures (6.35%, M10 gate 15);
-- alpha blending for glass and other see-through surfaces, with partial
-  shadows (4.71% from Cycles, M10 gate 16; 1.23× the frame, M10 gate 19;
-  needs hardware ray queries);
-- environment light: a sky whose radiance varies with direction, from an
-  equirectangular image (1.37% from Cycles on a gradient sky, M5 gate 12);
-- textures box-filtered over each pixel's footprint (M7 gate 2).
+<p align="center">
+  <img alt="A boulder moving among five lamps while one lamp changes color" src="docs/images/media-lamps.gif" width="720">
+  <br>
+  <sub>Real frames from the engine: a boulder moves among five lamps while the brightest one cycles through colors. Each move re-computes exactly the light it changes, in the same frame; changing a light's color re-computes nothing.</sub>
+</p>
 
-Every claim is measured against Blender's Cycles.
+## What is Continuum?
 
-- [docs/GUIDE.md](docs/GUIDE.md): using it as a library; API reference with
-  `cargo doc --no-deps -p continuum-gpu -p continuum-gltf --open`.
-- [docs/DESIGN.md](docs/DESIGN.md): the design, an honest status (§3.6),
-  and what to do next (§3.8, "Start here").
-- [docs/results/](docs/results/): every measured result.
+Continuum is a real-time renderer, written in Rust on
+[wgpu](https://wgpu.rs) compute shaders. It does the expensive part of
+lighting (how much of each light every surface can see) exactly, and keeps
+the answers until they could actually have changed. Every claim it makes is
+measured against [Blender's Cycles](https://www.cycles-renderer.org/), a
+reference path tracer.
 
-## Try it: the real-time viewer
+It ships as a library, a [Bevy](https://bevyengine.org) plugin, and a
+viewer that flies through your own glTF files. It is experimental: v0.2
+works and is measured, but the API will change.
+
+## Why it is different
+
+### 1. One cone answers what a thousand rays would
+
+To light a point, a renderer has to know how much of each light the point
+can see. Most real-time engines estimate it, and ray tracers sample it with
+random rays. Continuum sends **one cone** from the point to the whole light.
+Whatever blocks the cone is recorded as bits, one per direction, and the
+open share is the light that arrives.
+
+<p align="center">
+  <img alt="Animated diagram: an occluder slides through a cone from a surface point to an area light; the cone's direction bits flip, and the share of light that arrives follows" src="docs/images/how/mask-cone.svg" width="860">
+</p>
+
+Because there are no random samples, there is no noise to clean up, and the
+same scene gives the same image every frame.
+
+<p align="center">
+  <img alt="Diagram comparing shadow maps, sampled rays and a mask cone" src="docs/images/how/three-ways.svg" width="860">
+</p>
+
+### 2. A cache that knows what can change
+
+Computing that for every pixel, every frame, would be too slow, so
+Continuum stores the light it computes on the surfaces themselves, in pages
+baked for the parts of the world you look at. The trick is knowing when a
+stored answer is still right:
+
+<p align="center">
+  <img alt="Diagram: lighting cached on surface pages; when an object moves, only the pages it can affect are re-computed" src="docs/images/how/cache.svg" width="860">
+</p>
+
+- **Changing a light's color or brightness** re-uses everything: light is
+  stored per unit of brightness.
+- **Moving an object** re-computes only the pages whose light it could have
+  changed, within the same frame. Everything else is provably the same, so
+  light is never shown stale (measured: 65 moving objects among a million
+  static ones cost 1.06–1.09× a still frame).
+- **Nothing is blended from previous frames.** Most real-time renderers
+  smooth over noise or missing work by mixing in past frames, which leaves
+  ghosts and lag behind moving things. Here each frame comes from the cache
+  as it is now.
+
+### 3. It scales to huge worlds
+
+<p align="center">
+  <img alt="Flying low over a field of a million boulders" src="docs/images/media-field.gif" width="640">
+  <br>
+  <sub>A million boulders, about ten billion triangles, lit by the sun and sky: real frames, flying 120 m forward and rising to 20 m. Flights over this field average 14.6–15.0 ms a frame at 1280×720 on a fanless MacBook Air (M4).</sub>
+</p>
+
+Geometry is instanced and organized in hierarchies whose coverage is
+pre-filtered, so a cone crossing a distant crowd of objects reads one
+summary instead of every triangle. Positions are stored in double
+precision, so worlds can be kilometers across.
+
+## How it compares
+
+How the usual ways of lighting a scene handle soft shadows from area
+lights:
+
+| | Used in | Soft shadows | Noise and lag | Moving objects |
+|---|---|---|---|---|
+| Shadow maps, filtered | Most real-time engines | Approximated: the edge is blurred to an estimated width | No noise; aliasing and light leaks | Yes |
+| Ray-traced shadows | Games with ray-tracing GPUs | Sampled with a few rays per pixel | Noisy; denoisers and past frames hide it, at the cost of lag and smearing | Yes |
+| Real-time GI with caches and temporal accumulation (e.g. Unreal's Lumen) | Recent engines | From simplified versions of the scene | Accumulated over frames, so lighting trails behind changes | Yes, with lag |
+| Baked lightmaps | Many games, architecture | Exact, computed offline | None | No: any change needs a new bake |
+| Path tracing | Film, Blender's Cycles | The reference | Noisy until many samples converge; seconds or more a frame | Yes |
+| **Continuum** | | **Computed per point and light by one cone: within 0.4–3% of Cycles in our tests** | **None: no random samples, no past frames** | **Yes: exact, in the same frame** |
+
+A fair note: this compares *methods*. Continuum's numbers are measured
+against Cycles; we have not benchmarked against Unreal, Unity or Godot, and
+have measured speed only on an Apple M4 laptop. The table describes what
+each approach approximates, not who wins a race.
+
+## Measured, not claimed
+
+Every feature passes a *gate*: a test whose pass criterion is written down
+and committed before it runs, and whose result is recorded with exact
+numbers, failures included ([docs/results/](docs/results/)). The
+comparisons below are Continuum's cached lighting, settled, against Cycles
+at 4,096 samples per pixel. The percentage is the relative error over the
+image.
+
+<p align="center">
+  <img alt="Continuum and Cycles side by side: metallic-roughness materials, 5.85% from Cycles" src="docs/images/compare/materials.jpg" width="860">
+  <img alt="Continuum and Cycles side by side: alpha-blended glass, 4.70% from Cycles" src="docs/images/compare/glass.jpg" width="860">
+  <img alt="Continuum and Cycles side by side: five lamps at night with bounce light, 3.07% from Cycles" src="docs/images/compare/lamps.jpg" width="860">
+</p>
+
+<details>
+<summary>More comparisons: foliage, environment sky, normal maps</summary>
+
+<p align="center">
+  <img alt="Alpha-masked foliage, 3.29% from Cycles" src="docs/images/compare/foliage.jpg" width="860">
+  <img alt="Sky from an environment image, 1.37% from Cycles" src="docs/images/compare/environment.jpg" width="860">
+  <img alt="Normal maps, 3.63% from Cycles" src="docs/images/compare/normal-maps.jpg" width="860">
+</p>
+
+</details>
+
+Selected numbers (1280×720, Apple M4, release builds):
+
+| What | Result | Gate |
+|---|---|---|
+| A million instanced boulders (10¹⁰ triangles), flying | 14.6–15.0 ms a frame | M4 G11 |
+| A textured glTF scene against Cycles | 0.43% error; 1.5 ms a warm frame | M6 G1 |
+| Three colored lights over the field | 1.22% from Cycles; flights 14–15 ms | M5 G6 |
+| Point and spot lights | 1.35% from Cycles | M5 G8 |
+| One bounce of light | 1.79% from Cycles (7.09% without it) | M10 G1 |
+| Moving objects among a million | 1.06–1.09× a still frame, never stale | M9 G1 |
+| Changing a light's color | free and exact: nothing is re-computed | M5 G6 |
+
+## What it can do today
+
+- **Lights:** rectangular area lights, suns, point and spot lights with a
+  size, up to 16 of them, colored, re-colorable for free.
+- **Sky:** a uniform sky, or an environment image (`.hdr`, `.png`).
+- **Materials:** glTF metallic-roughness with glossy reflections, normal
+  maps, emission (which lights its surroundings), emissive textures, vertex
+  colors, alpha cutouts, alpha blending for glass, double-sided faces,
+  texture transforms and wrap modes.
+- **One bounce of indirect light**, in the cache.
+- **Moving objects**, exactly, in the same frame; glTF animations play
+  through them.
+- **glTF 2.0** import and export, with cameras, lights and animations.
+- **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
+  entities moving its objects.
+- **Viewer:** fly through the showcase, the boulder field, or your own file.
+
+## Limits
+
+Honest about where it stands:
+
+- **Measured on Apple Silicon (Metal) only.** CI checks correctness on Linux
+  (Vulkan, software adapter) and that the shaders compile for Windows
+  (DX12). NVIDIA, AMD and real Windows GPUs are untested.
+- **One ray per pixel,** so distant detail aliases (shimmering far away).
+- **The sky warms up slowly** in the cache: a new view takes 120–300
+  frames to come within 5% of its full sky light.
+- **Rigid motion only:** no skinned or morphing meshes yet.
+- **Bounce light** is one bounce, and not yet with moving objects.
+- **Transparency** needs hardware ray queries.
+- **Fanless laptops** slow down under minutes of sustained load.
+
+## Try it
+
+You need [Rust](https://rustup.rs) and a GPU wgpu supports.
 
 ```bash
 cargo run --release -p viewer
 ```
 
-Fly through the showcase: a gallery with a colonnade, an arch and a torus-knot
-sculpture, lit by one skylight, with a bouncing ball and a spinning cube.
-
-Controls:
-
-- WASD to move, Q/E down and up, Shift to move faster.
-- Drag with the left mouse button to look.
-- C plays the camera path, P pauses the moving objects.
-- `[` and `]` change the exposure a stop at a time (field and glTF scenes;
-  `--exposure K` starts at K).
-- V toggles vsync, Esc quits.
-
-The title bar shows the frame rate. `--scene room` opens the M2 test room
-instead.
-
-### The million-boulder field
+That flies through the showcase. Other scenes:
 
 ```bash
 cargo run --release -p viewer -- --scene field --scale 2
 ```
 
-This is a 2 km plain with 1,000,000 instanced copies of a 9,800-triangle
-boulder: about ten billion triangles in 152 MB of GPU memory. It is lit by a
-sun-sized light through a view-dependent lighting cache (M4 gate 8):
-
-- Pages of texels are allocated on the surfaces you look at, coarser with
-  distance.
-- They are baked with mask cones, at most 20,000 per frame, and kept while
-  they stay in view.
-- Shading a warm view costs 2–3 ms.
-
-Flags:
-
-- `--boulders N` changes the count.
-- `--scale N` renders at 1/N of the window.
-- `--no-cache` lights every pixel with its own mask cone every frame, as
-  before.
-- `--sky` adds a blue-white sky. Frames keep their rate (flights average
-  14.8 ms with sun and sky, M5 gate 5), but sky light converges slowly.
-  Pages bake their lights first and their sky later, so a view comes within
-  5% of its warm image in 120–300 frames, and is warm in 1,200–2,600 at a
-  fixed budget (M5 gate 9).
-- `--env sky.hdr` (or a `.png`) lights the scene with an equirectangular
-  environment image instead (an HDRI, in Blender's orientation;
-  `--env-strength K` scales it), and `--env gradient` with a
-  horizon-to-zenith gradient (1.37% from Cycles, M5 gate 12). Rays that miss
-  see the image in 8 bits below its peak, so a sun belongs in a light.
-
-Scenes can have several colored rectangular lights (`Renderer::new` takes a
-list). The cache stores light per unit
-radiance, so `set_light_radiance` re-colors a light with no bake. Three
-lights on the field, a warm sun, a cool fill and an orange lamp, are within
-1.2% of Cycles, and flights over them average 14–15 ms (M5 gate 6).
-
-Texels store each light's shadowed share of its unshadowed light, and each
-pixel applies its own normal (M5 gate 7). This halves the cache's error
-against per-pixel cones.
-
-Point lights with a size and spot lights (glTF's falloff) work too, per
-pixel and cached. A night scene lit by both is 1.35% from Cycles (M5
-gate 8).
-
-On the fanless M4 Air, flights with several lights hold 13–15 ms while the
-machine is cool. After minutes of load the GPU slows, and they take 20 ms or
-more (M5 gate 8).
-
-### Your own scenes (glTF)
-
-`continuum_gltf::load` imports glTF 2.0 files (`.gltf`, `.glb`) as instanced
-scenes:
-
-- meshes and node instances;
-- base color factors and textures, sampled per pixel at the pixel's
-  footprint;
-- automatic charts for the lighting cache;
-- punctual lights (`KHR_lights_punctual`): point, spot and directional.
-
-A textured scene imported this way is within 0.43% of Cycles with the same
-textures, and a warm 720p frame takes 1.5 ms (M6 gate 1). Metallic and
-roughness factors, emission and normal maps are imported too (normal maps
-3.63% from Cycles, M10 gate 5; metallic-roughness 5.85%, M10 gate 10),
-with metallic-roughness and emissive textures (6.35%, M10 gate 15). Alpha
-masks are cut into geometry (3.29% from Cycles, M10 gate 7), and BLEND
-materials are blended (4.71%, M10 gate 16). Double-sided materials become
-exactly back-to-back faces (M10 gates 8–9). `KHR_texture_transform` is
-applied to the texture coordinates, as Blender's importer applies it (one
-transform per primitive: a slot with another is skipped). Vertex colors
-(`COLOR_0`) multiply the base color (1.29% from Cycles, 1.00× the frame,
-M10 gates 17–18), and samplers clamp or mirror (2.18%, M10 gate 20).
-Saving writes materials back, with emissive textures, blending, vertex
-colors and samplers.
-
 ```bash
-cargo run --release -p viewer -- --gltf scene.glb
+cargo run --release -p viewer -- --gltf your-scene.glb
 ```
 
-This flies through a file in real time:
+Controls: WASD to move, Q/E down and up, Shift to move faster, drag to look,
+P to pause moving objects and animations, `[` and `]` for exposure, V for
+vsync, Esc to quit.
 
-- lit by the file's own lights, or else a sun 30° up (`--sky` adds the sky,
-  `--env` an environment image);
-- seen from the file's camera, or from one framed around the scene;
-- standing on a grey ground (`--no-ground` leaves it out);
-- playing the file's first animation, if it has one (P pauses; node
-  translation and rotation; not with a sky, which movers do not mix with
-  yet).
+## Use it
 
-`--scale N` and `--no-cache` work as for the field.
+As a library, the front door is `continuum_gpu::Renderer`: give it a scene
+(geometry and placements, or a glTF file through `continuum_gltf::load`),
+lights and a camera, and it renders into your texture.
+[docs/GUIDE.md](docs/GUIDE.md) walks through it, and the API reference is
+`cargo doc --no-deps -p continuum-gpu -p continuum-gltf --open`.
+
+In Bevy:
+
+```rust
+use bevy::prelude::*;
+use bevy_continuum::{ContinuumCamera, ContinuumPlugin, ContinuumScene};
+
+App::new()
+    .add_plugins((DefaultPlugins, ContinuumPlugin))
+    .insert_resource(my_continuum_scene())
+    .add_systems(Startup, |mut commands: Commands| {
+        commands.spawn((Camera3d::default(), bevy::camera::Hdr, ContinuumCamera));
+    })
+    .run();
+```
+
+```bash
+cargo run --release -p bevy_continuum --example boxes
+```
+
+## How it was built
+
+The design and an honest status live in [docs/DESIGN.md](docs/DESIGN.md)
+(§3.6 for where it stands, §3.8 for what is next). Work proceeds in
+milestones of gates: M0 tested the core bets in 2D, M1 in 3D on the CPU,
+and M2 onward on the GPU.
+
+**Ideas it builds on.** Cone tracing (Amanatides 1984), coverage masks
+(Carpenter's A-buffer, 1984), voxel cone tracing (Crassin et al. 2011),
+prefiltered occlusion for aggregate geometry (Lacewell et al. 2008), the
+render cache (Walter et al. 1999) and incremental global illumination
+(Drettakis & Sillion 1997). We believe combining exact cone coverage with
+caches that are recomputed only when an answer could have changed by a
+bounded amount is new, but a full literature check is still to come
+([DESIGN §9](docs/DESIGN.md)).
+
+## License
+
+Continuum is source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE.md): free for personal,
+research, educational and other noncommercial use. Commercial use needs a
+separate license from Penumbral Labs; open an issue to ask. Files under
+`third_party/` keep their own licenses (MIT or Apache-2.0).
+
+---
+
+## For developers
+
+<details>
+<summary><b>The viewer in detail</b></summary>
+
+```bash
+cargo run --release -p viewer
+```
+
+Flies through the showcase: a gallery with a colonnade, an arch and a
+torus-knot sculpture, lit by one skylight, with a bouncing ball and a
+spinning cube. `--scene room` opens the M2 test room. C plays the camera
+path.
+
+**The million-boulder field** (`--scene field`): a 2 km plain with
+1,000,000 instanced copies of a 9,800-triangle boulder, about ten billion
+triangles in 152 MB of GPU memory, lit through a view-dependent lighting
+cache (M4 gate 8). Pages of texels are allocated on the surfaces you look
+at, coarser with distance, baked with mask cones within a frame budget, and
+kept while they stay in view.
+
+- `--boulders N` changes the count; `--scale N` renders at 1/N of the
+  window; `--no-cache` lights every pixel with its own cone every frame.
+- `--sky` adds a blue-white sky. Pages bake their lights first and their
+  sky later, so a view comes within 5% of its warm image in 120–300 frames
+  (M5 gate 9).
+- `--env sky.hdr` (or a `.png`, or `gradient`) lights the scene with an
+  equirectangular environment image in Blender's orientation;
+  `--env-strength K` scales it (1.37% from Cycles, M5 gate 12).
+- `--exposure K` sets the starting exposure.
+
+**Your own glTF files** (`--gltf scene.glb`): lit by the file's own lights,
+or else a sun (`--sky` and `--env` add a sky); seen from the file's camera
+or one framed around the scene; on a grey ground (`--no-ground` leaves it
+out); playing the file's first animation (not with a sky yet).
+`--emitters-as-lights` makes emissive rectangles area lights
+(experimental, M10 gate 23).
 
 To render a file to an image:
 
@@ -166,146 +300,91 @@ To render a file to an image:
 cargo run --release -p continuum-gltf --example render -- scene.glb out.png
 ```
 
-The same in code, through the library's `Renderer`, is in
-[docs/GUIDE.md](docs/GUIDE.md).
+</details>
 
-Measured offscreen at 1280×720 with hardware rays (M4 gate 11):
+<details>
+<summary><b>glTF support</b></summary>
 
-- Warm views take 6.5–8 ms per frame.
-- A 600-frame flight from standing height to 150 m averages 14.6–15.0 ms,
-  with 99th-percentile frames under 33 ms.
-- The bake follows a 14 ms frame target. While flying, lighting comes from
-  coarser pages (softer shadows) and sharpens when the view settles.
-- The far field aliases, with one ray per pixel.
+`continuum_gltf::load` imports glTF 2.0 (`.gltf`, `.glb`) as instanced
+scenes: meshes and node instances; base color factors and textures, sampled
+at each pixel's footprint; metallic-roughness factors and textures (5.85%
+from Cycles, M10 gate 10); normal maps (3.63%, M10 gate 5); emission and
+emissive textures (6.35%, M10 gate 15); alpha MASK cut into geometry
+(3.29%, M10 gate 7) and BLEND as blending (4.71%, M10 gate 16);
+double-sided materials as exactly back-to-back faces (M10 gates 8–9);
+`KHR_texture_transform`, as Blender's importer applies it; vertex colors
+(1.29%, M10 gates 17–18); sampler wrap modes (2.18%, M10 gate 20);
+`KHR_lights_punctual`; cameras; and node animations (translation and
+rotation). `continuum_gltf::save` writes scenes back, with their materials.
+A textured scene imported this way is within 0.43% of Cycles with the same
+textures (M6 gate 1).
 
-Pixel-footprint cones are planned for the aliasing. Getting these numbers
-needed a small patch to wgpu-core (`third_party/README.md`).
+</details>
 
-![A million boulders](docs/images/m4-gate2-million-boulders.png)
+<details>
+<summary><b>Comparing with other renderers</b></summary>
 
-How it renders:
+- `cargo run --release -p room3d --bin export_showcase` writes the showcase
+  to `experiments/room3d/out/showcase/`, ready to rebuild in another
+  renderer: `showcase.obj` (Z up, meters, per-vertex normals) and
+  `showcase.json` (albedos, the light, the camera path and movers). Use
+  non-metallic, fully rough materials with no specular and a fixed
+  exposure, so differences come from lighting.
+- The Cycles references are rendered by the gates themselves
+  (`experiments/room3d/cycles/`); they need Blender 4.2 or later (set
+  `BLENDER` if it is not in `/Applications`).
+  `cargo run --release -p room3d --bin cycles_calibration` checks the
+  pipeline on a scene with a known answer.
+- `cargo run --release -p room3d --bin bench` repeats the gates' timings in
+  one headless run, to compare GPUs (`docs/BENCHMARK.md`;
+  `docs/results/bench-m4.md` holds the M4 baseline).
 
-- Direct light from the area light is baked at startup into a world-space
-  lighting cache: one mask cone per texel, on every mesh's charts.
-- Each frame is a camera ray per pixel plus a cache lookup.
-- When objects move, each frame re-bakes exactly the cache blocks they can
-  reach, adding only the moving meshes to each texel's cached static coverage.
-  Their soft shadows match a full re-bake (M2 gate 5).
-- Probes add one bounce of indirect light. Each caches which static surface it
-  sees in 768 directions and re-gathers their radiance every frame (M2 gate
-  6). Probes on the moving objects are traced from scratch.
+</details>
 
-On an M4 MacBook Air, on battery, it runs at about 21 ms per frame at
-2560×1440. At 1080p the frame is 17.8 ms, just over the 16.7 ms target
-(M3 gate 3).
+<details>
+<summary><b>Repository layout</b></summary>
 
-![Continuum (left), Cycles at 4096 samples per pixel (middle), difference ×4 (right)](docs/images/m3-gate3-vs-cycles.png)
-
-The same frame from Continuum and from Cycles, configured to compute the same
-thing (Lambertian materials, direct light plus one diffuse bounce): 3.8%
-relative RMSE (M3 gate 3).
-
-## Comparing with other renderers
-
-- `cargo run --release -p room3d --bin export_showcase` writes the showcase to
-  `experiments/room3d/out/showcase/`, ready to rebuild in another renderer (for
-  a UE5 side-by-side, for example):
-  - `showcase.obj`: one object per mesh, Z up, meters, per-vertex normals.
-  - `showcase.json`: linear albedos, the light (a one-sided rectangle with its
-    radiance), and the camera path and movers sampled every 30 frames.
-  - When rebuilding it, use non-metallic, fully rough materials with no
-    specular, and fix exposure (no auto-exposure), so differences come from
-    lighting.
-- `cargo run --release -p room3d --bin cycles_calibration` checks the Cycles
-  pipeline on a scene with a known answer. The M3 gate 3 binary renders the
-  references itself. Both need Blender 4.2 or later; set `BLENDER` if it is
-  not in `/Applications`.
-
-## Layout
-
-- `crates/continuum`: the library: direction masks (binary and continuous), the
-  error ledger, 3D pyramid cones with exact per-bin rasterization, a BVH, and
-  meshes with charts and smooth normals (`mesh::Surface`).
-- `crates/continuum-gpu`: wgpu compute backend: `Renderer` (the library's
-  front door), mask cones in WGSL, the lighting caches, the live renderer.
+- `crates/continuum`: the core: direction masks (binary and continuous),
+  the error ledger, 3D cones, a BVH, meshes with charts.
+- `crates/continuum-gpu`: the wgpu compute backend: `Renderer` (the
+  library's front door), mask cones in WGSL, the lighting caches.
 - `crates/continuum-gltf`: glTF 2.0 import and export, and the `render`
   example.
-- `crates/bevy_continuum`: a Bevy 0.20 plugin (a camera's view rendered by
-  Continuum) and the `boxes` example.
-- `apps/viewer`: the real-time viewer (instanced scenes through `Renderer`,
-  the showcase and the room through the live renderer).
-- `experiments/flatland`: 2D experiments that test the core bets (milestone M0).
-- `experiments/room3d`: 3D experiments on triangle scenes (milestones M1–M3),
-  the showcase scene, and the Cycles reference pipeline (`cycles/`).
-- `docs/`: design document and experiment results.
+- `crates/bevy_continuum`: the Bevy 0.20 plugin and the `boxes` example.
+- `apps/viewer`: the real-time viewer.
+- `experiments/flatland`: the 2D experiments that tested the core bets
+  (M0).
+- `experiments/room3d`: the 3D experiments and gates
+  (`src/bin/m<milestone>_gate<n>.rs`), test scenes, and the Cycles
+  pipeline.
+- `docs/`: the design document, the guide, and every result.
+- `scripts/`: the README's diagrams (`readme_diagrams.py`) and GIFs
+  (`make_gif.py`, from frames written by the `readme_media` binary).
+- `third_party/`: a small patch to wgpu-core (see its README).
 
-## Running
+</details>
 
-To compare GPUs, `cargo run --release -p room3d --bin bench` repeats the
-gates' timing measurements in one headless run; `docs/BENCHMARK.md` covers
-running it on a rented NVIDIA GPU, and `docs/results/bench-m4.md` holds the
-M4 baseline.
+<details>
+<summary><b>Running the tests and gates</b></summary>
 
 ```bash
 cargo test --release
-cargo run --release -p flatland --bin gate1
-cargo run --release -p flatland --bin ledger
-cargo run --release -p flatland --bin gate4
-cargo run --release -p flatland --bin gate5
-cargo run --release -p flatland --bin gate6
-cargo run --release -p flatland --bin gate6b
-cargo run --release -p flatland --bin gate7
-cargo run --release -p room3d --bin m1_gate1
-cargo run --release -p room3d --bin m1_gate2
-cargo run --release -p room3d --bin m1_gate3
-cargo run --release -p room3d --bin m1_gate4
-cargo run --release -p room3d --bin render
-cargo run --release -p room3d --bin m2_gate1
-cargo run --release -p room3d --bin render_gpu
-cargo run --release -p room3d --bin m2_gate2
-cargo run --release -p room3d --bin m2_gate3 -- capture   # once, before kernel changes
-cargo run --release -p room3d --bin m2_gate3
-cargo run --release -p room3d --bin m2_gate4
-cargo run --release -p room3d --bin m2_gate5
-cargo run --release -p room3d --bin m2_gate6
-cargo run --release -p room3d --bin render_indirect   # side-by-side image
-cargo run --release -p room3d --bin m3_gate1
-cargo run --release -p room3d --bin m3_gate2
-cargo run --release -p room3d --bin m3_gate3           # needs Blender
-cargo run --release -p room3d --bin render_showcase    # three frames of the path
-cargo run --release -p room3d --bin m4_gate1
-cargo run --release -p room3d --bin m4_gate2
-cargo run --release -p room3d --bin m4_gate3
-cargo run --release -p room3d --bin m4_gate4
-cargo run --release -p room3d --bin m4_gate5
-cargo run --release -p room3d --bin render_field -- 1000000 1920 1080
 ```
 
-Later gates follow the same pattern:
-`cargo run --release -p room3d --bin m<milestone>_gate<n>`. M5 gates 1–8,
-M6 gate 1 and M7 gate 1 (pixel cones for anti-aliasing, failed) are the
-latest, with results in `docs/results/`.
+Each gate is a binary that prints its verdict and writes its images to
+`experiments/<crate>/out/`:
 
-![GPU render at 1080p](docs/images/m2-gpu-render-1080p.png)
+```bash
+cargo run --release -p flatland --bin gate1
+cargo run --release -p room3d --bin m3_gate3        # needs Blender
+cargo run --release -p room3d --bin m10_gate20      # needs Blender
+```
 
-The same scene rendered on the GPU at 1080p (Apple M4, 189 ms, brute force with
-no hierarchy yet; see `docs/results/m2-gpu-render.md`).
+The pattern is `cargo run --release -p room3d --bin m<milestone>_gate<n>`;
+results are in `docs/results/`, one file per gate. Early milestones (M0–M4)
+are described in `docs/DESIGN.md` §3.5 and §6, with images in
+`docs/images/`.
 
-![First 3D render](docs/images/m1-first-render.png)
+</details>
 
-First 3D render (direct light only, CPU, 480×360). Left: mask cones,
-deterministic and noise-free. Right: 16 jittered light samples per pixel at
-about the same cost. Shadows are black because there is no indirect light yet.
-
-Each run prints a results table and writes images to `experiments/flatland/out/`:
-
-- `sheet.png` (gate 1): top row renders, bottom row signed error maps (red too
-  dark, blue too bright).
-- `ledger_<scenario>.png` (gates 2–3): one row per key frame; columns are the
-  lit result, tiles recomputed that frame (orange), the certified error bound,
-  and the actual error. `_stress` versions use a deliberately huge ε so the
-  bound and error columns have something to show.
-- `gate5_<visibility>_<charging>.png` (gate 5): the same four columns for the
-  sky scenario at ε = 1%.
-- `gate6_bounce.png` (gate 6): the same four columns for one-bounce indirect
-  light (attempt 3 charges, ε = 1%).
+<p align="center"><sub>Continuum is made by Penumbral Labs.</sub></p>

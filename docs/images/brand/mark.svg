@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160" role="img" aria-label="Penumbral Labs">
+  <defs>
+    <radialGradient id="sun" cx="40%" cy="38%" r="70%">
+      <stop offset="0" stop-color="#FFE9A8"/>
+      <stop offset="0.55" stop-color="#FFC15E"/>
+      <stop offset="1" stop-color="#F28A2E"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <clipPath id="disk"><circle cx="80" cy="80" r="56"/></clipPath>
+  </defs>
+  <!-- The light, partly hidden by a soft-edged occluder: a penumbra. -->
+  <circle cx="80" cy="80" r="56" fill="url(#sun)"/>
+  <g clip-path="url(#disk)">
+    <circle cx="122" cy="62" r="46" fill="#171A22" filter="url(#soft)"/>
+  </g>
+  <circle cx="80" cy="80" r="56" fill="none" stroke="#171A22" stroke-opacity="0.18" stroke-width="2"/>
+  </svg>

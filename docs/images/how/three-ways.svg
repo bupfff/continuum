@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="330" viewBox="0 0 900 330" role="img" aria-label="Three ways to get a soft shadow">
+<title>Three ways to get a soft shadow</title>
+<rect width="900" height="330" rx="14" fill="#0f141c"/>
+<text x="24" y="34" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#f2eee6" text-anchor="start">Shadow map</text>
+<text x="24" y="54" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Most real-time engines</text>
+<rect x="90" y="80" width="120" height="8" rx="3" fill="#ffc15e"/>
+<rect x="128" y="150" width="44" height="9" rx="2" fill="#5b6577"/>
+<line x1="30" y1="236" x2="270" y2="236" stroke="#a9aeb8" stroke-opacity="0.5"/>
+<circle cx="165" cy="236" r="5" fill="#f2eee6"/>
+<text x="324" y="34" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#f2eee6" text-anchor="start">Sampled rays</text>
+<text x="324" y="54" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Ray-traced shadows</text>
+<rect x="390" y="80" width="120" height="8" rx="3" fill="#ffc15e"/>
+<rect x="428" y="150" width="44" height="9" rx="2" fill="#5b6577"/>
+<line x1="330" y1="236" x2="570" y2="236" stroke="#a9aeb8" stroke-opacity="0.5"/>
+<circle cx="465" cy="236" r="5" fill="#f2eee6"/>
+<text x="624" y="34" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#f2eee6" text-anchor="start">Mask cone</text>
+<text x="624" y="54" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Continuum</text>
+<rect x="690" y="80" width="120" height="8" rx="3" fill="#ffc15e"/>
+<rect x="728" y="150" width="44" height="9" rx="2" fill="#5b6577"/>
+<line x1="630" y1="236" x2="870" y2="236" stroke="#a9aeb8" stroke-opacity="0.5"/>
+<circle cx="765" cy="236" r="5" fill="#f2eee6"/>
+<rect x="96.0" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="109.5" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="123.0" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="136.5" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="150.0" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="163.5" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="177.0" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="190.5" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<rect x="204.0" y="100" width="11" height="11" fill="none" stroke="#a9aeb8" stroke-opacity="0.6"/>
+<line x1="150" y1="84" x2="165" y2="236" stroke="#ffc15e" stroke-opacity="0.6" stroke-dasharray="4 4"/>
+<text x="24" y="270" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">One depth picture from the light; the soft</text>
+<text x="24" y="288" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">edge is a blur, so its width is a guess.</text>
+<text x="24" y="306" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Fast. Leaks and shimmers at distance.</text>
+<line x1="465" y1="236" x2="395.9" y2="88" stroke="#ffc15e" stroke-opacity="0.75" stroke-width="1.6"/>
+<line x1="465" y1="236" x2="435.0" y2="154" stroke="#e5674e" stroke-width="1.6"/>
+<line x1="465" y1="236" x2="445.5" y2="154" stroke="#e5674e" stroke-width="1.6"/>
+<line x1="465" y1="236" x2="450.8" y2="154" stroke="#e5674e" stroke-width="1.6"/>
+<line x1="465" y1="236" x2="461.1" y2="154" stroke="#e5674e" stroke-width="1.6"/>
+<line x1="465" y1="236" x2="468.4" y2="154" stroke="#e5674e" stroke-width="1.6"/>
+<line x1="465" y1="236" x2="483.5" y2="88" stroke="#ffc15e" stroke-opacity="0.75" stroke-width="1.6"/>
+<line x1="465" y1="236" x2="502.6" y2="88" stroke="#ffc15e" stroke-opacity="0.75" stroke-width="1.6"/>
+<text x="324" y="270" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">A few random rays per pixel, then a</text>
+<text x="324" y="288" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">denoiser and past frames to hide the noise.</text>
+<text x="324" y="306" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Accurate in the limit. Lag and smearing.</text>
+<polygon points="765,236 690,88 810,88" fill="#ffc15e" fill-opacity="0.12" stroke="#ffc15e" stroke-opacity="0.5"/>
+<rect x="814" y="104" width="7" height="30" fill="#ffc15e"/>
+<rect x="822" y="104" width="7" height="30" fill="#ffc15e"/>
+<rect x="830" y="104" width="7" height="30" fill="#5b6577"/>
+<rect x="838" y="104" width="7" height="30" fill="#5b6577"/>
+<rect x="846" y="104" width="7" height="30" fill="#5b6577"/>
+<rect x="854" y="104" width="7" height="30" fill="#ffc15e"/>
+<rect x="862" y="104" width="7" height="30" fill="#ffc15e"/>
+<rect x="870" y="104" width="7" height="30" fill="#ffc15e"/>
+<text x="826" y="150" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#a9aeb8" text-anchor="start">bits</text>
+<text x="624" y="270" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">One cone covers the whole light; what blocks</text>
+<text x="624" y="288" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">it is recorded as bits. The open share is the</text>
+<text x="624" y="306" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">light that arrives: no blur, no noise.</text>
+</svg>

@@ -31,6 +31,11 @@
   - **Viewer:** `apps/viewer` (`cargo run --release -p viewer -- --scene
     field --scale 2`).
   - **Patched wgpu-core:** `third_party/` (see its README).
+  - **README media:** diagrams from `scripts/readme_diagrams.py`
+    (`docs/images/how/`), GIFs from the `readme_media` binary's frames
+    through `scripts/make_gif.py`, Cycles comparisons in
+    `docs/images/compare/`, the logo in `docs/images/brand/`. License:
+    PolyForm Noncommercial 1.0.0 (`LICENSE.md`), by Penumbral Labs.
 - Gate workflow:
   1. Write the gate's binary as a stub whose doc comment states the pass
      criterion, and commit it before implementing or running.

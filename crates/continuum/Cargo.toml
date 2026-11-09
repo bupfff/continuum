@@ -3,6 +3,7 @@ name = "continuum"
 description = "Certified incremental cone rendering."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 glam = "0.34.1"

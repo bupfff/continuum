@@ -5,6 +5,7 @@ members = ["apps/viewer", "crates/bevy_continuum", "crates/continuum", "crates/c
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [profile.release]
 debug = 1 # keep symbols so profilers can attribute time

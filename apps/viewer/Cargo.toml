@@ -3,6 +3,7 @@ name = "viewer"
 description = "Real-time Continuum viewer: fly through a scene lit by mask cones."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
