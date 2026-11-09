@@ -17,6 +17,7 @@
 //!   nodes front area / silhouette), with no bins;
 //! - a larger box is opened; a triangle larger than a pixel adds the exact
 //!   area of the pixel it covers (front faces only).
+//!
 //! Within an object, contributions add (its front faces do not overlap) up
 //! to 1; objects combine as independent occluders. The walk stops once the
 //! pixel is covered. Boxes crossing the eye's near plane are opened down to
