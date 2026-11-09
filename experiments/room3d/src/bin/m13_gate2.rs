@@ -218,8 +218,8 @@ fn main() -> std::io::Result<()> {
                 .iter_mut()
                 .zip(frame(&mut r, camera, &view_target))
             {
-                for c in 0..3 {
-                    s[c] += p[0] / 256.0;
+                for v in s.iter_mut() {
+                    *v += p[0] / 256.0;
                 }
             }
         }
