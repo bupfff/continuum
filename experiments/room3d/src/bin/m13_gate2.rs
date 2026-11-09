@@ -45,6 +45,7 @@
 //! 2. **Speed:** the coverage pass at most 10 ms a frame at 1280×720 (median
 //!    of 10 frames each waited for), leaving room for shading within a
 //!    60 Hz frame.
+//!
 //! Reported: nodes and triangles per pixel.
 //!
 //! `cargo run --release -p room3d --bin m13_gate2`

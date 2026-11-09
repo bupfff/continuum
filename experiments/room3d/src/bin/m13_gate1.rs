@@ -34,6 +34,7 @@
 //! 2. **Speed:** the coverage pass at most 16.7 ms a frame at 1280×720
 //!    (median of 10 frames each waited for, hardware or compute as the
 //!    kernel chooses; the pass alone, no shading).
+//!
 //! Reported: work per pixel (object nodes, meshes entered, triangle nodes),
 //! and the same with M7 gate 1's threshold (one bin) for contrast.
 //!
@@ -73,7 +74,12 @@ fn target(kernel: &MaskConeKernel) -> wgpu::TextureView {
 
 /// A per-pixel renderer through the pixel-cone entry point, with the
 /// kernel's profile stage and prefilter as set.
-fn renderer(kernel: &MaskConeKernel, field: &Field, origin: DVec3, lights: &[Light]) -> InstancedRenderer {
+fn renderer(
+    kernel: &MaskConeKernel,
+    field: &Field,
+    origin: DVec3,
+    lights: &[Light],
+) -> InstancedRenderer {
     kernel.set_pixel_cones(true);
     let r = InstancedRenderer::new_lights(
         kernel,
@@ -174,9 +180,15 @@ fn main() -> std::io::Result<()> {
         let one = gray(&frame(&mut r, camera, &view_target));
         let mut reference = vec![[0.0f32; 3]; (W * H) as usize];
         for k in 0..256 {
-            let (dx, dy) = (((k % 16) as f32 + 0.5) / 16.0 - 0.5, ((k / 16) as f32 + 0.5) / 16.0 - 0.5);
+            let (dx, dy) = (
+                ((k % 16) as f32 + 0.5) / 16.0 - 0.5,
+                ((k / 16) as f32 + 0.5) / 16.0 - 0.5,
+            );
             r.set_pixel_offset(dx, dy);
-            for (s, p) in reference.iter_mut().zip(frame(&mut r, camera, &view_target)) {
+            for (s, p) in reference
+                .iter_mut()
+                .zip(frame(&mut r, camera, &view_target))
+            {
                 for c in 0..3 {
                     s[c] += p[0] / 256.0;
                 }
@@ -189,7 +201,8 @@ fn main() -> std::io::Result<()> {
         let c1 = e_ours <= 0.5 * e_one;
         let c2 = ours_ms <= 16.7;
         pass &= c1 && c2;
-        let mean_cov = |px: &[[f32; 3]]| px.iter().map(|p| p[0] as f64).sum::<f64>() / px.len() as f64;
+        let mean_cov =
+            |px: &[[f32; 3]]| px.iter().map(|p| p[0] as f64).sum::<f64>() / px.len() as f64;
         say(format!(
             "{name}: 1. coverage {:.2}% from the reference, one ray {:.2}% ({:.3}×, at most 0.5×): {}; 2. {:.2} ms a frame (at most 16.7): {}; mean coverage: reference {:.4}, ours {:.4}, one ray {:.4}",
             100.0 * e_ours,
@@ -213,7 +226,14 @@ fn main() -> std::io::Result<()> {
             let took = start.elapsed();
             let mean = |c: usize| px.iter().map(|p| p[c] as f64).sum::<f64>() / px.len() as f64;
             let max = |c: usize| px.iter().map(|p| p[c]).fold(0.0f32, f32::max);
-            work.push((bins, mean(1), mean(2), max(2), ms(took), relative_rmse(&gray(&px), &reference)));
+            work.push((
+                bins,
+                mean(1),
+                mean(2),
+                max(2),
+                ms(took),
+                relative_rmse(&gray(&px), &reference),
+            ));
         }
         counting.set_profile_stage(0);
         for (bins, objects, tri_nodes, tri_max, took, err) in work {
