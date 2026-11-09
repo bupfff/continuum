@@ -35,6 +35,10 @@
     coverage maps; `mask_cones.wgsl` sections "M13 gate 2/3/4" and
     `hw_visibility.wgsl`'s `hw_m13_*` read them; profile stages 10–16
     select the diagnostic paths (DESIGN §3.8, working notes).
+  - **Streamed geometry (M14):** `stream.rs` (camera levels, the pool,
+    the policy) and `stream.wgsl` (the feedback pass); `cam_tri` in
+    `hw_visibility.wgsl`; the rock field `room3d::rocks`; `stream_dev`
+    sizes a view's working set before choosing a budget.
   - **README media:** diagrams from `scripts/readme_diagrams.py`
     (`docs/images/how/`), GIFs from the `readme_media` binary's frames
     through `scripts/make_gif.py`, Cycles comparisons in

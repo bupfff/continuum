@@ -300,6 +300,23 @@ For a window, see `apps/viewer`, which flies through a file with
     them still.
   - Rigid motion only (the scale stays). With the cache, not yet with a
     sky.
+- **Streamed detail (experimental, M14 gate 1).** Give a geometry finer
+  *camera levels* in `InstancedScene::geometry_levels` (a `Levels`: each
+  `Level` a `Surface` in the geometry's own charts, with its largest
+  distance from the finest level), and set `RendererOptions::streaming` to
+  a `StreamOptions` (a triangle budget, the pixel error allowed).
+  - Camera rays see each geometry at the finest level loaded; levels load
+    as the view needs them (each object gets the coarsest level within
+    `pixel_error` pixels at its distance) and the least recently seen are
+    evicted, never over the budget. The geometry itself stays what
+    lighting sees, and what the camera sees until a level arrives.
+  - Measured: a scene 6.35× the budget settles to within a tenth of one
+    ray's coverage error of everything loaded, with 3.4× less GPU memory;
+    it costs 1.07–1.12× the frame time in flight, from loads
+    (`docs/results/m14-gate1.md`).
+  - Hardware camera rays only; not with movers, vertex colors, normal maps,
+    cutouts or blending on the levels. `Renderer::stream_stats` reports
+    what it did.
 
 ## Requirements
 

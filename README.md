@@ -186,15 +186,21 @@ Honest about where it stands:
 Core first: before more features, the fundamentals have to hold up at
 extreme scale and detail. In order:
 
-1. **Detail smaller than a pixel, without shimmer** (in progress). Each
+1. **Unique geometry at scale** (in progress): worlds bigger than GPU
+   memory, streamed by need. The first step works: each object's finer
+   versions load as the camera needs them, within a fixed budget. A field
+   of unique rocks 6.35× the budget looks within a tenth of
+   one-ray-per-pixel's error of having everything loaded, with 3.4× less
+   GPU memory. Streaming costs 7–12% of the frame time, a little over the
+   10% bar, from loading too often; lighting still sees each object's
+   coarse version.
+2. **Detail smaller than a pixel, without shimmer** (in progress). Each
    object type gets a small precomputed map of how it looks from every
    direction, and pixels read those instead of tracing every tiny
    surface. The accuracy question is answered: on the million-boulder
    field, about a fifth of one-ray-per-pixel's error from standing height
    and an eighth from 150 m up. Speed is not there yet (122–135 ms a frame
    on the laptop), so it is not in the renderer yet.
-2. **Unique geometry at scale:** worlds bigger than GPU memory, streamed
-   by need, with those maps standing in for what is not loaded.
 3. **Steady frame times, then the lighting fundamentals** (multiple
    bounces, faster sky warm-up).
 

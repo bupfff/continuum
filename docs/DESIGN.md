@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-09, after M13 gate 4)
+## 3.6 Where we stand (updated 2026-11-09, after M14 gate 1)
 
 Against the goal in §1, honestly:
 
@@ -141,6 +141,14 @@ Against the goal in §1, honestly:
     and sharpens when the view settles.
   - Hardware camera rays take about 2–3 ms. This needed a patched wgpu-core
     (`third_party/`).
+- **Unique geometry streamed (M14 G1, failed narrowly on speed).** Camera
+  levels of each geometry load by need into a fixed pool: a field of 256
+  unique rocks whose finest levels are 6.35× the budget settles to within
+  a tenth of one ray's coverage error of fully resident, with 3.4× less
+  GPU memory, at 1.07–1.12× the frame time (loads are too many and cost
+  about 1 ms each). Lighting still sees each geometry's always-resident
+  base level, and the scale is a mechanism test (16.6 million unique
+  triangles), not yet beyond memory.
 - **Measured against an independent path tracer** (Cycles, compared
   correctly: supersampled 4×4 against Cycles' area-integrated pixels):
   - sun and sky on an outdoor scene: 0.7–1.2% (M5 G2);
@@ -390,9 +398,9 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-09, fifth session)
+### 3.8 Next steps, in order (updated 2026-11-09, sixth session)
 
-**Start here (end of the fifth session, 2026-11-09).** The state in one
+**Start here (end of the sixth session, 2026-11-09).** The state in one
 place, for a new conversation:
 
 - **The user's direction: core first** (2026-11-08). Before more features,
@@ -411,7 +419,32 @@ place, for a new conversation:
   come through issues. The README was rebuilt for a wide audience (logo,
   explainer diagrams, engine GIFs, Cycles comparisons, an honest comparison
   of methods).
-- **M13, sub-pixel detail (item 1 below), this session:** coverage only so
+- **M14, unique geometry at scale (sixth session):** G1 streams *camera
+  levels* (`docs/results/m14-gate1.md`; code in
+  `crates/continuum-gpu/src/stream.rs` and `stream.wgsl`, the scene in
+  `room3d::rocks`, the gate `m14_gate1`, the sizing tool `stream_dev`):
+  - Each geometry may carry finer levels (`InstancedScene::
+    geometry_levels`); the geometry itself stays the lighting level
+    (always resident, what cones and the cache see, the camera's
+    stand-in). Hardware camera rays see the finest resident level; a
+    feedback pass picks the coarsest level within half a pixel per
+    object; the CPU loads by need into a buddy-allocated pool (after the
+    lighting triangles in every per-triangle buffer; a level's first
+    triangle in the object's transform's spare word), evicting the least
+    recently seen. `RendererOptions::streaming` exposes it.
+  - **Failed on frame rate in one flight of three** (1.124× the resident
+    frame against 1.10×; 1.074× and 1.085× in the others). Passed: 6.35×
+    the budget, never over it; settled coverage 0.062–0.096× one ray's
+    error; 0.013–0.029% of pixels differ in flight; 3.4× less GPU memory.
+  - The cost is loads: about half a load a frame (a third of the scene
+    per flight, though a view wants at most 1.9 of 16.6 million
+    triangles), about 1 ms each, worst frames 32 ms. The policy causes
+    them: levels loaded one by one as rocks approach, over-detailed rocks
+    evicted to their lighting level then reloaded, upgrades allocating
+    before freeing.
+  - Settled colour is 1.3–1.6% off: positional error does not bound the
+    normal's, so coarser levels shade smoother.
+- **M13, sub-pixel detail (item 2 below), fifth session:** coverage only so
   far, on the million-boulder field without its ground, against 16×16 rays
   per pixel (`docs/results/m13-gate1.md` … `m13-gate4.md`):
   - G1 (pixel cones prefiltered at the pixel, bins rasterized per node):
@@ -428,15 +461,17 @@ place, for a new conversation:
   - Appearance (color and light from the cache at maps and splats) is not
     started; coverage was the open question, and it is answered.
 - **Next, in order (the user agreed 2026-11-09):**
-  1. *Unique geometry at scale (M14).* The 10¹⁰ triangles so far are a
-     million copies of one boulder, all resident. Stream geometry (and its
-     hierarchy nodes) by need, with M13's coverage maps standing in for
-     what is not loaded, so a scene several times the memory budget flies
-     at frame rate. First gate to design: a field of many unique
-     geometries (generated variants) whose triangles exceed a set budget
-     several times; pass if flights hold frame rate within the budget and
-     coverage stays within a bound of the fully resident image. Shape the
-     stand-ins so M13's far-field work can share them.
+  1. *Unique geometry at scale (M14).* G1 streams camera levels (above).
+     Next, M14 G2: fewer, cheaper loads on G1's scene and criteria (load
+     the level wanted a moment ahead instead of each in turn; downgrade in
+     place instead of dropping to the lighting level; free before
+     allocating; spread structure builds), and bound the normal's error in
+     level choice. Then stream the lighting level by cone footprint (a
+     page whose cones need a missing subtree is retried when it arrives,
+     so the cache stays certified), and scale past memory: a reference
+     that does not need everything resident (visibility in subsets by
+     instance masks), object-group stand-ins for the far field (shared
+     with M13's maps).
   2. *M13's far field, for speed:* one walk shared by a tile of pixels
      (coherent loads; the horizon's long walk paid once per tile), or a
      coarser far field through the quality dial; then appearance (gate:
@@ -727,7 +762,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
 | M13 prefiltered appearance (core first, item 1) | Hierarchy nodes keep lit appearance; pixel cones stop at pixel-size nodes | Sub-pixel detail without aliasing, cost bounded by the screen. G1 coverage only (**failed**: from 150 m 0.38× one ray's coverage error, passing, but 1.2–2 s a frame, about 100× too slow: each node visit rasterizes into 8×8 bins; standing failed mostly on a flawed measure, buried boulder parts the ground hid in the reference only, `docs/results/m13-gate1.md`); G2 a scalar per-node test (**failed**: 257–281 ms a frame, about 26× over; accuracy 0.38× one ray's from 150 m, 0.59× standing, where one horizon row holds 84% of the error: independent splats saturate a pixel whose boulders all sit low in it, correlation that sub-pixel bins keep, `docs/results/m13-gate2.md`); G3 directional coverage maps and 4×4 bins (**failed** on speed only: accuracy **passes** both views, 0.264× one ray's error standing and 0.231× from 150 m; but 178–707 ms a frame, long tails where partly covered pixels never stop, `docs/results/m13-gate3.md`); G4 near surfaces by hardware rays at pixel corners and bins (**failed** on speed only: accuracy 0.218× and 0.132×; 122–135 ms against a 50 ms intermediate bar, the far field's walk left, `docs/results/m13-gate4.md`) |
-| M14 unique geometry at scale (core first, item 2) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate; not started |
+| M14 unique geometry at scale (core first, item 2) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate. G1 camera levels streamed by need (**failed** on frame rate in one flight of three: 256 unique rocks whose finest levels are 6.35× a 2.5M-triangle budget, never over it; settled coverage 0.062–0.096× one ray's error from fully resident, 0.013–0.029% of pixels differ in flight, 3.4× less GPU memory; but 1.074×, 1.085× and **1.124×** the resident frame against 1.10×, from about half a load a frame at about 1 ms each; settled colour 1.3–1.6% off, smoother normals at coarser levels, `docs/results/m14-gate1.md`) |
 
 ## 7. Benchmark protocol
 
