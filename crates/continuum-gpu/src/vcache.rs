@@ -354,7 +354,10 @@ struct ChartTables {
     cell_bounds: Vec<[Vec3; 2]>,
 }
 
-fn chart_tables(geometries: &[Surface]) -> ChartTables {
+/// Geometries from `skip` on (streamed lighting levels, M14 gate 5) keep
+/// their charts and cells, but list no triangles: their packages carry
+/// those.
+fn chart_tables(geometries: &[Surface], skip: usize) -> ChartTables {
     let mut t = ChartTables {
         charts: Vec::new(),
         cells: Vec::new(),
@@ -365,7 +368,7 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
         cell_bounds: Vec::new(),
     };
     let mut first_tri = 0u32;
-    for g in geometries {
+    for (index, g) in geometries.iter().enumerate() {
         assert_eq!(
             g.charts.len(),
             g.chart_grid.len(),
@@ -388,6 +391,14 @@ fn chart_tables(geometries: &[Surface]) -> ChartTables {
         // meet, shrunk by a thousandth of a cell so a parametric quad's two
         // triangles stay in their own cell.
         let mut lists: Vec<Vec<u32>> = vec![Vec::new(); t.cells.len() - first_cell];
+        if index >= skip {
+            // No triangles listed, and no boxes kept (`page_bounds` gives
+            // such pages an empty box).
+            for c in first_cell..t.cells.len() {
+                t.cells[c] = [0, 0];
+            }
+            continue;
+        }
         for (k, (uv, &chart)) in g.uv.iter().zip(&g.chart).enumerate() {
             let c = &t.charts[(first_chart + chart) as usize];
             let grid = Vec2::new(c.grid[0] as f32, c.grid[1] as f32);
@@ -836,7 +847,7 @@ pub(crate) struct VirtualCache {
     /// is resident (as the frame began); and this frame's wanted and pinned
     /// objects.
     lighting: bool,
-    lit_cells: Option<(crate::stream::LitCells, Vec<crate::stream::LitPackage>)>,
+    lit_cells: Option<crate::stream::LitCells>,
     lit_waiting: HashMap<u32, ([u32; 3], Vec<u32>, u32)>,
     /// Objects of pages released from waiting, pinned until the frame given
     /// (their re-bake comes two frames later).
@@ -975,98 +986,30 @@ impl VirtualCache {
             options.sky_sample_cost >= 1,
             "a sky sample costs at least 1"
         );
-        let mut tables = chart_tables(&scene.geometries);
+        let mut tables = chart_tables(&scene.geometries, lighting.map_or(usize::MAX, |l| l.first));
         let own = self_tables(scene, &tables, if sky { options.self_spacing } else { 0.0 });
-        // Lighting levels streamed (M14 gate 4): the streamed geometries'
-        // chart coordinates, charts and cell lists leave the tables for
-        // packages; their cells stay, empty until a level loads.
+        // Lighting levels streamed (M14 gates 4–5): the streamed geometries'
+        // chart coordinates, charts and cell lists come in packages; their
+        // cells stay, empty until a level loads.
         let lit_cells = lighting.map(|lay| {
             assert!(
                 !sky,
                 "streamed lighting levels with a sky are not supported yet"
             );
-            let count = scene.geometries.len();
-            let mut firsts = Vec::with_capacity(count);
-            let mut acc = 0usize;
-            for g in &scene.geometries {
-                firsts.push(acc);
-                acc += g.triangles.len();
-            }
-            let cells_of = |g: usize| {
-                let c0 = tables.first_chart[g] as usize;
-                let c1 = tables
-                    .first_chart
-                    .get(g + 1)
-                    .map_or(tables.charts.len(), |&c| c as usize);
-                let lo = tables
-                    .charts
-                    .get(c0)
-                    .map_or(tables.cells.len(), |c| c.first_cell as usize);
-                let hi = tables
-                    .charts
-                    .get(c1)
-                    .map_or(tables.cells.len(), |c| c.first_cell as usize);
-                (lo, hi)
-            };
-            let entry = |cell: usize| {
-                tables
-                    .cells
-                    .get(cell)
-                    .map_or(tables.cell_tris.len(), |c| c[0] as usize)
-            };
-            let static_cells = entry(cells_of(lay.first).0);
-            let mut slot_cells = 1usize;
-            let mut packages = Vec::with_capacity(count - lay.first);
-            let mut emptied = Vec::with_capacity(count - lay.first);
-            #[allow(clippy::needless_range_loop)]
-            for g in lay.first..count {
-                let (f, n) = (firsts[g], scene.geometries[g].triangles.len());
-                let (lo, hi) = cells_of(g);
-                let (e0, e1) = (
-                    entry(lo),
-                    if g + 1 < count {
-                        entry(cells_of(g + 1).0)
-                    } else {
-                        tables.cell_tris.len()
-                    },
-                );
-                slot_cells = slot_cells.max(e1 - e0);
-                packages.push(crate::stream::LitPackage {
-                    uv: tables.tri_uv[3 * f..3 * (f + n)].to_vec(),
-                    chart: tables.tri_chart[f..f + n].to_vec(),
-                    cells: (lo..hi)
-                        .map(|c| [c as u32, tables.cells[c][0] - e0 as u32, tables.cells[c][1]])
-                        .collect(),
-                    cell_tris: tables.cell_tris[e0..e1]
-                        .iter()
-                        .map(|&t| t - f as u32)
-                        .collect(),
-                    ..Default::default()
-                });
-                emptied.push((lo, hi));
-            }
-            for (lo, hi) in emptied {
-                for c in lo..hi {
-                    tables.cells[c] = [0, 0];
-                }
-            }
+            let static_cells = tables.cell_tris.len();
             let t_s = lay.static_tris as usize;
             let slots = (lay.slots * lay.slot_tris) as usize;
             tables.tri_uv.truncate(3 * t_s);
             tables.tri_uv.resize(3 * (t_s + slots), [0.0; 2]);
             tables.tri_chart.truncate(t_s);
             tables.tri_chart.resize(t_s + slots, 0);
-            tables.cell_tris.truncate(static_cells);
             tables
                 .cell_tris
-                .resize(static_cells + lay.slots as usize * slot_cells, 0);
-            (
-                crate::stream::LitCells {
-                    static_cells: static_cells as u32,
-                    slot_cells: slot_cells as u32,
-                },
-                packages,
-            )
+                .resize(static_cells + (lay.slots * lay.slot_cells) as usize, 0);
+            crate::stream::LitCells {
+                static_cells: static_cells as u32,
+                slot_cells: lay.slot_cells,
+            }
         });
         // Camera levels' pool (M14 gate 1): their charts and chart
         // coordinates follow the lighting level's triangles'.
@@ -1981,8 +1924,9 @@ impl VirtualCache {
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for y in y0..=y1 {
             for x in x0..=x1 {
-                let b = self.cell_bounds[(first + y * g[0] + x) as usize];
-                (lo, hi) = (lo.min(b[0]), hi.max(b[1]));
+                if let Some(b) = self.cell_bounds.get((first + y * g[0] + x) as usize) {
+                    (lo, hi) = (lo.min(b[0]), hi.max(b[1]));
+                }
             }
         }
         if lo.x > hi.x {
@@ -2402,11 +2346,8 @@ impl VirtualCache {
         (&self.lit_wants, &self.lit_pins)
     }
 
-    /// Takes the cell part of the layout and the streamed geometries'
-    /// table packages (once).
-    pub(crate) fn take_lit_cells(
-        &mut self,
-    ) -> Option<(crate::stream::LitCells, Vec<crate::stream::LitPackage>)> {
+    /// Takes the cell part of the layout (once).
+    pub(crate) fn take_lit_cells(&mut self) -> Option<crate::stream::LitCells> {
         self.lit_cells.take()
     }
 
@@ -2915,11 +2856,80 @@ mod tests {
     #[test]
     fn every_triangle_of_a_parametric_chart_lands_in_its_cell() {
         let s = Surface::parametric(6, 4, |u, v| Vec3::new(u, v, (u * v).sin()));
-        let t = chart_tables(std::slice::from_ref(&s));
+        let t = chart_tables(std::slice::from_ref(&s), usize::MAX);
         let filled: usize = t.cells.iter().map(|c| c[1] as usize).sum();
         assert_eq!(filled, s.triangles.len());
         assert!(t.cells.iter().all(|c| c[1] <= 2));
         assert_eq!(t.cells.len(), 24);
+    }
+
+    /// A streamed lighting level's package built alone (M14 gate 5) holds
+    /// exactly what the whole scene's buffers hold for it, rebased.
+    #[test]
+    fn a_lighting_package_built_alone_matches_the_scene_buffers() {
+        use crate::hierarchy::COVERAGE_SAMPLES as CS;
+        let a = Surface::parametric(7, 5, |u, v| Vec3::new(u, v, (9.0 * u).sin() * 0.1));
+        let b = Surface::parametric(32, 16, |u, v| {
+            let (t, p) = (std::f32::consts::TAU * u, std::f32::consts::PI * v);
+            let r = 1.0 + 0.1 * (5.0 * t).sin() * (3.0 * p).cos();
+            Vec3::new(p.sin() * t.cos(), p.sin() * t.sin(), -p.cos()) * r
+        });
+        let scene = crate::InstancedScene {
+            geometries: vec![a.clone(), b.clone()],
+            ..Default::default()
+        };
+        let places = crate::stream::chart_places(&scene);
+        let (p, r) = crate::stream::lit_package(&b, &places[1], None, false);
+        let flat = crate::hierarchy::flatten(&[a.triangles.clone(), b.triangles.clone()]);
+        let [first, n, root, _] = flat.ranges[1];
+        let (f, n, root) = (first as usize, n as usize, root as usize);
+        let next = flat.blas.len();
+        let bytes = |x: &[crate::hierarchy::NodeGpu]| bytemuck::cast_slice::<_, u8>(x).to_vec();
+        let rebased: Vec<_> = flat.blas[root..next]
+            .iter()
+            .map(|x| x.rebased(-(root as i64), -(f as i64)))
+            .collect();
+        assert_eq!(bytes(&p.nodes), bytes(&rebased));
+        let items: Vec<u32> = flat.blas_items[f..f + n]
+            .iter()
+            .map(|&i| i - first)
+            .collect();
+        assert_eq!(p.items, items);
+        let cov = &flat.blas_cov[root * CS..next * CS];
+        assert!(
+            p.cov
+                .iter()
+                .zip(cov)
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+        );
+        assert_eq!(p.cov.len(), cov.len());
+        assert!(
+            r.cov
+                .iter()
+                .zip(cov)
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+        );
+        assert_eq!(p.tris, flat.tris[3 * f..3 * (f + n)]);
+        assert_eq!(r.bounds, crate::hierarchy::mesh_bounds(&b.triangles));
+        let t = chart_tables(&scene.geometries, usize::MAX);
+        assert_eq!(p.uv, t.tri_uv[3 * f..3 * (f + n)]);
+        assert_eq!(p.chart, t.tri_chart[f..f + n]);
+        let c0 = t.charts[t.first_chart[1] as usize].first_cell as usize;
+        let e0 = t.cells[c0][0];
+        let cells: Vec<[u32; 3]> = (c0..t.cells.len())
+            .map(|c| [c as u32, t.cells[c][0] - e0, t.cells[c][1]])
+            .collect();
+        assert_eq!(p.cells, cells);
+        let list: Vec<u32> = t.cell_tris[e0 as usize..]
+            .iter()
+            .map(|&i| i - first)
+            .collect();
+        assert_eq!(p.cell_tris, list);
+        // Skipped from the tables: cells kept, empty; no triangles listed.
+        let s = chart_tables(&scene.geometries, 1);
+        assert_eq!(s.cells.len(), t.cells.len());
+        assert!(s.cells[c0..].iter().all(|c| *c == [0, 0]));
+        assert_eq!(s.tri_chart.len(), a.triangles.len());
     }
 
     #[test]

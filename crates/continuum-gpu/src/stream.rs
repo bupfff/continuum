@@ -56,6 +56,18 @@ pub trait LevelSource: Send + Sync + std::fmt::Debug {
     /// Level `level` (an index into `Levels::finer`) of geometry
     /// `geometry`, as [`Level::surface`] would hold it.
     fn level(&self, geometry: usize, level: usize) -> Surface;
+
+    /// Geometry `geometry`'s lighting level (M14 gate 5), for a geometry
+    /// whose lighting level streams ([`StreamOptions::lighting_triangles`])
+    /// and whose surface in the scene holds no triangles (only its charts
+    /// and chart grid): produced once when the renderer is made (for the
+    /// record that stays resident) and again on worker threads whenever a
+    /// bake needs it and it is not in CPU memory. `None` (the default): the
+    /// scene holds every lighting level.
+    fn lighting(&self, geometry: usize) -> Option<Surface> {
+        let _ = geometry;
+        None
+    }
 }
 
 /// A geometry's camera levels (M14 gate 1): finer versions that camera rays
@@ -106,6 +118,10 @@ pub struct StreamOptions {
     /// camera levels to have a proxy, those geometries last in the scene,
     /// and no sky, bounce light or movers.
     pub lighting_triangles: u32,
+    /// Bytes of lighting levels produced on demand (M14 gate 5; see
+    /// [`LevelSource::lighting`]) kept in CPU memory at most, the least
+    /// recently wanted dropped first.
+    pub lighting_cache_bytes: u64,
     /// Every geometry's finest level resident from the start and nothing
     /// streamed: the fully resident reference (the budget is ignored).
     pub resident: bool,
@@ -121,6 +137,7 @@ impl Default for StreamOptions {
             cpu_cache_bytes: 2 << 30,
             workers: 4,
             lighting_triangles: 0,
+            lighting_cache_bytes: 256 << 20,
             resident: false,
         }
     }
@@ -1478,13 +1495,19 @@ mod tests {
 
 /// Lighting levels streamed (M14 gate 4): the geometries from `first` on
 /// (the scene's last) stream; the others stay resident, as a prefix of
-/// every per-triangle buffer, then `slots` slots of `slot_tris` triangles.
+/// every per-triangle buffer, then `slots` slots of `slot_tris` triangles
+/// (and `slot_nodes` hierarchy nodes, `slot_cells` cell-list entries).
+/// Per streamed geometry, its record and its place in the chart tables.
 #[derive(Clone, Debug)]
 pub(crate) struct LightingLayout {
     pub first: usize,
     pub static_tris: u32,
     pub slot_tris: u32,
     pub slots: u32,
+    pub slot_nodes: u32,
+    pub slot_cells: u32,
+    pub records: Arc<Vec<LitRecord>>,
+    pub places: Arc<Vec<ChartPlace>>,
 }
 
 impl LightingLayout {
@@ -1495,12 +1518,189 @@ impl LightingLayout {
     }
 }
 
+/// What stays resident of a streamed lighting level (M14 gate 5): its
+/// hierarchy's root (the *stub*) with the root's coverage, its triangles'
+/// bounds, and its package's sizes (which size the slots).
+#[derive(Clone, Debug)]
+pub(crate) struct LitRecord {
+    pub root: crate::hierarchy::NodeGpu,
+    pub cov: [f32; crate::hierarchy::COVERAGE_SAMPLES],
+    pub bounds: (continuum::glam::Vec3, continuum::glam::Vec3),
+    pub tris: u32,
+    pub nodes: u32,
+    pub cell_entries: u32,
+}
+
+/// A geometry's place in the lighting cache's chart tables (as
+/// `vcache::chart_tables` numbers them): its first chart, and per chart its
+/// first cell and grid.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ChartPlace {
+    pub first_chart: u32,
+    pub charts: Vec<(u32, [u32; 2])>,
+}
+
+/// Every geometry's place in the chart tables.
+pub(crate) fn chart_places(scene: &InstancedScene) -> Vec<ChartPlace> {
+    let (mut chart, mut cell) = (0u32, 0u32);
+    scene
+        .geometries
+        .iter()
+        .map(|g| {
+            let place = ChartPlace {
+                first_chart: chart,
+                charts: g
+                    .chart_grid
+                    .iter()
+                    .map(|&grid| {
+                        let first = cell;
+                        cell += grid[0] * grid[1];
+                        (first, grid)
+                    })
+                    .collect(),
+            };
+            chart += g.charts.len() as u32;
+            place
+        })
+        .collect()
+}
+
+/// Builds a streamed geometry's lighting package from its surface, alone
+/// (M14 gate 5): what the renderer's buffers would hold for it, with
+/// triangles, nodes and cell-list entries counted from 0. `colors`: its
+/// vertex colors, if any; `tangents`: whether its normals carry MikkTSpace
+/// tangents (a normal-mapped geometry, with the kernel's MikkTSpace on).
+pub(crate) fn lit_package(
+    surface: &Surface,
+    place: &ChartPlace,
+    colors: Option<&[[continuum::glam::Vec3; 3]]>,
+    tangents: bool,
+) -> (LitPackage, LitRecord) {
+    use crate::hierarchy::COVERAGE_SAMPLES;
+    let n = surface.triangles.len();
+    let colors = colors.filter(|c| c.len() == n);
+    let mut tris = Vec::with_capacity(3 * n);
+    for (t, corners) in surface.triangles.iter().enumerate() {
+        for (k, v) in corners.iter().enumerate() {
+            let w = colors.map_or(0.0, |c| crate::color_code(c[t][k]));
+            tris.push([v.x, v.y, v.z, w]);
+        }
+    }
+    let mapped = tangents && surface.tex.len() == n && surface.normals.len() == n;
+    let codes = mapped
+        .then(|| crate::tangents::mikktspace(surface))
+        .flatten();
+    let mut normals = Vec::with_capacity(3 * n);
+    for (t, corners) in surface.normals.iter().enumerate() {
+        for (k, v) in corners.iter().enumerate() {
+            let w = codes
+                .as_ref()
+                .map_or(0.0, |ts| crate::tangents::encode(ts[t][k]));
+            normals.push([v.x, v.y, v.z, w]);
+        }
+    }
+    let tex: Vec<[f32; 2]> = if surface.tex.len() == n {
+        surface.tex.iter().flatten().map(|v| v.to_array()).collect()
+    } else {
+        vec![[0.0; 2]; 3 * n]
+    };
+    let (nodes, items, cov) = crate::hierarchy::triangle_hierarchy(&surface.triangles, 0, 0);
+    // Chart coordinates, charts and cell lists, as `vcache::chart_tables`
+    // builds them: each triangle in every cell its chart coordinates'
+    // bounds meet (shrunk by a thousandth of a cell).
+    let cell_count: u32 = place.charts.iter().map(|(_, g)| g[0] * g[1]).sum();
+    let first_cell = place.charts.first().map_or(0, |c| c.0);
+    let mut lists: Vec<Vec<u32>> = vec![Vec::new(); cell_count as usize];
+    let mut uv = Vec::with_capacity(3 * n);
+    let mut chart = Vec::with_capacity(n);
+    for (k, (corners, &c)) in surface.uv.iter().zip(&surface.chart).enumerate() {
+        let (cell0, grid) = place.charts[c as usize];
+        let size = continuum::glam::Vec2::new(grid[0] as f32, grid[1] as f32);
+        let lo = (corners[0].min(corners[1]).min(corners[2]) * size
+            + continuum::glam::Vec2::splat(1e-3))
+        .floor();
+        let hi = (corners[0].max(corners[1]).max(corners[2]) * size
+            - continuum::glam::Vec2::splat(1e-3))
+        .floor();
+        let clamp = |v: f32, n: u32| (v.max(0.0) as u32).min(n - 1);
+        let (x0, x1) = (clamp(lo.x, grid[0]), clamp(hi.x.max(lo.x), grid[0]));
+        let (y0, y1) = (clamp(lo.y, grid[1]), clamp(hi.y.max(lo.y), grid[1]));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                lists[(cell0 - first_cell + y * grid[0] + x) as usize].push(k as u32);
+            }
+        }
+        chart.push(place.first_chart + c);
+        uv.extend(corners.iter().map(|v| v.to_array()));
+    }
+    let mut cells = Vec::with_capacity(lists.len());
+    let mut cell_tris = Vec::new();
+    for (c, list) in lists.into_iter().enumerate() {
+        cells.push([
+            first_cell + c as u32,
+            cell_tris.len() as u32,
+            list.len() as u32,
+        ]);
+        cell_tris.extend(list);
+    }
+    let record = LitRecord {
+        root: nodes[0],
+        cov: cov[..COVERAGE_SAMPLES]
+            .try_into()
+            .expect("a root's coverage"),
+        bounds: crate::hierarchy::mesh_bounds(&surface.triangles),
+        tris: n as u32,
+        nodes: nodes.len() as u32,
+        cell_entries: cell_tris.len() as u32,
+    };
+    (
+        LitPackage {
+            tris,
+            normals,
+            tex,
+            nodes,
+            items,
+            cov,
+            uv,
+            chart,
+            cells,
+            cell_tris,
+        },
+        record,
+    )
+}
+
+/// Bytes a geometry's lighting level takes packaged for streaming (M14
+/// gate 5): its package as gate 4 kept every one in CPU memory, without
+/// the surface it was built from.
+#[doc(hidden)]
+pub fn lighting_package_bytes(surface: &Surface) -> u64 {
+    let place = ChartPlace {
+        first_chart: 0,
+        charts: surface
+            .chart_grid
+            .iter()
+            .scan(0u32, |cell, &grid| {
+                let first = *cell;
+                *cell += grid[0] * grid[1];
+                Some((first, grid))
+            })
+            .collect(),
+    };
+    lit_package(surface, &place, None, false).0.bytes()
+}
+
 /// Where lighting levels stream, if they do (see
-/// [`StreamOptions::lighting_triangles`]).
+/// [`StreamOptions::lighting_triangles`]), and the packages of those the
+/// scene holds (built now and kept; the others' are produced on demand).
+/// Writes every streamed geometry's record: a geometry whose surface holds
+/// no triangles takes its lighting level from the scene's source, produced
+/// once now (on every core) for its record, as an offline build would.
 pub(crate) fn lighting_layout(
     scene: &InstancedScene,
     options: &StreamOptions,
-) -> Option<LightingLayout> {
+    mikktspace: bool,
+) -> Option<(LightingLayout, Vec<Option<Arc<LitPackage>>>)> {
     if options.lighting_triangles == 0 || options.resident {
         return None;
     }
@@ -1512,26 +1712,87 @@ pub(crate) fn lighting_layout(
             .is_some_and(|l| l.proxy.is_some())
     };
     let first = (0..scene.geometries.len()).find(|&g| proxied(g))?;
+    let count = scene.geometries.len();
     assert!(
-        (first..scene.geometries.len()).all(proxied),
+        (first..count).all(proxied),
         "streamed lighting levels need every geometry from the first with a proxy on to have one"
+    );
+    assert!(
+        (first..count).all(|g| scene.blend_clear(g) <= 0.0),
+        "streamed lighting levels with blending are not supported yet"
     );
     let static_tris = scene.geometries[..first]
         .iter()
         .map(|g| g.triangles.len() as u32)
         .sum();
-    let slot_tris = scene.geometries[first..]
-        .iter()
-        .map(|g| g.triangles.len() as u32)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    Some(LightingLayout {
+    let places = chart_places(scene);
+    let tangents = |g: usize| {
+        mikktspace
+            && scene
+                .geometry_normal_maps
+                .get(g)
+                .copied()
+                .flatten()
+                .is_some()
+    };
+    let build = |g: usize| -> (LitRecord, Option<Arc<LitPackage>>) {
+        let held = &scene.geometries[g];
+        if held.triangles.is_empty() {
+            assert!(
+                scene
+                    .geometry_colors
+                    .get(g)
+                    .and_then(|c| c.as_ref())
+                    .is_none(),
+                "lighting levels produced on demand carry no vertex colors"
+            );
+            let surface = scene
+                .level_source
+                .as_ref()
+                .and_then(|s| s.lighting(g))
+                .expect(
+                    "a geometry without triangles takes its lighting level from the scene's source",
+                );
+            let (_, record) = lit_package(&surface, &places[g], None, tangents(g));
+            (record, None)
+        } else {
+            let colors = scene.geometry_colors.get(g).and_then(|c| c.as_deref());
+            let (package, record) = lit_package(held, &places[g], colors, tangents(g));
+            (record, Some(Arc::new(package)))
+        }
+    };
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let all: Vec<usize> = (first..count).collect();
+    let chunk = all.len().div_ceil(threads).max(1);
+    let built: Vec<(LitRecord, Option<Arc<LitPackage>>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = all
+            .chunks(chunk)
+            .map(|part| scope.spawn(|| part.iter().map(|&g| build(g)).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("a lighting record thread"))
+            .collect()
+    });
+    let (records, packages): (Vec<LitRecord>, Vec<Option<Arc<LitPackage>>>) =
+        built.into_iter().unzip();
+    let slot_tris = records.iter().map(|r| r.tris).max().unwrap_or(1).max(1);
+    let layout = LightingLayout {
         first,
         static_tris,
         slot_tris,
         slots: (options.lighting_triangles / slot_tris).max(1),
-    })
+        slot_nodes: records.iter().map(|r| r.nodes).max().unwrap_or(1).max(1),
+        slot_cells: records
+            .iter()
+            .map(|r| r.cell_entries)
+            .max()
+            .unwrap_or(1)
+            .max(1),
+        records: Arc::new(records),
+        places: Arc::new(places[first..].to_vec()),
+    };
+    Some((layout, packages))
 }
 
 /// A streamed geometry's lighting level as it is uploaded into a slot:
@@ -1552,6 +1813,17 @@ pub(crate) struct LitPackage {
     pub chart: Vec<u32>,
     pub cells: Vec<[u32; 3]>,
     pub cell_tris: Vec<u32>,
+}
+
+impl LitPackage {
+    /// Bytes of its data.
+    pub(crate) fn bytes(&self) -> u64 {
+        (16 * (self.tris.len() + self.normals.len())
+            + 8 * (self.tex.len() + self.uv.len())
+            + 48 * self.nodes.len()
+            + 4 * (self.items.len() + self.cov.len() + self.chart.len() + self.cell_tris.len())
+            + 12 * self.cells.len()) as u64
+    }
 }
 
 /// The node part of the layout: resident nodes, the stubs' first (one per
@@ -1599,6 +1871,17 @@ pub struct LightingStats {
     pub capacity_triangles: u64,
     /// Geometries pinned (pages wait for them, or are planned on them).
     pub pinned: u32,
+    /// Lighting levels produced on demand (M14 gate 5) arriving this frame,
+    /// the frames they took from request to arrival in all, and wanted
+    /// levels waiting for one.
+    pub produced: u32,
+    /// See `produced`.
+    pub production_frames: u32,
+    /// See `produced`.
+    pub waiting_production: u32,
+    /// Bytes of produced lighting packages kept in CPU memory, after the
+    /// frame's trim.
+    pub cpu_cache_bytes: u64,
 }
 
 /// Lighting levels loaded at most per frame.
@@ -1607,12 +1890,61 @@ const LIT_LOADS_PER_FRAME: usize = 64;
 /// planned the next frame and baked the one after.
 const MIN_RESIDENT: u64 = 4;
 
-/// Lighting levels streamed into slots (M14 gate 4).
+/// Worker threads producing lighting packages from the scene's source (M14
+/// gate 5); they end when the pool (and so the job queue) is dropped.
+struct LitProducer {
+    jobs: mpsc::Sender<usize>,
+    done: mpsc::Receiver<(usize, Arc<LitPackage>)>,
+}
+
+impl LitProducer {
+    fn new(
+        source: Arc<dyn LevelSource>,
+        layout: &LightingLayout,
+        tangents: Arc<Vec<bool>>,
+        workers: usize,
+    ) -> Self {
+        let (jobs, queue) = mpsc::channel::<usize>();
+        let (finished, done) = mpsc::channel();
+        let queue = Arc::new(Mutex::new(queue));
+        for _ in 0..workers.max(1) {
+            let (queue, finished, source) = (queue.clone(), finished.clone(), source.clone());
+            let (places, tangents, first) = (layout.places.clone(), tangents.clone(), layout.first);
+            std::thread::spawn(move || {
+                loop {
+                    let Ok(g) = queue.lock().expect("job queue").recv() else {
+                        return;
+                    };
+                    let surface = source
+                        .lighting(first + g)
+                        .expect("the source's lighting level");
+                    let (package, _) = lit_package(&surface, &places[g], None, tangents[g]);
+                    if finished.send((g, Arc::new(package))).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        LitProducer { jobs, done }
+    }
+}
+
+/// Lighting levels streamed into slots (M14 gate 4), their packages kept in
+/// CPU memory or produced on demand (M14 gate 5).
 pub(crate) struct LightingPool {
     layout: LightingLayout,
     nodes: LitNodes,
     cells: LitCells,
-    packages: Vec<LitPackage>,
+    /// Per streamed geometry: its package if in CPU memory, whether it is
+    /// produced on demand (and so may be dropped), and the frame it was
+    /// requested in (0: not).
+    packages: Vec<Option<Arc<LitPackage>>>,
+    sourced: Vec<bool>,
+    requested: Vec<u64>,
+    producer: Option<LitProducer>,
+    /// Bytes of produced packages held, and their cap.
+    cache_bytes: u64,
+    cache_cap: u64,
     /// Per streamed geometry: its objects, its slot, the latest frame it
     /// was wanted, touched or pinned.
     objects: Vec<Vec<u32>>,
@@ -1621,6 +1953,8 @@ pub(crate) struct LightingPool {
     /// The frame each was loaded in (kept at least `MIN_RESIDENT` frames,
     /// so its pages bake before it can go).
     loaded_at: Vec<u64>,
+    /// Per slot, the geometry in it.
+    owner: Vec<Option<usize>>,
     free: Vec<u32>,
     /// Per object of the scene: whether its lighting level is resident.
     resident: Vec<bool>,
@@ -1635,8 +1969,10 @@ impl LightingPool {
         layout: LightingLayout,
         nodes: LitNodes,
         cells: LitCells,
-        packages: Vec<LitPackage>,
+        packages: Vec<Option<Arc<LitPackage>>>,
         scene: &InstancedScene,
+        options: &StreamOptions,
+        mikktspace: bool,
     ) -> Self {
         let count = packages.len();
         let mut objects = vec![Vec::new(); count];
@@ -1649,12 +1985,41 @@ impl LightingPool {
                 resident[k] = false;
             }
         }
+        let sourced: Vec<bool> = packages.iter().map(Option::is_none).collect();
+        let producer = sourced.iter().any(|&s| s).then(|| {
+            let tangents = (0..count)
+                .map(|g| {
+                    mikktspace
+                        && scene
+                            .geometry_normal_maps
+                            .get(layout.first + g)
+                            .copied()
+                            .flatten()
+                            .is_some()
+                })
+                .collect();
+            LitProducer::new(
+                scene
+                    .level_source
+                    .clone()
+                    .expect("lighting levels produced by the scene's source"),
+                &layout,
+                Arc::new(tangents),
+                options.workers,
+            )
+        });
         LightingPool {
             free: (0..layout.slots).rev().collect(),
+            owner: vec![None; layout.slots as usize],
             layout,
             nodes,
             cells,
             packages,
+            sourced,
+            requested: vec![0; count],
+            producer,
+            cache_bytes: 0,
+            cache_cap: options.lighting_cache_bytes,
             objects,
             slot: vec![None; count],
             used: vec![0; count],
@@ -1678,7 +2043,9 @@ impl LightingPool {
     /// Loads the lighting levels of the objects `wanted` (missing from
     /// bakes, or under pages asked for), keeping those of `pinned` objects
     /// (pages wait for them or are baked on them this frame), evicting the
-    /// least recently used others to make room.
+    /// least recently used others to make room. A wanted level produced on
+    /// demand and not in CPU memory is asked of the workers and loads once
+    /// it arrives.
     pub(crate) fn update(
         &mut self,
         queue: &wgpu::Queue,
@@ -1691,6 +2058,16 @@ impl LightingPool {
             capacity_triangles: (self.layout.slots * self.layout.slot_tris) as u64,
             ..Default::default()
         };
+        if let Some(p) = &self.producer {
+            for (g, package) in p.done.try_iter() {
+                stats.produced += 1;
+                stats.production_frames += (frame - self.requested[g]) as u32;
+                self.requested[g] = 0;
+                self.cache_bytes += package.bytes();
+                self.packages[g] = Some(package);
+                self.used[g] = self.used[g].max(frame);
+            }
+        }
         // Protected: pinned levels, then wanted ones in the order given (the
         // pages waiting longest first) while the slots hold them. Only
         // protected levels load, and only unprotected ones are evicted, so
@@ -1698,17 +2075,17 @@ impl LightingPool {
         let n = self.packages.len();
         let capacity = self.layout.slots as usize;
         let mut protect = vec![false; n];
-        let mut count = 0usize;
+        let mut protected = Vec::new();
         for &o in pinned {
             if let Some(&g) = self.of_object.get(o as usize)
                 && g != NONE
                 && !protect[g as usize]
             {
                 protect[g as usize] = true;
-                count += 1;
+                protected.push(g as usize);
             }
         }
-        stats.pinned = count as u32;
+        stats.pinned = protected.len() as u32;
         let mut wants: Vec<usize> = Vec::new();
         for &o in wanted {
             let Some(&g) = self.of_object.get(o as usize) else {
@@ -1717,20 +2094,30 @@ impl LightingPool {
             if g == NONE || protect[g as usize] {
                 continue;
             }
-            if count >= capacity {
+            if protected.len() >= capacity {
                 stats.refused += 1;
                 continue;
             }
             protect[g as usize] = true;
-            count += 1;
+            protected.push(g as usize);
             wants.push(g as usize);
         }
-        for (used, _) in self.used.iter_mut().zip(&protect).filter(|(_, p)| **p) {
-            *used = frame;
+        for &g in &protected {
+            self.used[g] = frame;
         }
         let mut loaded = 0;
         for g in wants {
             if self.slot[g].is_some() {
+                continue;
+            }
+            if self.packages[g].is_none() {
+                if self.requested[g] == 0
+                    && let Some(p) = &self.producer
+                {
+                    self.requested[g] = frame;
+                    let _ = p.jobs.send(g);
+                }
+                stats.waiting_production += 1;
                 continue;
             }
             if loaded >= LIT_LOADS_PER_FRAME {
@@ -1742,13 +2129,13 @@ impl LightingPool {
                 None => {
                     // The least recently used unprotected one, loaded long
                     // enough ago for its pages to have baked.
-                    let victim = (0..n)
-                        .filter(|&h| {
-                            self.slot[h].is_some()
-                                && !protect[h]
-                                && self.loaded_at[h] + MIN_RESIDENT <= frame
-                        })
-                        .min_by_key(|&h| self.used[h]);
+                    let victim = self
+                        .owner
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .filter(|&h| !protect[h] && self.loaded_at[h] + MIN_RESIDENT <= frame)
+                        .min_by_key(|&h| (self.used[h], h));
                     victim.map(|h| {
                         stats.evictions += 1;
                         self.evict(queue, targets, h)
@@ -1764,20 +2151,42 @@ impl LightingPool {
             loaded += 1;
             stats.loads += 1;
         }
+        self.trim(&protect);
+        stats.cpu_cache_bytes = self.cache_bytes;
         stats.resident_triangles = self
-            .slot
+            .owner
             .iter()
-            .zip(&self.packages)
-            .filter(|(s, _)| s.is_some())
-            .map(|(_, p)| (p.tris.len() / 3) as u64)
+            .flatten()
+            .map(|&g| self.layout.records[g].tris as u64)
             .sum();
         self.log.push(stats);
         self.frame += 1;
     }
 
+    /// Drops produced packages to the CPU cache's cap: unprotected ones
+    /// first, each the least recently used first.
+    fn trim(&mut self, protect: &[bool]) {
+        if self.cache_bytes <= self.cache_cap {
+            return;
+        }
+        let mut held: Vec<(bool, u64, usize)> = (0..self.packages.len())
+            .filter(|&g| self.sourced[g] && self.packages[g].is_some())
+            .map(|g| (protect[g], self.used[g], g))
+            .collect();
+        held.sort_unstable();
+        for (_, _, g) in held {
+            if self.cache_bytes <= self.cache_cap {
+                break;
+            }
+            let package = self.packages[g].take().expect("a held package");
+            self.cache_bytes -= package.bytes();
+        }
+    }
+
     /// Frees geometry `g`'s slot: its objects point at their stub.
     fn evict(&mut self, queue: &wgpu::Queue, targets: &LitTargets, g: usize) -> u32 {
         let k = self.slot[g].take().expect("a resident lighting level");
+        self.owner[k as usize] = None;
         let stub = self.nodes.stubs + g as u32;
         for &o in &self.objects[g] {
             self.resident[o as usize] = false;
@@ -1793,7 +2202,7 @@ impl LightingPool {
     /// Uploads geometry `g`'s lighting level into slot `k` and points its
     /// objects at it.
     fn load(&mut self, queue: &wgpu::Queue, targets: &LitTargets, g: usize, k: u32) {
-        let p = &self.packages[g];
+        let p = self.packages[g].clone().expect("a package in CPU memory");
         let tri = self.layout.static_tris + k * self.layout.slot_tris;
         let node = self.nodes.static_nodes + self.packages.len() as u32 + k * self.nodes.slot_nodes;
         let cell = self.cells.static_cells + k * self.cells.slot_cells;
@@ -1852,5 +2261,6 @@ impl LightingPool {
             );
         }
         self.slot[g] = Some(k);
+        self.owner[k as usize] = Some(g);
     }
 }

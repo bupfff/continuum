@@ -40,7 +40,10 @@ fn main() {
             .map_or(vec![16, 32, 64], |s| vec![64, s]);
         for side in sides {
             let rocks = Rocks::with_proxies(side, 6.0);
-            for slots in [491_520u32, 0].into_iter().take(if side > 64 { 1 } else { 2 }) {
+            for slots in [491_520u32, 0]
+                .into_iter()
+                .take(if side > 64 { 1 } else { 2 })
+            {
                 let before = gpu_bytes(&device);
                 let r = InstancedRenderer::with_streaming(
                     &kernel,

@@ -133,6 +133,8 @@ pub use cutout::cut_out;
 pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 pub use renderer::{Renderer, RendererOptions};
+#[doc(hidden)]
+pub use stream::lighting_package_bytes;
 pub use stream::{Level, LevelSource, Levels, StreamOptions, StreamStats};
 pub use vcache::{CacheOptions, CacheStats};
 
@@ -1321,7 +1323,7 @@ impl MaskConeKernel {
     ) -> (
         Vec<(u32, wgpu::Buffer)>,
         Option<hierarchy::MoverTree>,
-        Option<(stream::LitNodes, Vec<stream::LitPackage>)>,
+        Option<stream::LitNodes>,
     ) {
         // Paths without the list read the first light as a rectangle; a
         // sphere stands there as a tiny square at its center.
@@ -1337,10 +1339,21 @@ impl MaskConeKernel {
                 one_sided: false,
             }
         });
+        // Lighting levels streamed (M14 gates 4–5): the streamed geometries
+        // (the scene's last, from `skip`) leave every buffer for packages
+        // loaded into slots; each keeps its record.
+        let skip = lighting.map_or(usize::MAX, |l| l.first);
         let geometries: Vec<Vec<Tri>> = scene
             .geometries
             .iter()
-            .map(|g| g.triangles.clone())
+            .enumerate()
+            .map(|(g, s)| {
+                if g >= skip {
+                    Vec::new()
+                } else {
+                    s.triangles.clone()
+                }
+            })
             .collect();
         let placements: Vec<Placement> = scene
             .instances
@@ -1353,12 +1366,19 @@ impl MaskConeKernel {
                 clear: scene.blend_clear(i.geometry),
             })
             .collect();
-        let (mut flat, xforms, bounds, geometry_ranges) =
+        let (mut flat, xforms, mut bounds, geometry_ranges) =
             flatten_instanced(&geometries, &placements);
+        if let Some(lay) = lighting {
+            for (b, p) in bounds.iter_mut().zip(&placements) {
+                if p.geometry >= skip {
+                    *b = p.world_bounds(lay.records[p.geometry - skip].bounds);
+                }
+            }
+        }
         // Vertex colors (M10 gate 17) in the triangles' unused w: 1 plus an
         // sRGB byte per channel, an exact integer (0: none).
         let mut first = 0;
-        for (g, geometry) in scene.geometries.iter().enumerate() {
+        for (g, geometry) in scene.geometries.iter().enumerate().take(skip) {
             if let Some(Some(colors)) = scene.geometry_colors.get(g)
                 && colors.len() == geometry.triangles.len()
             {
@@ -1378,24 +1398,12 @@ impl MaskConeKernel {
             let (nodes, items, tree) = hierarchy::object_hierarchy_with_movers(&bounds, &movable);
             (nodes, items, Some(tree))
         };
-        // Object-level prefiltering: the object hierarchy's coverage follows
-        // the triangle hierarchies' in the same buffer.
-        let objects = if self.object_prefilter.get() && self.prefilter.get() > 0.0 {
-            let roots: Vec<u32> = flat.ranges.iter().map(|r| r[2]).collect();
-            let cov =
-                hierarchy::object_coverage(&nodes, &items, &flat.blas_cov, &roots, &placements);
-            let base = (flat.blas_cov.len() / hierarchy::COVERAGE_SAMPLES) as u32;
-            flat.blas_cov.extend(cov);
-            base
-        } else {
-            hierarchy::NONE
-        };
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
         // Per triangle corner, its shading normal, and in w its MikkTSpace
         // tangent's code where the geometry has a normal map (M10 gate 13;
         // 0: none).
         let mut normals: Vec<[f32; 4]> = Vec::new();
-        for (g, geometry) in scene.geometries.iter().enumerate() {
+        for (g, geometry) in scene.geometries.iter().enumerate().take(skip) {
             let mapped = scene
                 .geometry_normal_maps
                 .get(g)
@@ -1538,7 +1546,7 @@ impl MaskConeKernel {
             })
             .collect();
         let mut tex: Vec<[f32; 2]> = Vec::new();
-        for g in &scene.geometries {
+        for g in scene.geometries.iter().take(skip) {
             if g.tex.len() == g.triangles.len() {
                 tex.extend(g.tex.iter().flatten().map(|v| v.to_array()));
             } else {
@@ -1548,60 +1556,18 @@ impl MaskConeKernel {
         if tex.is_empty() {
             tex.push([0.0; 2]);
         }
-        // Lighting levels streamed (M14 gate 4): the streamed geometries (the
-        // scene's last) leave every buffer for packages loaded into slots;
-        // a stub per geometry (its root and coverage) stays, and the
-        // objects' coverage follows the slots.
+        // Lighting levels streamed (M14 gates 4–5): a stub per streamed
+        // geometry (its root and coverage, from its record) follows the
+        // resident nodes, then the slots.
         let mut lit_parts = None;
-        let mut objects = objects;
         if let Some(lay) = lighting {
             let cs = hierarchy::COVERAGE_SAMPLES;
-            let count = scene.geometries.len();
-            let first_g = lay.first;
             let t_s = lay.static_tris as usize;
             assert_eq!(
-                geometry_ranges[first_g][0] as usize, t_s,
+                geometry_ranges[skip][0] as usize, t_s,
                 "streamed geometries come last"
             );
-            let n_s = geometry_ranges[first_g][2] as usize;
-            let node_total = flat.blas.len();
-            let mut packages = Vec::with_capacity(count - first_g);
-            let mut slot_nodes = 1usize;
-            let mut stubs = Vec::with_capacity(count - first_g);
-            let mut stub_cov = Vec::with_capacity((count - first_g) * cs);
-            for g in first_g..count {
-                let [first, n, root, _] = geometry_ranges[g];
-                let next = if g + 1 < count {
-                    geometry_ranges[g + 1][2] as usize
-                } else {
-                    node_total
-                };
-                let (f, n, r) = (first as usize, n as usize, root as usize);
-                let nodes = next - r;
-                slot_nodes = slot_nodes.max(nodes);
-                stubs.push(flat.blas[r]);
-                stub_cov.extend_from_slice(&flat.blas_cov[r * cs..(r + 1) * cs]);
-                packages.push(stream::LitPackage {
-                    tris: flat.tris[3 * f..3 * (f + n)].to_vec(),
-                    normals: normals[3 * f..3 * (f + n)].to_vec(),
-                    tex: tex[3 * f..3 * (f + n)].to_vec(),
-                    nodes: flat.blas[r..next]
-                        .iter()
-                        .map(|x| x.rebased(-(r as i64), -(f as i64)))
-                        .collect(),
-                    items: flat.blas_items[f..f + n]
-                        .iter()
-                        .map(|&i| i - first)
-                        .collect(),
-                    cov: flat.blas_cov[r * cs..next * cs].to_vec(),
-                    ..Default::default()
-                });
-            }
-            let object_cov: Vec<f32> = if objects != hierarchy::NONE {
-                flat.blas_cov[objects as usize * cs..].to_vec()
-            } else {
-                Vec::new()
-            };
+            let n_s = flat.blas.len();
             let slot_total = (lay.slots * lay.slot_tris) as usize;
             flat.tris.truncate(3 * t_s);
             flat.tris.resize(3 * (t_s + slot_total), [0.0; 4]);
@@ -1611,32 +1577,37 @@ impl MaskConeKernel {
             tex.resize(3 * (t_s + slot_total), [0.0; 2]);
             flat.blas_items.truncate(t_s);
             flat.blas_items.resize(t_s + slot_total, 0);
-            let all_nodes = n_s + stubs.len() + lay.slots as usize * slot_nodes;
-            flat.blas.truncate(n_s);
-            flat.blas.extend(stubs.iter().copied());
+            let all_nodes = n_s + lay.records.len() + (lay.slots * lay.slot_nodes) as usize;
+            flat.blas.extend(lay.records.iter().map(|r| r.root));
             flat.blas.resize(all_nodes, NodeGpu::zeroed());
-            flat.blas_cov.truncate(n_s * cs);
-            flat.blas_cov.extend(stub_cov);
-            flat.blas_cov.resize(all_nodes * cs, 0.0);
-            if objects != hierarchy::NONE {
-                objects = all_nodes as u32;
-                flat.blas_cov.extend(object_cov);
+            for r in lay.records.iter() {
+                flat.blas_cov.extend_from_slice(&r.cov);
             }
+            flat.blas_cov.resize(all_nodes * cs, 0.0);
             for (k, i) in scene.instances.iter().enumerate() {
-                if i.geometry >= first_g {
+                if i.geometry >= skip {
                     let w = flat.ranges[k][3];
-                    flat.ranges[k] = [hierarchy::NONE, 0, (n_s + i.geometry - first_g) as u32, w];
+                    flat.ranges[k] = [hierarchy::NONE, 0, (n_s + i.geometry - skip) as u32, w];
                 }
             }
-            lit_parts = Some((
-                stream::LitNodes {
-                    static_nodes: n_s as u32,
-                    stubs: n_s as u32,
-                    slot_nodes: slot_nodes as u32,
-                },
-                packages,
-            ));
+            lit_parts = Some(stream::LitNodes {
+                static_nodes: n_s as u32,
+                stubs: n_s as u32,
+                slot_nodes: lay.slot_nodes,
+            });
         }
+        // Object-level prefiltering: the object hierarchy's coverage follows
+        // the triangle hierarchies' in the same buffer.
+        let objects = if self.object_prefilter.get() && self.prefilter.get() > 0.0 {
+            let roots: Vec<u32> = flat.ranges.iter().map(|r| r[2]).collect();
+            let cov =
+                hierarchy::object_coverage(&nodes, &items, &flat.blas_cov, &roots, &placements);
+            let base = (flat.blas_cov.len() / hierarchy::COVERAGE_SAMPLES) as u32;
+            flat.blas_cov.extend(cov);
+            base
+        } else {
+            hierarchy::NONE
+        };
         // Camera levels' pool (M14 gate 1): after the lighting level's
         // triangles in every per-triangle buffer the camera's shading reads.
         if pool > 0 {
@@ -2817,7 +2788,7 @@ fn rectangles(tris: &[continuum::mesh::Tri]) -> Option<Vec<(Vec3, Vec3, Vec3)>> 
 
 /// A vertex color's code (M10 gate 17): 1 plus its sRGB bytes, red lowest,
 /// as an exact integer in an f32 (at most 2^24).
-fn color_code(c: Vec3) -> f32 {
+pub(crate) fn color_code(c: Vec3) -> f32 {
     let byte = |x: f32| {
         let x = x.clamp(0.0, 1.0);
         let s = if x <= 0.003_130_8 {

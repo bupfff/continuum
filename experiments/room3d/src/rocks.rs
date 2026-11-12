@@ -197,8 +197,29 @@ pub struct Rocks {
     pub positions: Vec<DVec3>,
     /// Each rock's bounding radius (meters, about its centre).
     pub radii: Vec<f32>,
+    /// Each rock's lighting level's extent: its largest horizontal distance
+    /// from the rock's centre, and its lowest and highest points' heights
+    /// (meters, in the world).
+    pub extents: Vec<[f32; 3]>,
     /// The field's half width (meters).
     pub half: f64,
+    /// Each rock's index in the whole field (row by row; all of them unless
+    /// built with [`Rocks::region`]).
+    pub ids: Vec<usize>,
+}
+
+/// How [`Rocks`] are built.
+#[derive(Clone, Copy, Default)]
+struct Build {
+    /// Camera levels produced on demand.
+    on_demand: bool,
+    /// A proxy level per rock.
+    proxies: bool,
+    /// Lighting levels produced on demand too (the scene holds only charts).
+    lighting: bool,
+    /// Keep only the rocks whose centres lie within this many meters of
+    /// the field's centre along x and along y.
+    keep: Option<f64>,
 }
 
 impl Rocks {
@@ -211,23 +232,67 @@ impl Rocks {
 
     /// [`Rocks::new`] with the rocks' displacement given.
     pub fn with_detail(side: usize, spacing: f64, detail: Detail) -> Rocks {
-        Rocks::build(side, spacing, detail, false, false)
+        Rocks::build(side, spacing, detail, Build::default())
     }
 
     /// [`Rocks::new`] with the camera levels produced on demand (M14 gate
     /// 3): only the lighting levels are built now; the scene's
     /// `level_source` generates the rest from each rock's shape.
     pub fn on_demand(side: usize, spacing: f64) -> Rocks {
-        Rocks::build(side, spacing, Detail::default(), true, false)
+        let build = Build {
+            on_demand: true,
+            ..Default::default()
+        };
+        Rocks::build(side, spacing, Detail::default(), build)
     }
 
     /// [`Rocks::on_demand`] with a proxy level per rock (M14 gate 4), so
     /// camera rays never see the lighting levels, which can then stream.
     pub fn with_proxies(side: usize, spacing: f64) -> Rocks {
-        Rocks::build(side, spacing, Detail::default(), true, true)
+        let build = Build {
+            on_demand: true,
+            proxies: true,
+            ..Default::default()
+        };
+        Rocks::build(side, spacing, Detail::default(), build)
     }
 
-    fn build(side: usize, spacing: f64, detail: Detail, on_demand: bool, proxies: bool) -> Rocks {
+    /// [`Rocks::with_proxies`] with the lighting levels produced on demand
+    /// too (M14 gate 5): the scene holds each rock's charts but none of its
+    /// triangles; the source gives the lighting level.
+    pub fn lighting_on_demand(side: usize, spacing: f64) -> Rocks {
+        let build = Build {
+            on_demand: true,
+            proxies: true,
+            lighting: true,
+            keep: None,
+        };
+        Rocks::build(side, spacing, Detail::default(), build)
+    }
+
+    /// The rocks of [`Rocks::with_proxies`]'s field whose centres lie within
+    /// `half` meters of its centre along x and y (the same shapes and
+    /// places; [`Rocks::ids`] names each in the whole field), every lighting
+    /// level held: a reference for a region of a field too large for one
+    /// renderer (M14 gate 5).
+    pub fn region(side: usize, spacing: f64, half: f64) -> Rocks {
+        let build = Build {
+            on_demand: true,
+            proxies: true,
+            lighting: false,
+            keep: Some(half),
+        };
+        Rocks::build(side, spacing, Detail::default(), build)
+    }
+
+    fn build(side: usize, spacing: f64, detail: Detail, build: Build) -> Rocks {
+        let Build {
+            on_demand,
+            proxies,
+            lighting,
+            keep,
+        } = build;
+        assert!(on_demand || !lighting, "lighting on demand needs a source");
         let mut rng = Pcg32::new(14, 1);
         let ground = {
             let h = 1000.0f32;
@@ -262,10 +327,15 @@ impl Rocks {
                 (shape, DVec3::new(x, y, -sink as f64), angle, shade)
             })
             .collect();
+        let ids: Vec<usize> = (0..shapes.len())
+            .filter(|&k| keep.is_none_or(|h| shapes[k].1.x.abs() <= h && shapes[k].1.y.abs() <= h))
+            .collect();
+        let shapes: Vec<(Shape, DVec3, f32, f32)> =
+            ids.iter().map(|&k| shapes[k].clone()).collect();
         // Building levels is the slow part: one thread per chunk of rocks.
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let chunk = shapes.len().div_ceil(threads).max(1);
-        let built: Vec<(Surface, Levels)> = std::thread::scope(|scope| {
+        let built: Vec<(Surface, Levels, [f32; 4])> = std::thread::scope(|scope| {
             let handles: Vec<_> = shapes
                 .chunks(chunk)
                 .map(|part| {
@@ -283,8 +353,27 @@ impl Rocks {
                                         triangles: Shape::triangles_at_most(l),
                                     })
                                     .collect();
+                                let surface = shape.surface(0);
+                                let (lo, hi) = surface.bounds();
+                                let radius = 1.05 * lo.abs().max(hi.abs()).length();
+                                let across = surface
+                                    .triangles
+                                    .iter()
+                                    .flatten()
+                                    .map(|v| v.truncate().length())
+                                    .fold(0.0f32, f32::max);
+                                let extent = [radius, across, lo.z, hi.z];
+                                let surface = if lighting {
+                                    Surface {
+                                        charts: surface.charts,
+                                        chart_grid: surface.chart_grid,
+                                        ..Default::default()
+                                    }
+                                } else {
+                                    surface
+                                };
                                 (
-                                    shape.surface(0),
+                                    surface,
                                     Levels {
                                         base_error: shape.error(0),
                                         finer,
@@ -294,6 +383,7 @@ impl Rocks {
                                             triangles: 0,
                                         }),
                                     },
+                                    extent,
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -306,9 +396,11 @@ impl Rocks {
                 .collect()
         });
         let mut radii = Vec::with_capacity(shapes.len());
-        for ((surface, l), (_, position, angle, shade)) in built.into_iter().zip(&shapes) {
-            let (lo, hi) = surface.bounds();
-            radii.push(1.05 * lo.abs().max(hi.abs()).length());
+        let mut extents = Vec::with_capacity(shapes.len());
+        for ((surface, l, e), (_, position, angle, shade)) in built.into_iter().zip(&shapes) {
+            radii.push(e[0]);
+            let z = position.z as f32;
+            extents.push([e[1], e[2] + z, e[3] + z]);
             instances.push(Instance {
                 geometry: geometries.len(),
                 rotation: Mat3::from_rotation_z(*angle),
@@ -320,6 +412,32 @@ impl Rocks {
             geometries.push(surface);
             levels.push(Some(l));
         }
+        let sun = Rocks::sun();
+        Rocks {
+            scene: InstancedScene {
+                geometries,
+                instances,
+                geometry_levels: levels,
+                level_source: on_demand.then(|| {
+                    Arc::new(RockSource {
+                        shapes: shapes.iter().map(|(s, _, _, _)| s.clone()).collect(),
+                        lighting,
+                    }) as Arc<dyn LevelSource>
+                }),
+                ..Default::default()
+            },
+            sun,
+            positions,
+            radii,
+            extents,
+            half,
+            ids,
+        }
+    }
+
+    /// The field's sun: 35° up, 1 km away, 0.5° across (the same for
+    /// every field).
+    pub fn sun() -> Light {
         let (elevation, azimuth) = (35f32.to_radians(), 200f32.to_radians());
         let toward = Vec3::new(
             elevation.cos() * azimuth.cos(),
@@ -331,7 +449,7 @@ impl Rocks {
         let w = -toward;
         let a = Vec3::Z.cross(w).normalize() * size;
         let b = w.cross(a).normalize() * size;
-        let sun = Light::rect(
+        Light::rect(
             RectLight {
                 corner: toward * distance - (a + b) * 0.5,
                 edge_u: a,
@@ -339,24 +457,7 @@ impl Rocks {
                 one_sided: true,
             },
             Vec3::new(1.0, 0.95, 0.88) * 15000.0,
-        );
-        Rocks {
-            scene: InstancedScene {
-                geometries,
-                instances,
-                geometry_levels: levels,
-                level_source: on_demand.then(|| {
-                    Arc::new(RockSource {
-                        shapes: shapes.iter().map(|(s, _, _, _)| s.clone()).collect(),
-                    }) as Arc<dyn LevelSource>
-                }),
-                ..Default::default()
-            },
-            sun,
-            positions,
-            radii,
-            half,
-        }
+        )
     }
 
     /// Triangles of every rock's finest level.
@@ -423,10 +524,16 @@ pub fn flight(k: usize, t: f32, half: f32, fov: f32) -> Camera {
 #[derive(Debug)]
 pub struct RockSource {
     shapes: Vec<Shape>,
+    /// Whether it gives the lighting levels too (M14 gate 5).
+    lighting: bool,
 }
 
 impl LevelSource for RockSource {
     fn level(&self, geometry: usize, level: usize) -> Surface {
         self.shapes[geometry - 1].surface(level + 1)
+    }
+
+    fn lighting(&self, geometry: usize) -> Option<Surface> {
+        self.lighting.then(|| self.shapes[geometry - 1].surface(0))
     }
 }

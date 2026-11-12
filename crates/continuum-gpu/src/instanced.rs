@@ -893,11 +893,18 @@ impl InstancedRenderer {
             "streamed camera levels with movers are not supported yet"
         );
         let pool = stream.map_or(0, |o| crate::stream::pool_triangles(scene, &o));
-        let layout = stream.and_then(|o| crate::stream::lighting_layout(scene, &o));
+        let (layout, lit_packages) = match stream
+            .and_then(|o| crate::stream::lighting_layout(scene, &o, kernel.mikktspace.get()))
+        {
+            Some((l, p)) => (Some(l), Some(p)),
+            None => (None, None),
+        };
         if layout.is_some() {
             assert!(
-                cache.as_ref().is_some_and(|c| !c.indirect) && kernel.sky() == Vec3::ZERO,
-                "streamed lighting levels need the cache, without bounce light or a sky (yet)"
+                cache.as_ref().is_some_and(|c| !c.indirect)
+                    && kernel.sky() == Vec3::ZERO
+                    && moving_lights.is_empty(),
+                "streamed lighting levels need the cache, without bounce light, a sky or moving lights (yet)"
             );
         }
         let (scene_buffers, tree, lit_nodes) =
@@ -1144,19 +1151,23 @@ impl InstancedRenderer {
             lighting: None,
             vis: None,
         };
-        if let (Some(lay), Some((nodes, mut packages))) = (layout.clone(), lit_nodes) {
-            let (cells, tables) = renderer
+        if let (Some(lay), Some(nodes), Some(packages), Some(options)) =
+            (layout.clone(), lit_nodes, lit_packages, stream)
+        {
+            let cells = renderer
                 .cache
                 .as_mut()
                 .and_then(|c| c.state.take_lit_cells())
                 .expect("the cache's lighting tables");
-            for (p, t) in packages.iter_mut().zip(tables) {
-                p.uv = t.uv;
-                p.chart = t.chart;
-                p.cells = t.cells;
-                p.cell_tris = t.cell_tris;
-            }
-            renderer.lighting = Some(LightingPool::new(lay, nodes, cells, packages, scene));
+            renderer.lighting = Some(LightingPool::new(
+                lay,
+                nodes,
+                cells,
+                packages,
+                scene,
+                &options,
+                kernel.mikktspace.get(),
+            ));
         }
         if let (Some(options), true) = (stream, pool > 0) {
             let base = layout.as_ref().map_or_else(
