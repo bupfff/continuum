@@ -180,33 +180,38 @@ Honest about where it stands:
 - **Bounce light** is one bounce, and not yet with moving objects.
 - **Transparency** needs hardware ray queries.
 - **Fanless laptops** slow down under minutes of sustained load.
+- **Streaming is new:** it needs hardware ray queries; streamed lighting
+  works with the sun and other lights but not yet with a sky, bounce light
+  or moving objects; coarser versions of objects shade slightly smoother
+  (about 1–1.6% colour difference when settled).
 
 ## Where it is going
 
-Core first: before more features, the fundamentals have to hold up at
-extreme scale and detail. In order:
+The aim is to be excellent at three things: **scale, detail and
+lighting**, in huge, extremely detailed worlds where detail follows the
+screen (zoom in and it resolves further; what you cannot see costs
+nothing). Four landmarks, in order:
 
-1. **Unique geometry at scale** (in progress): worlds bigger than GPU
-   memory, streamed by need. The first step works: each object's finer
-   versions load as the camera needs them, within a fixed budget. A field
-   of unique rocks 6.35× the budget looks within a tenth of
-   one-ray-per-pixel's error of having everything loaded, with 3.4× less
-   GPU memory, and zooming in onto a rock 100 m away resolves it fully.
-   4,096 unique rocks whose detail would take 33 GB (more than the
-   laptop's memory) are generated as the camera needs them and fly within
-   60 fps (worst frame 14.5 ms). What lighting sees streams too, and the
-   lighting stays exact: every cached result shown is identical to one
-   computed with everything loaded (2.7 million checked), at half the GPU
-   memory.
-2. **Detail smaller than a pixel, without shimmer** (in progress). Each
-   object type gets a small precomputed map of how it looks from every
-   direction, and pixels read those instead of tracing every tiny
-   surface. The accuracy question is answered: on the million-boulder
-   field, about a fifth of one-ray-per-pixel's error from standing height
-   and an eighth from 150 m up. Speed is not there yet (122–135 ms a frame
-   on the laptop), so it is not in the renderer yet.
-3. **Steady frame times, then the lighting fundamentals** (multiple
-   bounces, faster sky warm-up).
+1. **A unique world beyond memory** (most of the way there). Each
+   object's finer versions load as the camera needs them, within a fixed
+   budget, and detail follows the zoom: zooming in onto a rock 100 m away
+   resolves it fully. 4,096 unique rocks whose detail would take 33 GB
+   (more than the laptop's memory) are generated as the camera needs them
+   and fly within 60 fps (worst frame 14.5 ms). What lighting sees streams
+   too, and the lighting stays exact: every cached result shown is
+   identical to one computed with everything loaded (2.7 million checked),
+   at half the GPU memory. Still to come: everything generated on demand,
+   a sky and bounce light with it, and worlds larger still.
+2. **Lighting you can trust in motion.** The cache now always converges
+   with bounce light (a loop that never settled is fixed); next, a faster
+   sky warm-up, bounded error while flying, more bounces, a moving sun.
+3. **Detail smaller than a pixel, without shimmer.** Each object type
+   gets a small precomputed map of how it looks from every direction, and
+   pixels read those instead of tracing every tiny surface. Accuracy is
+   answered (a fifth to an eighth of one-ray-per-pixel's error on the
+   million-boulder field); speed is not (122–135 ms a frame), so it is not
+   in the renderer yet.
+4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
 reference" against "how fast", instead of fixed presets.
