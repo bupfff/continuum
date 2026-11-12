@@ -10,8 +10,61 @@ use continuum::glam::DVec3;
 use continuum_gpu::{CacheOptions, InstancedRenderer, MaskConeKernel, StreamOptions, wgpu};
 use room3d::rocks::{Detail, Rocks, flight};
 
+/// Bytes the GPU device has allocated (Metal's `currentAllocatedSize`).
+fn gpu_bytes(device: &wgpu::Device) -> u64 {
+    #[cfg(target_vendor = "apple")]
+    {
+        use objc2_metal::MTLDevice;
+        if let Some(d) = unsafe { device.as_hal::<wgpu::hal::api::Metal>() } {
+            return d.raw_device().currentAllocatedSize() as u64;
+        }
+    }
+    let _ = device;
+    0
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if std::env::var_os("MEMORY").is_some() {
+        // GPU memory against the number of unique rocks (on demand, a small
+        // camera budget): what each resident lighting level costs.
+        let kernel = MaskConeKernel::new().expect("a GPU");
+        kernel.set_prefilter(1.0);
+        kernel.set_hardware_rays(true);
+        let device = kernel.device().clone();
+        for side in [16usize, 32, 64] {
+            let rocks = Rocks::on_demand(side, 6.0);
+            let lit: usize = rocks.scene.geometries.iter().map(|g| g.triangles.len()).sum();
+            for cache in [false, true] {
+                let before = gpu_bytes(&device);
+                let r = InstancedRenderer::with_streaming(
+                    &kernel,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    1280,
+                    720,
+                    1,
+                    &[rocks.sun],
+                    &rocks.scene,
+                    DVec3::ZERO,
+                    cache.then(CacheOptions::default),
+                    StreamOptions {
+                        budget_triangles: 1 << 16,
+                        ..Default::default()
+                    },
+                );
+                r.wait();
+                let bytes = gpu_bytes(&device) - before;
+                println!(
+                    "{} rocks, {lit} lighting triangles, cache {cache}: {:.1} MB ({:.0} B a lighting triangle; scene buffers {:.1} MB)",
+                    side * side,
+                    bytes as f64 / 1e6,
+                    bytes as f64 / lit as f64,
+                    r.scene_bytes() as f64 / 1e6
+                );
+            }
+        }
+        return;
+    }
     let arg = |i: usize, default: f64| args.get(i).and_then(|a| a.parse().ok()).unwrap_or(default);
     let side = arg(1, 16.0) as usize;
     let detail = Detail {

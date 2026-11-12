@@ -533,7 +533,33 @@ place, for a new conversation:
   2. *The cache that never settles with bounce light:* done (M10 G24,
      2026-11-12, above).
   3. *M14* (G3 passed: on-demand production and the time budget). Next,
-     G4: the lighting level streamed by cone footprint (a page whose
+     G4, designed 2026-11-12 (not started). Measured first (`stream_dev`
+     MEMORY): a resident lighting level costs about 350 B a triangle on the
+     GPU (half compute buffers, half its hardware structure); 4,096 rocks'
+     lighting levels take 1.36 GB before the cache. Design:
+     - The camera never sees lighting levels: an always-resident *proxy*
+       level per geometry (tens of triangles, in the camera pool, never
+       evicted) stands in for camera rays, so lighting levels need no
+       hardware structure (half their memory).
+     - Lighting levels live in slot pools by size class (tris, normals,
+       hierarchy nodes and items rebased on upload, node coverage, chart
+       tables); `meshes[o]` points at the slot, or at an always-resident
+       *stub* node (the object's root bounds and coverage) when absent.
+     - Where a cone, a bounce ray or a texel lookup would descend into a
+       stub (`add_mesh_coverage_if`, `nearest_in_mesh`, `vc_surface`), the
+       bake records (page, object) as incomplete and requests the object;
+       the page is not shown (as an invalid slot) and is re-planned once
+       its objects are resident; levels a waiting page needs are pinned
+       (as M10 G24's bounce pages). So the cache stays certified: every
+       page shown was baked against the full lighting levels it needed.
+     - Binding budget: the bake passes are at Metal's 29 buffers; the
+       incomplete list and object requests must share existing buffers
+       (`incomplete`, `requests`) with tags.
+     - Gate: a field whose lighting levels exceed a lighting budget several
+       times; pass if the settled cache equals a fully resident one's
+       (bit-exact or within float noise), no page is ever shown baked
+       against a stub, flights hold 60 fps.
+     Original note: the lighting level streamed by cone footprint (a page whose
      cones need a missing subtree is retried when it arrives, so the cache
      stays certified); shading detail from the finest level on coarser
      ones; then past memory (a reference that needs nothing resident at
