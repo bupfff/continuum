@@ -195,13 +195,14 @@ nothing). Four landmarks, in order:
 1. **A unique world beyond memory** (most of the way there). Each
    object's finer versions load as the camera needs them, within a fixed
    budget, and detail follows the zoom: zooming in onto a rock 100 m away
-   resolves it fully. 4,096 unique rocks whose detail would take 33 GB
-   (more than the laptop's memory) are generated as the camera needs them
-   and fly within 60 fps (worst frame 14.5 ms). What lighting sees streams
-   too, and the lighting stays exact: every cached result shown is
-   identical to one computed with everything loaded (2.7 million checked),
-   at half the GPU memory. Still to come: everything generated on demand,
-   a sky and bounce light with it, and worlds larger still.
+   resolves it fully. What lighting sees streams too, generated as needed,
+   and the lighting stays exact: every cached result shown matches one
+   computed with everything loaded. 36,864 unique rocks (lighting alone
+   would need 7.6 GB more GPU memory) fly at about 6 ms a frame on a
+   fanless laptop, keeping about 18 KB of GPU memory per rock, with 1.4
+   million cached results checked against an independent reference. Still
+   to come: smoothing out a rare slow frame (one of 5,400 took 42 ms), a
+   sky and bounce light with streamed lighting.
 2. **Lighting you can trust in motion.** The cache now always converges
    with bounce light (a loop that never settled is fixed); next, a faster
    sky warm-up, bounded error while flying, more bounces, a moving sun.

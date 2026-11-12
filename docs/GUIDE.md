@@ -343,9 +343,14 @@ For a window, see `apps/viewer`, which flies through a file with
     small record: the hierarchy's root and its coverage), then again on
     worker threads whenever a bake needs it, into a CPU cache capped at
     `StreamOptions::lighting_cache_bytes`. Measured: 36,864 unique rocks at
-    about 28 KB of GPU memory and 15 KB of CPU memory each, the cache still
-    exact, but not yet within 60 fps (26–39 ms frames with gate 4's
-    slots; `docs/results/m14-gate5.md`).
+    about 18 KB of GPU memory and 15 KB of CPU memory each, the cache still
+    exact, flown at 6.2–6.5 ms a frame on average (99th percentile 10–12
+    ms; one frame in 5,400 took 42 ms; `docs/results/m14-gate6.md`).
+    Objects showing their proxy are traced through clusters of 32, so the
+    top-level structure stays small as unique objects grow.
+  - `StreamOptions::fit_budget` (on by default) keeps the camera budget:
+    while a view wants more than it holds, the pixel error the levels are
+    chosen for grows (reported in `StreamStats::pixel_error`).
   - Hardware camera rays only; not with movers, vertex colors, normal maps,
     cutouts or blending on the levels. `Renderer::stream_stats` reports
     what it did.

@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-12, after M14 gate 5)
+## 3.6 Where we stand (updated 2026-11-12, after M14 gate 6)
 
 Against the goal in §1, honestly:
 
@@ -161,8 +161,13 @@ Against the goal in §1, honestly:
   failed on speed only:** lighting levels are produced on demand too
   (36,864 unique rocks, lighting CPU memory capped at 256 MB, about 28 KB
   of GPU memory a rock), still certified against a reference holding the
-  flights' region (676,080 pages identical), but flights take 26–39 ms a
-  frame (the lighting slots churn). Not yet with a sky, bounce or movers.
+  flights' region (676,080 pages identical), but flights took 26–39 ms a
+  frame. **G6 failed on one frame only:** after profiling (uploads through
+  a staging belt, a persistent residency set and incremental top-level
+  builds in patched wgpu, clusters of 32 proxies, narrower scans) the same
+  flights take 6.2–6.5 ms on average, 99th percentile 10–12 ms, with
+  about 18 KB of GPU memory a rock; one frame took 42 ms. Not yet with a
+  sky, bounce or movers.
 - **Measured against an independent path tracer** (Cycles, compared
   correctly: supersampled 4×4 against Cycles' area-integrated pixels):
   - sun and sky on an outdoor scene: 0.7–1.2% (M5 G2);
@@ -412,9 +417,9 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-12, end of the seventh session)
+### 3.8 Next steps, in order (updated 2026-11-12, end of the eighth session)
 
-**Start here (end of the seventh session, 2026-11-12).** The state in one
+**Start here (end of the eighth session, 2026-11-12).** The state in one
 place, for a new conversation. Read this block, then the milestone table
 (§6) and the results files it names.
 
@@ -443,7 +448,7 @@ place, for a new conversation. Read this block, then the milestone table
 1. **A unique world beyond memory:** unique geometry several times GPU
    memory, flown at 60 fps on the M4, never over budget, lighting streamed
    too and still certified, within a stated bound of a reference, at any
-   zoom. *Most of the mechanism is done (M14 G1–G4):*
+   zoom. *Most of the mechanism is done (M14 G1–G6):*
    - camera levels stream by need (feedback per pixel, half a pixel of
      error, a paged pool, level chains, a 2 ms-a-frame time budget);
    - levels are produced on demand by worker threads into a capped CPU
@@ -452,12 +457,16 @@ place, for a new conversation. Read this block, then the milestone table
    - lighting levels stream too (an eighth resident), with the cache still
      bit-exact (G4); proxy levels stand in for camera rays;
    - detail follows the zoom (G2: 50° to 1.5° onto a rock 103 m away,
-     settled exact).
-   *Left:* speed at 36,864 rocks (G5: on-demand lighting levels exact and
-   small, about 28 KB a rock, but 26–39 ms frames); a sky, bounce light and movers with streamed lighting;
-   a reference for scenes larger than any one renderer can hold; shading
-   detail on coarser levels (they shade with smoother normals: 1.0–1.6%
-   colour difference settled).
+     settled exact);
+   - lighting levels produced on demand too (G5), and 36,864 unique rocks
+     (9× G4's field) at 6.2–6.5 ms mean, 99th percentile 10–12 ms, about
+     18 KB of GPU memory a rock, the cache certified against a reference
+     holding the flights' region (G6: 1.4 million pages identical);
+     objects showing proxies are seen through clusters of 32.
+   *Left:* one 42 ms frame in 5,400 (G6 failed on it) and lighting levels
+   arriving 13–17 frames late on new ground; a sky, bounce light and
+   movers with streamed lighting; shading detail on coarser levels (they
+   shade with smoother normals: 1.0–1.6% colour difference settled).
 2. **Lighting you can trust in motion:** the cache always converges, the
    sky warms in a few hundred frames, the error while flying is measured
    and bounded, a moving sun at real speed. *Done:* the loop that never
@@ -471,21 +480,12 @@ place, for a new conversation. Read this block, then the milestone table
 
 **Next, in order:**
 
-1. **M14 G6, frame rate at 36,864 rocks** (G5 failed on speed only,
-   `docs/results/m14-gate5.md`): profile first; remove per-frame work
-   that scales with the object count (the streamer's scans over every
-   geometry, the top-level structure rebuilt over every instance, lock
-   contention with level production), then gate 5's flights within
-   60 fps. *Done in G5 (the rest of this item):*
-   **M14 G5, lighting levels produced on demand:** give lighting packages
-   the same path as camera levels (built on worker threads through a
-   source, kept in the capped CPU cache, the plan waiting for them as it
-   waits for GPU slots), so per unique object only a small record stays
-   resident (stub node, proxy, chart cells, level errors). Then a scene
-   several times larger than G4's (16k–64k rocks), whose reference cannot
-   be one renderer: compare pages against renderers each holding a subset
-   of the lighting levels a page needs, or bake a sample of pages in a
-   second renderer with only their needed levels resident.
+1. **M14 G7, frame-time stability at scale:** find gate 6's 42 ms frame
+   (record per-frame stage times in the flights; suspects: the residency
+   set's periodic removal of retired structures, a burst of loads with
+   cluster rebuilds, the CPU cache's trim), bound each frame's streaming
+   work, and speed lighting production (13–17 frames late in G6's flights
+   1–2). Then gate 6's criteria again.
 2. **A sky and bounce light with streamed lighting:** `vc_bake_sky` and
    `vc_bake_indirect` must mark pages the way `vc_bake` does (`lit_missing`,
    `LIT_MARK`), and their own-object sky masks need the lighting level.
@@ -499,13 +499,28 @@ place, for a new conversation. Read this block, then the milestone table
 5. **M13's far field for speed** (one walk shared by a tile of pixels, or
    a coarser far field through the quality dial; goal a 10 ms coverage
    pass at 1280×720), then appearance.
-6. **Frame-time stability** (`flight-spikes-diagnostics.md`), then the
-   showcase; the NVIDIA benchmark when funded.
+6. **The showcase;** the NVIDIA benchmark when funded.
 - Parked features (untouched unless a landmark needs them): emissive faces
   as lights (M10 G23–G24: 19.71% from Cycles, the faces showing emission
   without the light they reflect, worse supersampled for an unexplained
   reason), a second texture coordinate set, movers under a sky, moving
   lights' dark state, new material or glTF features, Bevy work.
+
+**The eighth session (2026-11-12), gate by gate:**
+
+- *M14 G5, lighting levels produced on demand, certified beyond one
+  renderer:* failed on frame rate only (26–39 ms); passed scale (36,864
+  rocks, lighting levels 72× the slots and 26.9× a 256 MB CPU cache),
+  certification (676,080 pages identical to a reference holding the
+  flights' region with every lighting level resident) and memory (27.7 KB
+  of GPU memory a rock).
+- *M14 G6, gate 5's world within 60 fps:* failed on one frame (42.3 ms
+  against 33.3 ms in flight 2); passed everything else: means 6.2–6.5 ms,
+  99th percentile 10.2–11.9 ms, 1,416,782 pages identical, 17.8 KB of GPU
+  memory a rock. Fixes, found by profiling: lighting uploads through a
+  staging belt, a persistent Metal residency set and incremental top-level
+  builds (patched wgpu, `third_party/`), clusters of proxies, the
+  streamer's scans narrowed to tracked lists.
 
 **The seventh session (2026-11-12), gate by gate** (numbers in
 `docs/results/`, design notes in the milestone table):
@@ -541,11 +556,23 @@ against an absent level, missing until re-baked); `vcache.rs` has the
 `lit_*` fields (pending pages, waiting pages, per-page needs, pins) and
 `pinned` (bounce pages, M10 G24); `instanced_buffers` (lib.rs) and
 `VirtualCache::new` cut streamed geometries out of the buffers when
-lighting streams. The rock field is `room3d::rocks` (`Rocks::new`,
-`with_detail`, `on_demand`, `with_proxies`; `flight(k, t, half, fov)`).
+lighting streams. Lighting levels on demand (G5): `LevelSource::lighting`,
+`stream::lit_package` (a package built alone), `LitRecord` (the stub),
+`LitProducer` and the CPU cache in `LightingPool`. Clusters of proxies
+(G6): `hw::proxy_clusters`, `Clusters` in `hw.rs` (cluster structures,
+slots for finer levels, `rebuild_clusters`), `hw_object` in
+`hw_visibility.wgsl`, the member lists after the objects' ranges in
+`meshes` (before the page table). The rock field is `room3d::rocks`
+(`Rocks::new`, `with_detail`, `on_demand`, `with_proxies`,
+`lighting_on_demand`, `region`; `flight(k, t, half, fov)`). `stream_dev`
+`GATE5=<side>` times gate 5's flights stage by stage; `RECORDS` measures
+GPU memory per rock.
 
 **M14 caveats to keep in mind:** lighting streaming needs the streamed
-geometries last in the scene, a proxy on each, no sky, bounce or movers;
+geometries last in the scene, a proxy on each, no sky, bounce, movers or
+moving lights; clusters hold at most about 1.6 million objects (member
+lists addressed in 23 bits); a page's box (`page_bounds`) is empty for
+lighting levels produced on demand (used only with movers);
 camera levels carry no vertex colors, tangents, cutouts or blending; the
 G2 run had about 0.1 ms a frame unexplained and 10–14 ms CPU spikes later
 traced to waits counted as CPU time; `read_cache_pages` was wrong without
@@ -838,7 +865,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
 | M13 prefiltered appearance (Landmark 3) | Hierarchy nodes keep lit appearance; pixel cones stop at pixel-size nodes | Sub-pixel detail without aliasing, cost bounded by the screen. G1 coverage only (**failed**: from 150 m 0.38× one ray's coverage error, passing, but 1.2–2 s a frame, about 100× too slow: each node visit rasterizes into 8×8 bins; standing failed mostly on a flawed measure, buried boulder parts the ground hid in the reference only, `docs/results/m13-gate1.md`); G2 a scalar per-node test (**failed**: 257–281 ms a frame, about 26× over; accuracy 0.38× one ray's from 150 m, 0.59× standing, where one horizon row holds 84% of the error: independent splats saturate a pixel whose boulders all sit low in it, correlation that sub-pixel bins keep, `docs/results/m13-gate2.md`); G3 directional coverage maps and 4×4 bins (**failed** on speed only: accuracy **passes** both views, 0.264× one ray's error standing and 0.231× from 150 m; but 178–707 ms a frame, long tails where partly covered pixels never stop, `docs/results/m13-gate3.md`); G4 near surfaces by hardware rays at pixel corners and bins (**failed** on speed only: accuracy 0.218× and 0.132×; 122–135 ms against a 50 ms intermediate bar, the far field's walk left, `docs/results/m13-gate4.md`) |
-| M14 unique geometry at scale (Landmark 1) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate. G1 camera levels streamed by need (**failed** on frame rate in one flight of three: 256 unique rocks whose finest levels are 6.35× a 2.5M-triangle budget, never over it; settled coverage 0.062–0.096× one ray's error from fully resident, 0.013–0.029% of pixels differ in flight, 3.4× less GPU memory; but 1.074×, 1.085× and **1.124×** the resident frame against 1.10×, from about half a load a frame at about 1 ms each; settled colour 1.3–1.6% off, smoother normals at coarser levels, `docs/results/m14-gate1.md`); G2 fewer, cheaper loads and a zoom (**failed** on frame rate in three flights of four: 1.091×, **1.110×, 1.111×, 1.113×** against 1.10×, streaming 0.33–0.42 ms a frame, 2.0–2.5% of a 60 fps frame; passed: never over budget, settled coverage 0.072–0.087× one ray's error, 0.011–0.028% of pixels off in flight, the zoom from 50° to 1.5° on a rock 103 m away exact settled with the working set 1.55 → 0.52 million triangles; paged pool, staging belt, level chains; a load about 29 ns a triangle, 22 of it the structure's build, `docs/results/m14-gate2.md`); G3 beyond CPU memory within a 60 fps budget (**passed**: 4,096 unique rocks, finest levels 32× an 8.4-million-triangle budget and 33 GB packed against 25.8 GB of memory, generated on demand by worker threads into a 2 GiB cache; three 1,800-frame flights at 4.8–5.3 ms mean, 99th percentile 7.9–8.8 ms, worst 14.5 ms, never over budget or cap; settled within 0.018–0.030× one ray's error of every rock at its ideal level; a 2 ms-a-frame time budget deferred 384–926 loads a flight, `docs/results/m14-gate3.md`); G4 lighting levels streamed, certified (**passed**: lighting levels 8× their budget; 2.68 million shown cache pages in flight and every settled page in common bit-identical to a renderer with all lighting levels resident; GPU memory at creation 0.486× gate 3's way; flights 5.4–6.9 ms mean, worst 18.2 ms; proxy levels for camera rays, stubs and slots for lighting levels, pages baked against an absent level hidden and re-baked, `docs/results/m14-gate4.md`); G5 lighting levels produced on demand, certified beyond one renderer (**failed** on the frame budget only: 36,864 unique rocks, lighting levels produced by worker threads into a 256 MB CPU cache, 72× the slots and 26.9× the cache, never over either; 676,080 pages in the flights' region identical to a reference holding the region's 4,941 rocks with every lighting level resident, the longest shadow 7.89 m inside a 12 m margin; 27.7 KB of GPU memory and 15.2 KB of CPU heap a rock, 0.128× and 0.052× a lighting level resident; but **26–39 ms** mean frames, p99 51–66 ms, worst 67–90 ms, with 34–62 lighting loads a frame, `docs/results/m14-gate5.md`) |
+| M14 unique geometry at scale (Landmark 1) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate. G1 camera levels streamed by need (**failed** on frame rate in one flight of three: 256 unique rocks whose finest levels are 6.35× a 2.5M-triangle budget, never over it; settled coverage 0.062–0.096× one ray's error from fully resident, 0.013–0.029% of pixels differ in flight, 3.4× less GPU memory; but 1.074×, 1.085× and **1.124×** the resident frame against 1.10×, from about half a load a frame at about 1 ms each; settled colour 1.3–1.6% off, smoother normals at coarser levels, `docs/results/m14-gate1.md`); G2 fewer, cheaper loads and a zoom (**failed** on frame rate in three flights of four: 1.091×, **1.110×, 1.111×, 1.113×** against 1.10×, streaming 0.33–0.42 ms a frame, 2.0–2.5% of a 60 fps frame; passed: never over budget, settled coverage 0.072–0.087× one ray's error, 0.011–0.028% of pixels off in flight, the zoom from 50° to 1.5° on a rock 103 m away exact settled with the working set 1.55 → 0.52 million triangles; paged pool, staging belt, level chains; a load about 29 ns a triangle, 22 of it the structure's build, `docs/results/m14-gate2.md`); G3 beyond CPU memory within a 60 fps budget (**passed**: 4,096 unique rocks, finest levels 32× an 8.4-million-triangle budget and 33 GB packed against 25.8 GB of memory, generated on demand by worker threads into a 2 GiB cache; three 1,800-frame flights at 4.8–5.3 ms mean, 99th percentile 7.9–8.8 ms, worst 14.5 ms, never over budget or cap; settled within 0.018–0.030× one ray's error of every rock at its ideal level; a 2 ms-a-frame time budget deferred 384–926 loads a flight, `docs/results/m14-gate3.md`); G4 lighting levels streamed, certified (**passed**: lighting levels 8× their budget; 2.68 million shown cache pages in flight and every settled page in common bit-identical to a renderer with all lighting levels resident; GPU memory at creation 0.486× gate 3's way; flights 5.4–6.9 ms mean, worst 18.2 ms; proxy levels for camera rays, stubs and slots for lighting levels, pages baked against an absent level hidden and re-baked, `docs/results/m14-gate4.md`); G5 lighting levels produced on demand, certified beyond one renderer (**failed** on the frame budget only: 36,864 unique rocks, lighting levels produced by worker threads into a 256 MB CPU cache, 72× the slots and 26.9× the cache, never over either; 676,080 pages in the flights' region identical to a reference holding the region's 4,941 rocks with every lighting level resident, the longest shadow 7.89 m inside a 12 m margin; 27.7 KB of GPU memory and 15.2 KB of CPU heap a rock, 0.128× and 0.052× a lighting level resident; but **26–39 ms** mean frames, p99 51–66 ms, worst 67–90 ms, with 34–62 lighting loads a frame, `docs/results/m14-gate5.md`); G6 gate 5's world within 60 fps (**failed** on one frame: means 6.16, 6.53, 6.18 ms, p99 10.2–11.9 ms, worst 13.2, 17.1 and **42.3 ms** against 33.3; 1,416,782 pages identical to the subset reference; 17.8 KB of GPU memory and 14.9 KB of CPU heap a rock; lighting uploads through a staging belt, a persistent residency set and incremental top-level builds in patched wgpu, clusters of 32 proxies, the streamer's scans narrowed, `docs/results/m14-gate6.md`) |
 
 ## 7. Benchmark protocol
 
