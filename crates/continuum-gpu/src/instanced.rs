@@ -387,6 +387,7 @@ fn stream_targets<'a>(scene: &'a [(u32, wgpu::Buffer)], cache: Option<&'a Cache>
         uv: cache.map(|c| c.state.buffer(23)),
         chart: cache.map(|c| c.state.buffer(35)),
         xforms: find(30),
+        meshes: find(3),
     }
 }
 
@@ -1113,12 +1114,15 @@ impl InstancedRenderer {
                 .sum::<usize>() as u32;
             let hw = renderer.hw.as_mut().expect("hardware camera rays");
             let targets = stream_targets(&renderer.scene, renderer.cache.as_ref());
+            // The page table follows the objects' ranges (at least one).
+            let table_base = 4 * scene.instances.len().max(1) as u32;
             renderer.stream = Some(Streamer::new(
                 &renderer.device,
                 &renderer.queue,
                 scene,
                 options,
                 base,
+                table_base,
                 hw,
                 &targets,
             ));
@@ -1452,6 +1456,15 @@ impl InstancedRenderer {
     /// empty without it).
     pub fn stream_log(&self) -> &[StreamStats] {
         self.stream.as_ref().map_or(&[], |s| s.log())
+    }
+
+    /// Evicts every streamed level at the next frame (diagnostics: what
+    /// loads cost).
+    #[doc(hidden)]
+    pub fn stream_evict_all(&mut self) {
+        if let Some(s) = &mut self.stream {
+            s.evict_all();
+        }
     }
 
     /// Bytes of camera levels kept in CPU memory for streaming (M14 gate

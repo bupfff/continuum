@@ -1543,6 +1543,10 @@ impl MaskConeKernel {
         // Camera levels' pool (M14 gate 1): after the lighting level's
         // triangles in every per-triangle buffer the camera's shading reads.
         if pool > 0 {
+            // The page table follows the objects' ranges.
+            let entries = stream::table_entries(scene) as usize;
+            flat.ranges
+                .extend(std::iter::repeat_n([0u32; 4], entries.div_ceil(4)));
             let lit: usize = scene.geometries.iter().map(|g| g.triangles.len()).sum();
             let all = 3 * (lit + pool as usize);
             flat.tris.resize(all, [0.0; 4]);

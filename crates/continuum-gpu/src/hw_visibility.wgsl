@@ -14,22 +14,26 @@ const HW_RAY_FLAGS: u32 = 0x1u | 0x10u; // FORCE_OPAQUE | CULL_BACK_FACING
 const HW_FRONT_FLAGS: u32 = 0x2u | 0x10u;
 
 // The triangle a camera ray's hit names: object `mesh`'s geometry at its
-// resident camera level (M14 gate 1), whose first triangle its transform's
-// spare word holds, flagged (0: none, the lighting level).
-fn cam_tri(mesh: u32, primitive: u32) -> u32 {
+// resident camera level (M14), whose bottom-level structure has one
+// geometry per pool page; the transform's spare word holds, flagged, the
+// level's page-table entry (0: none, the lighting level), and the table
+// (after the objects' ranges) each page's first triangle.
+fn cam_tri(mesh: u32, geometry: u32, primitive: u32) -> u32 {
     let x = meshes[mesh].w;
-    var first = meshes[mesh].x;
     if (x != NONE) {
         let word = bitcast<u32>(xforms[4u * x + 3u].w);
-        if ((word & 0x40000000u) != 0u) { first = word & 0x3fffffffu; }
+        if ((word & 0x40000000u) != 0u) {
+            let e = (word & 0x3fffffffu) + geometry;
+            return meshes[e / 4u][e % 4u] + primitive;
+        }
     }
-    return first + primitive;
+    return meshes[mesh].x + primitive;
 }
 
 // Whether a camera ray along `dir` sees the front of object `mesh`'s
-// triangle at primitive `primitive`.
-fn hw_front(mesh: u32, primitive: u32, dir: vec3<f32>) -> bool {
-    let t = cam_tri(mesh, primitive);
+// triangle at `geometry`, `primitive`.
+fn hw_front(mesh: u32, geometry: u32, primitive: u32, dir: vec3<f32>) -> bool {
+    let t = cam_tri(mesh, geometry, primitive);
     let v0 = tris[3u * t].xyz;
     let n = normal_to_world(mesh, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
     return dot(n, dir) < 0.0;
@@ -52,12 +56,12 @@ fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
     rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
     rayQueryProceed(&rq);
     var hit = rayQueryGetCommittedIntersection(&rq);
-    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.primitive_index, dir)) {
+    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.geometry_index, hit.primitive_index, dir)) {
         var fq: ray_query;
         rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
         while (rayQueryProceed(&fq)) {
             let c = rayQueryGetCandidateIntersection(&fq);
-            if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+            if (hw_front(c.instance_custom_data, c.geometry_index, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
         }
         hit = rayQueryGetCommittedIntersection(&fq);
     }
@@ -66,7 +70,7 @@ fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dist = 3.4e38;
     if (hit.kind != 0u) {
         mesh = hit.instance_custom_data;
-        tri = cam_tri(mesh, hit.primitive_index);
+        tri = cam_tri(mesh, hit.geometry_index, hit.primitive_index);
         dist = hit.t;
     }
     vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
@@ -92,36 +96,36 @@ fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
     rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
     rayQueryProceed(&rq);
     var hit = rayQueryGetCommittedIntersection(&rq);
-    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.primitive_index, dir)) {
+    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.geometry_index, hit.primitive_index, dir)) {
         var fq: ray_query;
         rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
         while (rayQueryProceed(&fq)) {
             let c = rayQueryGetCandidateIntersection(&fq);
-            if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+            if (hw_front(c.instance_custom_data, c.geometry_index, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
         }
         hit = rayQueryGetCommittedIntersection(&fq);
     }
     if (hit.kind != 0u) {
         mesh = hit.instance_custom_data;
-        tri = cam_tri(mesh, hit.primitive_index);
+        tri = cam_tri(mesh, hit.geometry_index, hit.primitive_index);
         dist = hit.t;
     }
     var mq: ray_query;
     rayQueryInitialize(&mq, movers_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, dist, eye, dir));
     rayQueryProceed(&mq);
     var moved = rayQueryGetCommittedIntersection(&mq);
-    if (moved.kind != 0u && !hw_front(moved.instance_custom_data, moved.primitive_index, dir)) {
+    if (moved.kind != 0u && !hw_front(moved.instance_custom_data, moved.geometry_index, moved.primitive_index, dir)) {
         var fq: ray_query;
         rayQueryInitialize(&fq, movers_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, dist, eye, dir));
         while (rayQueryProceed(&fq)) {
             let c = rayQueryGetCandidateIntersection(&fq);
-            if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+            if (hw_front(c.instance_custom_data, c.geometry_index, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
         }
         moved = rayQueryGetCommittedIntersection(&fq);
     }
     if (moved.kind != 0u && moved.t < dist) {
         mesh = moved.instance_custom_data;
-        tri = cam_tri(mesh, moved.primitive_index);
+        tri = cam_tri(mesh, moved.geometry_index, moved.primitive_index);
         dist = moved.t;
     }
     vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
@@ -135,18 +139,18 @@ fn hw_trace(eye: vec3<f32>, dir: vec3<f32>, t_min: f32) -> vec3<u32> {
     rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, t_min, 3.4e38, eye, dir));
     rayQueryProceed(&rq);
     var hit = rayQueryGetCommittedIntersection(&rq);
-    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.primitive_index, dir)) {
+    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.geometry_index, hit.primitive_index, dir)) {
         var fq: ray_query;
         rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, t_min, 3.4e38, eye, dir));
         while (rayQueryProceed(&fq)) {
             let c = rayQueryGetCandidateIntersection(&fq);
-            if (hw_front(c.instance_custom_data, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+            if (hw_front(c.instance_custom_data, c.geometry_index, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
         }
         hit = rayQueryGetCommittedIntersection(&fq);
     }
     if (hit.kind == 0u) { return vec3<u32>(0xffffffffu, 0xffffffffu, bitcast<u32>(3.4e38)); }
     let mesh = hit.instance_custom_data;
-    return vec3<u32>(mesh, cam_tri(mesh, hit.primitive_index), bitcast<u32>(hit.t));
+    return vec3<u32>(mesh, cam_tri(mesh, hit.geometry_index, hit.primitive_index), bitcast<u32>(hit.t));
 }
 
 // The opacity at world point `p` on triangle `t` of object `m`: 1 unless

@@ -28,11 +28,11 @@ struct StreamParams {
 
 const STREAM_NONE: u32 = 0xffffffffu;
 
-// One pixel of each 2×2: an object it misses is under two pixels across,
-// and wants no more than its neighbours'.
+// One pixel of each 4×4: an object it misses is under four pixels across,
+// where a level's error is rarely a visible share of it.
 @compute @workgroup_size(8, 8)
 fn stream_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let p = 2u * gid.xy;
+    let p = 4u * gid.xy;
     if (p.x >= params.width || p.y >= params.height) { return; }
     let v = vis[p.y * params.width + p.x];
     if (v.x == STREAM_NONE || v.x >= params.objects) { return; }
