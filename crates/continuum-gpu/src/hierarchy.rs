@@ -76,6 +76,15 @@ pub(crate) struct NodeGpu {
 }
 
 impl NodeGpu {
+    /// The node with its children's index moved by `nodes` (interior) or its
+    /// first item's by `items` (leaf), for moving a hierarchy (M14 gate 4).
+    pub(crate) fn rebased(&self, nodes: i64, items: i64) -> NodeGpu {
+        let mut n = *self;
+        let by = if n.info[1] > 0 { items } else { nodes };
+        n.info[0] = (n.info[0] as i64 + by) as u32;
+        n
+    }
+
     /// The node's box.
     pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
         (
@@ -421,10 +430,11 @@ pub(crate) fn shadow_region(
 /// hierarchy once, and per object a range pointing at them with a transform
 /// (`[row 0, row 1, row 2]` of the rotation with the translation in `w`, then
 /// `[scale, 1 / scale, 0, 0]`). Also returns each object's padded world bounds.
+#[allow(clippy::type_complexity)]
 pub(crate) fn flatten_instanced(
     geometries: &[Vec<Tri>],
     objects: &[Placement],
-) -> (Flat, Vec<[f32; 4]>, Vec<(Vec3, Vec3)>) {
+) -> (Flat, Vec<[f32; 4]>, Vec<(Vec3, Vec3)>, Vec<[u32; 4]>) {
     let mut flat = flatten(geometries);
     // A blended geometry's coverage samples scale by its opacity (M10 gate
     // 16): its nodes are its root's and those after it, up to the next
@@ -453,6 +463,7 @@ pub(crate) fn flatten_instanced(
         }
     }
     let ranges = std::mem::take(&mut flat.ranges);
+    let geometry_ranges = ranges.clone();
     let local: Vec<(Vec3, Vec3)> = geometries.iter().map(|g| mesh_bounds(g)).collect();
     let mut transforms = Vec::with_capacity(4 * objects.len().max(1));
     let mut bounds = Vec::with_capacity(objects.len());
@@ -468,7 +479,7 @@ pub(crate) fn flatten_instanced(
     if transforms.is_empty() {
         transforms.extend([[0.0; 4]; 4]);
     }
-    (flat, transforms, bounds)
+    (flat, transforms, bounds, geometry_ranges)
 }
 
 /// One mesh's triangle hierarchy (at most [`LEAF_TRIANGLES`] per leaf): nodes

@@ -592,6 +592,11 @@ var<private> work_b: vec4<u32> = vec4<u32>(0u);
 var<private> work_c: vec4<u32> = vec4<u32>(0u);
 // The object the traced cones start on (diagnostics only).
 var<private> own_object: u32 = 0xffffffffu;
+// Lighting levels streamed (M14 gate 4): an object whose lighting level was
+// needed and absent in this invocation's walks (NONE: none). An absent
+// level's objects hold NONE as their first triangle and point at a stub,
+// their hierarchy's root alone (bounds and prefiltered coverage).
+var<private> lit_missing: u32 = 0xffffffffu;
 
 // Packet traversal (M5 gate 5): the invocations of a subgroup that trace
 // cones together walk each hierarchy together. A node is visited when any of
@@ -656,7 +661,17 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
     var span = vec2<u32>(68u, 0u);
     var touched = false;
     if (light.counts.z == 2u) {
-        if (range.z != NONE) {
+        if (range.z != NONE && range.x == NONE) {
+            // The stub answers what the root alone answers (missed, or
+            // splatted at the cone's footprint), as the full walk would; a
+            // cone that would descend needs the absent level.
+            if (on) {
+                let node = blas[range.z];
+                let test = node_cone_test(c, &acc, &span, range.z, node.lo.xyz, node.hi.xyz);
+                if (test == 2u) { touched = true; }
+                if (test == 3u) { lit_missing = m; }
+            }
+        } else if (range.z != NONE) {
             var sp = base + 1u;
             stack_set(base, range.z);
             need_put(base, on);
@@ -1463,6 +1478,13 @@ fn nearest_in_mesh(world_eye: vec3<f32>, world_dir: vec3<f32>, m: u32, best: Hit
     if (light.counts.z == 2u) {
         if (range.z == NONE) { return hit; }
         let inv = 1.0 / dir;
+        if (range.x == NONE) {
+            // An absent lighting level (M14 gate 4): a ray into its stub's
+            // box needs it.
+            let node = blas[range.z];
+            if (ray_box(eye, inv, node.lo.xyz, node.hi.xyz, hit.distance)) { lit_missing = m; }
+            return hit;
+        }
         var sp = base + 1u;
         stack_set(base, range.z);
         while (sp > base) {
@@ -2676,6 +2698,14 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // Slots whose samples met hits with no page resident (requested), for the
 // CPU to re-bake later; count in mover_stats[15].
 @group(0) @binding(75) var<storage, read_write> incomplete: array<u32>;
+// The incomplete list's capacity (the CPU's `INCOMPLETE_CAP`), then pairs of
+// a page's slot and the object whose lighting level its bake lacked (M14
+// gate 4; `MISSING_CAP` of them).
+const INCOMPLETE_CAP: u32 = 16384u;
+// `slot_stale`'s mark for a page baked against an absent lighting level,
+// with the frame in its low bits (M14 gate 4).
+const LIT_MARK: u32 = 0x10000000u;
+const MISSING_CAP: u32 = 4096u;
 // Per object, its material (M10 gate 2): metallic and roughness; roughness
 // below zero is Lambertian.
 // Per object, two entries: metallic and roughness (f32 bits; roughness
@@ -2899,6 +2929,11 @@ struct TexelSurface {
 };
 
 fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
+    if (meshes[m].x == NONE) {
+        // The object's lighting level is absent (M14 gate 4).
+        lit_missing = m;
+        return TexelSurface(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), false);
+    }
     let ch = vcharts[c];
     let uv = (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n);
     let cell = min(vec2<u32>(uv * vec2<f32>(ch.grid)), ch.grid - vec2<u32>(1u));
@@ -2981,6 +3016,7 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let k = job.y & 0xffu;
     let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
     let t = page_texel(job.x, k);
+    lit_missing = NONE;
     let s = vc_surface(t.m, t.c, t.n, t.texel);
     let on = listed && t.inside && s.ok;
     let value = hit_irradiance_rect(on, 0u, s.apex, s.normal, lights[l]);
@@ -3008,6 +3044,19 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     }
     if (listed && t.inside) {
         pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(select(0.0, value, on), ratio, vc.sky.w == 1u);
+    }
+    // A texel that needed an absent lighting level (M14 gate 4): its page
+    // shows as missing (`vc_fill` keeps this frame's mark; a mark from an
+    // earlier frame is a slot's previous page's, cleared like any) and
+    // waits; the first texel to mark it lists the page with the object it
+    // lacked.
+    let mark = LIT_MARK | (vc.counts.y & 0x0fffffffu);
+    if (listed && t.inside && lit_missing != NONE && atomicExchange(&slot_stale[t.e.w], mark) != mark) {
+        let q = atomicAdd(&mover_stats[20], 1u);
+        if (q < MISSING_CAP) {
+            incomplete[INCOMPLETE_CAP + 2u * q] = t.e.w;
+            incomplete[INCOMPLETE_CAP + 2u * q + 1u] = lit_missing;
+        }
     }
     // A moving light's ledger record for this texel (M9 gate 2).
     let mj = moving_index[l];
@@ -3189,7 +3238,9 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
             let r = atomicCompareExchangeWeak(&slot_stale[e.w], 3u, 0u);
             if (r.exchanged || r.old_value != 3u) { break; }
         }
-    } else {
+    } else if (atomicLoad(&slot_stale[e.w]) != (LIT_MARK | (vc.counts.y & 0x0fffffffu))) {
+        // This frame's `LIT_MARK`: baked against an absent lighting level
+        // (M14 gate 4), missing until baked again.
         atomicStore(&slot_stale[e.w], select(0u, 3u, kind == 2.0));
     }
     let c = e.y & 0xffffu;
@@ -4184,7 +4235,7 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         // Missing more than a hundredth of the hemisphere: re-bake later.
         if (ind_missing[0] > 0.01 * 3.14159265) {
             let q = atomicAdd(&mover_stats[15], 1u);
-            if (q < arrayLength(&incomplete)) { incomplete[q] = e.w; }
+            if (q < INCOMPLETE_CAP) { incomplete[q] = e.w; }
         }
     }
 }

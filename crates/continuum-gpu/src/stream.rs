@@ -71,6 +71,12 @@ pub struct Levels {
     pub base_error: f32,
     /// Finer levels, coarse to fine; the last is the finest.
     pub finer: Vec<Level>,
+    /// A coarse level camera rays see until a finer one is resident (M14
+    /// gate 4): resident from the start, outside the budget, its surface
+    /// given (not by a source). With one, camera rays never see the
+    /// geometry itself (it needs no hardware structure), and its error
+    /// stands for `base_error`.
+    pub proxy: Option<Level>,
 }
 
 /// How camera levels are streamed (M14 gate 1).
@@ -95,6 +101,11 @@ pub struct StreamOptions {
     pub cpu_cache_bytes: u64,
     /// Threads producing levels from a [`LevelSource`].
     pub workers: usize,
+    /// Triangles of lighting levels (the geometries themselves) kept on the
+    /// GPU at most (M14 gate 4; 0: all resident). Needs every geometry with
+    /// camera levels to have a proxy, those geometries last in the scene,
+    /// and no sky, bounce light or movers.
+    pub lighting_triangles: u32,
     /// Every geometry's finest level resident from the start and nothing
     /// streamed: the fully resident reference (the budget is ignored).
     pub resident: bool,
@@ -109,6 +120,7 @@ impl Default for StreamOptions {
             build_ns_per_triangle: 30.0,
             cpu_cache_bytes: 2 << 30,
             workers: 4,
+            lighting_triangles: 0,
             resident: false,
         }
     }
@@ -317,6 +329,10 @@ struct Streamed {
     /// (for packing produced levels).
     first_chart: u32,
     textured: bool,
+    /// Its proxy, if any: its data, then (once loaded) its structure; its
+    /// page-table entry is `proxy_table`.
+    proxy: Option<(Arc<PackedData>, Option<wgpu::Blas>)>,
+    proxy_table: u32,
 }
 
 impl Streamed {
@@ -368,8 +384,10 @@ struct Readback {
 
 pub(crate) struct Streamer {
     options: StreamOptions,
-    /// The pool's first triangle in the camera's buffers.
+    /// The pool's first triangle in the camera's buffers (proxies), and its
+    /// pages' first.
     base: u32,
+    pages_base: u32,
     capacity: u32,
     alloc: Pages,
     /// The page table's first entry (a word index into the objects'
@@ -467,16 +485,27 @@ pub(crate) fn pool_triangles(scene: &InstancedScene, options: &StreamOptions) ->
     if streamed(scene).count() == 0 {
         0
     } else if options.resident {
-        streamed(scene).map(finest_pages).sum::<u32>() * PAGE
+        proxy_triangles(scene) + streamed(scene).map(finest_pages).sum::<u32>() * PAGE
     } else {
-        options.budget_triangles.div_ceil(PAGE).max(1) * PAGE
+        proxy_triangles(scene) + options.budget_triangles.div_ceil(PAGE).max(1) * PAGE
     }
+}
+
+/// Triangles of every streamed geometry's proxy (packed at the pool's
+/// start, ahead of its pages).
+fn proxy_triangles(scene: &InstancedScene) -> u32 {
+    streamed(scene)
+        .filter_map(|l| l.proxy.as_ref())
+        .map(|p| p.surface.triangles.len() as u32)
+        .sum()
 }
 
 /// Entries of the page table (one per page of every streamed geometry's
 /// every level).
 pub(crate) fn table_entries(scene: &InstancedScene) -> u32 {
-    streamed(scene).map(all_pages).sum()
+    streamed(scene)
+        .map(|l| all_pages(l) + l.proxy.is_some() as u32)
+        .sum()
 }
 
 /// Whether any camera level carries texture coordinates for a textured
@@ -535,6 +564,7 @@ impl Streamer {
         let mut index = vec![NONE; scene.geometries.len()];
         let mut errors_of: Vec<Vec<f32>> = Vec::new();
         let mut table = 0u32;
+        let mut proxies = 0u32;
         for (g, levels) in scene.geometry_levels.iter().enumerate() {
             let Some(levels) = levels else { continue };
             if levels.finer.is_empty() || g >= scene.geometries.len() {
@@ -542,8 +572,12 @@ impl Streamer {
             }
             let has_tex = scene.geometry_textures.get(g).copied().flatten().is_some();
             index[g] = geoms.len() as u32;
+            let proxy_table = table;
+            if levels.proxy.is_some() {
+                table += 1;
+            }
             errors_of.push(
-                std::iter::once(levels.base_error)
+                std::iter::once(levels.proxy.as_ref().map_or(levels.base_error, |p| p.error))
                     .chain(levels.finer.iter().map(|l| l.error))
                     .collect(),
             );
@@ -569,6 +603,14 @@ impl Streamer {
                     .collect(),
                 first_chart: first_chart[g],
                 textured: textured && has_tex,
+                proxy: levels.proxy.as_ref().map(|p| {
+                    proxies += p.surface.triangles.len() as u32;
+                    (
+                        Arc::new(pack(&p.surface, first_chart[g], textured && has_tex)),
+                        None,
+                    )
+                }),
+                proxy_table,
                 held: levels.finer.iter().map(|_| None).collect(),
                 wanted: 0,
                 seen: 0,
@@ -642,8 +684,9 @@ impl Streamer {
         let mut streamer = Streamer {
             options,
             base,
-            capacity,
-            alloc: Pages::new(capacity / PAGE),
+            pages_base: base + proxies,
+            capacity: capacity - proxies,
+            alloc: Pages::new((capacity - proxies) / PAGE),
             table_base,
             textured,
             geoms,
@@ -674,6 +717,7 @@ impl Streamer {
         {
             streamer.producer = Some(Producer::new(source.clone(), options.workers));
         }
+        streamer.load_proxies(device, queue, hw, targets);
         if options.resident {
             // In batches, so build inputs and scratch stay bounded.
             let all: Vec<usize> = (0..streamer.geoms.len()).collect();
@@ -1079,13 +1123,103 @@ impl Streamer {
         Some(class)
     }
 
+    /// Uploads every proxy (at the pool's start, packed one after another)
+    /// and builds their structures, waiting for them (once, at creation).
+    fn load_proxies(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        hw: &mut HwScene,
+        targets: &Targets,
+    ) {
+        let mut first = self.base;
+        let mut built: Vec<(usize, wgpu::BlasTriangleGeometrySizeDescriptor, u32)> = Vec::new();
+        for s in 0..self.geoms.len() {
+            let Some((p, _)) = &self.geoms[s].proxy else {
+                continue;
+            };
+            let t = first as u64;
+            queue.write_buffer(targets.tris, 48 * t, bytemuck::cast_slice(&p.tris));
+            queue.write_buffer(targets.normals, 48 * t, bytemuck::cast_slice(&p.normals));
+            if let (Some(uv), Some(chart)) = (targets.uv, targets.chart) {
+                queue.write_buffer(uv, 24 * t, bytemuck::cast_slice(&p.uv));
+                queue.write_buffer(chart, 4 * t, bytemuck::cast_slice(&p.chart));
+            }
+            if self.textured && !p.tex.is_empty() {
+                queue.write_buffer(targets.tex, 24 * t, bytemuck::cast_slice(&p.tex));
+            }
+            let table = self.table_base + self.geoms[s].proxy_table;
+            queue.write_buffer(targets.meshes, 4 * table as u64, bytemuck::bytes_of(&first));
+            let size = wgpu::BlasTriangleGeometrySizeDescriptor {
+                vertex_format: wgpu::VertexFormat::Float32x3,
+                vertex_count: 3 * p.triangles,
+                index_format: None,
+                index_count: None,
+                flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+            };
+            built.push((s, size, 3 * first));
+            first += p.triangles;
+        }
+        for batch in built.chunks(256) {
+            let blases: Vec<wgpu::Blas> = batch
+                .iter()
+                .map(|(_, size, _)| {
+                    device.create_blas(
+                        &wgpu::CreateBlasDescriptor {
+                            label: Some("proxy"),
+                            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                        },
+                        wgpu::BlasGeometrySizeDescriptors::Triangles {
+                            descriptors: vec![size.clone()],
+                        },
+                    )
+                })
+                .collect();
+            for ((s, _, _), blas) in batch.iter().zip(&blases) {
+                if let Some((_, b)) = &mut self.geoms[*s].proxy {
+                    *b = Some(blas.clone());
+                }
+                self.display(*s, queue, hw, targets);
+            }
+            let entries: Vec<wgpu::BlasBuildEntry> = batch
+                .iter()
+                .zip(&blases)
+                .map(|((_, size, first_vertex), blas)| wgpu::BlasBuildEntry {
+                    blas,
+                    geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
+                        wgpu::BlasTriangleGeometry {
+                            size,
+                            vertex_buffer: targets.tris,
+                            first_vertex: *first_vertex,
+                            vertex_stride: 16,
+                            index_buffer: None,
+                            first_index: None,
+                            transform_buffer: None,
+                            transform_buffer_offset: None,
+                        },
+                    ]),
+                })
+                .collect();
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.build_acceleration_structures(entries.iter(), std::iter::once(&hw.tlas));
+            queue.submit([encoder.finish()]);
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("GPU poll failed");
+        }
+    }
+
     /// Points geometry `s`'s objects at its finest resident level (or its
-    /// lighting level).
+    /// proxy, or its lighting level).
     fn display(&self, s: usize, queue: &wgpu::Queue, hw: &mut HwScene, targets: &Targets) {
         let g = &self.geoms[s];
         let level = g.level();
         let (blas, word) = if level == 0 {
-            (None, 0)
+            match &g.proxy {
+                Some((_, Some(b))) => (Some(b), LEVEL_FLAG | (self.table_base + g.proxy_table)),
+                _ => (None, 0),
+            }
         } else {
             let r = g.held[level as usize - 1]
                 .as_ref()
@@ -1140,7 +1274,7 @@ impl Streamer {
                     k += 1;
                 }
                 let (t0, t1) = (j * PAGE as usize, (k * PAGE as usize).min(n));
-                let t = (self.base + pages[j] * PAGE) as u64;
+                let t = (self.pages_base + pages[j] * PAGE) as u64;
                 let belt = &mut self.belt;
                 let mut put = |target: &wgpu::Buffer, offset: u64, data: &[u8]| {
                     if let Some(size) = wgpu::BufferSize::new(data.len() as u64) {
@@ -1172,7 +1306,10 @@ impl Streamer {
                 j = k;
             }
             let table = self.table_base + self.geoms[s].tables[level as usize - 1];
-            let entries: Vec<u32> = pages.iter().map(|&pg| self.base + pg * PAGE).collect();
+            let entries: Vec<u32> = pages
+                .iter()
+                .map(|&pg| self.pages_base + pg * PAGE)
+                .collect();
             queue.write_buffer(
                 targets.meshes,
                 4 * table as u64,
@@ -1206,7 +1343,7 @@ impl Streamer {
             );
             let firsts = pages
                 .iter()
-                .map(|&pg| 3 * (self.base + pg * PAGE))
+                .map(|&pg| 3 * (self.pages_base + pg * PAGE))
                 .collect();
             // Resident and shown before the top-level build below reads the
             // objects' instances.
@@ -1336,5 +1473,384 @@ mod tests {
         assert!(p.take(2).is_none());
         p.release(&a);
         assert_eq!(p.take(4).unwrap(), vec![0, 1, 2, 7]);
+    }
+}
+
+/// Lighting levels streamed (M14 gate 4): the geometries from `first` on
+/// (the scene's last) stream; the others stay resident, as a prefix of
+/// every per-triangle buffer, then `slots` slots of `slot_tris` triangles.
+#[derive(Clone, Debug)]
+pub(crate) struct LightingLayout {
+    pub first: usize,
+    pub static_tris: u32,
+    pub slot_tris: u32,
+    pub slots: u32,
+}
+
+impl LightingLayout {
+    /// Triangles before the camera's pool: the resident prefix and the
+    /// slots.
+    pub(crate) fn lit_tris(&self) -> u32 {
+        self.static_tris + self.slots * self.slot_tris
+    }
+}
+
+/// Where lighting levels stream, if they do (see
+/// [`StreamOptions::lighting_triangles`]).
+pub(crate) fn lighting_layout(
+    scene: &InstancedScene,
+    options: &StreamOptions,
+) -> Option<LightingLayout> {
+    if options.lighting_triangles == 0 || options.resident {
+        return None;
+    }
+    let proxied = |g: usize| {
+        scene
+            .geometry_levels
+            .get(g)
+            .and_then(|l| l.as_ref())
+            .is_some_and(|l| l.proxy.is_some())
+    };
+    let first = (0..scene.geometries.len()).find(|&g| proxied(g))?;
+    assert!(
+        (first..scene.geometries.len()).all(proxied),
+        "streamed lighting levels need every geometry from the first with a proxy on to have one"
+    );
+    let static_tris = scene.geometries[..first]
+        .iter()
+        .map(|g| g.triangles.len() as u32)
+        .sum();
+    let slot_tris = scene.geometries[first..]
+        .iter()
+        .map(|g| g.triangles.len() as u32)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    Some(LightingLayout {
+        first,
+        static_tris,
+        slot_tris,
+        slots: (options.lighting_triangles / slot_tris).max(1),
+    })
+}
+
+/// A streamed geometry's lighting level as it is uploaded into a slot:
+/// per triangle, its corners, normals, texture and chart coordinates and
+/// chart; its hierarchy's nodes (children and items relative to the
+/// slot), items (triangles relative to the slot) and node coverage; and
+/// its charts' cells (global cell, first entry and count relative to the
+/// slot's cell list) with that list (triangles relative to the slot).
+#[derive(Default)]
+pub(crate) struct LitPackage {
+    pub tris: Vec<[f32; 4]>,
+    pub normals: Vec<[f32; 4]>,
+    pub tex: Vec<[f32; 2]>,
+    pub nodes: Vec<crate::hierarchy::NodeGpu>,
+    pub items: Vec<u32>,
+    pub cov: Vec<f32>,
+    pub uv: Vec<[f32; 2]>,
+    pub chart: Vec<u32>,
+    pub cells: Vec<[u32; 3]>,
+    pub cell_tris: Vec<u32>,
+}
+
+/// The node part of the layout: resident nodes, the stubs' first (one per
+/// streamed geometry: its root), and nodes per slot.
+pub(crate) struct LitNodes {
+    pub static_nodes: u32,
+    pub stubs: u32,
+    pub slot_nodes: u32,
+}
+
+/// The cell part: resident cell-list entries, and entries per slot.
+pub(crate) struct LitCells {
+    pub static_cells: u32,
+    pub slot_cells: u32,
+}
+
+/// The buffers lighting levels load into.
+pub(crate) struct LitTargets<'a> {
+    pub tris: &'a wgpu::Buffer,
+    pub normals: &'a wgpu::Buffer,
+    pub tex: &'a wgpu::Buffer,
+    pub meshes: &'a wgpu::Buffer,
+    pub nodes: &'a wgpu::Buffer,
+    pub items: &'a wgpu::Buffer,
+    pub cov: &'a wgpu::Buffer,
+    pub uv: &'a wgpu::Buffer,
+    pub chart: &'a wgpu::Buffer,
+    pub cells: &'a wgpu::Buffer,
+    pub cell_tris: &'a wgpu::Buffer,
+}
+
+/// What lighting-level streaming did in a frame (M14 gate 4).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LightingStats {
+    /// Lighting levels loaded and evicted in the frame.
+    pub loads: u32,
+    /// See `loads`.
+    pub evictions: u32,
+    /// Lighting levels wanted but not loaded (no free slot, all pinned, or
+    /// over the frame's count).
+    pub refused: u32,
+    /// Triangles of the resident lighting levels, and the slots' capacity.
+    pub resident_triangles: u64,
+    /// See `resident_triangles`.
+    pub capacity_triangles: u64,
+    /// Geometries pinned (pages wait for them, or are planned on them).
+    pub pinned: u32,
+}
+
+/// Lighting levels loaded at most per frame.
+const LIT_LOADS_PER_FRAME: usize = 64;
+/// Frames a lighting level stays at least once loaded: its pages are
+/// planned the next frame and baked the one after.
+const MIN_RESIDENT: u64 = 4;
+
+/// Lighting levels streamed into slots (M14 gate 4).
+pub(crate) struct LightingPool {
+    layout: LightingLayout,
+    nodes: LitNodes,
+    cells: LitCells,
+    packages: Vec<LitPackage>,
+    /// Per streamed geometry: its objects, its slot, the latest frame it
+    /// was wanted, touched or pinned.
+    objects: Vec<Vec<u32>>,
+    slot: Vec<Option<u32>>,
+    used: Vec<u64>,
+    /// The frame each was loaded in (kept at least `MIN_RESIDENT` frames,
+    /// so its pages bake before it can go).
+    loaded_at: Vec<u64>,
+    free: Vec<u32>,
+    /// Per object of the scene: whether its lighting level is resident.
+    resident: Vec<bool>,
+    /// Per object: its streamed geometry (NONE: resident always).
+    of_object: Vec<u32>,
+    frame: u64,
+    log: Vec<LightingStats>,
+}
+
+impl LightingPool {
+    pub(crate) fn new(
+        layout: LightingLayout,
+        nodes: LitNodes,
+        cells: LitCells,
+        packages: Vec<LitPackage>,
+        scene: &InstancedScene,
+    ) -> Self {
+        let count = packages.len();
+        let mut objects = vec![Vec::new(); count];
+        let mut of_object = vec![NONE; scene.instances.len()];
+        let mut resident = vec![true; scene.instances.len()];
+        for (k, i) in scene.instances.iter().enumerate() {
+            if i.geometry >= layout.first {
+                objects[i.geometry - layout.first].push(k as u32);
+                of_object[k] = (i.geometry - layout.first) as u32;
+                resident[k] = false;
+            }
+        }
+        LightingPool {
+            free: (0..layout.slots).rev().collect(),
+            layout,
+            nodes,
+            cells,
+            packages,
+            objects,
+            slot: vec![None; count],
+            used: vec![0; count],
+            loaded_at: vec![0; count],
+            resident,
+            of_object,
+            frame: 1,
+            log: Vec::new(),
+        }
+    }
+
+    /// Per object, whether its lighting level is resident.
+    pub(crate) fn resident(&self) -> &[bool] {
+        &self.resident
+    }
+
+    pub(crate) fn log(&self) -> &[LightingStats] {
+        &self.log
+    }
+
+    /// Loads the lighting levels of the objects `wanted` (missing from
+    /// bakes, or under pages asked for), keeping those of `pinned` objects
+    /// (pages wait for them or are baked on them this frame), evicting the
+    /// least recently used others to make room.
+    pub(crate) fn update(
+        &mut self,
+        queue: &wgpu::Queue,
+        targets: &LitTargets,
+        wanted: &[u32],
+        pinned: &[u32],
+    ) {
+        let frame = self.frame;
+        let mut stats = LightingStats {
+            capacity_triangles: (self.layout.slots * self.layout.slot_tris) as u64,
+            ..Default::default()
+        };
+        // Protected: pinned levels, then wanted ones in the order given (the
+        // pages waiting longest first) while the slots hold them. Only
+        // protected levels load, and only unprotected ones are evicted, so
+        // the longest-waiting page's levels always come together.
+        let n = self.packages.len();
+        let capacity = self.layout.slots as usize;
+        let mut protect = vec![false; n];
+        let mut count = 0usize;
+        for &o in pinned {
+            if let Some(&g) = self.of_object.get(o as usize)
+                && g != NONE
+                && !protect[g as usize]
+            {
+                protect[g as usize] = true;
+                count += 1;
+            }
+        }
+        stats.pinned = count as u32;
+        let mut wants: Vec<usize> = Vec::new();
+        for &o in wanted {
+            let Some(&g) = self.of_object.get(o as usize) else {
+                continue;
+            };
+            if g == NONE || protect[g as usize] {
+                continue;
+            }
+            if count >= capacity {
+                stats.refused += 1;
+                continue;
+            }
+            protect[g as usize] = true;
+            count += 1;
+            wants.push(g as usize);
+        }
+        for (used, _) in self.used.iter_mut().zip(&protect).filter(|(_, p)| **p) {
+            *used = frame;
+        }
+        let mut loaded = 0;
+        for g in wants {
+            if self.slot[g].is_some() {
+                continue;
+            }
+            if loaded >= LIT_LOADS_PER_FRAME {
+                stats.refused += 1;
+                continue;
+            }
+            let slot = match self.free.pop() {
+                Some(k) => Some(k),
+                None => {
+                    // The least recently used unprotected one, loaded long
+                    // enough ago for its pages to have baked.
+                    let victim = (0..n)
+                        .filter(|&h| {
+                            self.slot[h].is_some()
+                                && !protect[h]
+                                && self.loaded_at[h] + MIN_RESIDENT <= frame
+                        })
+                        .min_by_key(|&h| self.used[h]);
+                    victim.map(|h| {
+                        stats.evictions += 1;
+                        self.evict(queue, targets, h)
+                    })
+                }
+            };
+            let Some(k) = slot else {
+                stats.refused += 1;
+                continue;
+            };
+            self.load(queue, targets, g, k);
+            self.loaded_at[g] = frame;
+            loaded += 1;
+            stats.loads += 1;
+        }
+        stats.resident_triangles = self
+            .slot
+            .iter()
+            .zip(&self.packages)
+            .filter(|(s, _)| s.is_some())
+            .map(|(_, p)| (p.tris.len() / 3) as u64)
+            .sum();
+        self.log.push(stats);
+        self.frame += 1;
+    }
+
+    /// Frees geometry `g`'s slot: its objects point at their stub.
+    fn evict(&mut self, queue: &wgpu::Queue, targets: &LitTargets, g: usize) -> u32 {
+        let k = self.slot[g].take().expect("a resident lighting level");
+        let stub = self.nodes.stubs + g as u32;
+        for &o in &self.objects[g] {
+            self.resident[o as usize] = false;
+            queue.write_buffer(
+                targets.meshes,
+                16 * o as u64,
+                bytemuck::cast_slice(&[NONE, 0, stub]),
+            );
+        }
+        k
+    }
+
+    /// Uploads geometry `g`'s lighting level into slot `k` and points its
+    /// objects at it.
+    fn load(&mut self, queue: &wgpu::Queue, targets: &LitTargets, g: usize, k: u32) {
+        let p = &self.packages[g];
+        let tri = self.layout.static_tris + k * self.layout.slot_tris;
+        let node = self.nodes.static_nodes + self.packages.len() as u32 + k * self.nodes.slot_nodes;
+        let cell = self.cells.static_cells + k * self.cells.slot_cells;
+        let t = tri as u64;
+        queue.write_buffer(targets.tris, 48 * t, bytemuck::cast_slice(&p.tris));
+        queue.write_buffer(targets.normals, 48 * t, bytemuck::cast_slice(&p.normals));
+        if !p.tex.is_empty() {
+            queue.write_buffer(targets.tex, 24 * t, bytemuck::cast_slice(&p.tex));
+        }
+        queue.write_buffer(targets.uv, 24 * t, bytemuck::cast_slice(&p.uv));
+        queue.write_buffer(targets.chart, 4 * t, bytemuck::cast_slice(&p.chart));
+        let items: Vec<u32> = p.items.iter().map(|&i| i + tri).collect();
+        queue.write_buffer(targets.items, 4 * t, bytemuck::cast_slice(&items));
+        let nodes: Vec<crate::hierarchy::NodeGpu> = p
+            .nodes
+            .iter()
+            .map(|n| n.rebased(node as i64, tri as i64))
+            .collect();
+        queue.write_buffer(
+            targets.nodes,
+            48 * node as u64,
+            bytemuck::cast_slice(&nodes),
+        );
+        queue.write_buffer(
+            targets.cov,
+            4 * (node as u64 * crate::hierarchy::COVERAGE_SAMPLES as u64),
+            bytemuck::cast_slice(&p.cov),
+        );
+        let list: Vec<u32> = p.cell_tris.iter().map(|&i| i + tri).collect();
+        if !list.is_empty() {
+            queue.write_buffer(
+                targets.cell_tris,
+                4 * cell as u64,
+                bytemuck::cast_slice(&list),
+            );
+        }
+        // The geometry's cells are consecutive: one write.
+        if let (Some(first), Some(last)) = (p.cells.first(), p.cells.last()) {
+            let mut run = vec![[0u32; 2]; (last[0] - first[0] + 1) as usize];
+            for &[c, f, n] in &p.cells {
+                run[(c - first[0]) as usize] = [f + cell, n];
+            }
+            queue.write_buffer(
+                targets.cells,
+                8 * first[0] as u64,
+                bytemuck::cast_slice(&run),
+            );
+        }
+        let count = (p.tris.len() / 3) as u32;
+        for &o in &self.objects[g] {
+            self.resident[o as usize] = true;
+            queue.write_buffer(
+                targets.meshes,
+                16 * o as u64,
+                bytemuck::cast_slice(&[tri, count, node]),
+            );
+        }
+        self.slot[g] = Some(k);
     }
 }

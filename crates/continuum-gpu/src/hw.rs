@@ -17,6 +17,10 @@ pub(crate) struct HwScene {
     pub movers: Option<(wgpu::Tlas, Vec<u32>)>,
     blas: Vec<Option<wgpu::Blas>>,
     _vertices: wgpu::Buffer,
+    /// Each object's top-level transform, kept for objects whose geometry
+    /// has no structure of its own (M14 gate 4: camera rays see its proxy),
+    /// so an instance can be made when a level is pointed at.
+    transforms: Vec<[f32; 12]>,
 }
 
 impl HwScene {
@@ -25,10 +29,18 @@ impl HwScene {
     /// camera levels).
     pub(crate) fn point_at(&mut self, object: usize, geometry: usize, blas: Option<&wgpu::Blas>) {
         let Some(b) = blas.or(self.blas[geometry].as_ref()) else {
+            self.tlas[object] = None;
             return;
         };
         if let Some(inst) = &mut self.tlas[object] {
             inst.set_blas(b);
+        } else {
+            self.tlas[object] = Some(wgpu::TlasInstance::new(
+                b,
+                self.transforms[object],
+                object as u32,
+                0xff,
+            ));
         }
     }
 
@@ -75,15 +87,20 @@ pub(crate) fn build(
     geometries: &[Vec<Tri>],
     objects: &[Placement],
     movable: &[usize],
+    skip: &[bool],
 ) -> HwScene {
     use wgpu::util::DeviceExt;
     assert!(
         objects.len() < 1 << 24,
         "at most 2^24 objects with hardware rays"
     );
+    // Geometries without a structure (M14 gate 4: proxied) upload nothing.
+    let built = |k: usize| !skip.get(k).copied().unwrap_or(false);
     let vertices: Vec<[f32; 3]> = geometries
         .iter()
-        .flatten()
+        .enumerate()
+        .filter(|(k, _)| built(*k))
+        .flat_map(|(_, g)| g.iter())
         .flat_map(|t| t.map(|v| v.to_array()))
         .chain(std::iter::once([0.0; 3]))
         .collect();
@@ -94,13 +111,16 @@ pub(crate) fn build(
     });
     let sizes: Vec<Option<wgpu::BlasTriangleGeometrySizeDescriptor>> = geometries
         .iter()
-        .map(|g| {
-            (!g.is_empty()).then(|| wgpu::BlasTriangleGeometrySizeDescriptor {
-                vertex_format: wgpu::VertexFormat::Float32x3,
-                vertex_count: 3 * g.len() as u32,
-                index_format: None,
-                index_count: None,
-                flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+        .enumerate()
+        .map(|(k, g)| {
+            (!g.is_empty() && !skip.get(k).copied().unwrap_or(false)).then(|| {
+                wgpu::BlasTriangleGeometrySizeDescriptor {
+                    vertex_format: wgpu::VertexFormat::Float32x3,
+                    vertex_count: 3 * g.len() as u32,
+                    index_format: None,
+                    index_count: None,
+                    flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+                }
             })
         })
         .collect();
@@ -123,9 +143,11 @@ pub(crate) fn build(
         .collect();
     let mut first = Vec::with_capacity(geometries.len());
     let mut next = 0u32;
-    for g in geometries {
+    for (k, g) in geometries.iter().enumerate() {
         first.push(next);
-        next += 3 * g.len() as u32;
+        if built(k) {
+            next += 3 * g.len() as u32;
+        }
     }
     let entries: Vec<wgpu::BlasBuildEntry> = blas
         .iter()
@@ -187,6 +209,7 @@ pub(crate) fn build(
         movers,
         blas,
         _vertices: vertex_buffer,
+        transforms: objects.iter().map(instance_transform).collect(),
     };
     let placements: Vec<Placement> = movable.iter().map(|&m| objects[m]).collect();
     scene.update_movers(&mut encoder, &placements);

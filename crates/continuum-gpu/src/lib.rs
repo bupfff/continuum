@@ -147,7 +147,7 @@ pub use lightmap::{BLOCK, BLOCK_PLANES, hemicube_weights};
 #[doc(hidden)]
 pub use vcache::CachePage;
 
-use hierarchy::{Placement, flatten, flatten_instanced, mesh_hierarchy, object_hierarchy};
+use hierarchy::{NodeGpu, Placement, flatten, flatten_instanced, mesh_hierarchy, object_hierarchy};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -622,7 +622,8 @@ pub(crate) const VC_ARGS_EDGES_BINDINGS: &[u32] = &[42, 66, 81];
 /// Bindings of the lighting cache's passes.
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
 pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 64, 68, 69, 70,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 62, 64, 68, 69,
+    70, 75,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51, 64,
@@ -1271,7 +1272,7 @@ impl MaskConeKernel {
         origin: DVec3,
         runs: usize,
     ) -> (Vec<[f32; 3]>, Duration, u64) {
-        let (buffers, _) = self.instanced_buffers(lights, scene, origin, &[], 0);
+        let (buffers, _, _) = self.instanced_buffers(lights, scene, origin, &[], 0, None);
         let bytes = buffers.iter().map(|(_, b)| b.size()).sum();
         let cam = camera_uniform(camera, width, height, lights[0].radiance.x);
         let hw_scene = self
@@ -1308,6 +1309,7 @@ impl MaskConeKernel {
     /// Scene buffers for an instanced scene, by binding (see `render_instanced`).
     /// The first light also fills the light uniform, which the paths without
     /// light lists read.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn instanced_buffers(
         &self,
         lights: &[Light],
@@ -1315,7 +1317,12 @@ impl MaskConeKernel {
         origin: DVec3,
         movable: &[usize],
         pool: u32,
-    ) -> (Vec<(u32, wgpu::Buffer)>, Option<hierarchy::MoverTree>) {
+        lighting: Option<&stream::LightingLayout>,
+    ) -> (
+        Vec<(u32, wgpu::Buffer)>,
+        Option<hierarchy::MoverTree>,
+        Option<(stream::LitNodes, Vec<stream::LitPackage>)>,
+    ) {
         // Paths without the list read the first light as a rectangle; a
         // sphere stands there as a tiny square at its center.
         let light = lights[0].as_rect().unwrap_or_else(|| {
@@ -1346,7 +1353,8 @@ impl MaskConeKernel {
                 clear: scene.blend_clear(i.geometry),
             })
             .collect();
-        let (mut flat, xforms, bounds) = flatten_instanced(&geometries, &placements);
+        let (mut flat, xforms, bounds, geometry_ranges) =
+            flatten_instanced(&geometries, &placements);
         // Vertex colors (M10 gate 17) in the triangles' unused w: 1 plus an
         // sRGB byte per channel, an exact integer (0: none).
         let mut first = 0;
@@ -1540,6 +1548,95 @@ impl MaskConeKernel {
         if tex.is_empty() {
             tex.push([0.0; 2]);
         }
+        // Lighting levels streamed (M14 gate 4): the streamed geometries (the
+        // scene's last) leave every buffer for packages loaded into slots;
+        // a stub per geometry (its root and coverage) stays, and the
+        // objects' coverage follows the slots.
+        let mut lit_parts = None;
+        let mut objects = objects;
+        if let Some(lay) = lighting {
+            let cs = hierarchy::COVERAGE_SAMPLES;
+            let count = scene.geometries.len();
+            let first_g = lay.first;
+            let t_s = lay.static_tris as usize;
+            assert_eq!(
+                geometry_ranges[first_g][0] as usize, t_s,
+                "streamed geometries come last"
+            );
+            let n_s = geometry_ranges[first_g][2] as usize;
+            let node_total = flat.blas.len();
+            let mut packages = Vec::with_capacity(count - first_g);
+            let mut slot_nodes = 1usize;
+            let mut stubs = Vec::with_capacity(count - first_g);
+            let mut stub_cov = Vec::with_capacity((count - first_g) * cs);
+            for g in first_g..count {
+                let [first, n, root, _] = geometry_ranges[g];
+                let next = if g + 1 < count {
+                    geometry_ranges[g + 1][2] as usize
+                } else {
+                    node_total
+                };
+                let (f, n, r) = (first as usize, n as usize, root as usize);
+                let nodes = next - r;
+                slot_nodes = slot_nodes.max(nodes);
+                stubs.push(flat.blas[r]);
+                stub_cov.extend_from_slice(&flat.blas_cov[r * cs..(r + 1) * cs]);
+                packages.push(stream::LitPackage {
+                    tris: flat.tris[3 * f..3 * (f + n)].to_vec(),
+                    normals: normals[3 * f..3 * (f + n)].to_vec(),
+                    tex: tex[3 * f..3 * (f + n)].to_vec(),
+                    nodes: flat.blas[r..next]
+                        .iter()
+                        .map(|x| x.rebased(-(r as i64), -(f as i64)))
+                        .collect(),
+                    items: flat.blas_items[f..f + n]
+                        .iter()
+                        .map(|&i| i - first)
+                        .collect(),
+                    cov: flat.blas_cov[r * cs..next * cs].to_vec(),
+                    ..Default::default()
+                });
+            }
+            let object_cov: Vec<f32> = if objects != hierarchy::NONE {
+                flat.blas_cov[objects as usize * cs..].to_vec()
+            } else {
+                Vec::new()
+            };
+            let slot_total = (lay.slots * lay.slot_tris) as usize;
+            flat.tris.truncate(3 * t_s);
+            flat.tris.resize(3 * (t_s + slot_total), [0.0; 4]);
+            normals.truncate(3 * t_s);
+            normals.resize(3 * (t_s + slot_total), [0.0; 4]);
+            tex.truncate(3 * t_s);
+            tex.resize(3 * (t_s + slot_total), [0.0; 2]);
+            flat.blas_items.truncate(t_s);
+            flat.blas_items.resize(t_s + slot_total, 0);
+            let all_nodes = n_s + stubs.len() + lay.slots as usize * slot_nodes;
+            flat.blas.truncate(n_s);
+            flat.blas.extend(stubs.iter().copied());
+            flat.blas.resize(all_nodes, NodeGpu::zeroed());
+            flat.blas_cov.truncate(n_s * cs);
+            flat.blas_cov.extend(stub_cov);
+            flat.blas_cov.resize(all_nodes * cs, 0.0);
+            if objects != hierarchy::NONE {
+                objects = all_nodes as u32;
+                flat.blas_cov.extend(object_cov);
+            }
+            for (k, i) in scene.instances.iter().enumerate() {
+                if i.geometry >= first_g {
+                    let w = flat.ranges[k][3];
+                    flat.ranges[k] = [hierarchy::NONE, 0, (n_s + i.geometry - first_g) as u32, w];
+                }
+            }
+            lit_parts = Some((
+                stream::LitNodes {
+                    static_nodes: n_s as u32,
+                    stubs: n_s as u32,
+                    slot_nodes: slot_nodes as u32,
+                },
+                packages,
+            ));
+        }
         // Camera levels' pool (M14 gate 1): after the lighting level's
         // triangles in every per-triangle buffer the camera's shading reads.
         if pool > 0 {
@@ -1547,7 +1644,10 @@ impl MaskConeKernel {
             let entries = stream::table_entries(scene) as usize;
             flat.ranges
                 .extend(std::iter::repeat_n([0u32; 4], entries.div_ceil(4)));
-            let lit: usize = scene.geometries.iter().map(|g| g.triangles.len()).sum();
+            let lit: usize = lighting.map_or_else(
+                || scene.geometries.iter().map(|g| g.triangles.len()).sum(),
+                |l| l.lit_tris() as usize,
+            );
             let all = 3 * (lit + pool as usize);
             flat.tris.resize(all, [0.0; 4]);
             normals.resize(all, [0.0; 4]);
@@ -1655,7 +1755,7 @@ impl MaskConeKernel {
             *self.m13_maps_info.borrow_mut() = (start.elapsed(), maps.len() * 4);
             buffers.push((82, storage("coverage maps", bytemuck::cast_slice(&maps))));
         }
-        (buffers, movers)
+        (buffers, movers, lit_parts)
     }
 
     /// A scene's textures, resampled into a layered texture with mip levels
@@ -1785,7 +1885,25 @@ impl MaskConeKernel {
                 clear: scene.blend_clear(i.geometry),
             })
             .collect();
-        hw::build(&self.device, &self.queue, &geometries, &placements, movable)
+        // Geometries with a proxy level are never seen by camera rays
+        // themselves (M14 gate 4): no structure.
+        let skip: Vec<bool> = (0..scene.geometries.len())
+            .map(|g| {
+                scene
+                    .geometry_levels
+                    .get(g)
+                    .and_then(|l| l.as_ref())
+                    .is_some_and(|l| l.proxy.is_some())
+            })
+            .collect();
+        hw::build(
+            &self.device,
+            &self.queue,
+            &geometries,
+            &placements,
+            movable,
+            &skip,
+        )
     }
 
     /// Bakes a lightmap for [`LiveRenderer::new`]: one mask cone per texel

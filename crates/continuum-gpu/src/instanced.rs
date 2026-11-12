@@ -9,7 +9,9 @@ use continuum::glam::{DVec3, Mat3, Vec3};
 use crate::hierarchy::{MoverTree, NodeGpu, Placement, mesh_bounds, mover_subtree, union_root};
 use crate::hw::HwScene;
 use crate::live::{DisplayDims, display_bind, display_pipeline};
-use crate::stream::{StreamOptions, StreamStats, Streamer, Targets};
+use crate::stream::{
+    LightingPool, LightingStats, LitTargets, StreamOptions, StreamStats, Streamer, Targets,
+};
 use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
@@ -367,8 +369,34 @@ pub struct InstancedRenderer {
     moving: Vec<usize>,
     /// Camera levels streamed by need (M14 gate 1).
     stream: Option<Streamer>,
+    /// Lighting levels streamed (M14 gate 4).
+    lighting: Option<LightingPool>,
     /// The visibility buffer (binding 31), once the targets are made.
     vis: Option<wgpu::Buffer>,
+}
+
+/// The buffers lighting levels load into (M14 gate 4).
+fn lit_targets<'a>(scene: &'a [(u32, wgpu::Buffer)], cache: &'a Cache) -> LitTargets<'a> {
+    let find = |b: u32| {
+        &scene
+            .iter()
+            .find(|(x, _)| *x == b)
+            .expect("a scene buffer")
+            .1
+    };
+    LitTargets {
+        tris: find(2),
+        normals: find(24),
+        tex: find(58),
+        meshes: find(3),
+        nodes: find(25),
+        items: find(26),
+        cov: find(29),
+        uv: cache.state.buffer(23),
+        chart: cache.state.buffer(35),
+        cells: cache.state.buffer(34),
+        cell_tris: cache.state.buffer(54),
+    }
 }
 
 /// The buffers camera levels upload into (M14 gate 1).
@@ -865,7 +893,15 @@ impl InstancedRenderer {
             "streamed camera levels with movers are not supported yet"
         );
         let pool = stream.map_or(0, |o| crate::stream::pool_triangles(scene, &o));
-        let (scene_buffers, tree) = kernel.instanced_buffers(lights, scene, origin, movable, pool);
+        let layout = stream.and_then(|o| crate::stream::lighting_layout(scene, &o));
+        if layout.is_some() {
+            assert!(
+                cache.as_ref().is_some_and(|c| !c.indirect) && kernel.sky() == Vec3::ZERO,
+                "streamed lighting levels need the cache, without bounce light or a sky (yet)"
+            );
+        }
+        let (scene_buffers, tree, lit_nodes) =
+            kernel.instanced_buffers(lights, scene, origin, movable, pool, layout.as_ref());
         let movers = tree.map(|tree| {
             let local: Vec<(Vec3, Vec3)> = scene
                 .geometries
@@ -1032,6 +1068,7 @@ impl InstancedRenderer {
                 moving_lights,
                 &lights.iter().map(LightGpu::from).collect::<Vec<_>>(),
                 pool,
+                layout.as_ref(),
             ),
             movers: (!movable.is_empty() || !moving_lights.is_empty()).then(|| {
                 (
@@ -1104,14 +1141,34 @@ impl InstancedRenderer {
             movers,
             moving: moving_lights.to_vec(),
             stream: None,
+            lighting: None,
             vis: None,
         };
+        if let (Some(lay), Some((nodes, mut packages))) = (layout.clone(), lit_nodes) {
+            let (cells, tables) = renderer
+                .cache
+                .as_mut()
+                .and_then(|c| c.state.take_lit_cells())
+                .expect("the cache's lighting tables");
+            for (p, t) in packages.iter_mut().zip(tables) {
+                p.uv = t.uv;
+                p.chart = t.chart;
+                p.cells = t.cells;
+                p.cell_tris = t.cell_tris;
+            }
+            renderer.lighting = Some(LightingPool::new(lay, nodes, cells, packages, scene));
+        }
         if let (Some(options), true) = (stream, pool > 0) {
-            let base = scene
-                .geometries
-                .iter()
-                .map(|g| g.triangles.len())
-                .sum::<usize>() as u32;
+            let base = layout.as_ref().map_or_else(
+                || {
+                    scene
+                        .geometries
+                        .iter()
+                        .map(|g| g.triangles.len())
+                        .sum::<usize>() as u32
+                },
+                |l| l.lit_tris(),
+            );
             let hw = renderer.hw.as_mut().expect("hardware camera rays");
             let targets = stream_targets(&renderer.scene, renderer.cache.as_ref());
             // The page table follows the objects' ranges (at least one).
@@ -1392,7 +1449,14 @@ impl InstancedRenderer {
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
         if let Some(cache) = &mut self.cache {
-            cache.state.begin_frame(&self.device);
+            cache
+                .state
+                .begin_frame(&self.device, self.lighting.as_ref().map(|l| l.resident()));
+        }
+        if let (Some(pool), Some(cache)) = (&mut self.lighting, &self.cache) {
+            let (wanted, pinned) = cache.state.lighting_requests();
+            let targets = lit_targets(&self.scene, cache);
+            pool.update(&self.queue, &targets, wanted, pinned);
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.apply_moves(&mut encoder);
@@ -1465,6 +1529,15 @@ impl InstancedRenderer {
         if let Some(s) = &mut self.stream {
             s.evict_all();
         }
+    }
+
+    /// What lighting-level streaming did in every frame so far (M14 gate 4;
+    /// empty without it), and the cache's pages waiting for lighting levels.
+    pub fn lighting_log(&self) -> (&[LightingStats], usize) {
+        (
+            self.lighting.as_ref().map_or(&[], |l| l.log()),
+            self.cache.as_ref().map_or(0, |c| c.state.waiting_pages()),
+        )
     }
 
     /// Bytes of camera levels kept in CPU memory for streaming (M14 gate
@@ -1545,7 +1618,7 @@ impl InstancedRenderer {
         let mut profile = FrameProfile::default();
         let start = Instant::now();
         if let Some(cache) = &mut self.cache {
-            cache.state.begin_frame(&self.device);
+            cache.state.begin_frame(&self.device, None);
         }
         profile.planning = start.elapsed();
         let start = Instant::now();

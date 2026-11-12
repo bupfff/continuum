@@ -71,6 +71,10 @@ const INDIRECT_SAMPLES: u32 = 9;
 /// their radiance (M10 gate 21).
 const INDIRECT_CHANNELS: u64 = 5;
 const INCOMPLETE_CAP: u32 = 1 << 14;
+/// Pages whose bake met an absent lighting level (M14 gate 4), with that
+/// geometry's object, listed per frame at most (pairs after the incomplete
+/// list; the shader's `MISSING_CAP`).
+const MISSING_CAP: u32 = 1 << 12;
 const INDIRECT_RETRY: u32 = 4;
 /// Request priorities' flags (the shader's `SECONDARY`, `WANTS_SAMPLES`).
 const SECONDARY: u32 = 0x8000_0000;
@@ -557,6 +561,9 @@ pub struct CachePage {
     /// One channel, 9 × 9 texels in rows of 9: a light's shadowed share of
     /// its unshadowed light, or the sky's irradiance per unit radiance.
     pub texels: Vec<f32>,
+    /// Whether pixels may read it: not marked stale, set aside, or baked
+    /// against an absent lighting level (M14 gate 4).
+    pub shown: bool,
 }
 
 /// A page's key, (object, chart | mip << 16, page x | page y << 16), unpacked.
@@ -822,6 +829,30 @@ pub(crate) struct VirtualCache {
     /// before the rest arrived, and the waiting page retried forever (M10
     /// gate 23's view that never settled).
     pinned: std::collections::VecDeque<(u32, [u32; 3])>,
+    /// Lighting levels streamed (M14 gate 4): the layout's cell part and
+    /// the streamed geometries' table packages (taken by the renderer);
+    /// pages whose bake met absent lighting levels, waiting for those
+    /// objects (slot → key, objects); per object whether its lighting level
+    /// is resident (as the frame began); and this frame's wanted and pinned
+    /// objects.
+    lighting: bool,
+    lit_cells: Option<(crate::stream::LitCells, Vec<crate::stream::LitPackage>)>,
+    lit_waiting: HashMap<u32, ([u32; 3], Vec<u32>, u32)>,
+    /// Objects of pages released from waiting, pinned until the frame given
+    /// (their re-bake comes two frames later).
+    lit_released: Vec<(u32, u32)>,
+    /// Pages asked for on objects whose lighting level was absent, oldest
+    /// first, with their priority and the frame first asked for: planned as
+    /// soon as the level is resident (a pixel asks for a missing page only
+    /// now and then, so waiting for it to ask again wastes the load).
+    lit_pending: std::collections::VecDeque<([u32; 3], u32, u32)>,
+    lit_pending_keys: std::collections::HashSet<[u32; 3]>,
+    /// Every object each page's bakes have found absent, kept across its
+    /// re-bakes (a bake reports only the first): it waits for all of them.
+    lit_needs: HashMap<[u32; 3], Vec<u32>>,
+    lit_resident: Vec<bool>,
+    lit_wants: Vec<u32>,
+    lit_pins: Vec<u32>,
     sky_rebaked: u32,
     /// Stable indices of objects that have moved (for the sky ledger).
     mover_ids: HashMap<u32, u32>,
@@ -908,6 +939,7 @@ impl VirtualCache {
         moving: &[usize],
         poses: &[crate::LightGpu],
         pool: u32,
+        lighting: Option<&crate::stream::LightingLayout>,
     ) -> Self {
         let channels = lights + 1;
         assert!(
@@ -944,14 +976,108 @@ impl VirtualCache {
             "a sky sample costs at least 1"
         );
         let mut tables = chart_tables(&scene.geometries);
+        let own = self_tables(scene, &tables, if sky { options.self_spacing } else { 0.0 });
+        // Lighting levels streamed (M14 gate 4): the streamed geometries'
+        // chart coordinates, charts and cell lists leave the tables for
+        // packages; their cells stay, empty until a level loads.
+        let lit_cells = lighting.map(|lay| {
+            assert!(
+                !sky,
+                "streamed lighting levels with a sky are not supported yet"
+            );
+            let count = scene.geometries.len();
+            let mut firsts = Vec::with_capacity(count);
+            let mut acc = 0usize;
+            for g in &scene.geometries {
+                firsts.push(acc);
+                acc += g.triangles.len();
+            }
+            let cells_of = |g: usize| {
+                let c0 = tables.first_chart[g] as usize;
+                let c1 = tables
+                    .first_chart
+                    .get(g + 1)
+                    .map_or(tables.charts.len(), |&c| c as usize);
+                let lo = tables
+                    .charts
+                    .get(c0)
+                    .map_or(tables.cells.len(), |c| c.first_cell as usize);
+                let hi = tables
+                    .charts
+                    .get(c1)
+                    .map_or(tables.cells.len(), |c| c.first_cell as usize);
+                (lo, hi)
+            };
+            let entry = |cell: usize| {
+                tables
+                    .cells
+                    .get(cell)
+                    .map_or(tables.cell_tris.len(), |c| c[0] as usize)
+            };
+            let static_cells = entry(cells_of(lay.first).0);
+            let mut slot_cells = 1usize;
+            let mut packages = Vec::with_capacity(count - lay.first);
+            let mut emptied = Vec::with_capacity(count - lay.first);
+            #[allow(clippy::needless_range_loop)]
+            for g in lay.first..count {
+                let (f, n) = (firsts[g], scene.geometries[g].triangles.len());
+                let (lo, hi) = cells_of(g);
+                let (e0, e1) = (
+                    entry(lo),
+                    if g + 1 < count {
+                        entry(cells_of(g + 1).0)
+                    } else {
+                        tables.cell_tris.len()
+                    },
+                );
+                slot_cells = slot_cells.max(e1 - e0);
+                packages.push(crate::stream::LitPackage {
+                    uv: tables.tri_uv[3 * f..3 * (f + n)].to_vec(),
+                    chart: tables.tri_chart[f..f + n].to_vec(),
+                    cells: (lo..hi)
+                        .map(|c| [c as u32, tables.cells[c][0] - e0 as u32, tables.cells[c][1]])
+                        .collect(),
+                    cell_tris: tables.cell_tris[e0..e1]
+                        .iter()
+                        .map(|&t| t - f as u32)
+                        .collect(),
+                    ..Default::default()
+                });
+                emptied.push((lo, hi));
+            }
+            for (lo, hi) in emptied {
+                for c in lo..hi {
+                    tables.cells[c] = [0, 0];
+                }
+            }
+            let t_s = lay.static_tris as usize;
+            let slots = (lay.slots * lay.slot_tris) as usize;
+            tables.tri_uv.truncate(3 * t_s);
+            tables.tri_uv.resize(3 * (t_s + slots), [0.0; 2]);
+            tables.tri_chart.truncate(t_s);
+            tables.tri_chart.resize(t_s + slots, 0);
+            tables.cell_tris.truncate(static_cells);
+            tables
+                .cell_tris
+                .resize(static_cells + lay.slots as usize * slot_cells, 0);
+            (
+                crate::stream::LitCells {
+                    static_cells: static_cells as u32,
+                    slot_cells: slot_cells as u32,
+                },
+                packages,
+            )
+        });
         // Camera levels' pool (M14 gate 1): their charts and chart
         // coordinates follow the lighting level's triangles'.
         if pool > 0 {
-            let lit: usize = scene.geometries.iter().map(|g| g.triangles.len()).sum();
+            let lit: usize = lighting.map_or_else(
+                || scene.geometries.iter().map(|g| g.triangles.len()).sum(),
+                |l| l.lit_tris() as usize,
+            );
             tables.tri_chart.resize(lit + pool as usize, 0);
             tables.tri_uv.resize(3 * (lit + pool as usize), [0.0; 2]);
         }
-        let own = self_tables(scene, &tables, if sky { options.self_spacing } else { 0.0 });
         let inv_base = 1.0 / options.base_texel;
         let chart_size: Vec<Vec2> = tables
             .charts
@@ -1135,7 +1261,7 @@ impl VirtualCache {
                 75,
                 empty(
                     "incomplete",
-                    INCOMPLETE_CAP as u64 * 4,
+                    INCOMPLETE_CAP as u64 * 4 + MISSING_CAP as u64 * 8,
                     wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
@@ -1264,6 +1390,16 @@ impl VirtualCache {
             retry: Default::default(),
             retrying: Default::default(),
             pinned: Default::default(),
+            lighting: lit_cells.is_some(),
+            lit_cells,
+            lit_waiting: HashMap::new(),
+            lit_released: Vec::new(),
+            lit_pending: Default::default(),
+            lit_pending_keys: Default::default(),
+            lit_needs: HashMap::new(),
+            lit_resident: Vec::new(),
+            lit_wants: Vec::new(),
+            lit_pins: Vec::new(),
             sky_due: HashMap::new(),
             hardware_edges: false,
             extra_samples: false,
@@ -1370,7 +1506,8 @@ impl VirtualCache {
                         + MOVER_STATS_BYTES
                         + INVALID_CAP as u64 * 4
                         + INCOMPLETE_CAP as u64 * 4
-                        + SKY_LIST_CAP as u64 * 4,
+                        + SKY_LIST_CAP as u64 * 4
+                        + MISSING_CAP as u64 * 8,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -1433,13 +1570,28 @@ impl VirtualCache {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let stale = self.buffer(62);
+        let stale_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stale readback"),
+            size: stale.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(pool, 0, &readback, 0, None);
+        encoder.copy_buffer_to_buffer(stale, 0, &stale_readback, 0, None);
         let index = self.queue.submit([encoder.finish()]);
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| ());
-        let raw = map_wait(device, &readback, index);
+        stale_readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |_| ());
+        let raw = map_wait(device, &readback, index.clone());
+        let stale_raw = map_wait(device, &stale_readback, index);
+        let stale_marks: &[u32] = bytemuck::cast_slice(&stale_raw);
         let values: &[f32] = bytemuck::cast_slice(&raw);
-        let channels = (self.lights + self.sky as u32) as usize;
+        // The pool keeps a sky channel after the lights' whether or not the
+        // sky is on (the shader's `vc_channels`).
+        let channels = (self.lights + 1) as usize;
         let mut pages = Vec::new();
         for (slot, &k) in self.slot_key.iter().enumerate() {
             if k[0] == EMPTY {
@@ -1464,6 +1616,7 @@ impl VirtualCache {
                 texels: (0..PAGE_TEXELS as usize)
                     .map(|t| values[(first + t) * channels + ch as usize])
                     .collect(),
+                shown: stale_marks.get(slot).is_none_or(|&m| m == 0 || m == 3),
             });
         }
         pages
@@ -1866,8 +2019,18 @@ impl VirtualCache {
         let bytes = r.tiles as u64 * 16;
         encoder.copy_buffer_to_buffer(self.buffer(39), 0, &r.buffer, 0, bytes);
         encoder.copy_buffer_to_buffer(self.buffer(42), 0, &r.buffer, bytes, STATS_BYTES);
-        if self.log.last().is_some_and(|l| l.moved > 0) || self.options.indirect {
+        if self.log.last().is_some_and(|l| l.moved > 0) || self.options.indirect || self.lighting {
             let at = bytes + STATS_BYTES + TIMESTAMP_BYTES;
+            if self.lighting {
+                encoder.copy_buffer_to_buffer(
+                    self.buffer(75),
+                    INCOMPLETE_CAP as u64 * 4,
+                    &r.buffer,
+                    at + MOVER_STATS_BYTES
+                        + (INVALID_CAP + INCOMPLETE_CAP + SKY_LIST_CAP) as u64 * 4,
+                    MISSING_CAP as u64 * 8,
+                );
+            }
             encoder.copy_buffer_to_buffer(self.buffer(64), 0, &r.buffer, at, MOVER_STATS_BYTES);
             encoder.copy_buffer_to_buffer(
                 self.buffer(65),
@@ -1947,12 +2110,19 @@ impl VirtualCache {
     /// only for that frame), adapts the bake budget to the frame time, queues
     /// stale pages when slot use arrives and frees a few, and plans the
     /// frame's bake.
-    pub(crate) fn begin_frame(&mut self, device: &wgpu::Device) {
+    pub(crate) fn begin_frame(&mut self, device: &wgpu::Device, lit_resident: Option<&[bool]>) {
         let start = Instant::now();
         let period = self.last_begin.map(|t| start - t);
         self.last_begin = Some(start);
         let slot = (self.frame % 2) as usize;
+        if let Some(r) = lit_resident {
+            self.lit_resident.clear();
+            self.lit_resident.extend_from_slice(r);
+        }
+        self.lit_wants.clear();
+        self.lit_pins.clear();
         let requests = self.collect(device, slot);
+        self.release_waiting();
         if self.overflowed.take().is_some() {
             self.evict_marked(device);
         }
@@ -2002,6 +2172,19 @@ impl VirtualCache {
         self.plan(device, requests);
         // `collect` adds its wait to `waiting`.
         self.planning += start.elapsed().saturating_sub(self.waiting);
+        if self.lighting && trace_lighting() {
+            let resident = self.lit_resident.iter().filter(|&&r| r).count();
+            eprintln!(
+                "lit frame {}: requests {}, planned {}, wants {:?}, pins {}, waiting {}, objects resident {}",
+                self.frame,
+                self.log.last().map_or(0, |l| l.requests),
+                self.bake_list.len(),
+                &self.lit_wants[..self.lit_wants.len().min(12)],
+                self.lit_pins.len(),
+                self.lit_waiting.len(),
+                resident
+            );
+        }
     }
 
     /// Reads back every frame still in flight (for reporting; plans nothing).
@@ -2036,7 +2219,8 @@ impl VirtualCache {
         let mut invalid: Vec<u32> = Vec::new();
         let mut incomplete: Vec<u32> = Vec::new();
         let mut sky_listed: Vec<u32> = Vec::new();
-        if moved || self.options.indirect {
+        let mut missing: Vec<(u32, u32)> = Vec::new();
+        if moved || self.options.indirect || self.lighting {
             let at = 4 * tiles + (STATS_BYTES + TIMESTAMP_BYTES) as usize / 4;
             mover.copy_from_slice(&words[at..at + 24]);
             let listed = (mover[1] as usize).min(INVALID_CAP as usize);
@@ -2055,6 +2239,17 @@ impl VirtualCache {
                 let first = first + (INVALID_CAP + INCOMPLETE_CAP) as usize;
                 let listed = (mover[7] as usize).min(SKY_LIST_CAP as usize);
                 sky_listed.extend_from_slice(&words[first..first + listed]);
+            }
+            if self.lighting {
+                let first = first + (INVALID_CAP + INCOMPLETE_CAP + SKY_LIST_CAP) as usize;
+                let listed = (mover[20] as usize).min(MISSING_CAP as usize);
+                missing.extend(
+                    words[first..first + 2 * listed]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|p| (p[0], p[1])),
+                );
             }
         }
         let appended = mover[5].min(self.append_jobs());
@@ -2121,8 +2316,103 @@ impl VirtualCache {
                 self.retry.push_back((slot, frame + INDIRECT_RETRY));
             }
         }
+        // Pages baked against absent lighting levels (M14 gate 4): shown as
+        // missing until re-baked; they wait for those objects.
+        for (slot, object) in missing {
+            let k = self.slot_key[slot as usize];
+            if k[0] == EMPTY {
+                continue;
+            }
+            if self.lit_needs.len() > 1 << 16 {
+                self.lit_needs.clear();
+            }
+            let needs = self.lit_needs.entry(k).or_default();
+            if !needs.contains(&object) {
+                needs.push(object);
+            }
+            let needs = needs.clone();
+            let entry = self
+                .lit_waiting
+                .entry(slot)
+                .or_insert((k, Vec::new(), frame));
+            if entry.0 != k {
+                *entry = (k, Vec::new(), frame);
+            }
+            entry.1 = needs;
+        }
         self.latest = self.latest.max(frame);
         requests
+    }
+
+    /// Pages waiting for lighting levels (M14 gate 4): once all their
+    /// objects' levels are resident, they are evicted, so pixels ask for
+    /// them again and they bake whole (their objects pinned meanwhile);
+    /// until then their objects are wanted, the longest waiting first. A
+    /// waiting page pins nothing: pins held by pages that cannot progress
+    /// would deadlock a small budget.
+    fn release_waiting(&mut self) {
+        let frame = self.frame;
+        self.lit_released.retain(|&(_, until)| until >= frame);
+        let mut waiting: Vec<(u32, u32, [u32; 3], Vec<u32>)> = self
+            .lit_waiting
+            .iter()
+            .map(|(&s, (k, o, since))| (*since, s, *k, o.clone()))
+            .collect();
+        waiting.sort_unstable_by_key(|w| (w.0, w.1));
+        for (_, slot, k, objects) in waiting {
+            if self.slot_key[slot as usize] != k {
+                self.lit_waiting.remove(&slot);
+                continue;
+            }
+            let ready = objects
+                .iter()
+                .chain(std::iter::once(&k[0]))
+                .all(|&o| self.lit_resident.get(o as usize).copied().unwrap_or(true));
+            if ready {
+                self.lit_waiting.remove(&slot);
+                if let Some((_, entry)) = self.map.remove(&k) {
+                    let map = &mut self.map;
+                    self.table.remove(entry as usize, |moved, i| {
+                        map.get_mut(&moved).expect("resident page").1 = i;
+                    });
+                    self.slot_key[slot as usize] = [EMPTY; 3];
+                    self.sky_due.remove(&slot);
+                    self.free.push(slot);
+                    self.evicted += 1;
+                }
+                for &o in objects.iter().chain(std::iter::once(&k[0])) {
+                    self.lit_released.push((o, frame + 4));
+                }
+                if self.lit_pending_keys.insert(k) {
+                    self.lit_pending.push_front((k, 1, frame));
+                }
+            } else {
+                self.lit_wants.push(k[0]);
+                self.lit_wants.extend(&objects);
+            }
+        }
+        self.lit_pins
+            .extend(self.lit_released.iter().map(|&(o, _)| o));
+    }
+
+    /// This frame's lighting-level wants (absent levels pages wait for or
+    /// are asked on) and pins (levels pages wait for or bake on now), M14
+    /// gate 4.
+    pub(crate) fn lighting_requests(&self) -> (&[u32], &[u32]) {
+        (&self.lit_wants, &self.lit_pins)
+    }
+
+    /// Takes the cell part of the layout and the streamed geometries'
+    /// table packages (once).
+    pub(crate) fn take_lit_cells(
+        &mut self,
+    ) -> Option<(crate::stream::LitCells, Vec<crate::stream::LitPackage>)> {
+        self.lit_cells.take()
+    }
+
+    /// Pages waiting for lighting levels.
+    pub(crate) fn waiting_pages(&self) -> usize {
+        self.lit_waiting.len()
     }
 
     /// Evicts the slots the stale pass marked invalid in `frame`, unless a
@@ -2371,6 +2661,30 @@ impl VirtualCache {
             .filter(|(k, p)| p & WANTS_SAMPLES == 0 && !self.map.contains_key(k))
             .map(|(k, priority)| (priority, k))
             .collect();
+        // Pages pending for lighting levels (M14 gate 4): those whose level
+        // is now resident join the order; the rest are wanted, oldest first
+        // (pending more than 240 frames: no longer asked for, dropped).
+        if self.lighting {
+            let frame = self.frame;
+            let mut keep = std::collections::VecDeque::with_capacity(self.lit_pending.len());
+            while let Some((k, priority, since)) = self.lit_pending.pop_front() {
+                if self.map.contains_key(&k) || since + 240 < frame {
+                    self.lit_pending_keys.remove(&k);
+                } else if self
+                    .lit_resident
+                    .get(k[0] as usize)
+                    .copied()
+                    .unwrap_or(true)
+                {
+                    self.lit_pending_keys.remove(&k);
+                    order.push((priority, k));
+                } else {
+                    self.lit_wants.push(k[0]);
+                    keep.push_back((k, priority, since));
+                }
+            }
+            self.lit_pending = keep;
+        }
         // Each page costs at least one texel: no more than `budget` can fit.
         let budget = (self.budget as u32).max(PAGE_TEXELS);
         if order.len() > budget as usize {
@@ -2390,6 +2704,7 @@ impl VirtualCache {
         // different bake order would settle to a different image.
         let sky_later =
             self.sky && self.options.sky_later && self.moving == 0 && !self.options.indirect;
+        let mut lit_reserved = 0u32;
         for (priority, k) in order {
             let secondary = priority & SECONDARY != 0;
             let later = sky_later && !secondary;
@@ -2428,8 +2743,27 @@ impl VirtualCache {
                 + bounce;
             // The first page always fits, so a page costlier than the whole
             // budget still gets baked.
-            if self.spent + cost > budget && !self.bake_list.is_empty() {
+            if self.spent + lit_reserved + cost > budget
+                && !(self.bake_list.is_empty() && lit_reserved == 0)
+            {
                 break;
+            }
+            // A page on an object whose lighting level is absent waits for
+            // it (M14 gate 4), keeping its share of the budget, so only as
+            // many levels are asked for as the bake can use.
+            if self.lighting
+                && !self
+                    .lit_resident
+                    .get(k[0] as usize)
+                    .copied()
+                    .unwrap_or(true)
+            {
+                self.lit_wants.push(k[0]);
+                lit_reserved += cost;
+                if self.lit_pending.len() < 1 << 16 && self.lit_pending_keys.insert(k) {
+                    self.lit_pending.push_back((k, priority, self.frame));
+                }
+                continue;
             }
             if self.free.is_empty() && !evicted_now {
                 evicted_now = true;
@@ -2444,6 +2778,9 @@ impl VirtualCache {
             self.slot_key[slot as usize] = k;
             self.last_used[slot as usize] = self.frame;
             self.alloc_frame[slot as usize] = self.frame;
+            if self.lighting {
+                self.lit_pins.push(k[0]);
+            }
             if secondary && self.options.indirect {
                 self.pinned.push_back((slot, k));
             }
@@ -2537,6 +2874,13 @@ impl VirtualCache {
             self.spent += bounce;
         }
     }
+}
+
+/// Diagnostics: `CONTINUUM_TRACE_LIT` set prints, each frame, what the plan
+/// did with streamed lighting levels (M14 gate 4; stderr).
+fn trace_lighting() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CONTINUUM_TRACE_LIT").is_some())
 }
 
 /// Diagnostics: `CONTINUUM_TRACE_BAKES` set prints every page planned and

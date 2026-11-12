@@ -28,6 +28,8 @@ const BASE_SEGMENTS: usize = 32;
 const OCTAVES: usize = 4;
 /// Random directions per octave.
 const WAVES: usize = 3;
+/// Segments around of the proxy level (M14 gate 4).
+const PROXY_SEGMENTS: usize = 8;
 
 /// One rock's shape: its radius, vertical squash, and per octave its
 /// waves' directions and phases.
@@ -127,8 +129,35 @@ impl Shape {
         if level >= finest {
             return 0.0;
         }
+        self.error_of(1 << (finest - level), level + 1)
+    }
+
+    /// The proxy level (M14 gate 4): `PROXY_SEGMENTS` around, the first
+    /// octave, always resident as camera rays' stand-in.
+    pub fn proxy(&self) -> Surface {
+        let s = Surface::parametric(PROXY_SEGMENTS, PROXY_SEGMENTS / 2, |u, v| {
+            self.point(u, v, 1)
+        });
+        let t = s.triangles[0];
+        if (t[1] - t[0]).cross(t[2] - t[0]).dot(t[0]) < 0.0 {
+            s.flipped()
+        } else {
+            s
+        }
+    }
+
+    /// The proxy's largest distance from the finest level (as `error`).
+    pub fn proxy_error(&self) -> f32 {
+        self.error_of((BASE_SEGMENTS << (OCTAVES - 1)) / PROXY_SEGMENTS, 1)
+    }
+
+    /// The largest distance from a level `step` times coarser than the
+    /// finest, with `octaves` octaves, to the finest, at the finest grid's
+    /// vertices.
+    fn error_of(&self, step: usize, octaves: usize) -> f32 {
+        let finest = OCTAVES - 1;
+        let level = octaves - 1;
         let (nu, nv) = (BASE_SEGMENTS << finest, (BASE_SEGMENTS << finest) / 2);
-        let step = 1 << (finest - level);
         let (lu, lv) = (nu / step, nv / step);
         let grid =
             |i: usize, j: usize| self.point(i as f32 / lu as f32, j as f32 / lv as f32, level + 1);
@@ -182,17 +211,23 @@ impl Rocks {
 
     /// [`Rocks::new`] with the rocks' displacement given.
     pub fn with_detail(side: usize, spacing: f64, detail: Detail) -> Rocks {
-        Rocks::build(side, spacing, detail, false)
+        Rocks::build(side, spacing, detail, false, false)
     }
 
     /// [`Rocks::new`] with the camera levels produced on demand (M14 gate
     /// 3): only the lighting levels are built now; the scene's
     /// `level_source` generates the rest from each rock's shape.
     pub fn on_demand(side: usize, spacing: f64) -> Rocks {
-        Rocks::build(side, spacing, Detail::default(), true)
+        Rocks::build(side, spacing, Detail::default(), true, false)
     }
 
-    fn build(side: usize, spacing: f64, detail: Detail, on_demand: bool) -> Rocks {
+    /// [`Rocks::on_demand`] with a proxy level per rock (M14 gate 4), so
+    /// camera rays never see the lighting levels, which can then stream.
+    pub fn with_proxies(side: usize, spacing: f64) -> Rocks {
+        Rocks::build(side, spacing, Detail::default(), true, true)
+    }
+
+    fn build(side: usize, spacing: f64, detail: Detail, on_demand: bool, proxies: bool) -> Rocks {
         let mut rng = Pcg32::new(14, 1);
         let ground = {
             let h = 1000.0f32;
@@ -253,6 +288,11 @@ impl Rocks {
                                     Levels {
                                         base_error: shape.error(0),
                                         finer,
+                                        proxy: proxies.then(|| Level {
+                                            surface: shape.proxy(),
+                                            error: shape.proxy_error(),
+                                            triangles: 0,
+                                        }),
                                     },
                                 )
                             })
