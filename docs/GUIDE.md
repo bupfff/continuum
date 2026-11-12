@@ -315,6 +315,13 @@ For a window, see `apps/viewer`, which flies through a file with
     and follows the zoom (50° to 1.5° onto a rock 103 m away settles
     exact); it costs 0.33–0.42 ms a frame in flight, mostly building
     structures for levels as they load (`docs/results/m14-gate2.md`).
+  - Levels need not be in memory: leave a `Level`'s surface empty (with
+    `triangles`, a bound on its count) and give the scene a `LevelSource`
+    (`InstancedScene::level_source`); worker threads produce levels as they
+    are wanted, into a CPU cache capped at `StreamOptions::cpu_cache_bytes`
+    (M14 gate 3: 4,096 unique rocks, 33 GB of detail, within 60 fps).
+  - `StreamOptions::frame_ms` caps the time spent building levels'
+    structures per frame (2 ms by default); further loads wait.
   - Hardware camera rays only; not with movers, vertex colors, normal maps,
     cutouts or blending on the levels. `Renderer::stream_stats` reports
     what it did.

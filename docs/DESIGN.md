@@ -125,7 +125,7 @@ Synthesis:
    what changed exactly where that is cheap, and certify with a bound what you
    choose not to recompute.*
 
-## 3.6 Where we stand (updated 2026-11-12, after M14 gate 2)
+## 3.6 Where we stand (updated 2026-11-12, after M14 gate 3)
 
 Against the goal in §1, honestly:
 
@@ -150,9 +150,13 @@ Against the goal in §1, honestly:
   four flights) made loads cheaper (paged pool, staging belt, level chains;
   29 ns a triangle, most of it building the structure) and showed detail
   following the zoom: 50° to 1.5° onto a rock 103 m away settles exact.
-  Streaming costs 0.33–0.42 ms a frame, 2–2.5% of a 60 fps frame. Lighting
-  still sees each geometry's always-resident base level, and the scale is
-  a mechanism test (16.6 million unique triangles), not yet beyond memory.
+  Streaming costs 0.33–0.42 ms a frame, 2–2.5% of a 60 fps frame. **G3
+  passed:** 4,096 unique rocks (finest 32× the budget, 33 GB packed,
+  beyond the machine's 25.8 GB) generated on demand by worker threads,
+  flown within a 60 fps budget (worst frame 14.5 ms) and settling within
+  0.03× one ray's error of the ideal levels. Lighting still sees each
+  geometry's always-resident base level, now most of the memory (3.3 GB
+  at creation for 4,096 rocks): streaming it is next.
 - **Measured against an independent path tracer** (Cycles, compared
   correctly: supersampled 4×4 against Cycles' area-integrated pixels):
   - sun and sky on an outdoor scene: 0.7–1.2% (M5 G2);
@@ -456,6 +460,12 @@ place, for a new conversation:
   resident while bounce samples wait (`vcache.rs`, `pinned`). Liveness
   passed at all 16 offsets; G24 failed only on the parked emissive-faces
   feature's accuracy (19.71%).
+- **M14 G3 (seventh session): passed** (`docs/results/m14-gate3.md`).
+  `LevelSource` (`InstancedScene::level_source`) produces levels on worker
+  threads into a capped CPU cache; `StreamOptions::frame_ms` is the
+  streaming time budget (2 ms a frame at 30 ns a triangle). 4,096 unique
+  rocks beyond CPU memory fly within 60 fps and settle to the ideal levels.
+  The lighting levels (resident) are now the limit.
 - **M14 G2 (seventh session):** paged pool (one structure geometry per
   4,096-triangle page; a page table after the objects' ranges), staging
   belt, level chains, a new eviction order, feedback at 1/16
@@ -522,7 +532,8 @@ place, for a new conversation:
      maps baked from it), a later gate.
   2. *The cache that never settles with bounce light:* done (M10 G24,
      2026-11-12, above).
-  3. *M14:* the lighting level streamed by cone footprint (a page whose
+  3. *M14* (G3 passed: on-demand production and the time budget). Next,
+     G4: the lighting level streamed by cone footprint (a page whose
      cones need a missing subtree is retried when it arrives, so the cache
      stays certified); shading detail from the finest level on coarser
      ones; then past memory (a reference that needs nothing resident at
@@ -814,7 +825,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
 | M13 prefiltered appearance (core first, item 1) | Hierarchy nodes keep lit appearance; pixel cones stop at pixel-size nodes | Sub-pixel detail without aliasing, cost bounded by the screen. G1 coverage only (**failed**: from 150 m 0.38× one ray's coverage error, passing, but 1.2–2 s a frame, about 100× too slow: each node visit rasterizes into 8×8 bins; standing failed mostly on a flawed measure, buried boulder parts the ground hid in the reference only, `docs/results/m13-gate1.md`); G2 a scalar per-node test (**failed**: 257–281 ms a frame, about 26× over; accuracy 0.38× one ray's from 150 m, 0.59× standing, where one horizon row holds 84% of the error: independent splats saturate a pixel whose boulders all sit low in it, correlation that sub-pixel bins keep, `docs/results/m13-gate2.md`); G3 directional coverage maps and 4×4 bins (**failed** on speed only: accuracy **passes** both views, 0.264× one ray's error standing and 0.231× from 150 m; but 178–707 ms a frame, long tails where partly covered pixels never stop, `docs/results/m13-gate3.md`); G4 near surfaces by hardware rays at pixel corners and bins (**failed** on speed only: accuracy 0.218× and 0.132×; 122–135 ms against a 50 ms intermediate bar, the far field's walk left, `docs/results/m13-gate4.md`) |
-| M14 unique geometry at scale (core first, item 2) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate. G1 camera levels streamed by need (**failed** on frame rate in one flight of three: 256 unique rocks whose finest levels are 6.35× a 2.5M-triangle budget, never over it; settled coverage 0.062–0.096× one ray's error from fully resident, 0.013–0.029% of pixels differ in flight, 3.4× less GPU memory; but 1.074×, 1.085× and **1.124×** the resident frame against 1.10×, from about half a load a frame at about 1 ms each; settled colour 1.3–1.6% off, smoother normals at coarser levels, `docs/results/m14-gate1.md`); G2 fewer, cheaper loads and a zoom (**failed** on frame rate in three flights of four: 1.091×, **1.110×, 1.111×, 1.113×** against 1.10×, streaming 0.33–0.42 ms a frame, 2.0–2.5% of a 60 fps frame; passed: never over budget, settled coverage 0.072–0.087× one ray's error, 0.011–0.028% of pixels off in flight, the zoom from 50° to 1.5° on a rock 103 m away exact settled with the working set 1.55 → 0.52 million triangles; paged pool, staging belt, level chains; a load about 29 ns a triangle, 22 of it the structure's build, `docs/results/m14-gate2.md`) |
+| M14 unique geometry at scale (core first, item 2) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate. G1 camera levels streamed by need (**failed** on frame rate in one flight of three: 256 unique rocks whose finest levels are 6.35× a 2.5M-triangle budget, never over it; settled coverage 0.062–0.096× one ray's error from fully resident, 0.013–0.029% of pixels differ in flight, 3.4× less GPU memory; but 1.074×, 1.085× and **1.124×** the resident frame against 1.10×, from about half a load a frame at about 1 ms each; settled colour 1.3–1.6% off, smoother normals at coarser levels, `docs/results/m14-gate1.md`); G2 fewer, cheaper loads and a zoom (**failed** on frame rate in three flights of four: 1.091×, **1.110×, 1.111×, 1.113×** against 1.10×, streaming 0.33–0.42 ms a frame, 2.0–2.5% of a 60 fps frame; passed: never over budget, settled coverage 0.072–0.087× one ray's error, 0.011–0.028% of pixels off in flight, the zoom from 50° to 1.5° on a rock 103 m away exact settled with the working set 1.55 → 0.52 million triangles; paged pool, staging belt, level chains; a load about 29 ns a triangle, 22 of it the structure's build, `docs/results/m14-gate2.md`); G3 beyond CPU memory within a 60 fps budget (**passed**: 4,096 unique rocks, finest levels 32× an 8.4-million-triangle budget and 33 GB packed against 25.8 GB of memory, generated on demand by worker threads into a 2 GiB cache; three 1,800-frame flights at 4.8–5.3 ms mean, 99th percentile 7.9–8.8 ms, worst 14.5 ms, never over budget or cap; settled within 0.018–0.030× one ray's error of every rock at its ideal level; a 2 ms-a-frame time budget deferred 384–926 loads a flight, `docs/results/m14-gate3.md`) |
 
 ## 7. Benchmark protocol
 

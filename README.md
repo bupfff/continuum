@@ -192,9 +192,10 @@ extreme scale and detail. In order:
    of unique rocks 6.35× the budget looks within a tenth of
    one-ray-per-pixel's error of having everything loaded, with 3.4× less
    GPU memory, and zooming in onto a rock 100 m away resolves it fully.
-   Streaming costs about 0.4 ms a frame (2–2.5% of a 60 fps frame), mostly
-   building ray-tracing structures for detail as the camera passes;
-   lighting still sees each object's coarse version.
+   4,096 unique rocks whose detail would take 33 GB (more than the
+   laptop's memory) are generated as the camera needs them and fly within
+   60 fps (worst frame 14.5 ms). Lighting still sees each object's coarse
+   version, kept resident; streaming that is next.
 2. **Detail smaller than a pixel, without shimmer** (in progress). Each
    object type gets a small precomputed map of how it looks from every
    direction, and pixels read those instead of tracing every tiny
