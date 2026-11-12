@@ -97,6 +97,7 @@ fn scene() -> ContinuumScene {
             geometry_colors: Vec::new(),
             texture_wrap: Vec::new(),
             geometry_levels: Vec::new(),
+            level_source: None,
         }),
         lights: vec![
             Light::sun(

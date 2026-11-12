@@ -14,7 +14,11 @@ use std::f32::consts::{PI, TAU};
 
 use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum::mesh::Surface;
-use continuum_gpu::{Camera, Instance, InstancedScene, Level, Levels, Light, RectLight};
+use std::sync::Arc;
+
+use continuum_gpu::{
+    Camera, Instance, InstancedScene, Level, LevelSource, Levels, Light, RectLight,
+};
 use flatland::rng::Pcg32;
 
 /// Segments around (u) of the lighting level; each finer level doubles them.
@@ -108,6 +112,13 @@ impl Shape {
         }
     }
 
+    /// At least as many triangles as level `level` has (`2 × nu × nv`;
+    /// degenerate ones at the poles are dropped).
+    pub fn triangles_at_most(level: usize) -> u32 {
+        let nu = (BASE_SEGMENTS << level) as u32;
+        nu * nu
+    }
+
     /// The largest distance from level `level`'s triangles to the finest
     /// level's, at the finest grid's vertices (both meshes interpolated
     /// along their own triangles at the same chart coordinates).
@@ -155,6 +166,8 @@ pub struct Rocks {
     pub sun: Light,
     /// Rock centres on the ground.
     pub positions: Vec<DVec3>,
+    /// Each rock's bounding radius (meters, about its centre).
+    pub radii: Vec<f32>,
     /// The field's half width (meters).
     pub half: f64,
 }
@@ -169,6 +182,17 @@ impl Rocks {
 
     /// [`Rocks::new`] with the rocks' displacement given.
     pub fn with_detail(side: usize, spacing: f64, detail: Detail) -> Rocks {
+        Rocks::build(side, spacing, detail, false)
+    }
+
+    /// [`Rocks::new`] with the camera levels produced on demand (M14 gate
+    /// 3): only the lighting levels are built now; the scene's
+    /// `level_source` generates the rest from each rock's shape.
+    pub fn on_demand(side: usize, spacing: f64) -> Rocks {
+        Rocks::build(side, spacing, Detail::default(), true)
+    }
+
+    fn build(side: usize, spacing: f64, detail: Detail, on_demand: bool) -> Rocks {
         let mut rng = Pcg32::new(14, 1);
         let ground = {
             let h = 1000.0f32;
@@ -215,8 +239,13 @@ impl Rocks {
                             .map(|(shape, _, _, _)| {
                                 let finer = (1..OCTAVES)
                                     .map(|l| Level {
-                                        surface: shape.surface(l),
+                                        surface: if on_demand {
+                                            Surface::default()
+                                        } else {
+                                            shape.surface(l)
+                                        },
                                         error: shape.error(l),
+                                        triangles: Shape::triangles_at_most(l),
                                     })
                                     .collect();
                                 (
@@ -236,7 +265,10 @@ impl Rocks {
                 .flat_map(|h| h.join().expect("a rock thread"))
                 .collect()
         });
+        let mut radii = Vec::with_capacity(shapes.len());
         for ((surface, l), (_, position, angle, shade)) in built.into_iter().zip(&shapes) {
+            let (lo, hi) = surface.bounds();
+            radii.push(1.05 * lo.abs().max(hi.abs()).length());
             instances.push(Instance {
                 geometry: geometries.len(),
                 rotation: Mat3::from_rotation_z(*angle),
@@ -273,10 +305,16 @@ impl Rocks {
                 geometries,
                 instances,
                 geometry_levels: levels,
+                level_source: on_demand.then(|| {
+                    Arc::new(RockSource {
+                        shapes: shapes.iter().map(|(s, _, _, _)| s.clone()).collect(),
+                    }) as Arc<dyn LevelSource>
+                }),
                 ..Default::default()
             },
             sun,
             positions,
+            radii,
             half,
         }
     }
@@ -337,5 +375,18 @@ pub fn flight(k: usize, t: f32, half: f32, fov: f32) -> Camera {
                 4.0,
             )
         }
+    }
+}
+
+/// Generates the rocks' camera levels on demand (geometry `k + 1` is rock
+/// `k`; level `l` of `Levels::finer` is the shape's level `l + 1`).
+#[derive(Debug)]
+pub struct RockSource {
+    shapes: Vec<Shape>,
+}
+
+impl LevelSource for RockSource {
+    fn level(&self, geometry: usize, level: usize) -> Surface {
+        self.shapes[geometry - 1].surface(level + 1)
     }
 }

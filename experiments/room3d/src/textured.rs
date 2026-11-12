@@ -290,6 +290,7 @@ impl Textured {
             geometry_colors: Vec::new(),
             texture_wrap: Vec::new(),
             geometry_levels: Vec::new(),
+            level_source: None,
         };
         // The camera stands at 1.5 m looking along +y, slightly down; the sun
         // is 30° up behind and to the left, 1 km away, 0.5° across.

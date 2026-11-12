@@ -133,7 +133,7 @@ pub use cutout::cut_out;
 pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 pub use renderer::{Renderer, RendererOptions};
-pub use stream::{Level, Levels, StreamOptions, StreamStats};
+pub use stream::{Level, LevelSource, Levels, StreamOptions, StreamStats};
 pub use vcache::{CacheOptions, CacheStats};
 
 // Experiment-only: used by the gates in `experiments/`, not part of the
@@ -2454,6 +2454,9 @@ pub struct InstancedScene {
     /// a budget ([`StreamOptions`], with hardware camera rays); lighting
     /// keeps the geometry itself.
     pub geometry_levels: Vec<Option<Levels>>,
+    /// Gives the camera levels whose surfaces are left empty in
+    /// `geometry_levels`, on demand (M14 gate 3).
+    pub level_source: Option<std::sync::Arc<dyn LevelSource>>,
 }
 
 /// How a texture continues past its edges (glTF sampler wrap modes).

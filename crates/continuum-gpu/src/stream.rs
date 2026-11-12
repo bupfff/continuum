@@ -21,6 +21,8 @@
 //! triangle is kept in its transform's unused word.
 
 use std::collections::BTreeSet;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use continuum::mesh::Surface;
@@ -41,6 +43,19 @@ pub struct Level {
     /// The largest distance from this level's surface to the finest
     /// level's, in the geometry's own units.
     pub error: f32,
+    /// For a level the scene's [`LevelSource`] gives (`surface` empty): at
+    /// least as many triangles as it will have (sizes its page table).
+    /// Ignored when `surface` holds the triangles.
+    pub triangles: u32,
+}
+
+/// Gives camera levels on demand (M14 gate 3), on worker threads, for
+/// levels whose `Level::surface` is empty: the stand-in for reading them
+/// from a disk, or for generating them.
+pub trait LevelSource: Send + Sync + std::fmt::Debug {
+    /// Level `level` (an index into `Levels::finer`) of geometry
+    /// `geometry`, as [`Level::surface`] would hold it.
+    fn level(&self, geometry: usize, level: usize) -> Surface;
 }
 
 /// A geometry's camera levels (M14 gate 1): finer versions that camera rays
@@ -68,8 +83,18 @@ pub struct StreamOptions {
     /// coarsest level whose error is at most this many pixels at its
     /// distance.
     pub pixel_error: f32,
-    /// Triangles loaded per frame at most (at least one level a frame).
-    pub upload_triangles: u32,
+    /// The time levels' structures may take to build per frame, in ms (at
+    /// least one level a frame): the streaming time budget (M14 gate 3),
+    /// at `build_ns_per_triangle`. Loads past it wait for later frames.
+    pub frame_ms: f32,
+    /// What building a level's structure and uploading it costs per
+    /// triangle, in ns (about 30 on Apple M4, M14 gate 2).
+    pub build_ns_per_triangle: f32,
+    /// Bytes of levels from a [`LevelSource`] kept in CPU memory at most
+    /// (the least recently used dropped first).
+    pub cpu_cache_bytes: u64,
+    /// Threads producing levels from a [`LevelSource`].
+    pub workers: usize,
     /// Every geometry's finest level resident from the start and nothing
     /// streamed: the fully resident reference (the budget is ignored).
     pub resident: bool,
@@ -80,7 +105,10 @@ impl Default for StreamOptions {
         Self {
             budget_triangles: 4 << 20,
             pixel_error: 0.5,
-            upload_triangles: 1 << 17,
+            frame_ms: 2.0,
+            build_ns_per_triangle: 30.0,
+            cpu_cache_bytes: 2 << 30,
+            workers: 4,
             resident: false,
         }
     }
@@ -109,6 +137,20 @@ pub struct StreamStats {
     pub evicted_over: u32,
     /// Triangles loaded again: levels loaded within the last 600 frames.
     pub repeat_triangles: u64,
+    /// Wants left for later frames by the time budget.
+    pub deferred: u32,
+    /// Levels a [`LevelSource`] produced (arriving this frame), the frames
+    /// they took from request to arrival in all, and wants waiting for
+    /// one.
+    pub produced: u32,
+    /// See `produced`.
+    pub production_frames: u32,
+    /// See `produced`.
+    pub waiting_production: u32,
+    /// Bytes of produced levels kept in CPU memory.
+    pub cpu_cache_bytes: u64,
+    /// Streamed geometries seen in the latest feedback.
+    pub seen: u32,
     /// Triangles loaded in the frame.
     pub loaded_triangles: u64,
     /// Geometries seen in the latest feedback wanting a finer level than
@@ -176,8 +218,22 @@ enum EvictClass {
     Over,
 }
 
-/// A level's per-triangle data as the camera's buffers hold it.
+/// A level as the streamer keeps it: its triangles (or their bound, before
+/// a source produces it) and its packed data, if in CPU memory.
 struct Packed {
+    triangles: u32,
+    data: Option<Arc<PackedData>>,
+    /// Given by the scene's source (its data may be dropped and produced
+    /// again).
+    sourced: bool,
+    /// The frame its production was requested (0: not in production).
+    requested: u64,
+    /// The latest frame it was produced or loaded.
+    used: u64,
+}
+
+/// A level's per-triangle data as the camera's buffers hold it.
+struct PackedData {
     triangles: u32,
     tris: Vec<[f32; 4]>,
     normals: Vec<[f32; 4]>,
@@ -186,13 +242,29 @@ struct Packed {
     tex: Vec<[f32; 2]>,
 }
 
-fn pack(s: &Surface, first_chart: u32, textured: bool) -> Packed {
+impl PackedData {
+    fn bytes(&self) -> u64 {
+        (16 * (self.tris.len() + self.normals.len())
+            + 8 * (self.uv.len() + self.tex.len())
+            + 4 * self.chart.len()) as u64
+    }
+}
+
+fn level_triangles(l: &Level) -> u32 {
+    if l.surface.triangles.is_empty() {
+        l.triangles
+    } else {
+        l.surface.triangles.len() as u32
+    }
+}
+
+fn pack(s: &Surface, first_chart: u32, textured: bool) -> PackedData {
     let n = s.triangles.len();
     assert!(
         s.normals.len() == n && s.uv.len() == n && s.chart.len() == n,
         "a camera level needs normals, chart coordinates and charts per triangle"
     );
-    Packed {
+    PackedData {
         triangles: n as u32,
         tris: s
             .triangles
@@ -241,6 +313,10 @@ struct Streamed {
     tables: Vec<u32>,
     /// The frame each level was last loaded in (0: never).
     loaded: Vec<u64>,
+    /// Its first chart, and whether its levels carry texture coordinates
+    /// (for packing produced levels).
+    first_chart: u32,
+    textured: bool,
 }
 
 impl Streamed {
@@ -321,6 +397,51 @@ pub(crate) struct Streamer {
     /// Reused mapped staging for uploads (fresh staging per write cost
     /// about half the uploads' CPU time in development).
     belt: wgpu::util::StagingBelt,
+    /// Worker threads producing levels from the scene's source, if any.
+    producer: Option<Producer>,
+    /// Bytes of produced levels' data kept in CPU memory.
+    cache_bytes: u64,
+}
+
+/// A level to produce: its streamed geometry, the scene's geometry, the
+/// level (from 1), the geometry's first chart, and whether it is textured.
+struct Job {
+    s: usize,
+    geometry: usize,
+    level: u32,
+    first_chart: u32,
+    textured: bool,
+}
+
+/// Worker threads calling the scene's [`LevelSource`]; they end when the
+/// streamer (and so the job queue) is dropped.
+struct Producer {
+    jobs: mpsc::Sender<Job>,
+    done: mpsc::Receiver<(usize, u32, Arc<PackedData>)>,
+}
+
+impl Producer {
+    fn new(source: Arc<dyn LevelSource>, workers: usize) -> Self {
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let (finished, done) = mpsc::channel();
+        let queue = Arc::new(Mutex::new(queue));
+        for _ in 0..workers.max(1) {
+            let (queue, finished, source) = (queue.clone(), finished.clone(), source.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let Ok(job) = queue.lock().expect("job queue").recv() else {
+                        return;
+                    };
+                    let surface = source.level(job.geometry, job.level as usize - 1);
+                    let data = Arc::new(pack(&surface, job.first_chart, job.textured));
+                    if finished.send((job.s, job.level, data)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        Producer { jobs, done }
+    }
 }
 
 fn streamed(scene: &InstancedScene) -> impl Iterator<Item = &Levels> {
@@ -333,21 +454,11 @@ fn streamed(scene: &InstancedScene) -> impl Iterator<Item = &Levels> {
 }
 
 fn finest_pages(l: &Levels) -> u32 {
-    pages_of(
-        l.finer
-            .last()
-            .expect("a finer level")
-            .surface
-            .triangles
-            .len() as u32,
-    )
+    pages_of(level_triangles(l.finer.last().expect("a finer level")))
 }
 
 fn all_pages(l: &Levels) -> u32 {
-    l.finer
-        .iter()
-        .map(|f| pages_of(f.surface.triangles.len() as u32))
-        .sum()
+    l.finer.iter().map(|f| pages_of(level_triangles(f))).sum()
 }
 
 /// The pool's size in triangles for `scene` under `options` (0: nothing to
@@ -442,8 +553,22 @@ impl Streamer {
                 levels: levels
                     .finer
                     .iter()
-                    .map(|l| pack(&l.surface, first_chart[g], textured && has_tex))
+                    .map(|l| {
+                        let sourced =
+                            l.surface.triangles.is_empty() && scene.level_source.is_some();
+                        Packed {
+                            triangles: level_triangles(l),
+                            data: (!sourced).then(|| {
+                                Arc::new(pack(&l.surface, first_chart[g], textured && has_tex))
+                            }),
+                            sourced,
+                            requested: 0,
+                            used: 0,
+                        }
+                    })
                     .collect(),
+                first_chart: first_chart[g],
+                textured: textured && has_tex,
                 held: levels.finer.iter().map(|_| None).collect(),
                 wanted: 0,
                 seen: 0,
@@ -453,7 +578,7 @@ impl Streamer {
                     .iter()
                     .scan(table, |t, l| {
                         let first = *t;
-                        *t += pages_of(l.surface.triangles.len() as u32);
+                        *t += pages_of(level_triangles(l));
                         Some(first)
                     })
                     .collect(),
@@ -537,12 +662,34 @@ impl Streamer {
             log: Vec::new(),
             evict_all: false,
             belt: wgpu::util::StagingBelt::new(device.clone(), 16 << 20),
+            producer: None,
+            cache_bytes: 0,
         };
+        if let Some(source) = &scene.level_source
+            && !options.resident
+            && streamer
+                .geoms
+                .iter()
+                .any(|g| g.levels.iter().any(|l| l.sourced))
+        {
+            streamer.producer = Some(Producer::new(source.clone(), options.workers));
+        }
         if options.resident {
             // In batches, so build inputs and scratch stay bounded.
             let all: Vec<usize> = (0..streamer.geoms.len()).collect();
             for batch in all.chunks(32) {
                 let mut encoder = device.create_command_encoder(&Default::default());
+                for &s in batch {
+                    let g = &mut streamer.geoms[s];
+                    let last = g.levels.len() - 1;
+                    if g.levels[last].data.is_none() {
+                        let source = scene.level_source.as_ref().expect("a level source");
+                        let surface = source.level(g.geometry, last);
+                        g.levels[last].triangles = surface.triangles.len() as u32;
+                        g.levels[last].data =
+                            Some(Arc::new(pack(&surface, g.first_chart, g.textured)));
+                    }
+                }
                 let loads: Vec<(usize, u32, Vec<u32>)> = batch
                     .iter()
                     .map(|&s| {
@@ -564,14 +711,7 @@ impl Streamer {
             // Nothing streams later: keep only the counts.
             for g in &mut streamer.geoms {
                 for p in &mut g.levels {
-                    *p = Packed {
-                        triangles: p.triangles,
-                        tris: Vec::new(),
-                        normals: Vec::new(),
-                        uv: Vec::new(),
-                        chart: Vec::new(),
-                        tex: Vec::new(),
-                    };
+                    p.data = None;
                 }
             }
         }
@@ -670,6 +810,11 @@ impl Streamer {
             encoder.clear_buffer(&self.wanted, 0, None);
         }
         stats.resident_triangles = self.geoms.iter().map(Streamed::resident_triangles).sum();
+        stats.seen = self
+            .geoms
+            .iter()
+            .filter(|g| self.latest > 0 && g.seen == self.latest)
+            .count() as u32;
         stats.wanting = self
             .geoms
             .iter()
@@ -696,6 +841,7 @@ impl Streamer {
         targets: &Targets,
         stats: &mut StreamStats,
     ) {
+        self.receive_produced(stats);
         let latest = self.latest;
         if latest == 0 {
             return;
@@ -717,10 +863,18 @@ impl Streamer {
         let mut loads: Vec<(usize, u32, Vec<u32>)> = Vec::new();
         let mut uploaded = 0u64;
         let mut evicted = false;
+        // The streaming time budget, in triangles.
+        let allowance =
+            (self.options.frame_ms as f64 * 1e6 / self.options.build_ns_per_triangle as f64) as u64;
         for s in wants {
             let level = self.geoms[s].wanted;
+            if !self.have(s, level) {
+                stats.waiting_production += 1;
+                continue;
+            }
             let n = self.geoms[s].levels[level as usize - 1].triangles;
-            if uploaded > 0 && uploaded + n as u64 > self.options.upload_triangles as u64 {
+            if uploaded > 0 && uploaded + n as u64 > allowance {
+                stats.deferred += 1;
                 continue;
             }
             let pages = loop {
@@ -756,6 +910,9 @@ impl Streamer {
             }
             *last = self.frame;
         }
+        for (s, level, _) in &loads {
+            self.geoms[*s].levels[*level as usize - 1].used = self.frame;
+        }
         stats.loads = loads.len() as u32;
         stats.loaded_triangles = loads
             .iter()
@@ -763,6 +920,74 @@ impl Streamer {
             .sum();
         if !loads.is_empty() || evicted {
             self.apply(device, queue, encoder, hw, targets, &loads, true);
+        }
+        self.trim_cache();
+        stats.cpu_cache_bytes = self.cache_bytes;
+    }
+
+    /// Whether level `level` of streamed geometry `s` is in CPU memory;
+    /// if not, asks for it (once) from the source's workers.
+    fn have(&mut self, s: usize, level: u32) -> bool {
+        let frame = self.frame;
+        let g = &mut self.geoms[s];
+        let (geometry, first_chart, textured) = (g.geometry, g.first_chart, g.textured);
+        let l = &mut g.levels[level as usize - 1];
+        if l.data.is_some() {
+            return true;
+        }
+        if l.requested == 0
+            && let Some(p) = &self.producer
+        {
+            l.requested = frame;
+            let _ = p.jobs.send(Job {
+                s,
+                geometry,
+                level,
+                first_chart,
+                textured,
+            });
+        }
+        false
+    }
+
+    /// Takes in what the workers produced.
+    fn receive_produced(&mut self, stats: &mut StreamStats) {
+        let Some(p) = &self.producer else { return };
+        let done: Vec<(usize, u32, Arc<PackedData>)> = p.done.try_iter().collect();
+        for (s, level, data) in done {
+            let l = &mut self.geoms[s].levels[level as usize - 1];
+            stats.produced += 1;
+            stats.production_frames += (self.frame - l.requested) as u32;
+            l.requested = 0;
+            l.used = self.frame;
+            l.triangles = data.triangles;
+            self.cache_bytes += data.bytes();
+            l.data = Some(data);
+        }
+    }
+
+    /// Drops produced levels' data, least recently used first, to the CPU
+    /// cache's cap.
+    fn trim_cache(&mut self) {
+        while self.cache_bytes > self.options.cpu_cache_bytes {
+            let Some((s, l)) = self
+                .geoms
+                .iter()
+                .enumerate()
+                .flat_map(|(s, g)| {
+                    g.levels
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| l.sourced && l.data.is_some())
+                        .map(move |(l, p)| (p.used, s, l))
+                })
+                .min()
+                .map(|(_, s, l)| (s, l))
+            else {
+                break;
+            };
+            let data = self.geoms[s].levels[l].data.take().expect("data");
+            self.cache_bytes -= data.bytes();
         }
     }
 
@@ -841,9 +1066,10 @@ impl Streamer {
             self.geoms[v].evicted = self.frame;
         }
         let wanted = self.geoms[v].wanted;
-        if rank == 4 && wanted > 0 {
+        if rank == 4 && wanted > 0 && self.have(v, wanted) {
             // Step down to the level it wants, loaded into the pages just
-            // freed; its objects switch in this frame's build.
+            // freed; its objects switch in this frame's build. (Without its
+            // data in CPU memory it drops to a coarser level until then.)
             let n = pages_of(self.geoms[v].triangles(wanted));
             let pages = self.alloc.take(n).expect("a step down fits its own pages");
             loads.push((v, wanted, pages));
@@ -901,7 +1127,10 @@ impl Streamer {
         let mut built: Vec<Built> = Vec::with_capacity(loads.len());
         for (s, level, pages) in loads {
             let (s, level) = (*s, *level);
-            let p = &self.geoms[s].levels[level as usize - 1];
+            let p = self.geoms[s].levels[level as usize - 1]
+                .data
+                .clone()
+                .expect("a level in CPU memory");
             let n = p.triangles as usize;
             // Consecutive pages upload together.
             let mut j = 0;
@@ -1074,11 +1303,7 @@ impl Streamer {
         self.geoms
             .iter()
             .flat_map(|g| &g.levels)
-            .map(|p| {
-                (16 * (p.tris.len() + p.normals.len())
-                    + 8 * (p.uv.len() + p.tex.len())
-                    + 4 * p.chart.len()) as u64
-            })
+            .filter_map(|p| p.data.as_ref().map(|d| d.bytes()))
             .sum()
     }
 
