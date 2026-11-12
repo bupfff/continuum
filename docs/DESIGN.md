@@ -403,7 +403,8 @@ estimates, and gates fail often, so treat them as ranges.
 **Start here (end of the sixth session, 2026-11-09).** The state in one
 place, for a new conversation:
 
-- **The user's direction: core first** (2026-11-08). Before more features,
+- **The user's direction: core first** (2026-11-08; sharpened 2026-11-12,
+  see "Focus" and "Landmarks" below). Before more features,
   make the fundamentals hold up at extreme scale and detail (unique
   geometry close up, and kilometers of open world), then branch out: one
   primitive (cones over a prefiltered hierarchy, with a certified cache)
@@ -460,29 +461,54 @@ place, for a new conversation:
     tail; about 67 object nodes and several map reads per pixel from 150 m).
   - Appearance (color and light from the cache at maps and splats) is not
     started; coverage was the open question, and it is answered.
-- **Next, in order (the user agreed 2026-11-09):**
-  1. *Unique geometry at scale (M14).* G1 streams camera levels (above).
-     Next, M14 G2: fewer, cheaper loads on G1's scene and criteria (load
-     the level wanted a moment ahead instead of each in turn; downgrade in
-     place instead of dropping to the lighting level; free before
-     allocating; spread structure builds), and bound the normal's error in
-     level choice. Then stream the lighting level by cone footprint (a
-     page whose cones need a missing subtree is retried when it arrives,
-     so the cache stays certified), and scale past memory: a reference
-     that does not need everything resident (visibility in subsets by
-     instance masks), object-group stand-ins for the far field (shared
-     with M13's maps).
-  2. *M13's far field, for speed:* one walk shared by a tile of pixels
-     (coherent loads; the horizon's long walk paid once per tile), or a
-     coarser far field through the quality dial; then appearance (gate:
-     color against the area-integrated image at a frame cost the dial can
-     trade). M13's goal stays a 10 ms coverage pass at 1280×720 on the M4.
-  3. *Frame-time stability:* flight spikes (`flight-spikes-diagnostics.md`).
-  4. *Lighting fundamentals:* the cache that never settles with bounce
-     light (M10 G23's loop, a core bug; `CONTINUUM_TRACE_BAKES` logs every
-     planned page and bounce retry for finding it), the sky's slow warm-up,
-     more than one bounce, bounce with movers, cheaper bounce shading.
-  5. *Speed beyond one laptop:* the NVIDIA benchmark, when funded.
+- **Focus (the user, 2026-11-12):** excellent at three things (scale,
+  detail, lighting), adequate at the rest. "Scale and detail" means huge,
+  extremely detailed worlds where **detail follows the screen**: zoom in
+  (or come closer) and geometry, lighting and textures resolve further
+  instead of pixelating; zoom out and what cannot be seen costs less.
+  Already true: geometry levels and cache pages are chosen by pixel
+  footprint (field of view included), textures filtered by footprint,
+  shadows exact at any zoom (no shadow maps). Limits today: geometry
+  stops at the finest stored level (facets beyond it), lighting texels at
+  `CacheOptions::base_texel` (5 mm; softer beyond), and sub-pixel detail
+  is slow (M13).
+- **Landmarks (agreed 2026-11-12):**
+  1. *A unique world beyond memory:* unique geometry several times GPU
+     memory, flown at 60 fps on the M4, never over budget, lighting
+     streamed too and still certified, within a stated bound of a
+     reference, at any zoom.
+  2. *Lighting you can trust in motion:* the cache always converges (no
+     loops), the sky warms in a few hundred frames, the error while flying
+     is measured and bounded, a moving sun at real speed.
+  3. *Detail without shimmer at frame rate:* sub-pixel coverage and
+     colour in about 10 ms at 720p, flicker measured on a still camera, no
+     blending of frames; its stand-ins shared with streaming's far field.
+  4. *One showcase scene* with all three (unique detail, sun, sky, bounce)
+     at 60 fps against Cycles, with the quality dial working.
+- **Next, in order (agreed 2026-11-12):**
+  1. *M14 G2:* fewer, cheaper loads on G1's scene and criteria, plus a
+     zoom flight (field of view 50° to 1.5° on a far rock). Shading detail
+     is a separate question: a normal bound in level choice would pull the
+     finest level out to about 39 m (fine octaves change shading well
+     beyond the distance their displacement is visible), so coarser levels
+     should carry the finest level's normals instead (chart-space normal
+     maps baked from it), a later gate.
+  2. *The cache that never settles with bounce light* (M10 G23's loop, a
+     core bug; `CONTINUUM_TRACE_BAKES` logs every planned page and bounce
+     retry for finding it).
+  3. *M14:* the lighting level streamed by cone footprint (a page whose
+     cones need a missing subtree is retried when it arrives, so the cache
+     stays certified); shading detail from the finest level on coarser
+     ones; then past memory (a reference that needs nothing resident at
+     once: visibility in subsets by instance masks; object-group stand-ins
+     for the far field, shared with M13's maps).
+  4. *Lighting in motion:* the sky's slow warm-up, the error while flying,
+     more than one bounce, a moving sun at real speed.
+  5. *M13's far field for speed* (one walk shared by a tile of pixels, or
+     a coarser far field through the quality dial; goal a 10 ms coverage
+     pass at 1280×720), then appearance.
+  6. *Frame-time stability* (`flight-spikes-diagnostics.md`), then the
+     showcase. The NVIDIA benchmark when funded.
   - Parked features: emissive faces as lights (M10 G23), a second texture
     coordinate set, movers under a sky, moving lights' dark state.
 - **The fourth session's features** (all in `docs/results/` and the
