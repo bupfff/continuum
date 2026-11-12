@@ -208,8 +208,7 @@ pub fn binned_gather(
     }
     let bin_angle = cone.angle / BINS as f32;
     let mut out = [0.0; LIGHTS];
-    for bin in 0..BINS {
-        let id = layer.id[bin];
+    for (bin, &id) in layer.id.iter().enumerate().take(BINS) {
         if id == NO_SURFACE || blocked & (1 << bin) != 0 {
             continue;
         }
