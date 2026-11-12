@@ -97,6 +97,15 @@ fn main() {
     );
     let frames = settle(&mut r, t.camera, &target);
     println!("settled in {frames} frames");
+    if let Some(path) = std::env::args().skip_while(|a| a != "dump").nth(1) {
+        // The settled linear image (one sample per pixel), for comparing
+        // regions with a reference offline.
+        r.finish();
+        let px: Vec<f32> = r.read_colors().into_iter().flatten().collect();
+        std::fs::write(&path, bytemuck::cast_slice(&px)).expect("written");
+        println!("wrote {path}");
+        return;
+    }
     r.set_footprint(0.25);
     r.set_pixel_offset(-0.375, -0.375);
     for k in 1..=3000 {

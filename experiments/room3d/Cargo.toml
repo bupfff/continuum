@@ -13,6 +13,7 @@ continuum-gpu = { path = "../../crates/continuum-gpu" }
 continuum-gltf = { path = "../../crates/continuum-gltf" }
 pollster = "1.0.1"
 png = "0.17"
+bytemuck = "1"
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2-metal = "0.3"

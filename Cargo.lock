@@ -3466,6 +3466,7 @@ dependencies = [
 name = "room3d"
 version = "0.2.0"
 dependencies = [
+ "bytemuck",
  "continuum",
  "continuum-gltf",
  "continuum-gpu",
