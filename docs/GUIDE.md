@@ -311,9 +311,10 @@ For a window, see `apps/viewer`, which flies through a file with
     evicted, never over the budget. The geometry itself stays what
     lighting sees, and what the camera sees until a level arrives.
   - Measured: a scene 6.35× the budget settles to within a tenth of one
-    ray's coverage error of everything loaded, with 3.4× less GPU memory;
-    it costs 1.07–1.12× the frame time in flight, from loads
-    (`docs/results/m14-gate1.md`).
+    ray's coverage error of everything loaded, with 3.4× less GPU memory,
+    and follows the zoom (50° to 1.5° onto a rock 103 m away settles
+    exact); it costs 0.33–0.42 ms a frame in flight, mostly building
+    structures for levels as they load (`docs/results/m14-gate2.md`).
   - Hardware camera rays only; not with movers, vertex colors, normal maps,
     cutouts or blending on the levels. `Renderer::stream_stats` reports
     what it did.
