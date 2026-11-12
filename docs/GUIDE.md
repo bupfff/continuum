@@ -344,8 +344,10 @@ For a window, see `apps/viewer`, which flies through a file with
     worker threads whenever a bake needs it, into a CPU cache capped at
     `StreamOptions::lighting_cache_bytes`. Measured: 36,864 unique rocks at
     about 18 KB of GPU memory and 15 KB of CPU memory each, the cache still
-    exact, flown at 6.2–6.5 ms a frame on average (99th percentile 10–12
-    ms; one frame in 5,400 took 42 ms; `docs/results/m14-gate6.md`).
+    exact, flown at 4.8–5.9 ms a frame on average with no frame over 16.7
+    ms (`docs/results/m14-gate7.md`). Producer threads run at a lower
+    priority than rendering (utility QoS on macOS), so views settle more
+    slowly than frames render.
     Objects showing their proxy are traced through clusters of 32, so the
     top-level structure stays small as unique objects grow.
   - `StreamOptions::fit_budget` (on by default) keeps the camera budget:
