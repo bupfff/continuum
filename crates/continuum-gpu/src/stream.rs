@@ -1882,6 +1882,9 @@ pub struct LightingStats {
     /// Bytes of produced lighting packages kept in CPU memory, after the
     /// frame's trim.
     pub cpu_cache_bytes: u64,
+    /// CPU time of the frame's update (taking in packages, choosing,
+    /// uploading, trimming), in ms.
+    pub cpu_ms: f32,
 }
 
 /// Lighting levels loaded at most per frame.
@@ -2054,6 +2057,7 @@ impl LightingPool {
         pinned: &[u32],
     ) {
         let frame = self.frame;
+        let start = Instant::now();
         let mut stats = LightingStats {
             capacity_triangles: (self.layout.slots * self.layout.slot_tris) as u64,
             ..Default::default()
@@ -2159,6 +2163,7 @@ impl LightingPool {
             .flatten()
             .map(|&g| self.layout.records[g].tris as u64)
             .sum();
+        stats.cpu_ms = start.elapsed().as_secs_f32() * 1000.0;
         self.log.push(stats);
         self.frame += 1;
     }

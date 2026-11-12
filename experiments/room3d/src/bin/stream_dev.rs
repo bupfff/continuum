@@ -25,6 +25,118 @@ fn gpu_bytes(device: &wgpu::Device) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Ok(side) = std::env::var("GATE5") {
+        // Where gate 5's frame time goes (M14): its field and options,
+        // flights 0 and 1 (900 frames each, settled first) with the gate's
+        // lighting slots, 4× and 16× them; per frame, the wall time and its
+        // parts.
+        let side: usize = side.parse().unwrap_or(192);
+        let kernel = MaskConeKernel::new().expect("a GPU");
+        kernel.set_prefilter(1.0);
+        kernel.set_sky_prefilter(8.0);
+        kernel.set_hardware_rays(true);
+        kernel.set_sky(continuum::glam::Vec3::ZERO);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target = kernel
+            .device()
+            .create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 1280,
+                    height: 720,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let built = std::time::Instant::now();
+        let rocks = Rocks::lighting_on_demand(side, 6.0);
+        println!(
+            "{} rocks built in {:.0} s",
+            side * side,
+            built.elapsed().as_secs_f64()
+        );
+        let frames = 900usize;
+        for slots in [491_520u32, 4 * 491_520, 16 * 491_520] {
+            let mut r = InstancedRenderer::with_streaming(
+                &kernel,
+                format,
+                1280,
+                720,
+                1,
+                &[Rocks::sun()],
+                &rocks.scene,
+                DVec3::ZERO,
+                Some(CacheOptions::default()),
+                StreamOptions {
+                    budget_triangles: 8 << 20,
+                    cpu_cache_bytes: 2 << 30,
+                    lighting_triangles: slots,
+                    ..Default::default()
+                },
+            );
+            for k in 0..2 {
+                let camera = |f: usize| flight(k, f as f32 / 1799.0, 192.0, 50.0);
+                for _ in 0..600 {
+                    r.frame(camera(0), &target);
+                }
+                r.finish();
+                let (c0, s0, l0) = (
+                    r.cache_log().len(),
+                    r.stream_log().len(),
+                    r.lighting_log().0.len(),
+                );
+                let begin = std::time::Instant::now();
+                for f in 0..frames {
+                    r.frame(camera(f), &target);
+                }
+                r.finish();
+                let wall = begin.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+                let cache = &r.cache_log()[c0..];
+                let stream = &r.stream_log()[s0..];
+                let lit = &r.lighting_log().0[l0..];
+                let mean =
+                    |v: &mut dyn Iterator<Item = f64>, n: usize| v.sum::<f64>() / n.max(1) as f64;
+                let timed: Vec<_> = cache.iter().filter(|c| c.timed).collect();
+                println!(
+                    "slots {slots}, flight {k}: wall {wall:.2} ms; cache planning {:.2} ms, waiting {:.2} ms, GPU bake {:.2} \
+                     ms, GPU camera {:.2} ms, pages baked {:.0}, requests {:.0}; camera streaming CPU {:.2} ms, loads \
+                     {:.2}; lighting CPU {:.2} ms, loads {:.1}, refused {:.0}, waiting production {:.1}; pages waiting {}",
+                    mean(
+                        &mut cache.iter().map(|c| c.planning.as_secs_f64() * 1000.0),
+                        cache.len()
+                    ),
+                    mean(
+                        &mut cache.iter().map(|c| c.waiting.as_secs_f64() * 1000.0),
+                        cache.len()
+                    ),
+                    mean(&mut timed.iter().map(|c| c.gpu_bake_ms as f64), timed.len()),
+                    mean(
+                        &mut timed.iter().map(|c| c.gpu_render_ms as f64),
+                        timed.len()
+                    ),
+                    mean(&mut cache.iter().map(|c| c.pages_baked as f64), cache.len()),
+                    mean(&mut cache.iter().map(|c| c.requests as f64), cache.len()),
+                    mean(&mut stream.iter().map(|s| s.cpu_ms as f64), stream.len()),
+                    mean(&mut stream.iter().map(|s| s.loads as f64), stream.len()),
+                    mean(&mut lit.iter().map(|s| s.cpu_ms as f64), lit.len()),
+                    mean(&mut lit.iter().map(|s| s.loads as f64), lit.len()),
+                    mean(&mut lit.iter().map(|s| s.refused as f64), lit.len()),
+                    mean(
+                        &mut lit.iter().map(|s| s.waiting_production as f64),
+                        lit.len()
+                    ),
+                    r.lighting_log().1,
+                );
+            }
+        }
+        return;
+    }
     if std::env::var_os("RECORDS").is_some() {
         // GPU memory per unique rock at creation, with proxies and lighting
         // levels streamed into fixed slots (gate 4's way) against every

@@ -334,8 +334,18 @@ For a window, see `apps/viewer`, which flies through a file with
     camera rays see until finer ones load), put those geometries last in
     `geometries`, and set `StreamOptions::lighting_triangles`. A page whose
     bake needs an absent lighting level is not shown until re-baked with
-    it, so cached light stays exact. Not yet with a sky, bounce light or
-    movers.
+    it, so cached light stays exact. Not yet with a sky, bounce light,
+    movers or moving lights.
+  - Lighting levels need not be in memory either (M14 gate 5): leave a
+    streamed geometry's surface empty except for its `charts` and
+    `chart_grid`, and have the scene's `LevelSource` return the level from
+    `lighting`. The renderer produces each once when it is made (keeping a
+    small record: the hierarchy's root and its coverage), then again on
+    worker threads whenever a bake needs it, into a CPU cache capped at
+    `StreamOptions::lighting_cache_bytes`. Measured: 36,864 unique rocks at
+    about 28 KB of GPU memory and 15 KB of CPU memory each, the cache still
+    exact, but not yet within 60 fps (26–39 ms frames with gate 4's
+    slots; `docs/results/m14-gate5.md`).
   - Hardware camera rays only; not with movers, vertex colors, normal maps,
     cutouts or blending on the levels. `Renderer::stream_stats` reports
     what it did.
