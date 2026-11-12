@@ -25,6 +25,117 @@ fn gpu_bytes(device: &wgpu::Device) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Ok(side) = std::env::var("SPIKES") {
+        // Gate 6's spike (M14 gate 7): its field, options and three flights
+        // in order (each settled at its first view, then 1,800 frames), each
+        // frame's wall time and parts; the slowest frames of each flight.
+        let side: usize = side.parse().unwrap_or(192);
+        let kernel = MaskConeKernel::new().expect("a GPU");
+        kernel.set_prefilter(1.0);
+        kernel.set_sky_prefilter(8.0);
+        kernel.set_hardware_rays(true);
+        kernel.set_sky(continuum::glam::Vec3::ZERO);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target = kernel
+            .device()
+            .create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 1280,
+                    height: 720,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let rocks = Rocks::lighting_on_demand(side, 6.0);
+        let mut r = InstancedRenderer::with_streaming(
+            &kernel,
+            format,
+            1280,
+            720,
+            1,
+            &[Rocks::sun()],
+            &rocks.scene,
+            DVec3::ZERO,
+            Some(CacheOptions::default()),
+            StreamOptions {
+                budget_triangles: 8 << 20,
+                cpu_cache_bytes: 2 << 30,
+                lighting_triangles: 491_520,
+                ..Default::default()
+            },
+        );
+        r.wait();
+        let half = if side >= 64 { 192.0 } else { side as f32 * 1.5 };
+        for k in 0..3 {
+            let camera = |f: usize| flight(k, f as f32 / 1799.0, half, 50.0);
+            for _ in 0..600 {
+                r.frame(camera(0), &target);
+            }
+            r.finish();
+            let (c0, s0, l0) = (
+                r.cache_log().len(),
+                r.stream_log().len(),
+                r.lighting_log().0.len(),
+            );
+            let mut times = Vec::with_capacity(1800);
+            for f in 0..1800 {
+                let call = std::time::Instant::now();
+                r.frame(camera(f), &target);
+                times.push(call.elapsed().as_secs_f64() * 1e3);
+            }
+            r.finish();
+            let cache = r.cache_log()[c0..].to_vec();
+            let stream = r.stream_log()[s0..].to_vec();
+            let lit = r.lighting_log().0[l0..].to_vec();
+            let mut order: Vec<usize> = (0..times.len()).collect();
+            order.sort_by(|&a, &b| times[b].total_cmp(&times[a]));
+            let mut sorted = times.clone();
+            sorted.sort_by(f64::total_cmp);
+            println!(
+                "flight {k}: mean {:.2} ms, p99 {:.2}, worst {:.2}; frames over 16.7 ms: {}, over 33.3 ms: {}",
+                times.iter().sum::<f64>() / times.len() as f64,
+                sorted[sorted.len() * 99 / 100],
+                sorted[sorted.len() - 1],
+                times.iter().filter(|&&t| t > 16.7).count(),
+                times.iter().filter(|&&t| t > 33.3).count(),
+            );
+            // The cache's and the lighting pool's logs are a frame or two
+            // behind the call; the streamer's is the call's own.
+            for &f in order.iter().take(8) {
+                let st = stream.get(f).copied().unwrap_or_default();
+                let li = lit.get(f).copied().unwrap_or_default();
+                let ca = cache.get(f);
+                println!(
+                    "  frame {f}: {:.2} ms; camera streaming {:.2} ms ({:.2}/{:.2}/{:.2}/{:.2}), {} loads {} evictions, \
+                     {} produced; lighting {:.2} ms, {} loads, {} produced; cache planning {:.2} ms, waiting {:.2} ms, \
+                     {} pages baked",
+                    times[f],
+                    st.cpu_ms,
+                    st.stage_ms[0],
+                    st.stage_ms[1],
+                    st.stage_ms[2],
+                    st.stage_ms[3],
+                    st.loads,
+                    st.evictions,
+                    st.produced,
+                    li.cpu_ms,
+                    li.loads,
+                    li.produced,
+                    ca.map_or(0.0, |c| c.planning.as_secs_f64() * 1e3),
+                    ca.map_or(0.0, |c| c.waiting.as_secs_f64() * 1e3),
+                    ca.map_or(0, |c| c.pages_baked),
+                );
+            }
+        }
+        return;
+    }
     if let Ok(side) = std::env::var("GATE5") {
         // Where gate 5's frame time goes (M14): its field and options,
         // flights 0 and 1 (900 frames each, settled first) with the gate's
