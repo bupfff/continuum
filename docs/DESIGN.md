@@ -458,10 +458,12 @@ place, for a new conversation:
   costs about 29 ns a triangle, 22 of it the build (about 45 million
   triangles a second on the M4); the flights need about 10,000 triangles a
   frame, inherent to passing unique rocks closely. About 0.1 ms a frame is
-  unexplained; CPU spikes of 10–14 ms appeared (undiagnosed). Open
-  question for the user: keep the speed bar against unthrottled ~4 ms
-  frames, or measure streaming against a 60 fps frame budget with a
-  streaming time budget (quality contract).
+  unexplained; CPU spikes of 10–14 ms appeared (undiagnosed).
+  **Decided 2026-11-12 (the user):** streaming's speed is measured against
+  a 60 fps frame budget (16.7 ms), with a streaming time budget (loads
+  limited to a share of the frame, the error from deferred loads
+  reported, per the quality contract §3.3), not as a ratio against
+  unthrottled frames. The next M14 gate adds that budget.
 - **M13, sub-pixel detail (item 2 below), fifth session:** coverage only so
   far, on the million-boulder field without its ground, against 16×16 rays
   per pixel (`docs/results/m13-gate1.md` … `m13-gate4.md`):
