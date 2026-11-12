@@ -482,6 +482,7 @@ impl Producer {
         for _ in 0..workers.max(1) {
             let (queue, finished, source) = (queue.clone(), finished.clone(), source.clone());
             std::thread::spawn(move || {
+                lower_priority();
                 loop {
                     let Ok(job) = queue.lock().expect("job queue").recv() else {
                         return;
@@ -592,6 +593,43 @@ fn map_wait(device: &wgpu::Device, buffer: &wgpu::Buffer, index: wgpu::Submissio
         .to_vec();
     buffer.unmap();
     data
+}
+
+/// Lowers the calling worker thread below the render thread (M14 gate 7):
+/// utility quality of service on Apple platforms, so the system keeps the
+/// performance cores for rendering; elsewhere nothing.
+fn lower_priority() {
+    #[cfg(target_vendor = "apple")]
+    {
+        unsafe extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+        }
+        const QOS_CLASS_UTILITY: u32 = 0x11;
+        // SAFETY: sets the calling thread's own scheduling class.
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+        }
+    }
+}
+
+/// Frees `value` on a background thread (M14 gate 7): levels dropped from
+/// the CPU caches are megabytes each, and freeing them stalled frames.
+fn discard<T: Send + 'static>(value: T) {
+    type Garbage = Box<dyn std::any::Any + Send>;
+    static BIN: std::sync::OnceLock<Mutex<mpsc::Sender<Garbage>>> = std::sync::OnceLock::new();
+    let bin = BIN.get_or_init(|| {
+        let (send, receive) = mpsc::channel::<Garbage>();
+        std::thread::spawn(move || {
+            lower_priority();
+            while let Ok(garbage) = receive.recv() {
+                drop(garbage);
+            }
+        });
+        Mutex::new(send)
+    });
+    if let Err(mpsc::SendError(garbage)) = bin.lock().expect("garbage bin").send(Box::new(value)) {
+        drop(garbage);
+    }
 }
 
 impl Streamer {
@@ -764,7 +802,7 @@ impl Streamer {
             graveyard: Vec::new(),
             log: Vec::new(),
             evict_all: false,
-            belt: wgpu::util::StagingBelt::new(device.clone(), 16 << 20),
+            belt: wgpu::util::StagingBelt::new(device.clone(), 32 << 20),
             producer: None,
             cache_bytes: 0,
             words: Vec::new(),
@@ -1131,6 +1169,7 @@ impl Streamer {
             let data = self.geoms[s].levels[l].data.take().expect("data");
             self.cache_bytes -= data.bytes();
             self.cached.remove(&(s, l));
+            discard(data);
         }
     }
 
@@ -1971,6 +2010,7 @@ impl LitProducer {
             let (queue, finished, source) = (queue.clone(), finished.clone(), source.clone());
             let (places, tangents, first) = (layout.places.clone(), tangents.clone(), layout.first);
             std::thread::spawn(move || {
+                lower_priority();
                 loop {
                     let Ok(g) = queue.lock().expect("job queue").recv() else {
                         return;
@@ -2093,7 +2133,7 @@ impl LightingPool {
             of_object,
             frame: 1,
             log: Vec::new(),
-            belt: wgpu::util::StagingBelt::new(device.clone(), 8 << 20),
+            belt: wgpu::util::StagingBelt::new(device.clone(), 32 << 20),
         }
     }
 
@@ -2249,6 +2289,7 @@ impl LightingPool {
             }
             let package = self.packages[g].take().expect("a held package");
             self.cache_bytes -= package.bytes();
+            discard(package);
         }
     }
 
