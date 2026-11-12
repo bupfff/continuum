@@ -815,6 +815,13 @@ pub(crate) struct VirtualCache {
     indirect_jobs: Vec<[u32; 2]>,
     retry: std::collections::VecDeque<(u32, u32)>,
     retrying: std::collections::HashSet<u32>,
+    /// Pages baked for bounce samples' hits (secondary requests), with their
+    /// keys: kept resident while any page's bounce samples wait for their
+    /// hits. Bounce samples complete only when every hit finds a page at
+    /// once; off-screen hit pages, read by no pixel, otherwise aged out
+    /// before the rest arrived, and the waiting page retried forever (M10
+    /// gate 23's view that never settled).
+    pinned: std::collections::VecDeque<(u32, [u32; 3])>,
     sky_rebaked: u32,
     /// Stable indices of objects that have moved (for the sky ledger).
     mover_ids: HashMap<u32, u32>,
@@ -1256,6 +1263,7 @@ impl VirtualCache {
             indirect_jobs: Vec::new(),
             retry: Default::default(),
             retrying: Default::default(),
+            pinned: Default::default(),
             sky_due: HashMap::new(),
             hardware_edges: false,
             extra_samples: false,
@@ -1980,6 +1988,7 @@ impl VirtualCache {
             );
         }
         let evicting = Instant::now();
+        self.refresh_pinned();
         if let Some((frame, _)) = &self.used_pending
             && frame + 2 <= self.frame
         {
@@ -2160,6 +2169,28 @@ impl VirtualCache {
         let index = self.queue.submit([encoder.finish()]);
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| ());
         map_wait(device, &readback, index)
+    }
+
+    /// Keeps pages baked for bounce hits in use while bounce samples wait
+    /// (see `pinned`), at most a quarter of the pool, the latest first;
+    /// releases them once none wait.
+    fn refresh_pinned(&mut self) {
+        if self.retry.is_empty() {
+            self.pinned.clear();
+            return;
+        }
+        let cap = (self.options.pages / 4) as usize;
+        while self.pinned.len() > cap {
+            self.pinned.pop_front();
+        }
+        let (keys, used, frame) = (&self.slot_key, &mut self.last_used, self.frame);
+        self.pinned.retain(|&(slot, k)| {
+            let still = keys[slot as usize] == k;
+            if still {
+                used[slot as usize] = frame;
+            }
+            still
+        });
     }
 
     /// Merges slot use read back from the GPU into `last_used`.
@@ -2413,6 +2444,9 @@ impl VirtualCache {
             self.slot_key[slot as usize] = k;
             self.last_used[slot as usize] = self.frame;
             self.alloc_frame[slot as usize] = self.frame;
+            if secondary && self.options.indirect {
+                self.pinned.push_back((slot, k));
+            }
             let index = self.bake_list.len() as u32;
             self.bake_list.push([k[0], k[1], k[2], slot]);
             let b = self.page_bounds(m, c, mip, page);
