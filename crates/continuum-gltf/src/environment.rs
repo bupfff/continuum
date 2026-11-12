@@ -254,9 +254,10 @@ mod tests {
         bytes.extend([128 + 10, 130]);
         let e = decode_environment(&bytes).unwrap();
         assert_eq!((e.width, e.height), (10, 1));
-        for x in 0..10 {
+        assert_eq!(e.rgb.len(), 10);
+        for (x, &pixel) in e.rgb.iter().enumerate() {
             let blue = if x < 4 { 50 } else { 20 + x as u8 - 4 };
-            assert_eq!(e.rgb[x], rgbe([7, x as u8, blue, 130]), "pixel {x}");
+            assert_eq!(pixel, rgbe([7, x as u8, blue, 130]), "pixel {x}");
         }
     }
 
