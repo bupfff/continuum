@@ -194,8 +194,10 @@ extreme scale and detail. In order:
    GPU memory, and zooming in onto a rock 100 m away resolves it fully.
    4,096 unique rocks whose detail would take 33 GB (more than the
    laptop's memory) are generated as the camera needs them and fly within
-   60 fps (worst frame 14.5 ms). Lighting still sees each object's coarse
-   version, kept resident; streaming that is next.
+   60 fps (worst frame 14.5 ms). What lighting sees streams too, and the
+   lighting stays exact: every cached result shown is identical to one
+   computed with everything loaded (2.7 million checked), at half the GPU
+   memory.
 2. **Detail smaller than a pixel, without shimmer** (in progress). Each
    object type gets a small precomputed map of how it looks from every
    direction, and pixels read those instead of tracing every tiny
