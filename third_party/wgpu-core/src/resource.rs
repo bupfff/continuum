@@ -2686,6 +2686,27 @@ pub struct Tlas {
     /// The `label` from the descriptor used to create the resource.
     pub(crate) label: String,
     pub(crate) tracking_data: TrackingData,
+    /// Continuum patch: per instance, the BLAS id last resolved and its
+    /// resource, so a build resolves only instances whose BLAS changed.
+    pub(crate) resolved: std::sync::Mutex<Vec<Option<(crate::id::BlasId, Arc<Blas>)>>>,
+    /// Continuum patch: the instances as last encoded, so a build encodes
+    /// only those that changed.
+    pub(crate) encoded: std::sync::Mutex<TlasEncoded>,
+}
+
+/// Continuum patch (M14 gate 6): a TLAS's instances as last encoded. Per
+/// instance its key (BLAS pointer, transform, custom data, mask) and its
+/// position among the encoded instances; the encoded bytes; each distinct
+/// BLAS with the number of instances naming it; and those BLAS as a list.
+#[derive(Debug, Default)]
+pub(crate) struct TlasEncoded {
+    pub(crate) keys: Vec<Option<(usize, [f32; 12], u32, u8)>>,
+    pub(crate) slots: Vec<u32>,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) size: usize,
+    pub(crate) counts: crate::FastHashMap<usize, (Arc<Blas>, u32)>,
+    pub(crate) dependencies: Vec<Arc<Blas>>,
+    pub(crate) stale: bool,
 }
 
 impl Drop for Tlas {

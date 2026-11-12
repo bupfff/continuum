@@ -1279,7 +1279,7 @@ impl MaskConeKernel {
         let cam = camera_uniform(camera, width, height, lights[0].radiance.x);
         let hw_scene = self
             .uses_hardware_rays()
-            .then(|| self.hw_scene(scene, origin, &[]));
+            .then(|| self.hw_scene(scene, origin, &[], 0));
         let (pixels, time) = self.render_buffers_with(
             false,
             cam,
@@ -1611,7 +1611,20 @@ impl MaskConeKernel {
         // Camera levels' pool (M14 gate 1): after the lighting level's
         // triangles in every per-triangle buffer the camera's shading reads.
         if pool > 0 {
-            // The page table follows the objects' ranges.
+            // The clusters' member lists follow the objects' ranges (M14
+            // gate 6; as `hw::proxy_clusters` orders them), then the page
+            // table.
+            let members: Vec<u32> = if self.uses_hardware_rays() {
+                hw::proxy_clusters(scene, origin).concat()
+            } else {
+                Vec::new()
+            };
+            let words = members.len().div_ceil(4);
+            let at = flat.ranges.len();
+            flat.ranges.extend(std::iter::repeat_n([0u32; 4], words));
+            for (w, &k) in members.iter().enumerate() {
+                flat.ranges[at + w / 4][w % 4] = k;
+            }
             let entries = stream::table_entries(scene) as usize;
             flat.ranges
                 .extend(std::iter::repeat_n([0u32; 4], entries.div_ceil(4)));
@@ -1839,6 +1852,7 @@ impl MaskConeKernel {
         scene: &InstancedScene,
         origin: DVec3,
         movable: &[usize],
+        dynamic: u32,
     ) -> hw::HwScene {
         let geometries: Vec<Vec<Tri>> = scene
             .geometries
@@ -1857,14 +1871,25 @@ impl MaskConeKernel {
             })
             .collect();
         // Geometries with a proxy level are never seen by camera rays
-        // themselves (M14 gate 4): no structure.
+        // themselves (M14 gate 4): no structure. Their objects show their
+        // proxies through clusters, and finer levels through `dynamic`
+        // slots (M14 gate 6; none when nothing streams).
         let skip: Vec<bool> = (0..scene.geometries.len())
+            .map(|g| hw::proxied(scene, g))
+            .collect();
+        let clusters = if dynamic > 0 {
+            hw::proxy_clusters(scene, origin)
+        } else {
+            Vec::new()
+        };
+        let proxies: Vec<Option<Vec<Tri>>> = (0..scene.geometries.len())
             .map(|g| {
                 scene
                     .geometry_levels
                     .get(g)
                     .and_then(|l| l.as_ref())
-                    .is_some_and(|l| l.proxy.is_some())
+                    .and_then(|l| l.proxy.as_ref())
+                    .map(|p| p.surface.triangles.clone())
             })
             .collect();
         hw::build(
@@ -1874,6 +1899,9 @@ impl MaskConeKernel {
             &placements,
             movable,
             &skip,
+            clusters,
+            &proxies,
+            dynamic,
         )
     }
 

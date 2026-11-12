@@ -293,6 +293,8 @@ impl Device {
             label: desc.label.to_string(),
             max_instance_count: desc.max_instances,
             tracking_data: TrackingData::new(self.tracker_indices.tlas_s.clone()),
+            resolved: std::sync::Mutex::new(Vec::new()),
+            encoded: std::sync::Mutex::new(Default::default()),
         }))
     }
 }

@@ -30,12 +30,25 @@ fn cam_tri(mesh: u32, geometry: u32, primitive: u32) -> u32 {
     return meshes[mesh].x + primitive;
 }
 
-// Whether a camera ray along `dir` sees the front of object `mesh`'s
-// triangle at `geometry`, `primitive`.
-fn hw_front(mesh: u32, geometry: u32, primitive: u32, dir: vec3<f32>) -> bool {
-    let t = cam_tri(mesh, geometry, primitive);
+// The object and geometry a hit names (M14 gate 6): an instance's custom
+// data is its object, or on a cluster of proxies the word where the
+// cluster's member list starts (one member per geometry); a member shows
+// its proxy, its only geometry.
+fn hw_object(custom: u32, geometry: u32) -> vec2<u32> {
+    if ((custom & 0x800000u) != 0u) {
+        let w = (custom & 0x7fffffu) + geometry;
+        return vec2<u32>(meshes[w / 4u][w % 4u], 0u);
+    }
+    return vec2<u32>(custom, geometry);
+}
+
+// Whether a camera ray along `dir` sees the front of the triangle a hit
+// names (its instance's custom data, `geometry`, `primitive`).
+fn hw_front(custom: u32, geometry: u32, primitive: u32, dir: vec3<f32>) -> bool {
+    let o = hw_object(custom, geometry);
+    let t = cam_tri(o.x, o.y, primitive);
     let v0 = tris[3u * t].xyz;
-    let n = normal_to_world(mesh, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
+    let n = normal_to_world(o.x, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
     return dot(n, dir) < 0.0;
 }
 
@@ -69,8 +82,9 @@ fn hw_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
     var tri = 0xffffffffu;
     var dist = 3.4e38;
     if (hit.kind != 0u) {
-        mesh = hit.instance_custom_data;
-        tri = cam_tri(mesh, hit.geometry_index, hit.primitive_index);
+        let o = hw_object(hit.instance_custom_data, hit.geometry_index);
+        mesh = o.x;
+        tri = cam_tri(o.x, o.y, hit.primitive_index);
         dist = hit.t;
     }
     vis[gid.y * w + gid.x] = vec4<u32>(mesh, tri, bitcast<u32>(dist), seen_light(eye, dir, dist));
@@ -106,8 +120,9 @@ fn hw_visibility_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
         hit = rayQueryGetCommittedIntersection(&fq);
     }
     if (hit.kind != 0u) {
-        mesh = hit.instance_custom_data;
-        tri = cam_tri(mesh, hit.geometry_index, hit.primitive_index);
+        let o = hw_object(hit.instance_custom_data, hit.geometry_index);
+        mesh = o.x;
+        tri = cam_tri(o.x, o.y, hit.primitive_index);
         dist = hit.t;
     }
     var mq: ray_query;
@@ -149,8 +164,8 @@ fn hw_trace(eye: vec3<f32>, dir: vec3<f32>, t_min: f32) -> vec3<u32> {
         hit = rayQueryGetCommittedIntersection(&fq);
     }
     if (hit.kind == 0u) { return vec3<u32>(0xffffffffu, 0xffffffffu, bitcast<u32>(3.4e38)); }
-    let mesh = hit.instance_custom_data;
-    return vec3<u32>(mesh, cam_tri(mesh, hit.geometry_index, hit.primitive_index), bitcast<u32>(hit.t));
+    let o = hw_object(hit.instance_custom_data, hit.geometry_index);
+    return vec3<u32>(o.x, cam_tri(o.x, o.y, hit.primitive_index), bitcast<u32>(hit.t));
 }
 
 // The opacity at world point `p` on triangle `t` of object `m`: 1 unless

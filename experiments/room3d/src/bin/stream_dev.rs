@@ -62,7 +62,12 @@ fn main() {
             built.elapsed().as_secs_f64()
         );
         let frames = 900usize;
-        for slots in [491_520u32, 4 * 491_520, 16 * 491_520] {
+        let slot_list: Vec<u32> = std::env::var("GATE5_SLOTS")
+            .ok()
+            .map_or(vec![491_520, 4 * 491_520, 16 * 491_520], |v| {
+                v.split(',').filter_map(|x| x.parse().ok()).collect()
+            });
+        for slots in slot_list {
             let mut r = InstancedRenderer::with_streaming(
                 &kernel,
                 format,
@@ -106,7 +111,9 @@ fn main() {
                 println!(
                     "slots {slots}, flight {k}: wall {wall:.2} ms; cache planning {:.2} ms, waiting {:.2} ms, GPU bake {:.2} \
                      ms, GPU camera {:.2} ms, pages baked {:.0}, requests {:.0}; camera streaming CPU {:.2} ms, loads \
-                     {:.2}; lighting CPU {:.2} ms, loads {:.1}, refused {:.0}, waiting production {:.1}; pages waiting {}",
+                     {:.2}, wanted {:.2} M triangles, pixel error {:.2} (most {:.2}); lighting CPU {:.2} ms, loads {:.1}, \
+                     refused {:.0}, waiting production {:.1}; pages waiting {}; streaming stages {:.2} / {:.2} / {:.2} / {:.2} \
+                     ms",
                     mean(
                         &mut cache.iter().map(|c| c.planning.as_secs_f64() * 1000.0),
                         cache.len()
@@ -124,6 +131,15 @@ fn main() {
                     mean(&mut cache.iter().map(|c| c.requests as f64), cache.len()),
                     mean(&mut stream.iter().map(|s| s.cpu_ms as f64), stream.len()),
                     mean(&mut stream.iter().map(|s| s.loads as f64), stream.len()),
+                    mean(
+                        &mut stream.iter().map(|s| s.wanted_triangles as f64 / 1e6),
+                        stream.len()
+                    ),
+                    mean(
+                        &mut stream.iter().map(|s| s.pixel_error as f64),
+                        stream.len()
+                    ),
+                    stream.iter().map(|s| s.pixel_error).fold(0.0f32, f32::max),
                     mean(&mut lit.iter().map(|s| s.cpu_ms as f64), lit.len()),
                     mean(&mut lit.iter().map(|s| s.loads as f64), lit.len()),
                     mean(&mut lit.iter().map(|s| s.refused as f64), lit.len()),
@@ -132,6 +148,22 @@ fn main() {
                         lit.len()
                     ),
                     r.lighting_log().1,
+                    mean(
+                        &mut stream.iter().map(|s| s.stage_ms[0] as f64),
+                        stream.len()
+                    ),
+                    mean(
+                        &mut stream.iter().map(|s| s.stage_ms[1] as f64),
+                        stream.len()
+                    ),
+                    mean(
+                        &mut stream.iter().map(|s| s.stage_ms[2] as f64),
+                        stream.len()
+                    ),
+                    mean(
+                        &mut stream.iter().map(|s| s.stage_ms[3] as f64),
+                        stream.len()
+                    ),
                 );
             }
         }

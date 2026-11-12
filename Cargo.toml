@@ -13,3 +13,4 @@ debug = 1 # keep symbols so profilers can attribute time
 # wgpu-core with one fix for TLASes with many instances: see third_party/README.md.
 [patch.crates-io]
 wgpu-core = { path = "third_party/wgpu-core" }
+wgpu-hal = { path = "third_party/wgpu-hal" }

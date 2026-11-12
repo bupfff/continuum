@@ -960,7 +960,12 @@ impl InstancedRenderer {
         // M13 gate 4 (profile stage 16) traces corner rays in hardware.
         let hw = (kernel.uses_hardware_rays()
             && (!pixel_cones || kernel.profile_stage.get() == 16))
-            .then(|| kernel.hw_scene(scene, origin, movable));
+            .then(|| {
+                // Top-level slots for objects showing finer levels than
+                // their proxies (M14 gate 6).
+                let dynamic = stream.map_or(0, |o| crate::stream::detailed_capacity(scene, &o));
+                kernel.hw_scene(scene, origin, movable, dynamic)
+            });
         let visibility = hw.as_ref().map(|hw| {
             if hw.movers.is_some() {
                 (
@@ -1167,6 +1172,7 @@ impl InstancedRenderer {
                 scene,
                 &options,
                 kernel.mikktspace.get(),
+                &device,
             ));
         }
         if let (Some(options), true) = (stream, pool > 0) {
@@ -1182,8 +1188,14 @@ impl InstancedRenderer {
             );
             let hw = renderer.hw.as_mut().expect("hardware camera rays");
             let targets = stream_targets(&renderer.scene, renderer.cache.as_ref());
-            // The page table follows the objects' ranges (at least one).
-            let table_base = 4 * scene.instances.len().max(1) as u32;
+            // The page table follows the objects' ranges (at least one) and
+            // the clusters' member lists (M14 gate 6).
+            let clustered = scene
+                .instances
+                .iter()
+                .filter(|i| crate::hw::proxied(scene, i.geometry))
+                .count() as u32;
+            let table_base = 4 * scene.instances.len().max(1) as u32 + 4 * clustered.div_ceil(4);
             renderer.stream = Some(Streamer::new(
                 &renderer.device,
                 &renderer.queue,
@@ -1464,12 +1476,12 @@ impl InstancedRenderer {
                 .state
                 .begin_frame(&self.device, self.lighting.as_ref().map(|l| l.resident()));
         }
+        let mut encoder = self.device.create_command_encoder(&Default::default());
         if let (Some(pool), Some(cache)) = (&mut self.lighting, &self.cache) {
             let (wanted, pinned) = cache.state.lighting_requests();
             let targets = lit_targets(&self.scene, cache);
-            pool.update(&self.queue, &targets, wanted, pinned);
+            pool.update(&mut encoder, &targets, wanted, pinned);
         }
-        let mut encoder = self.device.create_command_encoder(&Default::default());
         self.apply_moves(&mut encoder);
         if let Some(cache) = &mut self.cache {
             // Before the bake, which may count its work in the counters.

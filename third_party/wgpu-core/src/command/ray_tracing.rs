@@ -162,14 +162,32 @@ impl Global {
 
             let tlas = tlas_iter
                 .map(|tlas_package| {
+                    let tlas = self.resolve_tlas_id(tlas_package.tlas_id)?;
+                    // Continuum patch (M14 gate 6): resolve a BLAS id only
+                    // when it differs from the one this instance named at
+                    // the last build (a registry lookup per instance cost
+                    // milliseconds per build with tens of thousands).
+                    let mut resolved = tlas.resolved.lock().unwrap();
                     let instances = tlas_package
                         .instances
-                        .map(|instance| {
+                        .enumerate()
+                        .map(|(i, instance)| {
                             instance
                                 .as_ref()
                                 .map(|instance| {
+                                    if resolved.len() <= i {
+                                        resolved.resize(i + 1, None);
+                                    }
+                                    let blas = match &resolved[i] {
+                                        Some((id, blas)) if *id == instance.blas_id => blas.clone(),
+                                        _ => {
+                                            let blas = self.resolve_blas_id(instance.blas_id)?;
+                                            resolved[i] = Some((instance.blas_id, blas.clone()));
+                                            blas
+                                        }
+                                    };
                                     Ok(ArcTlasInstance {
-                                        blas: self.resolve_blas_id(instance.blas_id)?,
+                                        blas,
                                         transform: *instance.transform,
                                         custom_data: instance.custom_data,
                                         mask: instance.mask,
@@ -178,8 +196,9 @@ impl Global {
                                 .transpose()
                         })
                         .collect::<Result<_, BuildAccelerationStructureError>>()?;
+                    drop(resolved);
                     Ok(ArcTlasPackage {
-                        tlas: self.resolve_tlas_id(tlas_package.tlas_id)?,
+                        tlas,
                         instances,
                         lowest_unmodified: tlas_package.lowest_unmodified,
                     })
@@ -229,34 +248,53 @@ pub(crate) fn build_acceleration_structures(
 
         let first_byte_index = instance_buffer_staging_source.len();
 
-        let mut dependencies = Vec::new();
-        // Continuum patch: one entry per distinct BLAS, not per instance. Every
-        // submission that uses the TLAS walks this list (validation and
-        // residency), so with a million instances of two BLAS the per-instance
-        // list cost ~16 ms of CPU per submit. Validation and residency only
-        // need each BLAS once.
-        let mut seen_blas = crate::FastHashSet::default();
-
+        // Continuum patch: one entry per distinct BLAS, not per instance
+        // (every submission that uses the TLAS walks this list, for
+        // validation and residency; with a million instances of two BLAS a
+        // per-instance list cost ~16 ms of CPU per submit). And (M14 gate 6)
+        // the instances as last encoded are kept, so only those whose BLAS,
+        // transform, custom data or mask changed are validated and encoded
+        // again; the other bytes and the list are reused.
+        let mut encoded = tlas.encoded.lock().unwrap();
+        let encoded = &mut *encoded;
+        let same_pattern = encoded.keys.len() == package.instances.len()
+            && encoded
+                .keys
+                .iter()
+                .zip(&package.instances)
+                .all(|(k, i)| k.is_some() == i.is_some());
+        if !same_pattern {
+            encoded.keys.clear();
+            encoded.slots.clear();
+            encoded.bytes.clear();
+            encoded.counts.clear();
+            encoded.stale = true;
+        }
         let mut instance_count = 0;
-        for instance in package.instances.iter().flatten() {
+        for (index, instance) in package.instances.iter().enumerate() {
+            let Some(instance) = instance else {
+                if !same_pattern {
+                    encoded.keys.push(None);
+                    encoded.slots.push(u32::MAX);
+                }
+                continue;
+            };
+            instance_count += 1;
+            let blas = &instance.blas;
+            let key = (
+                Arc::as_ptr(blas) as usize,
+                instance.transform,
+                instance.custom_data,
+                instance.mask,
+            );
+            if same_pattern && encoded.keys[index] == Some(key) {
+                continue;
+            }
             if instance.custom_data >= (1u32 << 24u32) {
                 return Err(BuildAccelerationStructureError::TlasInvalidCustomIndex(
                     tlas.error_ident(),
                 ));
             }
-            let blas = &instance.blas;
-            state.tracker.blas_s.insert_single(blas.clone());
-
-            instance_buffer_staging_source.extend(state.device.raw().tlas_instance_to_bytes(
-                hal::TlasInstance {
-                    transform: instance.transform,
-                    custom_data: instance.custom_data,
-                    mask: instance.mask,
-                    blas_address: blas.handle,
-                    pipeline_intersection_data_offset: 0,
-                },
-            ));
-
             if tlas
                 .flags
                 .contains(wgpu_types::AccelerationStructureFlags::ALLOW_RAY_HIT_VERTEX_RETURN)
@@ -271,13 +309,50 @@ pub(crate) fn build_acceleration_structures(
                     ),
                 );
             }
-
-            instance_count += 1;
-
-            if seen_blas.insert(Arc::as_ptr(blas)) {
-                dependencies.push(blas.clone());
+            state.tracker.blas_s.insert_single(blas.clone());
+            let bytes = state.device.raw().tlas_instance_to_bytes(hal::TlasInstance {
+                transform: instance.transform,
+                custom_data: instance.custom_data,
+                mask: instance.mask,
+                blas_address: blas.handle,
+                pipeline_intersection_data_offset: 0,
+            });
+            encoded.size = bytes.len();
+            if same_pattern {
+                let at = encoded.slots[index] as usize * encoded.size;
+                encoded.bytes[at..at + encoded.size].copy_from_slice(&bytes);
+                if let Some(old) = encoded.keys[index] {
+                    if let Some(entry) = encoded.counts.get_mut(&old.0) {
+                        entry.1 -= 1;
+                        if entry.1 == 0 {
+                            encoded.counts.remove(&old.0);
+                            encoded.stale = true;
+                        }
+                    }
+                }
+                encoded.keys[index] = Some(key);
+            } else {
+                encoded
+                    .slots
+                    .push((encoded.bytes.len() / encoded.size.max(1)) as u32);
+                encoded.bytes.extend_from_slice(&bytes);
+                encoded.keys.push(Some(key));
             }
+            let entry = encoded
+                .counts
+                .entry(key.0)
+                .or_insert_with(|| (blas.clone(), 0));
+            if entry.1 == 0 {
+                encoded.stale = true;
+            }
+            entry.1 += 1;
         }
+        if encoded.stale {
+            encoded.dependencies = encoded.counts.values().map(|(b, _)| b.clone()).collect();
+            encoded.stale = false;
+        }
+        instance_buffer_staging_source.extend_from_slice(&encoded.bytes);
+        let dependencies = encoded.dependencies.clone();
 
         build_command.tlas_s_built.push(TlasBuild {
             tlas: tlas.clone(),
