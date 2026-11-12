@@ -21,6 +21,7 @@
 //! triangle is kept in its transform's unused word.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -467,35 +468,71 @@ struct Job {
     textured: bool,
 }
 
+/// Frames after its last want that a requested level is still produced
+/// (M14): older requests are skipped, so the queue holds what the view
+/// needs now.
+const STALE_FRAMES: u64 = 8;
+
+/// Per streamed geometry, the frame it was last wanted in, and the frame
+/// now, shared with producer threads.
+struct Freshness {
+    frame: AtomicU64,
+    wanted: Vec<AtomicU64>,
+}
+
+impl Freshness {
+    fn new(count: usize) -> Arc<Freshness> {
+        Arc::new(Freshness {
+            frame: AtomicU64::new(0),
+            wanted: (0..count).map(|_| AtomicU64::new(0)).collect(),
+        })
+    }
+
+    fn want(&self, key: usize, frame: u64) {
+        self.wanted[key].store(frame, Ordering::Relaxed);
+    }
+
+    fn fresh(&self, key: usize) -> bool {
+        self.frame.load(Ordering::Relaxed)
+            <= self.wanted[key].load(Ordering::Relaxed) + STALE_FRAMES
+    }
+}
+
 /// Worker threads calling the scene's [`LevelSource`]; they end when the
-/// streamer (and so the job queue) is dropped.
+/// streamer (and so the job queue) is dropped. A job no longer wanted is
+/// skipped (sent back empty).
 struct Producer {
     jobs: mpsc::Sender<Job>,
-    done: mpsc::Receiver<(usize, u32, Arc<PackedData>)>,
+    done: mpsc::Receiver<(usize, u32, Option<Arc<PackedData>>)>,
+    fresh: Arc<Freshness>,
 }
 
 impl Producer {
-    fn new(source: Arc<dyn LevelSource>, workers: usize) -> Self {
+    fn new(source: Arc<dyn LevelSource>, workers: usize, count: usize) -> Self {
         let (jobs, queue) = mpsc::channel::<Job>();
         let (finished, done) = mpsc::channel();
         let queue = Arc::new(Mutex::new(queue));
+        let fresh = Freshness::new(count);
         for _ in 0..workers.max(1) {
             let (queue, finished, source) = (queue.clone(), finished.clone(), source.clone());
+            let fresh = fresh.clone();
             std::thread::spawn(move || {
                 lower_priority();
                 loop {
                     let Ok(job) = queue.lock().expect("job queue").recv() else {
                         return;
                     };
-                    let surface = source.level(job.geometry, job.level as usize - 1);
-                    let data = Arc::new(pack(&surface, job.first_chart, job.textured));
+                    let data = fresh.fresh(job.s).then(|| {
+                        let surface = source.level(job.geometry, job.level as usize - 1);
+                        Arc::new(pack(&surface, job.first_chart, job.textured))
+                    });
                     if finished.send((job.s, job.level, data)).is_err() {
                         return;
                     }
                 }
             });
         }
-        Producer { jobs, done }
+        Producer { jobs, done, fresh }
     }
 }
 
@@ -819,7 +856,11 @@ impl Streamer {
                 .iter()
                 .any(|g| g.levels.iter().any(|l| l.sourced))
         {
-            streamer.producer = Some(Producer::new(source.clone(), options.workers));
+            streamer.producer = Some(Producer::new(
+                source.clone(),
+                options.workers,
+                streamer.geoms.len(),
+            ));
         }
         streamer.load_proxies(device, queue, hw, targets);
         if options.resident {
@@ -913,6 +954,9 @@ impl Streamer {
     ) {
         let start = Instant::now();
         let frame = self.frame;
+        if let Some(p) = &self.producer {
+            p.fresh.frame.store(frame, Ordering::Relaxed);
+        }
         self.graveyard.retain(|(f, _)| f + GRAVE_FRAMES > frame);
         let mut stats = StreamStats {
             capacity_triangles: self.capacity as u64,
@@ -1116,6 +1160,9 @@ impl Streamer {
         if l.data.is_some() {
             return true;
         }
+        if let Some(p) = &self.producer {
+            p.fresh.want(s, frame);
+        }
         if l.requested == 0
             && let Some(p) = &self.producer
         {
@@ -1134,9 +1181,14 @@ impl Streamer {
     /// Takes in what the workers produced.
     fn receive_produced(&mut self, stats: &mut StreamStats) {
         let Some(p) = &self.producer else { return };
-        let done: Vec<(usize, u32, Arc<PackedData>)> = p.done.try_iter().collect();
+        let done: Vec<(usize, u32, Option<Arc<PackedData>>)> = p.done.try_iter().collect();
         for (s, level, data) in done {
             let l = &mut self.geoms[s].levels[level as usize - 1];
+            // Skipped as no longer wanted: it may be asked for again.
+            let Some(data) = data else {
+                l.requested = 0;
+                continue;
+            };
             stats.produced += 1;
             stats.production_frames += (self.frame - l.requested) as u32;
             l.requested = 0;
@@ -1993,7 +2045,8 @@ const MIN_RESIDENT: u64 = 4;
 /// gate 5); they end when the pool (and so the job queue) is dropped.
 struct LitProducer {
     jobs: mpsc::Sender<usize>,
-    done: mpsc::Receiver<(usize, Arc<LitPackage>)>,
+    done: mpsc::Receiver<(usize, Option<Arc<LitPackage>>)>,
+    fresh: Arc<Freshness>,
 }
 
 impl LitProducer {
@@ -2006,26 +2059,30 @@ impl LitProducer {
         let (jobs, queue) = mpsc::channel::<usize>();
         let (finished, done) = mpsc::channel();
         let queue = Arc::new(Mutex::new(queue));
+        let fresh = Freshness::new(layout.places.len());
         for _ in 0..workers.max(1) {
             let (queue, finished, source) = (queue.clone(), finished.clone(), source.clone());
             let (places, tangents, first) = (layout.places.clone(), tangents.clone(), layout.first);
+            let fresh = fresh.clone();
             std::thread::spawn(move || {
                 lower_priority();
                 loop {
                     let Ok(g) = queue.lock().expect("job queue").recv() else {
                         return;
                     };
-                    let surface = source
-                        .lighting(first + g)
-                        .expect("the source's lighting level");
-                    let (package, _) = lit_package(&surface, &places[g], None, tangents[g]);
-                    if finished.send((g, Arc::new(package))).is_err() {
+                    let package = fresh.fresh(g).then(|| {
+                        let surface = source
+                            .lighting(first + g)
+                            .expect("the source's lighting level");
+                        Arc::new(lit_package(&surface, &places[g], None, tangents[g]).0)
+                    });
+                    if finished.send((g, package)).is_err() {
                         return;
                     }
                 }
             });
         }
-        LitProducer { jobs, done }
+        LitProducer { jobs, done, fresh }
     }
 }
 
@@ -2166,7 +2223,13 @@ impl LightingPool {
             ..Default::default()
         };
         if let Some(p) = &self.producer {
+            p.fresh.frame.store(frame, Ordering::Relaxed);
             for (g, package) in p.done.try_iter() {
+                // Skipped as no longer wanted: it may be asked for again.
+                let Some(package) = package else {
+                    self.requested[g] = 0;
+                    continue;
+                };
                 stats.produced += 1;
                 stats.production_frames += (frame - self.requested[g]) as u32;
                 self.requested[g] = 0;
@@ -2218,6 +2281,9 @@ impl LightingPool {
                 continue;
             }
             if self.packages[g].is_none() {
+                if let Some(p) = &self.producer {
+                    p.fresh.want(g, frame);
+                }
                 if self.requested[g] == 0
                     && let Some(p) = &self.producer
                 {

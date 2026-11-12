@@ -487,12 +487,21 @@ place, for a new conversation. Read this block, then the milestone table
 
 **Next, in order:**
 
-1. **Lighting production throughput and settling at scale:** G7's views
-   take up to 4,791 frames to settle, lighting levels arriving about 20
-   frames late on new ground (producers at low priority). Measure where
-   production time goes (generating the surface, the hierarchy and its
-   coverage, cell lists), make it cheaper or wider, and bound settling
-   (frames to a settled view) in a gate that keeps G7's frame budget.
+1. **Settling at scale (studied, parked):** G7's views take up to 4,791
+   frames to settle. Measured on 16,384 rocks (`stream_dev` `SETTLE`;
+   first views settle in 400–1,600 frames): phases bound by production
+   (four lighting workers at utility QoS, sharing the efficiency cores
+   with four camera workers, deliver 13–30 levels a frame against ~270
+   waiting) alternate with phases bound by the slots (64 lighting loads a
+   frame but 8–45 pages baked, waiting pages pinning ~340 of 511 slots for
+   neighbours' levels that bakes find only one round at a time). Done:
+   normal smoothing by sorting (bit-identical, generation 1.6× faster:
+   0.20 ms a lighting level, 9.9 ms the finest camera level), producers
+   skipping requests not wanted for 8 frames (no measured gain). Levers
+   left: predicting the neighbours a page's sun cones can reach (from the
+   records' bounds) so a page's levels are wanted together, more slots, or
+   a production budget on performance cores. Frame rate and exactness do
+   not depend on it.
 2. **A sky and bounce light with streamed lighting:** `vc_bake_sky` and
    `vc_bake_indirect` must mark pages the way `vc_bake` does (`lit_missing`,
    `LIT_MARK`), and their own-object sky masks need the lighting level.

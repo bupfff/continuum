@@ -25,6 +25,177 @@ fn gpu_bytes(device: &wgpu::Device) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Ok(side) = std::env::var("SETTLE") {
+        // What limits settling at scale (M14): gate 7's field and options,
+        // each flight's first view rendered until settled; per 100 frames,
+        // lighting loads, refusals, production and waits.
+        let side: usize = side.parse().unwrap_or(128);
+        let kernel = MaskConeKernel::new().expect("a GPU");
+        kernel.set_prefilter(1.0);
+        kernel.set_sky_prefilter(8.0);
+        kernel.set_hardware_rays(true);
+        kernel.set_sky(continuum::glam::Vec3::ZERO);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target = kernel
+            .device()
+            .create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 1280,
+                    height: 720,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let rocks = Rocks::lighting_on_demand(side, 6.0);
+        let mut r = InstancedRenderer::with_streaming(
+            &kernel,
+            format,
+            1280,
+            720,
+            1,
+            &[Rocks::sun()],
+            &rocks.scene,
+            DVec3::ZERO,
+            Some(CacheOptions::default()),
+            StreamOptions {
+                budget_triangles: 8 << 20,
+                cpu_cache_bytes: 2 << 30,
+                lighting_triangles: 491_520,
+                ..Default::default()
+            },
+        );
+        r.wait();
+        let half = if side >= 64 { 192.0 } else { side as f32 * 1.5 };
+        for k in 0..3 {
+            let view = flight(k, 0.0, half, 50.0);
+            let begin = std::time::Instant::now();
+            let (l0, c0, s0) = (
+                r.lighting_log().0.len(),
+                r.cache_log().len(),
+                r.stream_log().len(),
+            );
+            let mut quiet = 0;
+            let mut frames = 0;
+            for f in 1..=6000 {
+                r.frame(view, &target);
+                frames = f;
+                let (lit, waiting) = r.lighting_log();
+                let stream_quiet = r
+                    .stream_log()
+                    .last()
+                    .is_none_or(|s| s.loads == 0 && s.waiting_production == 0 && s.deferred == 0);
+                let latest = r.cache_stats().map_or(0, |s| s.frame as usize);
+                let cache_quiet = latest >= 16
+                    && r.cache_log()[latest - 16..latest]
+                        .iter()
+                        .all(|s| s.requests == 0 && s.pages_baked == 0);
+                let lit_quiet = waiting == 0
+                    && lit
+                        .last()
+                        .is_none_or(|s| s.loads == 0 && s.waiting_production == 0);
+                quiet = if stream_quiet && lit_quiet {
+                    quiet + 1
+                } else {
+                    0
+                };
+                if cache_quiet && quiet >= 16 {
+                    break;
+                }
+            }
+            r.finish();
+            let lit = &r.lighting_log().0[l0..];
+            let cache = &r.cache_log()[c0..];
+            let stream = &r.stream_log()[s0..];
+            println!(
+                "flight {k}: settled in {frames} frames ({:.1} s); camera loads {}, waiting production {}",
+                begin.elapsed().as_secs_f64(),
+                stream.iter().map(|s| s.loads).sum::<u32>(),
+                stream.iter().map(|s| s.waiting_production).sum::<u32>(),
+            );
+            for (c, chunk) in lit.chunks(250).enumerate() {
+                let n = chunk.len().max(1) as f64;
+                let pages: u32 = cache
+                    .iter()
+                    .skip(c * 250)
+                    .take(250)
+                    .map(|s| s.pages_baked)
+                    .sum();
+                let requests: u32 = cache
+                    .iter()
+                    .skip(c * 250)
+                    .take(250)
+                    .map(|s| s.requests)
+                    .sum();
+                println!(
+                    "  frames {}-{}: lighting loads {:.1}/frame, refused {:.0}, produced {:.1}, latency {:.1} frames, \
+                     waiting production {:.1}, pinned {:.0}; pages baked {:.1}/frame, requests {:.0}/frame",
+                    c * 250,
+                    c * 250 + chunk.len(),
+                    chunk.iter().map(|s| s.loads as f64).sum::<f64>() / n,
+                    chunk.iter().map(|s| s.refused as f64).sum::<f64>() / n,
+                    chunk.iter().map(|s| s.produced as f64).sum::<f64>() / n,
+                    chunk
+                        .iter()
+                        .map(|s| s.production_frames as f64)
+                        .sum::<f64>()
+                        / chunk
+                            .iter()
+                            .map(|s| s.produced as f64)
+                            .sum::<f64>()
+                            .max(1.0),
+                    chunk
+                        .iter()
+                        .map(|s| s.waiting_production as f64)
+                        .sum::<f64>()
+                        / n,
+                    chunk.iter().map(|s| s.pinned as f64).sum::<f64>() / n,
+                    pages as f64 / n,
+                    requests as f64 / n,
+                );
+            }
+        }
+        return;
+    }
+    if std::env::var_os("PRODUCE").is_some() {
+        // What producing levels costs, one thread (M14): a rock's lighting
+        // level (generated, then packaged) and its camera levels.
+        let mut rng = flatland::rng::Pcg32::new(14, 1);
+        let shapes: Vec<room3d::rocks::Shape> = (0..200)
+            .map(|_| room3d::rocks::Shape::random(&mut rng, Detail::default()))
+            .collect();
+        let t = std::time::Instant::now();
+        let lit: Vec<_> = shapes.iter().map(|s| s.surface(0)).collect();
+        let generate = t.elapsed().as_secs_f64() * 1e3 / 200.0;
+        let t = std::time::Instant::now();
+        let bytes: u64 = lit.iter().map(continuum_gpu::lighting_package_bytes).sum();
+        let package = t.elapsed().as_secs_f64() * 1e3 / 200.0;
+        println!(
+            "lighting level: generated in {generate:.3} ms, packaged in {package:.3} ms ({} triangles, {} KB)",
+            lit[0].triangles.len(),
+            bytes / 200 / 1000
+        );
+        for level in 1..4 {
+            let n = if level == 3 { 10 } else { 40 };
+            let t = std::time::Instant::now();
+            let tris: usize = shapes[..n]
+                .iter()
+                .map(|s| s.surface(level).triangles.len())
+                .sum();
+            println!(
+                "camera level {level}: generated in {:.2} ms ({} triangles)",
+                t.elapsed().as_secs_f64() * 1e3 / n as f64,
+                tris / n
+            );
+        }
+        return;
+    }
     if let Ok(side) = std::env::var("SPIKES") {
         // Gate 6's spike (M14 gate 7): its field, options and three flights
         // in order (each settled at its first view, then 1,800 frames), each

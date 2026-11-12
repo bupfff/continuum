@@ -321,6 +321,58 @@ impl Surface {
 /// card's front and back) stay apart instead of cancelling to zero (M10
 /// gate 8).
 fn smooth_normals(triangles: &[Tri]) -> Vec<[Vec3; 3]> {
+    // Each corner's normal sums the face normals (facing its own side) of
+    // every triangle with a corner at the same position (to 1e-5). Corners
+    // are grouped by sorting their keys (stable, so each group lists its
+    // triangles in order, as the sums need to be the same bit for bit),
+    // which costs far less than a map of lists (M14: generating levels).
+    let key = |p: Vec3| {
+        let q = (p * 1e5).round();
+        (q.x as i64, q.y as i64, q.z as i64)
+    };
+    let face: Vec<Vec3> = triangles
+        .iter()
+        .map(|t| (t[1] - t[0]).cross(t[2] - t[0]))
+        .collect();
+    let corners: Vec<(i64, i64, i64)> = triangles.iter().flatten().map(|&p| key(p)).collect();
+    let mut order: Vec<u32> = (0..corners.len() as u32).collect();
+    order.sort_by_key(|&c| corners[c as usize]);
+    // Per corner, its group's range in `order`.
+    let mut group = vec![(0u32, 0u32); corners.len()];
+    let mut start = 0;
+    while start < order.len() {
+        let k = corners[order[start] as usize];
+        let mut end = start + 1;
+        while end < order.len() && corners[order[end] as usize] == k {
+            end += 1;
+        }
+        for &c in &order[start..end] {
+            group[c as usize] = (start as u32, end as u32);
+        }
+        start = end;
+    }
+    triangles
+        .iter()
+        .zip(&face)
+        .enumerate()
+        .map(|(t, (_, n))| {
+            std::array::from_fn(|c| {
+                let (a, b) = group[3 * t + c];
+                order[a as usize..b as usize]
+                    .iter()
+                    .map(|&u| face[u as usize / 3])
+                    .filter(|f| f.dot(*n) > 0.0)
+                    .sum::<Vec3>()
+                    .normalize_or_zero()
+            })
+        })
+        .collect()
+}
+
+/// The map-of-lists smoothing `smooth_normals` replaced (M14), kept to
+/// check they agree bit for bit.
+#[cfg(test)]
+fn smooth_normals_by_map(triangles: &[Tri]) -> Vec<[Vec3; 3]> {
     let key = |p: Vec3| {
         let q = (p * 1e5).round();
         (q.x as i64, q.y as i64, q.z as i64)
@@ -354,6 +406,27 @@ fn smooth_normals(triangles: &[Tri]) -> Vec<[Vec3; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorted_smoothing_matches_the_map_bit_for_bit() {
+        let wavy = Surface::parametric(48, 24, |u, v| {
+            let (t, p) = (std::f32::consts::TAU * u, std::f32::consts::PI * v);
+            let r = 1.0 + 0.2 * (7.0 * t).sin() * (5.0 * p).cos();
+            Vec3::new(p.sin() * t.cos(), p.sin() * t.sin(), -p.cos()) * r
+        });
+        let boxed = Surface::cuboid(Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0));
+        for tris in [&wavy.triangles, &boxed.triangles] {
+            let a = smooth_normals(tris);
+            let b = smooth_normals_by_map(tris);
+            assert_eq!(a.len(), b.len());
+            for (x, y) in a.iter().flatten().zip(b.iter().flatten()) {
+                assert_eq!(
+                    x.to_array().map(f32::to_bits),
+                    y.to_array().map(f32::to_bits)
+                );
+            }
+        }
+    }
 
     #[test]
     fn box_faces_pair_into_quad_charts() {
