@@ -25,6 +25,50 @@ fn gpu_bytes(device: &wgpu::Device) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if std::env::var_os("RECORDS").is_some() {
+        // GPU memory per unique rock at creation, with proxies and lighting
+        // levels streamed into fixed slots (gate 4's way) against every
+        // lighting level resident: what a rock's resident record costs.
+        let kernel = MaskConeKernel::new().expect("a GPU");
+        kernel.set_prefilter(1.0);
+        kernel.set_hardware_rays(true);
+        kernel.set_sky(continuum::glam::Vec3::ZERO);
+        let device = kernel.device().clone();
+        let sides: Vec<usize> = std::env::var("RECORDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map_or(vec![16, 32, 64], |s| vec![64, s]);
+        for side in sides {
+            let rocks = Rocks::with_proxies(side, 6.0);
+            for slots in [491_520u32, 0].into_iter().take(if side > 64 { 1 } else { 2 }) {
+                let before = gpu_bytes(&device);
+                let r = InstancedRenderer::with_streaming(
+                    &kernel,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    1280,
+                    720,
+                    1,
+                    &[rocks.sun],
+                    &rocks.scene,
+                    DVec3::ZERO,
+                    Some(CacheOptions::default()),
+                    StreamOptions {
+                        budget_triangles: 8 << 20,
+                        lighting_triangles: slots,
+                        ..Default::default()
+                    },
+                );
+                r.wait();
+                let bytes = gpu_bytes(&device) - before;
+                println!(
+                    "{} rocks, lighting slots {slots}: {:.1} MB",
+                    side * side,
+                    bytes as f64 / 1e6
+                );
+            }
+        }
+        return;
+    }
     if std::env::var_os("MEMORY").is_some() {
         // GPU memory against the number of unique rocks (on demand, a small
         // camera budget): what each resident lighting level costs.
