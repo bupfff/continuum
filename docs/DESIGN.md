@@ -553,6 +553,14 @@ place, for a new conversation. Read this block, then the milestone table
   showed bounce samples' lighting-level wants churning the slots and their
   compute rays costing about 2 ms; rays through the camera's structures
   need no lighting level. The frame budget is 11 ms by default.
+- *Fixed after G10 (a CI test failing since G9):* with movers under a sky,
+  a page marked invalid while its sky was still the guess was not listed
+  for eviction, and a later frame's partial re-bake cleared its mark,
+  showing texels stale from the earlier move. Any small bake budget showed
+  it (G9's frame-period cap had shrunk the test's budget). Marked pages are
+  now always listed and never re-baked in part; the cap applies only with
+  a frame target (`frame_target_ms` 0 keeps the budget fixed, as
+  documented). A test at a small budget guards it.
 - *M14 G8, a sky and bounce light with streamed lighting:* failed on the
   frame budget only (p99 20.5–25.1 ms with a sky and bounce on 36,864
   rocks); passed certification (436,004 sun and 436,002 sky pages

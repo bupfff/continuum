@@ -917,11 +917,24 @@ fn movers_leave_no_stale_light() {
 /// ledger, nor than its ε threshold.
 #[test]
 fn movers_under_a_sky_stay_within_the_ledger() {
+    movers_under_a_sky(CacheOptions::default().bake_budget);
+}
+
+/// The same at a small bake budget: pages baked with the sky later still
+/// wait for their skies while the movers move. A page marked invalid then
+/// was shown again after a later frame re-baked a few of its texels.
+#[test]
+fn movers_under_a_sky_at_a_small_budget() {
+    movers_under_a_sky(2_000);
+}
+
+fn movers_under_a_sky(bake_budget: u32) {
     let s = scene(DVec3::ZERO);
     let movable: Vec<usize> = vec![1, 2, 6, 11];
     let options = RendererOptions {
         cache_options: CacheOptions {
             frame_target_ms: 0.0,
+            bake_budget,
             pages: 1 << 15,
             // Loose, so charges build up without invalidating: the bound is
             // what is tested.

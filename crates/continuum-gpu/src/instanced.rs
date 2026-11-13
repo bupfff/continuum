@@ -1978,6 +1978,15 @@ impl InstancedRenderer {
                     let at = k * channels + l;
                     if before[at].to_bits() != after[at].to_bits() {
                         check.light_differing += 1;
+                        if std::env::var_os("CONTINUUM_LIGHT_DEBUG").is_some() {
+                            eprintln!(
+                                "slot {slot} texel {} light {l}: {} vs {}, {}",
+                                k - first,
+                                before[at],
+                                after[at],
+                                cache.state.slot_debug(slot)
+                            );
+                        }
                     }
                 }
                 let at = k * channels + self.lights;

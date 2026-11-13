@@ -122,7 +122,8 @@ pub struct CacheOptions {
     /// grows by 10%. Between 1,000 and `bake_budget`.
     pub frame_target_ms: f32,
     /// The frame period the bake keeps frames within, measured on the CPU
-    /// (M14 gate 9; 0: none): while frames take longer, a cap on the bake
+    /// (M14 gate 9; 0: none), with a frame target (with `frame_target_ms`
+    /// 0 the budget stays fixed): while frames take longer, a cap on the bake
     /// budget shrinks in proportion; while they take less than 85% of it,
     /// the cap grows by 5% a frame. It catches what the GPU model does not
     /// see (structures built, uploads, the CPU's own work). 11 ms by default
@@ -2145,9 +2146,10 @@ impl VirtualCache {
                 self.options.bake_budget as f32,
             );
         }
-        // The frame period's cap (M14 gate 9).
+        // The frame period's cap (M14 gate 9), with a frame target only.
         let budget_ms = self.options.frame_budget_ms;
         if budget_ms > 0.0
+            && target > 0.0
             && let Some(period) = period
         {
             let period = period.as_secs_f32() * 1e3;

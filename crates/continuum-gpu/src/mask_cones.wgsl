@@ -3460,9 +3460,13 @@ fn may_be_shadowed(p: Box3, l: u32) -> bool {
     return false;
 }
 
-// Marks slot `s` invalid (once) and lists it for the CPU.
+// Marks slot `s` invalid (once) and lists it for the CPU, which evicts it.
+// A page shown (0) or hidden for a sky still the guess (3) or set aside by
+// the ledger (2) is listed too: left resident with this mark, a later
+// partial re-bake would clear it while texels made stale now stayed stale.
 fn mark_invalid(s: u32) {
-    if (atomicExchange(&slot_stale[s], 1u) == 0u) {
+    let old = atomicExchange(&slot_stale[s], 1u);
+    if (old == 0u || old == 2u || old == 3u) {
         let q = atomicAdd(&mover_stats[1], 1u);
         if (q < arrayLength(&invalid_list)) { invalid_list[q] = s; }
     }
@@ -3609,6 +3613,10 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (s >= arrayLength(&slot_stale)) { return; }
     let info = slot_info[3u * s];
     if (info.w == 0u) { return; }
+    // Marked invalid in an earlier frame and waiting to be evicted: its
+    // texels made stale then must not be shown after a partial re-bake now.
+    let mark = atomicLoad(&slot_stale[s]);
+    if (mark == 1u) { return; }
     let m = info.x;
     let visible = slot_used[s] + vc.movers.w >= vc.counts.y;
     if (visible) { atomicAdd(&mover_stats[2], 1u); }
@@ -3667,7 +3675,9 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
         candidate = may_be_shadowed(page, l);
     }
     if (!candidate) { return; }
-    if (unknown_sky) {
+    // A page hidden for another reason (its sky the guess, set aside by the
+    // ledger) is not re-baked in part: the fill would show it.
+    if (unknown_sky || mark != 0u) {
         mark_invalid(s);
         return;
     }
