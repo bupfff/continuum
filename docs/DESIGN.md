@@ -546,9 +546,20 @@ place, for a new conversation. Read this block, then the milestone table
    meshes' levels (chart-space normal maps baked from the finest), and a
    normal bound in level choice (which would pull the finest level out to
    about 39 m).
-5. **M13's far field for speed** (one walk shared by a tile of pixels, or
-   a coarser far field through the quality dial; goal a 10 ms coverage
-   pass at 1280×720), then appearance.
+5. **M13's far field for speed** (goal a 10 ms coverage pass at
+   1280×720), then appearance. Scoped 2026-11-13 (development, M13 G4's
+   path at 10,000 boulders): standing 25.5 ms, 150 m up 57.7 ms; without
+   the coverage maps' reads (four directions bilinearly for each of 16
+   bins, up to 256 reads per instance per pixel) 24.9 and 43.0 ms, so the
+   walk (23–28 object nodes per pixel, thousands at the horizon) and the
+   bins' rays (16 per unresolved pixel, 96% of pixels from 150 m: about 14
+   million a frame) carry most of it; at a million boulders 122–135 ms. A
+   tile-shared walk saved only 20–24% in M1 G3. The likely route is
+   Landmark 3's own: hierarchy nodes holding the coverage (and later the
+   lit appearance) of what is under them, so a far pixel reads a node
+   instead of walking to each instance (memory and correlation within a
+   node are the open questions; M13 G2's independent splats lost
+   correlation). Needs a design step before a gate.
 6. **The showcase;** the NVIDIA benchmark when funded.
 - Parked features (untouched unless a landmark needs them): emissive faces
   as lights (M10 G23–G24: 19.71% from Cycles, the faces showing emission
