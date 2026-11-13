@@ -151,6 +151,12 @@ fn geometry_maps(tris: &[Tri], c: Vec3, r: f32) -> Vec<f32> {
     out
 }
 
+/// Directions per side, texels per side of the finest level, and words per
+/// direction (M13 gate 5's texture follows the buffer's layout).
+pub(crate) fn layout() -> (u32, u32, u32) {
+    (DIRS, TEXELS, texels_per_direction())
+}
+
 /// The maps buffer for geometries `geometries`, each with its triangle
 /// hierarchy's root (None: not placed; left out).
 pub(crate) fn build(geometries: &[(&[Tri], Option<u32>)]) -> Vec<u32> {

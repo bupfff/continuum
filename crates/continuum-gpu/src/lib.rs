@@ -100,6 +100,10 @@ pub struct MaskConeKernel {
     pub(crate) profile_stage: std::cell::Cell<u32>,
     /// M13 gate 3: the coverage maps' build time and bytes, as last built.
     m13_maps_info: std::cell::RefCell<(std::time::Duration, usize)>,
+    /// M13 gate 5: the coverage maps as an 8-bit texture array (a layer per
+    /// geometry and direction, a mip level per map level), made with the
+    /// scene's buffers for the renderer's textures to take.
+    m13_coverage: std::cell::RefCell<Option<(wgpu::TextureView, wgpu::Sampler)>>,
     split: std::cell::Cell<bool>,
     /// The GPU's name, as the adapter reports it.
     pub adapter_name: String,
@@ -595,6 +599,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_edges",
     "hw_m13_corners",
     "hw_m13_near",
+    "hw_m13_tiles",
     "hw_vc_bake_indirect",
     "hw_vc_bake_sky",
     "hw_vc_error_shares",
@@ -617,6 +622,9 @@ pub(crate) const M13_MAPS_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29,
 /// after them (`m13_coverage_near`).
 pub(crate) const HW_M13_CORNERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 82];
 pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 31, 32, 82];
+/// M13 gate 5: the tile pass after the corner rays, with the maps' texture
+/// (85) and sampler (86).
+pub(crate) const M13_TILES_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 29, 30, 31, 32, 82, 85, 86];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
@@ -853,6 +861,7 @@ impl MaskConeKernel {
             nearest_first: std::cell::Cell::new(true),
             profile_stage: std::cell::Cell::new(0),
             m13_maps_info: std::cell::RefCell::new((std::time::Duration::ZERO, 0)),
+            m13_coverage: std::cell::RefCell::new(None),
             split: std::cell::Cell::new(false),
             adapter_name,
         }
@@ -1746,7 +1755,7 @@ impl MaskConeKernel {
         let mut buffers = buffers;
         // M13 gate 3 (profile stage 15): each placed geometry's directional
         // coverage maps.
-        if matches!(self.profile_stage.get(), 15 | 16) {
+        if matches!(self.profile_stage.get(), 15..=17) {
             let start = std::time::Instant::now();
             let tris: Vec<(&[continuum::mesh::Tri], Option<u32>)> = scene
                 .geometries
@@ -1764,9 +1773,90 @@ impl MaskConeKernel {
                 .collect();
             let maps = coverage_maps::build(&tris);
             *self.m13_maps_info.borrow_mut() = (start.elapsed(), maps.len() * 4);
+            if self.profile_stage.get() == 17 {
+                *self.m13_coverage.borrow_mut() = Some(self.coverage_texture(&maps));
+            }
             buffers.push((82, storage("coverage maps", bytemuck::cast_slice(&maps))));
         }
         (buffers, movers, lit_parts)
+    }
+
+    /// The coverage maps buffer's maps as an 8-bit texture array (M13 gate
+    /// 5): layer `256 k + d` holds placed geometry `k`'s direction `d`, its
+    /// mip levels the map's levels; sampled bilinearly, clamped at the edge.
+    fn coverage_texture(&self, maps: &[u32]) -> (wgpu::TextureView, wgpu::Sampler) {
+        let (dirs, texels, per) = coverage_maps::layout();
+        let placed = (maps[0] as usize).max(1);
+        let layers = placed as u32 * dirs * dirs;
+        let levels = texels.ilog2() + 1;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("coverage maps"),
+            size: wgpu::Extent3d {
+                width: texels,
+                height: texels,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for level in 0..levels {
+            let side = texels >> level;
+            let offset: u32 = (0..level).map(|l| (texels >> l) * (texels >> l)).sum();
+            let mut bytes = vec![0u8; (side * side * layers) as usize];
+            for k in 0..maps[0] as usize {
+                let base = maps[1 + 8 * k + 1] as usize;
+                for d in 0..(dirs * dirs) as usize {
+                    let at = base + d * per as usize + offset as usize;
+                    let layer = k * (dirs * dirs) as usize + d;
+                    for t in 0..(side * side) as usize {
+                        let v = f32::from_bits(maps[at + t]);
+                        bytes[layer * (side * side) as usize + t] =
+                            (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                }
+            }
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(side),
+                    rows_per_image: Some(side),
+                },
+                wgpu::Extent3d {
+                    width: side,
+                    height: side,
+                    depth_or_array_layers: layers,
+                },
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("coverage maps"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        (view, sampler)
+    }
+
+    /// Takes the coverage maps' texture made with the scene's buffers (M13
+    /// gate 5), if any.
+    pub(crate) fn take_coverage_texture(&self) -> Option<(wgpu::TextureView, wgpu::Sampler)> {
+        self.m13_coverage.borrow_mut().take()
     }
 
     /// A scene's textures, resampled into a layered texture with mip levels
@@ -1788,6 +1878,7 @@ impl MaskConeKernel {
             view,
             sampler,
             normals,
+            coverage: None,
         }
     }
 
@@ -2969,6 +3060,8 @@ pub(crate) struct SceneTextures {
     pub(crate) sampler: wgpu::Sampler,
     /// Normal maps (linear), M10 gate 5.
     pub(crate) normals: wgpu::TextureView,
+    /// M13 gate 5: the coverage maps' texture and its sampler.
+    pub(crate) coverage: Option<(wgpu::TextureView, wgpu::Sampler)>,
 }
 
 /// One placement of a geometry: `world = scale · rotation · p + position`.

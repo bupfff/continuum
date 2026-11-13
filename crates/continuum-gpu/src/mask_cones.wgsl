@@ -5925,14 +5925,44 @@ struct ScreenBox {
 var<private> sc_frustum: vec4<f32> = vec4<f32>(0.0);
 
 fn set_pixel_frustum(pix: vec2<f32>) {
+    set_rect_frustum(pix, pix + vec2<f32>(1.0));
+}
+
+// The frustum through the pixel rectangle [lo, hi) (M13 gate 5: a tile's),
+// with its edge directions' bounds per world axis for
+// `frustum_misses_box`.
+fn set_rect_frustum(lo: vec2<f32>, hi: vec2<f32>) {
     let tz = camera.params.z;
     let aspect = camera.params.x / camera.params.y;
     sc_frustum = vec4<f32>(
-        (2.0 * pix.x / camera.params.x - 1.0) * tz * aspect,
-        (2.0 * (pix.x + 1.0) / camera.params.x - 1.0) * tz * aspect,
-        (1.0 - 2.0 * (pix.y + 1.0) / camera.params.y) * tz,
-        (1.0 - 2.0 * pix.y / camera.params.y) * tz,
+        (2.0 * lo.x / camera.params.x - 1.0) * tz * aspect,
+        (2.0 * hi.x / camera.params.x - 1.0) * tz * aspect,
+        (1.0 - 2.0 * hi.y / camera.params.y) * tz,
+        (1.0 - 2.0 * lo.y / camera.params.y) * tz,
     );
+    var dlo = vec3<f32>(3.4e38);
+    var dhi = vec3<f32>(-3.4e38);
+    for (var k = 0u; k < 4u; k++) {
+        let d = camera.forward.xyz + camera.right.xyz * select(sc_frustum.x, sc_frustum.y, (k & 1u) != 0u)
+            + camera.up.xyz * select(sc_frustum.z, sc_frustum.w, (k & 2u) != 0u);
+        dlo = min(dlo, d);
+        dhi = max(dhi, d);
+    }
+    sc_dlo = dlo;
+    sc_dhi = dhi;
+}
+
+// The frustum's edge directions' bounds per world axis.
+var<private> sc_dlo: vec3<f32> = vec3<f32>(0.0);
+var<private> sc_dhi: vec3<f32> = vec3<f32>(0.0);
+
+// Whether a world box misses the frustum along a world axis (M13 gate 5,
+// exact): the frustum lies wholly on the eye's side of a face of the box.
+// The side planes' test cannot reject a box straddling the eye's plane,
+// since behind the eye a side plane also bounds the mirrored frustum.
+fn frustum_misses_box(lo: vec3<f32>, hi: vec3<f32>) -> bool {
+    let e = camera.eye.xyz;
+    return any((sc_dlo >= vec3<f32>(0.0)) & (e > hi)) || any((sc_dhi <= vec3<f32>(0.0)) & (e < lo));
 }
 
 // `behind` 2 also when the box lies wholly outside one of the pixel

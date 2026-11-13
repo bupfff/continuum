@@ -18,13 +18,13 @@ use crate::{
     HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
     HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS,
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
-    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, MaskConeKernel,
-    RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
-    VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
-    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_TILES_BINDINGS,
+    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
+    VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
+    VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS,
+    VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS,
+    VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS,
+    camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -469,6 +469,18 @@ fn bind_group(
         entries.push(wgpu::BindGroupEntry {
             binding: 56,
             resource: wgpu::BindingResource::Sampler(&t.sampler),
+        });
+    }
+    if let Some((view, sampler)) = textures.and_then(|t| t.coverage.as_ref())
+        && keep.contains(&85)
+    {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 85,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 86,
+            resource: wgpu::BindingResource::Sampler(sampler),
         });
     }
     if let Some(t) = textures
@@ -973,13 +985,13 @@ impl InstancedRenderer {
         // Pixel cones need no camera rays, so no acceleration structure.
         // M13 gate 4 (profile stage 16) traces corner rays in hardware.
         let hw = (kernel.uses_hardware_rays()
-            && (!pixel_cones || kernel.profile_stage.get() == 16))
-            .then(|| {
-                // Top-level slots for objects showing finer levels than
-                // their proxies (M14 gate 6).
-                let dynamic = stream.map_or(0, |o| crate::stream::detailed_capacity(scene, &o));
-                kernel.hw_scene(scene, origin, movable, dynamic)
-            });
+            && (!pixel_cones || matches!(kernel.profile_stage.get(), 16 | 17)))
+        .then(|| {
+            // Top-level slots for objects showing finer levels than
+            // their proxies (M14 gate 6).
+            let dynamic = stream.map_or(0, |o| crate::stream::detailed_capacity(scene, &o));
+            kernel.hw_scene(scene, origin, movable, dynamic)
+        });
         // Bounce samples trace through the camera's structures where there
         // are some (M14 gate 10).
         let bounce_hw = hw.is_some() && !pixel_cones;
@@ -1020,6 +1032,13 @@ impl InstancedRenderer {
             // M13: the scalar coverage walk in its own entry point (profile
             // stage 14), so it does not run at the pixel-cone entry's
             // occupancy.
+            (false, _) if pixel_cones && kernel.profile_stage.get() == 17 => vec![
+                (
+                    kernel.entry("hw_m13_corners"),
+                    HW_M13_CORNERS_BINDINGS.to_vec(),
+                ),
+                (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
+            ],
             (false, _) if pixel_cones && kernel.profile_stage.get() == 16 => vec![
                 (
                     kernel.entry("hw_m13_corners"),
@@ -1199,7 +1218,9 @@ impl InstancedRenderer {
             textures: {
                 // The environment's image after the scene's (M5 gate 12).
                 let (all, _) = kernel.textures_with_environment(&scene.textures);
-                kernel.scene_textures(&all, &scene.linear_textures())
+                let mut t = kernel.scene_textures(&all, &scene.linear_textures());
+                t.coverage = kernel.take_coverage_texture();
+                t
             },
             srgb: target_format.is_srgb(),
             float_target: matches!(
