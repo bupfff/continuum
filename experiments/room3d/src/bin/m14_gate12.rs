@@ -213,7 +213,14 @@ fn main() -> std::io::Result<()> {
                 &[rocks.sun],
                 &rocks.scene,
                 DVec3::ZERO,
-                Some(CacheOptions::default()),
+                Some(if std::env::var_os("M14_FIXED").is_some() {
+                    CacheOptions {
+                        frame_target_ms: 0.0,
+                        ..Default::default()
+                    }
+                } else {
+                    CacheOptions::default()
+                }),
                 options,
             )
         };
