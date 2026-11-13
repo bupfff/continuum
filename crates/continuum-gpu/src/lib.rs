@@ -604,6 +604,8 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_bin_args",
     "hw_m13_bin_rays",
     "hw_m13_tiles",
+    "hw_m13_page_args",
+    "hw_m13_page_bake",
     "hw_vc_bake_indirect",
     "hw_vc_bake_sky",
     "hw_vc_error_shares",
@@ -628,10 +630,22 @@ pub(crate) const HW_M13_CORNERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 82];
 pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 31, 32, 82];
 /// M13 gate 5: the tile pass after the corner rays, with the maps' texture
 /// (85) and sampler (86).
-pub(crate) const M13_TILES_BINDINGS: &[u32] = &[0, 3, 6, 7, 9, 10, 29, 30, 82, 85, 86, 87, 88, 90];
+pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
+    0, 3, 6, 7, 9, 10, 29, 30, 82, 85, 86, 87, 88, 90, 91, 92, 94, 95,
+];
+/// M13 gate 6: the coverage pages' bakes after the pixels' pass, and their
+/// dispatch.
+pub(crate) const M13_PAGE_ARGS_BINDINGS: &[u32] = &[91, 92, 93, 94];
+pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[3, 6, 9, 32, 91, 92, 94, 95];
+/// M13 gate 6's coverage pages: the pool, the requests' list, the state's
+/// counters, and the pages baked a frame by default.
+pub(crate) const M13_PAGE_POOL: usize = 32_768;
+pub(crate) const M13_PAGE_REQUESTS: usize = 4_096;
+pub(crate) const M13_PAGE_META: usize = 16;
+pub(crate) const M13_PAGE_BUDGET: u32 = 64;
 /// M13 gate 5: the roots pass, one invocation per tile listing the subtree
 /// roots its pixels walk (87); it also restarts the bin rays' list (88).
-pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88];
+pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88, 91, 92, 94];
 /// M13 gate 5: the pixels covered by their corners, and the list of those
 /// tracing bin rays (88); the list's dispatch arguments; the rays.
 pub(crate) const M13_BINS_BINDINGS: &[u32] = &[6, 31, 88];
@@ -1767,7 +1781,7 @@ impl MaskConeKernel {
         let mut buffers = buffers;
         // M13 gate 3 (profile stage 15): each placed geometry's directional
         // coverage maps.
-        if matches!(self.profile_stage.get(), 15..=17) {
+        if matches!(self.profile_stage.get(), 15..=18) {
             let start = std::time::Instant::now();
             let tris: Vec<(&[continuum::mesh::Tri], Option<u32>)> = scene
                 .geometries
@@ -1785,7 +1799,7 @@ impl MaskConeKernel {
                 .collect();
             let maps = coverage_maps::build(&tris);
             *self.m13_maps_info.borrow_mut() = (start.elapsed(), maps.len() * 4);
-            if self.profile_stage.get() == 17 {
+            if matches!(self.profile_stage.get(), 17 | 18) {
                 *self.m13_coverage.borrow_mut() = Some(self.coverage_texture(&maps));
                 // Each object's world bounding sphere about its map's centre
                 // (radius 0 without a map), so the walk tests and sets up an
@@ -1819,10 +1833,87 @@ impl MaskConeKernel {
                     90,
                     storage("object spheres", bytemuck::cast_slice(&spheres)),
                 ));
+                buffers.extend(self.m13_page_buffers(&nodes, &items, flat.ranges.len()));
             }
             buffers.push((82, storage("coverage maps", bytemuck::cast_slice(&maps))));
         }
         (buffers, movers, lit_parts)
+    }
+
+    /// M13 gate 6's coverage pages (stage 18; stage 17 has them off): the
+    /// hierarchy's item ranges and each object's place among the items (91),
+    /// the pages' state (92: counters, requests, their pages, the
+    /// node-to-page table, request marks, use marks), the bakes' dispatch arguments (93), the
+    /// pages' headers (94) and texels (95).
+    fn m13_page_buffers(
+        &self,
+        nodes: &[NodeGpu],
+        items: &[u32],
+        objects: usize,
+    ) -> Vec<(u32, wgpu::Buffer)> {
+        let n = nodes.len();
+        // Children follow their parents, so ranges fill from the back.
+        let mut ranges = vec![[0u32; 2]; n];
+        for k in (0..n).rev() {
+            let info = nodes[k].info;
+            ranges[k] = if info[1] > 0 {
+                [info[0], info[1]]
+            } else if info[3] != 0 {
+                [0, 0]
+            } else {
+                let (a, b) = (ranges[info[0] as usize], ranges[info[0] as usize + 1]);
+                [a[0].min(b[0]), a[1] + b[1]]
+            };
+        }
+        let mut place = vec![u32::MAX; objects];
+        for (k, &m) in items.iter().enumerate() {
+            if (m as usize) < objects {
+                place[m as usize] = k as u32;
+            }
+        }
+        let mut fixed = vec![n as u32];
+        fixed.extend(ranges.iter().flatten());
+        fixed.extend(place);
+        let pages_on = self.profile_stage.get() == 18;
+        let mut state = vec![0u32; M13_PAGE_META + 2 * M13_PAGE_REQUESTS + 2 * n + M13_PAGE_POOL];
+        state[4] = if pages_on { M13_PAGE_BUDGET } else { 0 };
+        state[9] = pages_on as u32;
+        for w in &mut state[M13_PAGE_META + 2 * M13_PAGE_REQUESTS..][..n] {
+            *w = hierarchy::NONE;
+        }
+        let mut headers = vec![[0.0f32; 4]; 5 * M13_PAGE_POOL];
+        for k in 0..M13_PAGE_POOL {
+            headers[5 * k + 3][3] = f32::from_bits(hierarchy::NONE);
+        }
+        let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | usage,
+                })
+        };
+        let none = wgpu::BufferUsages::empty();
+        vec![
+            (91, init("page ranges", bytemuck::cast_slice(&fixed), none)),
+            (
+                92,
+                init(
+                    "page state",
+                    bytemuck::cast_slice(&state),
+                    wgpu::BufferUsages::COPY_SRC,
+                ),
+            ),
+            (
+                93,
+                init("page bake args", &[0; 16], wgpu::BufferUsages::INDIRECT),
+            ),
+            (
+                94,
+                init("page headers", bytemuck::cast_slice(&headers), none),
+            ),
+            (95, init("page texels", &vec![0; M13_PAGE_POOL * 512], none)),
+        ]
     }
 
     /// The coverage maps buffer's maps as an 8-bit texture array (M13 gate

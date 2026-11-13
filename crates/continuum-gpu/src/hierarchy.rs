@@ -72,7 +72,7 @@ pub(crate) struct NodeGpu {
     hi: [f32; 4],
     /// Leaf: `[first item, item count, 0, 0]`; interior: `[left child, 0, 0, 0]`
     /// with the right child at `left + 1`.
-    info: [u32; 4],
+    pub(crate) info: [u32; 4],
 }
 
 impl NodeGpu {

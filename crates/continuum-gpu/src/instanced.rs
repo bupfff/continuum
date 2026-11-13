@@ -19,13 +19,13 @@ use crate::{
     HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS,
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
     M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_COVERAGE_BINDINGS,
-    M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_ROOTS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel,
-    RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
-    VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
-    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS, M13_PAGE_BAKE_BINDINGS,
+    M13_ROOTS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
+    SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS,
+    VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS,
+    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
+    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS,
+    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -65,6 +65,8 @@ enum CameraDispatch {
     Tiles,
     /// From the arguments the bin rays' list wrote (M13 gate 5).
     M13Rays,
+    /// From the arguments the page requests wrote (M13 gate 6).
+    M13Pages,
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -994,7 +996,7 @@ impl InstancedRenderer {
         // Pixel cones need no camera rays, so no acceleration structure.
         // M13 gate 4 (profile stage 16) traces corner rays in hardware.
         let hw = (kernel.uses_hardware_rays()
-            && (!pixel_cones || matches!(kernel.profile_stage.get(), 16 | 17)))
+            && (!pixel_cones || matches!(kernel.profile_stage.get(), 16..=18)))
         .then(|| {
             // Top-level slots for objects showing finer levels than
             // their proxies (M14 gate 6).
@@ -1041,7 +1043,7 @@ impl InstancedRenderer {
             // M13: the scalar coverage walk in its own entry point (profile
             // stage 14), so it does not run at the pixel-cone entry's
             // occupancy.
-            (false, _) if pixel_cones && kernel.profile_stage.get() == 17 => vec![
+            (false, _) if pixel_cones && matches!(kernel.profile_stage.get(), 17 | 18) => vec![
                 (
                     kernel.entry("hw_m13_corners"),
                     HW_M13_CORNERS_BINDINGS.to_vec(),
@@ -1060,6 +1062,14 @@ impl InstancedRenderer {
                     M13_BIN_RAYS_BINDINGS.to_vec(),
                 ),
                 (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
+                (
+                    kernel.entry("hw_m13_page_args"),
+                    M13_PAGE_ARGS_BINDINGS.to_vec(),
+                ),
+                (
+                    kernel.entry("hw_m13_page_bake"),
+                    M13_PAGE_BAKE_BINDINGS.to_vec(),
+                ),
             ],
             (false, _) if pixel_cones && kernel.profile_stage.get() == 16 => vec![
                 (
@@ -1151,6 +1161,8 @@ impl InstancedRenderer {
                 b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
                 b if b == M13_BIN_ARGS_BINDINGS => CameraDispatch::One,
                 b if b == M13_BIN_RAYS_BINDINGS => CameraDispatch::M13Rays,
+                b if b == M13_PAGE_ARGS_BINDINGS => CameraDispatch::One,
+                b if b == M13_PAGE_BAKE_BINDINGS => CameraDispatch::M13Pages,
                 _ => CameraDispatch::Screen,
             })
             .collect();
@@ -1357,6 +1369,44 @@ impl InstancedRenderer {
         self.wait();
     }
 
+    /// M13 gate 6 (profile stage 18): coverage pages baked a frame at most.
+    #[doc(hidden)]
+    pub fn set_m13_page_budget(&self, pages: u32) {
+        if let Some((_, state)) = self.scene.iter().find(|(b, _)| *b == 92) {
+            self.queue.write_buffer(state, 16, &pages.to_le_bytes());
+        }
+    }
+
+    /// M13 gate 6: the coverage pages' counters after the last frame (see
+    /// `g6_state` in `hw_visibility.wgsl`: 2 bakes, 6 requests, 8 pages
+    /// used, 10 baked in all, 11 nodes fitting no page, 12 page roots, 14
+    /// the largest shift read in 1/10,000 bin).
+    #[doc(hidden)]
+    pub fn m13_page_counters(&self) -> [u32; 16] {
+        let Some((_, state)) = self.scene.iter().find(|(b, _)| *b == 92) else {
+            return [0; 16];
+        };
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("page counters"),
+            size: 64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(state, 0, &readback, 0, 64);
+        self.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let words: Vec<u32> =
+            bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped counters")).to_vec();
+        let mut out = [0; 16];
+        out.copy_from_slice(&words);
+        out
+    }
+
     fn colors_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("colors"),
@@ -1391,7 +1441,7 @@ impl InstancedRenderer {
         // M13 gate 5: each 8×8 tile's subtree roots (a count, then up to 63,
         // each with its projected box).
         let roots_size = if self.passes.iter().any(|(_, keep)| keep.contains(&87)) {
-            width.div_ceil(8) as u64 * height.div_ceil(8) as u64 * 320 * 4
+            width.div_ceil(8) as u64 * height.div_ceil(8) as u64 * 384 * 4
         } else {
             16
         };
@@ -1563,6 +1613,11 @@ impl InstancedRenderer {
             }
             (CameraDispatch::M13Rays, _) => {
                 if let Some((_, args)) = &self.m13_work {
+                    pass.dispatch_workgroups_indirect(args, 0);
+                }
+            }
+            (CameraDispatch::M13Pages, _) => {
+                if let Some((_, args)) = self.scene.iter().find(|(b, _)| *b == 93) {
                     pass.dispatch_workgroups_indirect(args, 0);
                 }
             }
