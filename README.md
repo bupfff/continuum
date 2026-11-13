@@ -233,13 +233,13 @@ nothing). Four landmarks, in order:
    gets a small precomputed map of how it looks from every direction, and
    pixels read those instead of tracing every tiny surface. Accuracy is
    answered (a fifth to an eighth of one-ray-per-pixel's error on the
-   million-boulder field); speed is not (122–135 ms a frame), so it is not
-   in the renderer yet. The cost is each pixel walking down to individual
-   boulders, and at full size half of it is extra rays. The design for
-   both is written: fewer rays, one walk shared by a tile of pixels, and
-   far nodes of the scene's hierarchy holding small images of their own
-   coverage, re-made as the viewpoint moves, so a distant pixel reads one
-   node instead of thousands of boulders.
+   million-boulder field), and speed is getting there: 20 ms a frame from
+   150 m up and 38 ms standing (from 105–135 ms), with rays only near large
+   objects, one walk per tile of pixels down to small subtrees, and cheaper
+   map reads. Not in the renderer yet. What is left is the horizon, where
+   a pixel still walks thousands of boulders: far nodes of the scene's
+   hierarchy will hold small images of their own coverage, re-made as the
+   viewpoint moves, so a distant pixel reads one node instead.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
