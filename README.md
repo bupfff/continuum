@@ -212,8 +212,10 @@ nothing). Four landmarks, in order:
    real speed costs what a still one does, with every cached result shown
    within a certified bound of a fresh one; and a view with a sky warms in
    a few hundred frames instead of thousands (sky light through hardware
-   rays, closer to Cycles than before). Next, bounded error while flying,
-   more bounces.
+   rays, closer to Cycles than before). The error while flying is now
+   measured against fully settled views (about a fifth of the image on a
+   fast flight over the boulder field, mostly from the number of distinct
+   objects needing lighting at once); next, bounding it, and more bounces.
 3. **Detail smaller than a pixel, without shimmer.** Each object type
    gets a small precomputed map of how it looks from every direction, and
    pixels read those instead of tracing every tiny surface. Accuracy is
