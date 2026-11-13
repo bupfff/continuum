@@ -181,8 +181,8 @@ Honest about where it stands:
 - **Transparency** needs hardware ray queries.
 - **Fanless laptops** slow down under minutes of sustained load.
 - **Streaming is new:** it needs hardware ray queries; streamed lighting
-  works with the sun and other lights but not yet with a sky, bounce light
-  or moving objects; coarser versions of objects shade slightly smoother
+  works with lights, a sky and bounce light but not yet with moving
+  objects; coarser versions of objects shade slightly smoother
   (about 1–1.6% colour difference when settled).
 
 ## Where it is going
@@ -201,8 +201,10 @@ nothing). Four landmarks, in order:
    would need 7.6 GB more GPU memory) fly at about 5 ms a frame on a
    fanless laptop, no frame over 16.7 ms, keeping about 18 KB of GPU
    memory per rock, with 900,000 cached results checked against an
-   independent reference. Still to come: faster settling on new ground,
-   and a sky and bounce light with streamed lighting.
+   independent reference. A sky and bounce light now work with it too
+   (direct light still exact, bounce within half a percent), though not
+   yet within 60 fps at the largest scale. Still to come: that frame
+   budget, and faster settling on new ground.
 2. **Lighting you can trust in motion.** The cache now always converges
    with bounce light (a loop that never settled is fixed); next, a faster
    sky warm-up, bounded error while flying, more bounces, a moving sun.

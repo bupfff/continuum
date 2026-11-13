@@ -334,8 +334,10 @@ For a window, see `apps/viewer`, which flies through a file with
     camera rays see until finer ones load), put those geometries last in
     `geometries`, and set `StreamOptions::lighting_triangles`. A page whose
     bake needs an absent lighting level is not shown until re-baked with
-    it, so cached light stays exact. Not yet with a sky, bounce light,
-    movers or moving lights.
+    it, so cached light stays exact. A sky and bounce light work too (M14
+    gate 8): direct light stays exact, and bounce samples that meet an
+    absent level count it as missing and retry. Not yet with movers or
+    moving lights.
   - Lighting levels need not be in memory either (M14 gate 5): leave a
     streamed geometry's surface empty except for its `charts` and
     `chart_grid`, and have the scene's `LevelSource` return the level from
