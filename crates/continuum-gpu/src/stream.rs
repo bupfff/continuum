@@ -117,7 +117,8 @@ pub struct StreamOptions {
     /// Triangles of lighting levels (the geometries themselves) kept on the
     /// GPU at most (M14 gate 4; 0: all resident). Needs every geometry with
     /// camera levels to have a proxy, those geometries last in the scene,
-    /// and no sky, bounce light or movers.
+    /// and no movers or moving lights; a sky and bounce light are supported
+    /// (M14 gate 8).
     pub lighting_triangles: u32,
     /// Bytes of lighting levels produced on demand (M14 gate 5; see
     /// [`LevelSource::lighting`]) kept in CPU memory at most, the least
@@ -1666,13 +1667,21 @@ impl LightingLayout {
     }
 }
 
-/// What stays resident of a streamed lighting level (M14 gate 5): its
-/// hierarchy's root (the *stub*) with the root's coverage, its triangles'
-/// bounds, and its package's sizes (which size the slots).
+/// Levels of a streamed lighting level's hierarchy kept resident as its stub
+/// (M14 gate 8; gate 5 kept the root alone): wide cones (the sky's faces,
+/// coarse texels' cones) stop within them as a full walk would, so their
+/// pages need only the levels nearby.
+const STUB_DEPTH: u32 = 4;
+
+/// What stays resident of a streamed lighting level (M14 gate 5): the top
+/// `STUB_DEPTH` levels of its hierarchy (the *stub*: boxes and prefiltered
+/// coverage, children relative to its root, its frontier marked absent) and
+/// their coverage, its triangles' bounds, and its package's sizes (which
+/// size the slots).
 #[derive(Clone, Debug)]
 pub(crate) struct LitRecord {
-    pub root: crate::hierarchy::NodeGpu,
-    pub cov: [f32; crate::hierarchy::COVERAGE_SAMPLES],
+    pub stub: Vec<crate::hierarchy::NodeGpu>,
+    pub stub_cov: Vec<f32>,
     pub bounds: (continuum::glam::Vec3, continuum::glam::Vec3),
     pub tris: u32,
     pub nodes: u32,
@@ -1791,11 +1800,31 @@ pub(crate) fn lit_package(
         ]);
         cell_tris.extend(list);
     }
+    // The stub: the top levels, children numbered from its root (both of a
+    // node's next to each other), the frontier (leaves, and nodes at the
+    // last level) marked absent.
+    let mut stub = vec![nodes[0]];
+    let mut stub_cov = cov[..COVERAGE_SAMPLES].to_vec();
+    let mut todo = vec![(0usize, 0usize, 0u32)];
+    while let Some((old, at, depth)) = todo.pop() {
+        let node = nodes[old];
+        if node.is_leaf() || depth + 1 >= STUB_DEPTH {
+            stub[at] = node.absent();
+            continue;
+        }
+        let left = stub.len();
+        stub[at] = node.with_left(left as u32);
+        for k in 0..2 {
+            let child = node.left() as usize + k;
+            stub.push(nodes[child]);
+            stub_cov
+                .extend_from_slice(&cov[child * COVERAGE_SAMPLES..(child + 1) * COVERAGE_SAMPLES]);
+            todo.push((child, left + k, depth + 1));
+        }
+    }
     let record = LitRecord {
-        root: nodes[0],
-        cov: cov[..COVERAGE_SAMPLES]
-            .try_into()
-            .expect("a root's coverage"),
+        stub,
+        stub_cov,
         bounds: crate::hierarchy::mesh_bounds(&surface.triangles),
         tris: n as u32,
         nodes: nodes.len() as u32,
@@ -1974,11 +2003,11 @@ impl LitPackage {
     }
 }
 
-/// The node part of the layout: resident nodes, the stubs' first (one per
-/// streamed geometry: its root), and nodes per slot.
+/// The node part of the layout: each streamed geometry's stub's root, the
+/// slots' first node, and nodes per slot.
 pub(crate) struct LitNodes {
-    pub static_nodes: u32,
-    pub stubs: u32,
+    pub stub_roots: Vec<u32>,
+    pub slot_base: u32,
     pub slot_nodes: u32,
 }
 
@@ -2363,7 +2392,7 @@ impl LightingPool {
     fn evict(&mut self, encoder: &mut wgpu::CommandEncoder, targets: &LitTargets, g: usize) -> u32 {
         let k = self.slot[g].take().expect("a resident lighting level");
         self.owner[k as usize] = None;
-        let stub = self.nodes.stubs + g as u32;
+        let stub = self.nodes.stub_roots[g];
         for &o in &self.objects[g] {
             self.resident[o as usize] = false;
             put(
@@ -2382,7 +2411,7 @@ impl LightingPool {
     fn load(&mut self, encoder: &mut wgpu::CommandEncoder, targets: &LitTargets, g: usize, k: u32) {
         let p = self.packages[g].clone().expect("a package in CPU memory");
         let tri = self.layout.static_tris + k * self.layout.slot_tris;
-        let node = self.nodes.static_nodes + self.packages.len() as u32 + k * self.nodes.slot_nodes;
+        let node = self.nodes.slot_base + k * self.nodes.slot_nodes;
         let cell = self.cells.static_cells + k * self.cells.slot_cells;
         let t = tri as u64;
         let belt = &mut self.belt;

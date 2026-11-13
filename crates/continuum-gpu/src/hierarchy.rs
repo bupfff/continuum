@@ -85,6 +85,32 @@ impl NodeGpu {
         n
     }
 
+    /// Whether it is a leaf, and an interior node's left child (the right
+    /// one follows it).
+    pub(crate) fn is_leaf(&self) -> bool {
+        self.info[1] > 0
+    }
+
+    /// See `is_leaf`.
+    pub(crate) fn left(&self) -> u32 {
+        self.info[0]
+    }
+
+    /// This interior node with its children at `left` and `left + 1`.
+    pub(crate) fn with_left(&self, left: u32) -> NodeGpu {
+        let mut n = *self;
+        n.info = [left, 0, 0, 0];
+        n
+    }
+
+    /// This node's box, marked as the frontier of a lighting level's
+    /// resident stub (M14 gate 8: `info.w` 1): what lies below is absent.
+    pub(crate) fn absent(&self) -> NodeGpu {
+        let mut n = *self;
+        n.info = [0, 0, 0, 1];
+        n
+    }
+
     /// The node's box.
     pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
         (

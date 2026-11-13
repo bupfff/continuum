@@ -74,7 +74,10 @@ const INCOMPLETE_CAP: u32 = 1 << 14;
 /// Pages whose bake met an absent lighting level (M14 gate 4), with that
 /// geometry's object, listed per frame at most (pairs after the incomplete
 /// list; the shader's `MISSING_CAP`).
-const MISSING_CAP: u32 = 1 << 12;
+const MISSING_CAP: u32 = 1 << 14;
+/// Flags a missing list's slot as a bounce sample's want (the shader's
+/// `BOUNCE_WANT`, M14 gate 8).
+const BOUNCE_WANT: u32 = 0x8000_0000;
 const INDIRECT_RETRY: u32 = 4;
 /// Request priorities' flags (the shader's `SECONDARY`, `WANTS_SAMPLES`).
 const SECONDARY: u32 = 0x8000_0000;
@@ -459,7 +462,15 @@ const SELF_TEXELS: u32 = 1 << 20;
 /// The most self texels along a chart; larger charts walk themselves.
 const SELF_GRID_MAX: u32 = 1024;
 
-fn self_tables(scene: &InstancedScene, tables: &ChartTables, spacing: f32) -> SelfTables {
+/// Geometries from `streamed` on (lighting levels streamed, M14 gate 8) get
+/// none: their levels are not resident to bake masks from, so their sky
+/// walks cover their own level as any other's.
+fn self_tables(
+    scene: &InstancedScene,
+    tables: &ChartTables,
+    spacing: f32,
+    streamed: usize,
+) -> SelfTables {
     let mut own = SelfTables {
         charts: vec![[0; 4]; tables.charts.len().max(1)],
         texels: Vec::new(),
@@ -494,7 +505,7 @@ fn self_tables(scene: &InstancedScene, tables: &ChartTables, spacing: f32) -> Se
                 })
                 .sum()
         };
-        let candidates: Vec<usize> = (0..tables.first_chart.len())
+        let candidates: Vec<usize> = (0..tables.first_chart.len().min(streamed))
             .filter(|&g| instances[g] >= 2)
             .collect();
         let mut spacings: Vec<f32> = candidates
@@ -575,6 +586,9 @@ pub struct CachePage {
     /// Whether pixels may read it: not marked stale, set aside, or baked
     /// against an absent lighting level (M14 gate 4).
     pub shown: bool,
+    /// Whether its sky is baked (not the guess a page planned with the sky
+    /// later shows until its sky is baked alone; M14 gate 8).
+    pub sky_baked: bool,
 }
 
 /// A page's key, (object, chart | mip << 16, page x | page y << 16), unpacked.
@@ -863,6 +877,9 @@ pub(crate) struct VirtualCache {
     lit_needs: HashMap<[u32; 3], Vec<u32>>,
     lit_resident: Vec<bool>,
     lit_wants: Vec<u32>,
+    /// Levels bounce samples met absent (M14 gate 8), wanted until their
+    /// retries are due (and a few frames more).
+    lit_bounce: Vec<(u32, u32)>,
     lit_pins: Vec<u32>,
     sky_rebaked: u32,
     /// Stable indices of objects that have moved (for the sky ledger).
@@ -987,15 +1004,16 @@ impl VirtualCache {
             "a sky sample costs at least 1"
         );
         let mut tables = chart_tables(&scene.geometries, lighting.map_or(usize::MAX, |l| l.first));
-        let own = self_tables(scene, &tables, if sky { options.self_spacing } else { 0.0 });
+        let own = self_tables(
+            scene,
+            &tables,
+            if sky { options.self_spacing } else { 0.0 },
+            lighting.map_or(usize::MAX, |l| l.first),
+        );
         // Lighting levels streamed (M14 gates 4–5): the streamed geometries'
         // chart coordinates, charts and cell lists come in packages; their
         // cells stay, empty until a level loads.
         let lit_cells = lighting.map(|lay| {
-            assert!(
-                !sky,
-                "streamed lighting levels with a sky are not supported yet"
-            );
             let static_cells = tables.cell_tris.len();
             let t_s = lay.static_tris as usize;
             let slots = (lay.slots * lay.slot_tris) as usize;
@@ -1208,6 +1226,8 @@ impl VirtualCache {
                     wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
+            // Pairs listed missing this frame, a hash bitset (M14 gate 8).
+            (83, empty("lit seen", 1 << 13, copy_dst)),
             (
                 77,
                 empty(
@@ -1342,6 +1362,7 @@ impl VirtualCache {
             lit_needs: HashMap::new(),
             lit_resident: Vec::new(),
             lit_wants: Vec::new(),
+            lit_bounce: Vec::new(),
             lit_pins: Vec::new(),
             sky_due: HashMap::new(),
             hardware_edges: false,
@@ -1560,6 +1581,7 @@ impl VirtualCache {
                     .map(|t| values[(first + t) * channels + ch as usize])
                     .collect(),
                 shown: stale_marks.get(slot).is_none_or(|&m| m == 0 || m == 3),
+                sky_baked: stale_marks.get(slot).is_none_or(|&m| m == 0),
             });
         }
         pages
@@ -1954,6 +1976,9 @@ impl VirtualCache {
         encoder.clear_buffer(self.buffer(42), 0, None);
         encoder.clear_buffer(self.buffer(45), 0, None);
         encoder.clear_buffer(self.buffer(64), 0, None);
+        if self.lighting {
+            encoder.clear_buffer(self.buffer(83), 0, None);
+        }
     }
 
     /// Copies the frame's requests and counters (and every 32 frames, slot
@@ -2067,6 +2092,8 @@ impl VirtualCache {
         self.lit_pins.clear();
         let requests = self.collect(device, slot);
         self.release_waiting();
+        let now = self.frame;
+        self.lit_bounce.retain(|&(_, until)| until >= now);
         if self.overflowed.take().is_some() {
             self.evict_marked(device);
         }
@@ -2116,16 +2143,27 @@ impl VirtualCache {
         self.plan(device, requests);
         // `collect` adds its wait to `waiting`.
         self.planning += start.elapsed().saturating_sub(self.waiting);
+        // Bounce samples' wants last: the slots serve direct light first.
+        if self.lighting {
+            self.lit_wants
+                .extend(self.lit_bounce.iter().map(|&(o, _)| o));
+        }
         if self.lighting && trace_lighting() {
             let resident = self.lit_resident.iter().filter(|&&r| r).count();
             eprintln!(
-                "lit frame {}: requests {}, planned {}, wants {:?}, pins {}, waiting {}, objects resident {}",
+                "lit frame {}: requests {}, planned {}, wants {:?} ({} in all), pins {}, waiting {} (needing at most {} levels), objects resident {}",
                 self.frame,
                 self.log.last().map_or(0, |l| l.requests),
                 self.bake_list.len(),
                 &self.lit_wants[..self.lit_wants.len().min(12)],
+                self.lit_wants.len(),
                 self.lit_pins.len(),
                 self.lit_waiting.len(),
+                self.lit_waiting
+                    .values()
+                    .map(|w| w.1.len() + 1)
+                    .max()
+                    .unwrap_or(0),
                 resident
             );
         }
@@ -2262,9 +2300,24 @@ impl VirtualCache {
         }
         // Pages baked against absent lighting levels (M14 gate 4): shown as
         // missing until re-baked; they wait for those objects.
-        for (slot, object) in missing {
+        for (entry, object) in missing {
+            // Flagged: a bounce sample's want (M14 gate 8): the page stays
+            // shown and its samples retry, with the level wanted and pinned
+            // for the retry.
+            let bounce = entry & BOUNCE_WANT != 0;
+            let slot = entry & !BOUNCE_WANT;
             let k = self.slot_key[slot as usize];
             if k[0] == EMPTY {
+                continue;
+            }
+            // Bounce's wants stay apart from direct light's needs: a page's
+            // direct light never waits on what its bounce rays reach (more
+            // levels, often, than the slots hold).
+            if bounce {
+                self.lit_bounce.push((object, frame + INDIRECT_RETRY + 8));
+                if self.retrying.insert(slot) {
+                    self.retry.push_back((slot, frame + INDIRECT_RETRY));
+                }
                 continue;
             }
             if self.lit_needs.len() > 1 << 16 {
@@ -2526,6 +2579,9 @@ impl VirtualCache {
             if self.spent + cost > limit && !self.bake_list.is_empty() {
                 break;
             }
+            if !self.lighting_ready(k) {
+                continue;
+            }
             self.sky_due.remove(&slot);
             self.last_used[slot as usize] = self.frame;
             let (m, c, mip, page) = unpack(k);
@@ -2540,6 +2596,28 @@ impl VirtualCache {
             self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] +=
                 samples * self.options.sky_sample_cost;
             self.sky_rebaked += 1;
+        }
+    }
+
+    /// With streamed lighting levels, whether page `k` can bake now (M14
+    /// gate 8: skies baked alone and bounce retries): its object's level and
+    /// those its earlier bakes found absent all resident. If so they are
+    /// pinned for the frame; if not they are wanted, and nothing is pinned
+    /// (pins held by pages that cannot progress deadlock the slots).
+    fn lighting_ready(&mut self, k: [u32; 3]) -> bool {
+        if !self.lighting {
+            return true;
+        }
+        let needs = self.lit_needs.get(&k).cloned().unwrap_or_default();
+        let resident = |o: u32| self.lit_resident.get(o as usize).copied().unwrap_or(true);
+        if resident(k[0]) && needs.iter().all(|&o| resident(o)) {
+            self.lit_pins.push(k[0]);
+            self.lit_pins.extend(&needs);
+            true
+        } else {
+            self.lit_wants.push(k[0]);
+            self.lit_wants.extend(&needs);
+            false
         }
     }
 
@@ -2787,11 +2865,17 @@ impl VirtualCache {
                 .is_some_and(|&(_, due)| due <= self.frame)
         {
             let (slot, _) = self.retry.pop_front().expect("a retry");
-            self.retrying.remove(&slot);
             let k = self.slot_key[slot as usize];
             if k[0] == EMPTY {
+                self.retrying.remove(&slot);
                 continue;
             }
+            if !self.lighting_ready(k) {
+                // Again later, its levels wanted meanwhile.
+                self.retry.push_back((slot, self.frame + INDIRECT_RETRY));
+                continue;
+            }
+            self.retrying.remove(&slot);
             let (m, c, mip, page) = unpack(k);
             if trace_bakes() {
                 eprintln!(
@@ -2803,7 +2887,8 @@ impl VirtualCache {
             self.bake_list.push([k[0], k[1], k[2], slot]);
             let b = self.page_bounds(m, c, mip, page);
             self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
-            self.bake_bounds.push([b[4], b[5], b[6], b[7]]);
+            // w 5: bounce samples alone (the fill keeps the page's marks).
+            self.bake_bounds.push([b[4], b[5], b[6], 5.0]);
             if self.sky {
                 let stride = self.sky_stride(m, mip);
                 let first = self.sky_samples.len() as u32;
@@ -2903,8 +2988,9 @@ mod tests {
                 .all(|(x, y)| x.to_bits() == y.to_bits())
         );
         assert_eq!(p.cov.len(), cov.len());
+        // The stub's root carries the root's coverage.
         assert!(
-            r.cov
+            r.stub_cov[..CS]
                 .iter()
                 .zip(cov)
                 .all(|(x, y)| x.to_bits() == y.to_bits())

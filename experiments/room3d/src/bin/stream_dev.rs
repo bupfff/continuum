@@ -556,6 +556,16 @@ fn main() {
     kernel.set_prefilter(1.0);
     kernel.set_sky_prefilter(8.0);
     kernel.set_hardware_rays(true);
+    // SKY=<radiance>: a uniform sky; BOUNCE: bounce light (M14 gate 8).
+    let sky: f32 = std::env::var("SKY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    kernel.set_sky(continuum::glam::Vec3::splat(sky));
+    let cache_options = || CacheOptions {
+        indirect: std::env::var_os("BOUNCE").is_some(),
+        ..Default::default()
+    };
     let (w, h) = (1280, 720);
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let target = kernel
@@ -615,7 +625,7 @@ fn main() {
         &[rocks.sun],
         &rocks.scene,
         DVec3::ZERO,
-        Some(CacheOptions::default()),
+        Some(cache_options()),
         StreamOptions {
             budget_triangles: budget,
             lighting_triangles: std::env::var("LIGHTING")
@@ -639,7 +649,7 @@ fn main() {
             &[sun],
             &scene_for_baseline,
             DVec3::ZERO,
-            Some(CacheOptions::default()),
+            Some(cache_options()),
             StreamOptions {
                 resident: true,
                 ..Default::default()
@@ -711,7 +721,7 @@ fn main() {
             &[sun],
             &scene_for_baseline,
             DVec3::ZERO,
-            Some(CacheOptions::default()),
+            Some(cache_options()),
             StreamOptions {
                 budget_triangles: budget,
                 ..Default::default()
@@ -724,10 +734,22 @@ fn main() {
             }
             x.finish();
         }
-        let ours = r.read_cache_pages(0);
-        let theirs: std::collections::HashMap<(u32, u32, u32, [u32; 2]), Vec<f32>> = reference
-            .read_cache_pages(0)
+        // The sun's channel, or with a sky its channel (SKY_CHANNEL=1).
+        let ch: u32 = std::env::var("SKY_CHANNEL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let ours = r.read_cache_pages(ch);
+        // Pages whose sky is still the guess are left out of a sky
+        // comparison.
+        let ours: Vec<_> = ours
             .into_iter()
+            .filter(|p| ch == 0 || p.sky_baked)
+            .collect();
+        let theirs: std::collections::HashMap<(u32, u32, u32, [u32; 2]), Vec<f32>> = reference
+            .read_cache_pages(ch)
+            .into_iter()
+            .filter(|p| p.shown && (ch == 0 || p.sky_baked))
             .map(|p| ((p.object, p.chart, p.mip, p.page), p.texels))
             .collect();
         let (mut common, mut differing, mut worst) = (0, 0, 0.0f32);

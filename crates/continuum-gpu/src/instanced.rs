@@ -901,10 +901,8 @@ impl InstancedRenderer {
         };
         if layout.is_some() {
             assert!(
-                cache.as_ref().is_some_and(|c| !c.indirect)
-                    && kernel.sky() == Vec3::ZERO
-                    && moving_lights.is_empty(),
-                "streamed lighting levels need the cache, without bounce light, a sky or moving lights (yet)"
+                cache.is_some() && moving_lights.is_empty(),
+                "streamed lighting levels need the cache, without moving lights (yet)"
             );
         }
         let (scene_buffers, tree, lit_nodes) =

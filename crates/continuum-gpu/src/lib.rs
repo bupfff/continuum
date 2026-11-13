@@ -625,10 +625,11 @@ pub(crate) const VC_ARGS_EDGES_BINDINGS: &[u32] = &[42, 66, 81];
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
 pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 62, 64, 68, 69,
-    70, 75,
+    70, 75, 83,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
-    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51, 64,
+    0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51, 62, 64, 75,
+    83,
 ];
 pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
     &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 54, 49, 50, 51];
@@ -1567,7 +1568,6 @@ impl MaskConeKernel {
                 geometry_ranges[skip][0] as usize, t_s,
                 "streamed geometries come last"
             );
-            let n_s = flat.blas.len();
             let slot_total = (lay.slots * lay.slot_tris) as usize;
             flat.tris.truncate(3 * t_s);
             flat.tris.resize(3 * (t_s + slot_total), [0.0; 4]);
@@ -1577,22 +1577,28 @@ impl MaskConeKernel {
             tex.resize(3 * (t_s + slot_total), [0.0; 2]);
             flat.blas_items.truncate(t_s);
             flat.blas_items.resize(t_s + slot_total, 0);
-            let all_nodes = n_s + lay.records.len() + (lay.slots * lay.slot_nodes) as usize;
-            flat.blas.extend(lay.records.iter().map(|r| r.root));
-            flat.blas.resize(all_nodes, NodeGpu::zeroed());
+            // Each stub (its hierarchy's top levels, M14 gate 8) in turn.
+            let mut stub_roots = Vec::with_capacity(lay.records.len());
             for r in lay.records.iter() {
-                flat.blas_cov.extend_from_slice(&r.cov);
+                let root = flat.blas.len();
+                stub_roots.push(root as u32);
+                flat.blas
+                    .extend(r.stub.iter().map(|n| n.rebased(root as i64, 0)));
+                flat.blas_cov.extend_from_slice(&r.stub_cov);
             }
+            let slot_base = flat.blas.len();
+            let all_nodes = slot_base + (lay.slots * lay.slot_nodes) as usize;
+            flat.blas.resize(all_nodes, NodeGpu::zeroed());
             flat.blas_cov.resize(all_nodes * cs, 0.0);
             for (k, i) in scene.instances.iter().enumerate() {
                 if i.geometry >= skip {
                     let w = flat.ranges[k][3];
-                    flat.ranges[k] = [hierarchy::NONE, 0, (n_s + i.geometry - skip) as u32, w];
+                    flat.ranges[k] = [hierarchy::NONE, 0, stub_roots[i.geometry - skip], w];
                 }
             }
             lit_parts = Some(stream::LitNodes {
-                static_nodes: n_s as u32,
-                stubs: n_s as u32,
+                stub_roots,
+                slot_base: slot_base as u32,
                 slot_nodes: lay.slot_nodes,
             });
         }
