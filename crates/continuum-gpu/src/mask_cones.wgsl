@@ -4600,6 +4600,10 @@ fn hemicube_weight(b: u32) -> f32 {
 
 var<workgroup> ind_partial: array<vec4<f32>, 320>;
 var<workgroup> ind_missing: array<f32, 64>;
+// More bounces (M10 gate 25): per lane, the fewest bounces its hits held
+// and its share whose hits held too few.
+var<workgroup> ind_gen_wg: array<f32, 64>;
+var<workgroup> ind_short_wg: array<f32, 64>;
 
 // One workgroup per sample (rows of 65,535 workgroups); each invocation
 // traces three of the 192 bins, then a fixed tree reduction.
@@ -4615,7 +4619,33 @@ const BOUNCE_WANT: u32 = 0x80000000u;
 // page's direct light reflected, its emission, into `sum`; the bin's weight
 // `w` if the page is missing (requested), else 0. Shared by the compute and
 // the hardware bounce bakes (M14 gate 10).
-fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>) -> f32 {
+// More bounces (M10 gate 25): the bounces the lane's hits hold (the
+// fewest), and the hemisphere's share whose hits hold too few.
+var<private> ind_gen: f32 = 15.0;
+var<private> ind_short: f32 = 0.0;
+
+// Adds the bounce light of the page at a hit (slot `slot`, lookup `r`), its
+// 3×3 samples bilinearly, times `reflect`, to each channel's `sum`; returns
+// the fewest bounces those samples hold (0 where never baked).
+fn bounce_more(slot: u32, r: PageRef, reflect: vec3<f32>, sum: ptr<function, array<vec3<f32>, 5>>) -> f32 {
+    let g = (vec2<f32>(r.base) + r.frac) * 0.25;
+    let i0 = min(vec2<u32>(floor(g)), vec2<u32>(1u));
+    let f = clamp(g - vec2<f32>(i0), vec2<f32>(0.0), vec2<f32>(1.0));
+    var held = 15.0;
+    for (var q = 0u; q < 4u; q++) {
+        let ix = i0.x + (q & 1u);
+        let iy = i0.y + (q >> 1u);
+        let wq = select(1.0 - f.x, f.x, (q & 1u) == 1u) * select(1.0 - f.y, f.y, (q >> 1u) == 1u);
+        held = min(held, unpack2x16float(indirect[indirect_at(slot, iy * 3u + ix, 0u)].y).y);
+        for (var ch = 0u; ch < IND_CH; ch++) {
+            let raw = indirect[indirect_at(slot, iy * 3u + ix, ch)];
+            (*sum)[ch] += reflect * (wq * vec3<f32>(unpack2x16float(raw.x), unpack2x16float(raw.y).x));
+        }
+    }
+    return held;
+}
+
+fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>, bounces: u32) -> f32 {
     if (hit.mesh == NONE) { return 0.0; }
     let lights_n = min(arrayLength(&lights), IND_SKY);
     let sky_ch = vc.sky.z;
@@ -4645,8 +4675,10 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
         slot = vc_find_any(r.key);
         if (slot != NONE) { break; }
     }
+    // With more bounces (M10 gate 25), the page hit should hold one fewer.
+    let wanted_bits = (bounces - 1u) << 24u;
     if (slot == NONE) {
-        vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY);
+        vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY | wanted_bits);
         return w;
     }
     let hn = shading_normal(hit.mesh, hit.tri, p, -dir);
@@ -4665,6 +4697,14 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
         (*sum)[IND_GLOW] += reflect * direct * lights[l].radiance.xyz;
     }
     (*sum)[IND_SKY] += reflect * vc_bilinear(slot, r, sky_ch);
+    if (bounces > 1u) {
+        let held = bounce_more(slot, r, reflect, sum);
+        ind_gen = min(ind_gen, held);
+        if (held < f32(bounces - 1u)) {
+            ind_short += w;
+            vc_request(r.key, 1u | SECONDARY | WANTS_SAMPLES | wanted_bits);
+        }
+    }
     return 0.0;
 }
 
@@ -4674,6 +4714,8 @@ struct BounceJob {
     k: u32,
     listed: bool,
     surf: TexelSurface,
+    // The bounces its samples should hold (M10 gate 25; at least 1).
+    bounces: u32,
 }
 
 fn bounce_job(wg: vec3<u32>) -> BounceJob {
@@ -4686,9 +4728,11 @@ fn bounce_job(wg: vec3<u32>) -> BounceJob {
     let mip = e.y >> 16u;
     let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
     let n = vc_grid(c, m, mip);
-    let k = job.y;
+    let k = job.y & 0xffu;
     let texel = min(page * PAGE + vec2<u32>(4u * (k % 3u), 4u * (k / 3u)), n - vec2<u32>(1u));
-    return BounceJob(e, k, listed, vc_surface(m, c, n, texel));
+    ind_gen = 15.0;
+    ind_short = 0.0;
+    return BounceJob(e, k, listed, vc_surface(m, c, n, texel), max(job.y >> 8u, 1u));
 }
 
 // Sums the workgroup's bins and stores the sample (lane 0), listing its page
@@ -4697,6 +4741,8 @@ fn bounce_job(wg: vec3<u32>) -> BounceJob {
 fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32) {
     for (var ch = 0u; ch < IND_CH; ch++) { ind_partial[li * IND_CH + ch] = vec4<f32>(sum[ch], 0.0); }
     ind_missing[li] = missing;
+    ind_gen_wg[li] = ind_gen;
+    ind_short_wg[li] = ind_short;
     workgroupBarrier();
     for (var h = 32u; h > 0u; h >>= 1u) {
         if (li < h) {
@@ -4704,16 +4750,23 @@ fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32
                 ind_partial[li * IND_CH + ch] += ind_partial[(li + h) * IND_CH + ch];
             }
             ind_missing[li] += ind_missing[li + h];
+            ind_gen_wg[li] = min(ind_gen_wg[li], ind_gen_wg[li + h]);
+            ind_short_wg[li] += ind_short_wg[li + h];
         }
         workgroupBarrier();
     }
     if (li == 0u && job.listed) {
+        // The bounces the sample holds (y's second half; 0: never baked):
+        // one, or with more bounces one more than the fewest its hits held
+        // (M10 gate 25).
+        var held = 1.0;
+        if (job.bounces > 1u) { held = min(1.0 + ind_gen_wg[0], 15.0); }
         for (var ch = 0u; ch < IND_CH; ch++) {
             let v = ind_partial[ch].xyz;
-            // The y's second half is 1 once baked (0: never).
-            indirect[indirect_at(job.e.w, job.k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, 1.0)));
+            indirect[indirect_at(job.e.w, job.k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, held)));
         }
-        if (ind_missing[0] > 0.01 * 3.14159265) {
+        // Retried while hits were missing, or held too few bounces.
+        if (ind_missing[0] + ind_short_wg[0] > 0.01 * 3.14159265) {
             let q = atomicAdd(&mover_stats[15], 1u);
             if (q < INCOMPLETE_CAP) { incomplete[q] = job.e.w; }
         }
@@ -4751,7 +4804,7 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
                 missing += hemicube_weight(b);
                 continue;
             }
-            missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum);
+            missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum, job.bounces);
         }
     }
     bounce_finish(li, job, sum, missing);

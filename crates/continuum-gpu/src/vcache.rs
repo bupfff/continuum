@@ -79,9 +79,12 @@ const MISSING_CAP: u32 = 1 << 14;
 /// `BOUNCE_WANT`, M14 gate 8).
 const BOUNCE_WANT: u32 = 0x8000_0000;
 const INDIRECT_RETRY: u32 = 4;
-/// Request priorities' flags (the shader's `SECONDARY`, `WANTS_SAMPLES`).
+/// Request priorities' flags (the shader's `SECONDARY`, `WANTS_SAMPLES`),
+/// and the bounces a page's samples should hold (bits 24–27; with
+/// `SECONDARY` only, M10 gate 25).
 const SECONDARY: u32 = 0x8000_0000;
 const WANTS_SAMPLES: u32 = 0x4000_0000;
+const TARGET_SHIFT: u32 = 24;
 /// The stale passes' and the ledger's counters (16 words) in each readback.
 const MOVER_STATS_BYTES: u64 = 96;
 /// Movers under a sky (M9 gate 3): slots listed for a sky re-bake per frame
@@ -162,6 +165,13 @@ pub struct CacheOptions {
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
     pub sky_ray_cost: u32,
+    /// Bounces of light with `indirect` (M10 gate 25), 1 to 8: a bounce
+    /// sample gathers the bounce light of the pages it hits too, and records
+    /// how many bounces it holds (one more than the fewest its hits hold);
+    /// pages whose hits hold too few re-bake their samples, and the pages
+    /// hit are asked for with samples of their own, one bounce fewer, down to
+    /// pages with none. 1 by default: direct light at hits only.
+    pub bounces: u32,
     /// Moving lights (M9 gate 2): the largest change of a texel's ratio
     /// (its light's shadowed share) the cache may show before re-baking it.
     pub ledger_epsilon: f32,
@@ -235,6 +245,7 @@ impl Default for CacheOptions {
             sky_sample_cost: 10,
             sky_rays: true,
             sky_ray_cost: 1,
+            bounces: 1,
             ledger_epsilon: 0.01,
             indirect: false,
             emission_bounce: true,
@@ -935,6 +946,10 @@ pub(crate) struct VirtualCache {
     hardware_edges: bool,
     /// Sky samples trace hardware rays (M5 gate 13).
     sky_rays: bool,
+    /// Per slot: the bounces its samples should hold (0: no samples), and
+    /// its samples' retries since it was allocated (M10 gate 25).
+    slot_target: Vec<u8>,
+    slot_retries: Vec<u8>,
     /// The extra samples' list (buffer 81): silhouette rays through ray
     /// queries, or layers behind alpha-blended surfaces (M10 gate 16).
     extra_samples: bool,
@@ -1416,6 +1431,8 @@ impl VirtualCache {
             sky_due: HashMap::new(),
             hardware_edges: false,
             sky_rays: false,
+            slot_target: vec![0; options.pages as usize],
+            slot_retries: vec![0; options.pages as usize],
             extra_samples: false,
             sky_rebaked: 0,
             mover_ids: HashMap::new(),
@@ -1757,9 +1774,10 @@ impl VirtualCache {
                 },
             ],
             // x: 1 if bounce samples gather emission (M10 gate 11).
+            // y: bounces (M10 gate 25).
             extra: [
                 (self.options.indirect && self.options.emission_bounce) as u32,
-                0,
+                self.options.bounces.clamp(1, 8),
                 0,
                 0,
             ],
@@ -2021,6 +2039,35 @@ impl VirtualCache {
     /// Sky samples trace hardware rays from now on (M5 gate 13).
     pub(crate) fn set_sky_rays(&mut self) {
         self.sky_rays = true;
+    }
+
+    /// The bounces a request's page should hold in its samples: a pixel's,
+    /// all of them; a page wanted for light at bounce hits, what its bits say
+    /// (0: no samples).
+    fn request_target(&self, priority: u32) -> u8 {
+        if priority & SECONDARY == 0 {
+            self.options.bounces.clamp(1, 8) as u8
+        } else {
+            ((priority >> TARGET_SHIFT) & 0xf).min(8) as u8
+        }
+    }
+
+    /// Schedules slot `slot`'s samples to re-bake at frame `due`, unless
+    /// they already wait or, with several bounces, have retried too often
+    /// (a page whose hits never gain bounces must not keep the view from
+    /// settling).
+    fn schedule_retry(&mut self, slot: u32, due: u32) {
+        let s = slot as usize;
+        if self.options.bounces > 1 {
+            let cap = (4 * self.options.bounces + 8).min(255) as u8;
+            if self.slot_retries[s] >= cap {
+                return;
+            }
+        }
+        if self.retrying.insert(slot) {
+            self.slot_retries[s] = self.slot_retries[s].saturating_add(1);
+            self.retry.push_back((slot, due));
+        }
     }
 
     /// What a sky sample counts against the bake budget.
@@ -2387,9 +2434,7 @@ impl VirtualCache {
         // Incomplete bounce samples: re-bake once the requested pages have
         // had time to arrive.
         for slot in incomplete {
-            if self.retrying.insert(slot) {
-                self.retry.push_back((slot, frame + INDIRECT_RETRY));
-            }
+            self.schedule_retry(slot, frame + INDIRECT_RETRY);
         }
         // Pages baked against absent lighting levels (M14 gate 4): shown as
         // missing until re-baked; they wait for those objects.
@@ -2756,13 +2801,18 @@ impl VirtualCache {
         self.texels = 0;
         self.spent = 0;
         self.spent_by_mip = [0; 8];
-        // Resident pages shown without bounce samples: schedule them.
+        // Resident pages shown without bounce samples, or wanted with more
+        // bounces than they hold (M10 gate 25): schedule them, now.
         for (k, priority) in &requests {
             if priority & WANTS_SAMPLES != 0
                 && let Some(&(slot, _)) = self.map.get(k)
-                && self.retrying.insert(slot)
             {
-                self.retry.push_front((slot, self.frame));
+                let target = self.request_target(*priority).max(1);
+                let s = slot as usize;
+                self.slot_target[s] = self.slot_target[s].max(target);
+                if self.retrying.insert(slot) {
+                    self.retry.push_front((slot, self.frame));
+                }
             }
         }
         // Pages planned in the frame between are resident already. Pixels'
@@ -2844,7 +2894,13 @@ impl VirtualCache {
             } else {
                 0
             };
-            let bounce = if self.options.indirect && !secondary {
+            // The bounces its samples should hold (0: none; M10 gate 25).
+            let target = if self.options.indirect {
+                self.request_target(priority)
+            } else {
+                0
+            };
+            let bounce = if target > 0 {
                 INDIRECT_SAMPLES * self.options.indirect_sample_cost
             } else {
                 0
@@ -2899,7 +2955,9 @@ impl VirtualCache {
             self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
             // w 1: no bounce samples planned (the fill clears the slot's);
             // w 2: lights only, the sky a guess until it is baked alone.
-            let bare = self.options.indirect && secondary;
+            let bare = self.options.indirect && target == 0;
+            self.slot_target[slot as usize] = target;
+            self.slot_retries[slot as usize] = 0;
             let kind = if later { 2.0 } else { bare as u32 as f32 };
             self.bake_bounds.push([b[4], b[5], b[6], kind]);
             // Light by light, so neighbouring invocations trace one light.
@@ -2926,9 +2984,9 @@ impl VirtualCache {
             if later {
                 self.sky_due.insert(slot, self.frame + 1);
             }
-            if self.options.indirect && !secondary {
+            if target > 0 {
                 for k in 0..INDIRECT_SAMPLES {
-                    self.indirect_jobs.push([index, k]);
+                    self.indirect_jobs.push([index, k | (target as u32) << 8]);
                 }
             }
             if trace_bakes() {
@@ -2984,8 +3042,9 @@ impl VirtualCache {
                 let first = self.sky_samples.len() as u32;
                 self.page_sky.push([first, stride << 24]);
             }
+            let target = self.slot_target[slot as usize].max(1) as u32;
             for s in 0..INDIRECT_SAMPLES {
-                self.indirect_jobs.push([index, s]);
+                self.indirect_jobs.push([index, s | target << 8]);
             }
             self.spent += bounce;
         }
