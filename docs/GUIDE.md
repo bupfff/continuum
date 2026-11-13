@@ -72,7 +72,7 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   that need it are hidden until wanted again. Moving sphere lights re-bake
   shadow edges whenever they move. Not yet with movers or a sky in the
   cache. Lights change color and intensity freely either way.
-- - **Bounce light.** `CacheOptions::indirect` adds one bounce of diffuse
+- **Bounce light.** `CacheOptions::indirect` adds one bounce of diffuse
   light (M10 gate 1). `CacheOptions::bounces` carries it further: a bounce
   sample gathers the bounce light of the pages it hits, and pages re-bake
   until their hits hold enough. A closed room lit by one panel goes from
