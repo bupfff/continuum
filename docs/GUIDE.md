@@ -45,8 +45,8 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 - **Streamed detail (M14) is new.** Camera levels stream with hardware
   camera rays only, and carry no vertex colors, tangents, cutouts or
   blending; streamed lighting levels need a proxy on every streamed
-  geometry, those geometries last in the scene, and no sky, bounce light
-  or movers. Coarser camera levels shade with smoother normals (1.0–1.6%
+  geometry, those geometries last in the scene, and no movers or moving
+  lights. Coarser camera levels shade with smoother normals (1.0–1.6%
   colour difference settled). See "Streamed detail" under Concepts.
 
 - **Moving objects.** Instances listed in `RendererOptions::movable` move
