@@ -2668,6 +2668,75 @@ impl InstancedScene {
         s
     }
 
+    /// Coarser levels for geometries that come without them (M14 gate 15;
+    /// imported meshes). Each geometry with at least `min_triangles`
+    /// triangles, no levels yet, and none of what camera levels do not carry
+    /// yet (vertex colors, a normal map, an alpha cutoff, blending) gets
+    /// levels from [`continuum::simplify::levels`]: the scene keeps a level
+    /// of about `lighting_triangles` triangles for lighting, and camera
+    /// rays see levels four times finer each, up to the geometry itself,
+    /// streamed by need (with hardware camera rays and [`StreamOptions`]).
+    /// Returns how many geometries got levels.
+    pub fn simplify_geometries(
+        &mut self,
+        min_triangles: usize,
+        lighting_triangles: usize,
+    ) -> usize {
+        let n = self.geometries.len();
+        self.geometry_levels.resize(n, None);
+        let mut count = 0;
+        for g in 0..n {
+            let tris = self.geometries[g].triangles.len();
+            let unsupported = self.geometry_colors.get(g).is_some_and(|c| c.is_some())
+                || self
+                    .geometry_normal_maps
+                    .get(g)
+                    .is_some_and(|m| m.is_some())
+                || self
+                    .geometry_alpha_cutoff
+                    .get(g)
+                    .is_some_and(|a| a.is_some())
+                || self.geometry_blend.get(g).is_some_and(|b| b.is_some());
+            if tris < min_triangles.max(4 * lighting_triangles.max(1))
+                || self.geometry_levels[g].is_some()
+                || unsupported
+            {
+                continue;
+            }
+            let mut targets = Vec::new();
+            let mut t = tris / 4;
+            while t > lighting_triangles {
+                targets.push(t);
+                t /= 4;
+            }
+            targets.push(lighting_triangles.max(1));
+            let mut levels = continuum::simplify::levels(&self.geometries[g], &targets);
+            let lighting = levels.pop().expect("a lighting level");
+            let finest = std::mem::replace(&mut self.geometries[g], lighting.surface);
+            let mut finer: Vec<Level> = levels
+                .into_iter()
+                .rev()
+                .map(|l| Level {
+                    triangles: l.surface.triangles.len() as u32,
+                    surface: l.surface,
+                    error: l.error,
+                })
+                .collect();
+            finer.push(Level {
+                triangles: finest.triangles.len() as u32,
+                surface: finest,
+                error: 0.0,
+            });
+            self.geometry_levels[g] = Some(Levels {
+                base_error: lighting.error,
+                finer,
+                proxy: None,
+            });
+            count += 1;
+        }
+        count
+    }
+
     /// Emissive faces made area lights (M10 gate 23). Each geometry with
     /// uniform emission (no emissive texture, not blended) whose triangles
     /// all pair into planar rectangles, at most `max_faces` of them, becomes

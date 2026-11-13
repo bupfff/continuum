@@ -14,6 +14,7 @@ pub mod coverage;
 pub mod ledger;
 pub mod mask;
 pub mod mesh;
+pub mod simplify;
 
 pub use coverage::CoverageMask;
 pub use glam;
