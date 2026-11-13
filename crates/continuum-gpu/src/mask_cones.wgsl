@@ -2671,10 +2671,13 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 @group(0) @binding(68) var<storage, read> light_poses: array<LightRect>;
 // Per slot and moving light, LEDGER_WORDS words: 0 the frame the page was
 // baked (its version), 1 the smallest slack of its texels that are not
-// mixed: a texel's guard less the light's shift from the version's pose to
-// the pose it was baked at (angle, f32 bits; while the light, seen from the
-// page, stays within it of the version's pose, every such texel holds), 2–3
-// unused, 4 flags (1: a mixed texel, 2: a texel baked after the version),
+// mixed (on a lattice, of every texel the light reaches): a texel's guard
+// less the light's shift from the version's pose to the pose it was baked
+// at (angle, f32 bits; while the light, seen from the page, stays within it
+// of the version's pose, every such texel holds), 2 on a lattice (M9 gate
+// 6) the largest κ of its mixed texels (f32 bits), 3 the frame its mixed
+// texels were last baked, 4 flags (1: a mixed texel, 2: a texel baked after
+// the version, 8: a footprint its lattice could not hold),
 // then per texel 16 bits (two per word): the frames since the version it
 // was baked (10 bits), 4 unused, and its state (2 bits: 2 clear, 3 mixed,
 // 0 fixed: facing away, or never shown).
@@ -3043,14 +3046,41 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     lit_missing = NONE;
     let s = vc_surface(t.m, t.c, t.n, t.texel);
     let on = listed && t.inside && s.ok;
-    let value = hit_irradiance_rect(on, 0u, s.apex, s.normal, lights[l]);
+    let open = unshadowed_rect(s.apex, s.normal, lights[l]);
+    // A moving rect light bakes on its page's lattice (M9 gate 6), in the
+    // frame of the light's pose at the page's version. Both walks run for
+    // every invocation (a packet can hold two lights' texels), each acting
+    // only where it applies.
+    let mj = moving_index[l];
+    let lattice = mj != NONE && !is_sphere(lights[l]);
+    var then = lights[l];
+    if (lattice) {
+        let version = atomicLoad(&ledger[ledger_base(t.e.w, mj)]);
+        if (version != 0u && vc.counts.y - version < vc.ledger.y) {
+            then = light_poses[(version % vc.ledger.y) * arrayLength(&lights) + l];
+        }
+    }
+    // A texel whose bins' weights spread too far (the light near its
+    // horizon) re-bakes whenever the light moves, so it gains nothing from
+    // the lattice and takes the (smaller) cone around the light.
+    var on_lattice = lattice;
+    if (lattice && on && open > 0.0) {
+        on_lattice = lattice_kappa(lattice_frame(s.apex, then), s.normal) <= LATTICE_KAPPA_MAX;
+    }
+    let lat = lattice_ratio(on && on_lattice && open > 0.0, s.apex, s.normal, lights[l], then);
+    let lat_empty = last_empty;
+    let lat_full = last_full;
+    // A footprint the lattice cannot hold (never expected: the ledger
+    // re-bakes such pages whole first) bakes as other lights do and has its
+    // page re-baked whole.
+    let overflow = on && on_lattice && open > 0.0 && lat < 0.0;
+    let value = hit_irradiance_rect(on && (!on_lattice || overflow), 0u, s.apex, s.normal, lights[l]);
     // With `light_ratio`, the texel keeps its light's shadowed share of the
     // unshadowed light, and shading multiplies that by the unshadowed light
     // at the pixel, with the pixel's own normal (a ratio estimator). Where
     // the light is below the texel's horizon, the texel's own light is zero
     // whatever the ratio; a ratio of one leaves pixels nearby that face the
     // light unshadowed, as on a convex object's terminator.
-    let open = unshadowed_rect(s.apex, s.normal, lights[l]);
     var ratio = select(select(1.0, clamp(value / open, 0.0, 1.0), open > 0.0), 0.0, !on);
     // A cone that nothing covers sees all its light, one wholly covered
     // none: exactly, whatever the estimators' rounding at the horizon (M9
@@ -3060,14 +3090,22 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // A moving light's ratio within ε of 0 or 1 is that (M9 gate 2): a
     // nearly covered cone's estimate wavers by a few thousandths as its bins
     // realign, which no bound on the light's motion covers. Mixed texels'
-    // bounds add ε for it, so they re-bake whenever the light moves.
-    if (moving_index[l] != NONE) {
+    // bounds add ε for it, so they re-bake whenever the light moves. (Not on
+    // a lattice, whose bins do not realign.)
+    if (mj != NONE) {
         let snap = bitcast<f32>(vc.ledger.z);
         if (ratio < snap) { ratio = 0.0; }
         if (ratio > 1.0 - snap) { ratio = 1.0; }
     }
+    var light_value = value;
+    if (on_lattice && !overflow) {
+        ratio = select(select(1.0, lat, open > 0.0), 0.0, !on);
+        if (on && open > 0.0 && lat_empty) { ratio = 1.0; }
+        if (on && open > 0.0 && lat_full) { ratio = 0.0; }
+        light_value = ratio * open;
+    }
     if (listed && t.inside) {
-        pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(select(0.0, value, on), ratio, vc.sky.w == 1u);
+        pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(select(0.0, light_value, on), ratio, vc.sky.w == 1u);
     }
     // A texel that needed an absent lighting level (M14 gate 4): its page
     // shows as missing (`vc_fill` keeps this frame's mark; a mark from an
@@ -3076,9 +3114,8 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // lacked.
     if (listed && t.inside && lit_missing != NONE) { lit_mark_page(t.e.w, lit_missing); }
     // A moving light's ledger record for this texel (M9 gate 2).
-    let mj = moving_index[l];
     if (mj != NONE && listed && t.inside) {
-        ledger_texel(on, t.e.w, mj, l, k, s.apex, s.normal, lights[l], open);
+        ledger_texel(on, t.e.w, mj, l, k, s.apex, s.normal, lights[l], open, then, lattice, overflow);
     }
     if (COUNT_WORK) {
         for (var k = 0u; k < 4u; k++) {
@@ -3851,18 +3888,39 @@ fn below_horizon(apex: vec3<f32>, n: vec3<f32>, r: LightRect) -> f32 {
 }
 
 // Records texel `k` of slot `slot` for moving light `j` (bake pass): its
-// state and frame, and the page's guard, unshadowed light and radius.
-fn ledger_texel(on: bool, slot: u32, j: u32, light_index: u32, k: u32, apex: vec3<f32>, n: vec3<f32>, r: LightRect, open: f32) {
+// state and frame, and the page's guard, unshadowed light and radius. On a
+// lattice (M9 gate 6, `then` the light's pose at the page's version), every
+// texel the light reaches keeps a slack: its bins stay within the guard's
+// reach while the light, seen from it, moves less than the reach less the
+// light's radius and a bin's diagonal; and a mixed texel's κ, the spread of
+// its bins' weights over that reach, bounds how its ratio can move.
+fn ledger_texel(on: bool, slot: u32, j: u32, light_index: u32, k: u32, apex: vec3<f32>, n: vec3<f32>, r: LightRect, open: f32, then: LightRect, lattice: bool, overflow: bool) {
     let base = ledger_base(slot, j);
     let version = atomicLoad(&ledger[base]);
     let offset = min(vc.counts.y - version, MAX_OFFSET);
     var state = 0u;
     var guard = 3.4e38;
+    // On a lattice: the reach (the guard's half-angle), the light's radius
+    // plus a bin's diagonal, and κ.
+    var reach = 0.0;
+    var margin = 3.4e38;
+    var bin = 0.0;
+    var kappa = 3.0e38;
+    if (lattice && on && open > 0.0) {
+        let f = lattice_frame(apex, then);
+        if (f.ok) {
+            reach = min(GUARD * f.alpha, 1.4);
+            bin = length(f.beta);
+            margin = f.alpha + bin;
+            kappa = lattice_kappa(f, n);
+        }
+    }
     if (on && open > 0.0 && offset != 0u) {
         // Re-baked alone after the page's version: only mixed texels are
         // (the ledger re-bakes a page whole once its slack runs out), and
         // it stays mixed, with no guard cone traced.
         state = 3u;
+        if (lattice) { guard = reach - margin; }
     } else if (on && open > 0.0) {
         let g = guard_cone(apex, r);
         var cov: array<f32, 64>;
@@ -3883,6 +3941,9 @@ fn ledger_texel(on: bool, slot: u32, j: u32, light_index: u32, k: u32, apex: vec
         // it, the estimates of grazing light waver as bins realign.
         if (-below_horizon(apex, n, r) <= max(2.0 * min(GUARD * g.alpha, 1.4), 0.1)) { state = 3u; }
         guard = min(GUARD * g.alpha, 1.4) - g.alpha;
+        // On a lattice, the guard (traced around the light's center, as the
+        // lattice's forward is) must also hold the bins the footprint meets.
+        if (lattice) { guard = min(min(GUARD * g.alpha, 1.4), reach) - max(margin, g.alpha + bin); }
     } else if (on) {
         // Facing away: fixed while the light's center stays below the
         // horizon, if it lies well below (twice the light's radius);
@@ -3895,23 +3956,35 @@ fn ledger_texel(on: bool, slot: u32, j: u32, light_index: u32, k: u32, apex: vec
             state = 3u;
         }
     }
-    if (state != 3u && guard < 3.0e38) {
+    if ((state != 3u || lattice) && guard < 3.0e38) {
         // Its slack: the guard less the light's shift since the version, as
         // seen from the apex.
         var slack = guard;
         if (offset != 0u) {
             let point = Box3(apex, apex);
-            let then = light_poses[(version % vc.ledger.y) * arrayLength(&lights) + light_index];
-            slack = guard - light_shift(then, r, point);
+            let then_v = light_poses[(version % vc.ledger.y) * arrayLength(&lights) + light_index];
+            slack = guard - light_shift(then_v, r, point);
         }
         atomicMin(&ledger[base + 1u], bitcast<u32>(max(slack, 0.0)));
+    }
+    // A mixed texel whose bins' weights are unbounded (the light near its
+    // horizon, or below it) is marked (code bit 1) to re-bake whenever the
+    // light moves; the others' κ bounds the page's.
+    var code = 0u;
+    if (lattice && state == 3u) {
+        if (on && open > 0.0 && kappa <= LATTICE_KAPPA_MAX) {
+            atomicMax(&ledger[base + 2u], bitcast<u32>(kappa));
+        } else {
+            code = 4u;
+        }
     }
     let shift = 16u * (k % 2u);
     let word = base + 5u + k / 2u;
     atomicAnd(&ledger[word], ~(0xffffu << shift));
-    atomicOr(&ledger[word], ((offset << 6u) | state) << shift);
-    // Page flags: 1 a mixed texel, 2 a texel baked after the version.
-    let flags = select(0u, 1u, state == 3u) | select(0u, 2u, offset != 0u);
+    atomicOr(&ledger[word], ((offset << 6u) | code | state) << shift);
+    // Page flags: 1 a mixed texel, 2 a texel baked after the version, 8 a
+    // footprint its lattice could not hold (M9 gate 6).
+    let flags = select(0u, 1u, state == 3u) | select(0u, 2u, offset != 0u) | select(0u, 8u, overflow);
     if (flags != 0u) { atomicOr(&ledger[base + 4u], flags); }
 }
 
@@ -3921,8 +3994,8 @@ fn ledger_reset(slot: u32, j: u32) {
     let base = ledger_base(slot, j);
     atomicStore(&ledger[base], vc.counts.y);
     atomicStore(&ledger[base + 1u], 0x7f7fffffu);
-    atomicStore(&ledger[base + 2u], 0x7f7fffffu);
-    atomicStore(&ledger[base + 3u], 0u);
+    atomicStore(&ledger[base + 2u], 0u);
+    atomicStore(&ledger[base + 3u], vc.counts.y);
     atomicStore(&ledger[base + 4u], 0u);
     for (var w = 5u; w < LEDGER_WORDS; w++) { atomicStore(&ledger[base + w], 0u); }
     ledger_bound[slot * vc.ledger.x + j] = 0.0;
@@ -3963,6 +4036,320 @@ fn light_shift(a: LightRect, b: LightRect, page: Box3) -> f32 {
     return 2.0 * asin(moved / (2.0 * d)) * 1.0001;
 }
 
+// --- Moving rect lights on a lattice (M9 gate 6). ---
+//
+// Cones re-centred on a moving light waver by a few thousandths as their
+// bins realign with it (gate 4), which no bound on the light's motion
+// covers. A moving rect light's cones instead keep their bins on a lattice
+// fixed in the frame of the light's pose at the page's version: forward
+// toward the light's center then (from the texel), right along its first
+// edge, bins a seventh of that footprint (plus a margin) on a side. The
+// window is the lattice's 8×8 bins holding the footprint now, and each bin
+// counts by the footprint's area in it times its projected solid angle per
+// area at its center. A bin's coverage does not depend on where the window
+// sits, so the ratio, an average of the bins' openness under the
+// footprint's weighting, moves only as that weighting does
+// (`lattice_bound`).
+
+const LATTICE_MARGIN: f32 = 0.03;
+// A mixed texel whose bins' weights spread more than this (the light near
+// its horizon) re-bakes whenever the light moves instead of widening its
+// page's bound.
+const LATTICE_KAPPA_MAX: f32 = 8.0;
+
+// Corner `k` of rect light `r` (k's bits: along edge_u, along edge_v).
+fn rect_corner(r: LightRect, k: u32) -> vec3<f32> {
+    return r.corner.xyz + r.edge_u.xyz * f32(k & 1u) + r.edge_v.xyz * f32((k >> 1u) & 1u);
+}
+
+struct LatticeFrame {
+    forward: vec3<f32>,
+    right: vec3<f32>,
+    up: vec3<f32>,
+    // A bin's size in the window's plane (tangents), per axis.
+    beta: vec2<f32>,
+    // The light's largest angle from forward (radians).
+    alpha: f32,
+    ok: bool,
+};
+
+// The lattice of rect light pose `then` seen from `apex`.
+fn lattice_frame(apex: vec3<f32>, then: LightRect) -> LatticeFrame {
+    var f: LatticeFrame;
+    f.ok = false;
+    let to = light_center(then) - apex;
+    let d = length(to);
+    if (d <= 1e-6) { return f; }
+    let forward = to / d;
+    var right = then.edge_u.xyz - forward * dot(forward, then.edge_u.xyz);
+    if (length(right) <= 1e-6 * length(then.edge_u.xyz)) {
+        right = then.edge_v.xyz - forward * dot(forward, then.edge_v.xyz);
+    }
+    if (length(right) <= 0.0) { return f; }
+    right = normalize(right);
+    let up = cross(forward, right);
+    var lo = vec2<f32>(3.4e38);
+    var hi = vec2<f32>(-3.4e38);
+    var alpha = 0.0;
+    for (var k = 0u; k < 4u; k++) {
+        let p = rect_corner(then, k) - apex;
+        let z = dot(forward, p);
+        if (z <= 1e-6 * d) { return f; }
+        let uv = vec2<f32>(dot(right, p), dot(up, p)) / z;
+        lo = min(lo, uv);
+        hi = max(hi, uv);
+        alpha = max(alpha, atan2(length(cross(forward, p)), z));
+    }
+    f.forward = forward;
+    f.right = right;
+    f.up = up;
+    f.beta = max(hi - lo, vec2<f32>(1e-12)) * ((1.0 + LATTICE_MARGIN) / 7.0);
+    f.alpha = alpha * 1.0001;
+    f.ok = true;
+    return f;
+}
+
+// The spread κ (max over min) of the bins' weights for a texel with normal
+// `n` on lattice `f`, over the guard's reach around forward: the cosine to
+// the normal and the window's solid angle per area (3e38 where the reach
+// meets the horizon).
+fn lattice_kappa(f: LatticeFrame, n: vec3<f32>) -> f32 {
+    if (!f.ok) { return 3.0e38; }
+    let reach = min(GUARD * f.alpha, 1.4);
+    let theta = atan2(length(cross(n, f.forward)), dot(n, f.forward));
+    if (theta + reach >= 1.5706) { return 3.0e38; }
+    let t = tan(reach);
+    return cos(max(theta - reach, 0.0)) / cos(theta + reach) * pow(1.0 + t * t, 1.5) * 1.0001;
+}
+
+struct Lattice {
+    c: Cone,
+    // The light's footprint in bins, its corners in order around it.
+    q: Poly2,
+    ok: bool,
+};
+
+// The lattice cone from `apex` toward rect light `now` on the lattice of
+// pose `then`: the 8×8 bins holding the footprint now, as deep as the
+// light's plane. Not ok behind a one-sided light or where the footprint
+// does not fit.
+fn lattice_cone(apex: vec3<f32>, now: LightRect, then: LightRect) -> Lattice {
+    var out: Lattice;
+    out.ok = false;
+    prefilter_bins = light.params.x;
+    let f = lattice_frame(apex, then);
+    if (!f.ok) { return out; }
+    let n = normalize(cross(now.edge_u.xyz, now.edge_v.xyz));
+    if (now.corner.w > 0.5 && dot(n, apex - now.corner.xyz) <= 0.0) { return out; }
+    var pts: array<vec2<f32>, 4>;
+    var lo = vec2<f32>(3.4e38);
+    var hi = vec2<f32>(-3.4e38);
+    for (var k = 0u; k < 4u; k++) {
+        let p = rect_corner(now, k) - apex;
+        let z = dot(f.forward, p);
+        if (z <= 1e-6) { return out; }
+        pts[k] = vec2<f32>(dot(f.right, p), dot(f.up, p)) / z;
+        lo = min(lo, pts[k]);
+        hi = max(hi, pts[k]);
+    }
+    let origin = floor(lo / f.beta) * f.beta;
+    let end = origin + 8.0 * f.beta;
+    if (any(hi > end)) { return out; }
+    var far_n = n;
+    if (dot(far_n, now.corner.xyz - apex) < 0.0) { far_n = -far_n; }
+    let dist = dot(far_n, now.corner.xyz - apex);
+    if (dist <= 1e-6) { return out; }
+    out.c.apex = apex;
+    out.c.right = f.right;
+    out.c.up = f.up;
+    out.c.forward = f.forward;
+    out.c.window = vec4<f32>(origin, end);
+    out.c.far_normal = far_n;
+    out.c.far_offset = dot(far_n, apex) + dist * (1.0 - 1e-5);
+    out.c = bound_cone(out.c, normalize(light_center(now) - apex));
+    out.q.n = 4u;
+    out.q.v[0] = (pts[0] - origin) / f.beta;
+    out.q.v[1] = (pts[1] - origin) / f.beta;
+    out.q.v[2] = (pts[3] - origin) / f.beta;
+    out.q.v[3] = (pts[2] - origin) / f.beta;
+    out.ok = true;
+    return out;
+}
+
+// The footprint `q`'s area in each bin (in bins).
+fn lattice_areas(q: Poly2) -> array<f32, 64> {
+    var acc: array<f32, 68>;
+    for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
+    var span = vec2<u32>(68u, 0u);
+    let g = f32(GRID);
+    for (var i = 0u; i < q.n; i++) {
+        let a = clamp(q.v[i], vec2<f32>(0.0), vec2<f32>(g));
+        let e = clamp(q.v[(i + 1u) % q.n], vec2<f32>(0.0), vec2<f32>(g));
+        draw_edge(&acc, &span, a, e, 1.0);
+    }
+    var m: array<f32, 64>;
+    var running = 0.0;
+    for (var b = 0u; b < BINS; b++) {
+        running += acc[b];
+        m[b] = min(abs(running), 1.0);
+    }
+    return m;
+}
+
+// The share of the footprint (its area `m` in each bin) that coverage
+// `cov` leaves open: each bin weighted by the footprint's area in it and its
+// projected solid angle per area at its center (0 below the horizon of
+// `normal`).
+fn lattice_share(c: Cone, normal: vec3<f32>, m: ptr<function, array<f32, 64>>, cov: ptr<function, array<f32, 64>>) -> f32 {
+    let g = f32(GRID);
+    var total = 0.0;
+    var open = 0.0;
+    for (var b = 0u; b < BINS; b++) {
+        let area = (*m)[b];
+        if (area <= 0.0) { continue; }
+        let d = direction(c, (f32(b % GRID) + 0.5) / g, (f32(b / GRID) + 0.5) / g);
+        let l2 = dot(d, d);
+        let w = area * max(dot(normal, d), 0.0) / (l2 * l2);
+        total += w;
+        open += w * (1.0 - (*cov)[b]);
+    }
+    if (total <= 0.0) { return 1.0; }
+    return open / total;
+}
+
+// A moving rect light's ratio at `apex` (normal `normal`) on the lattice
+// of pose `then`, setting `last_empty` and `last_full` as
+// `cone_irradiance_rect` does; −1 where the lattice cannot hold it (or
+// `on` is false). The window's bins outside the footprint start covered:
+// they do not count, and the walk can stop once the footprint is covered.
+fn lattice_ratio(on: bool, apex: vec3<f32>, normal: vec3<f32>, now: LightRect, then: LightRect) -> f32 {
+    let lc = lattice_cone(apex, now, then);
+    let traced = on && lc.ok;
+    var m = lattice_areas(lc.q);
+    var cov: array<f32, 64>;
+    var full = 0u;
+    for (var b = 0u; b < BINS; b++) {
+        cov[b] = select(0.0, 1.0, traced && m[b] <= 0.0);
+        if (cov[b] >= 1.0) { full++; }
+    }
+    scene_coverage_if(traced, lc.c, 0u, &cov, &full);
+    last_empty = true;
+    last_full = true;
+    for (var b = 0u; b < BINS; b++) {
+        if (cov[b] > 0.0 && m[b] > 0.0) { last_empty = false; }
+        if (cov[b] < 1.0) { last_full = false; }
+    }
+    if (!traced) { return -1.0; }
+    return lattice_share(lc.c, normal, &m, &cov);
+}
+
+// Distances and directions from page box `page` to rect lights `a` and `b`
+// (M9 gate 6): the nearest and farthest, the smallest cosine between a
+// light's normal and a direction from the page to it, and the largest half
+// diagonal.
+struct LatticeReach {
+    near: f32,
+    far: f32,
+    cos_min: f32,
+    half_diagonal: f32,
+};
+
+fn lattice_reach(a: LightRect, b: LightRect, page: Box3) -> LatticeReach {
+    var out: LatticeReach;
+    let la = light_box(a);
+    let lb = light_box(b);
+    let span = Box3(min(la.lo, lb.lo), max(la.hi, lb.hi));
+    let gap = max(vec3<f32>(0.0), max(page.lo - span.hi, span.lo - page.hi));
+    out.near = length(gap);
+    out.half_diagonal = 0.5 * max(length(a.edge_u.xyz + a.edge_v.xyz), length(b.edge_u.xyz + b.edge_v.xyz));
+    out.half_diagonal = max(out.half_diagonal, 0.5 * max(length(a.edge_u.xyz - a.edge_v.xyz), length(b.edge_u.xyz - b.edge_v.xyz)));
+    // From the centers: any point of the page lies within half its diagonal
+    // of its center, any point of a light within its half diagonal of its.
+    let pc = (page.lo + page.hi) * 0.5;
+    let ph = 0.5 * length(page.hi - page.lo);
+    let ca = light_center(a) - pc;
+    let cb = light_center(b) - pc;
+    out.far = max(length(ca), length(cb)) + ph + out.half_diagonal;
+    let na = normalize(cross(a.edge_u.xyz, a.edge_v.xyz));
+    let nb = normalize(cross(b.edge_u.xyz, b.edge_v.xyz));
+    let cos_c = min(abs(dot(na, normalize(ca))), abs(dot(nb, normalize(cb))));
+    // A direction between such points turns from the centers' by at most
+    // the arcsine of their offsets over the nearest distance.
+    if (out.near > 0.0) {
+        out.cos_min = cos_c - asin(min((ph + out.half_diagonal) / out.near, 1.0));
+    } else {
+        out.cos_min = -1.0;
+    }
+    return out;
+}
+
+// The largest change of a ratio baked on a lattice with rect light pose `a`
+// and re-baked with pose `b`, for texels in page box `page` whose bins'
+// weights spread by at most `kappa` (max over min) over their guard's
+// reach (M9 gate 6). Every point of the light moves at most δ seen from the
+// page (`light_shift`), at most sec²ρ δ in the window's plane within the
+// reach ρ, so the footprint A' lies within δ' of A, and |A' \ A| (and
+// |A \ A'|) is at most P δ' + π δ'² (Steiner, A convex, P its perimeter).
+// The bins' weighting is a density between g and κ g on the footprint, so
+// the two weightings differ in total variation by at most
+// ½(κ a/|A| + κ b/|A'| + κ max(a, b)/max(|A|, |A'|)) ≤ 1.5 κ S / Ω for
+// S = P δ' + π δ'² and Ω ≤ either footprint's area (a plane area is at
+// least its solid angle); a ratio, an average of bins' openness in [0, 1],
+// moves by at most that.
+fn lattice_bound(a: LightRect, b: LightRect, page: Box3, kappa: f32) -> f32 {
+    let delta = light_shift(a, b, page);
+    if (delta <= 0.0) { return 0.0; }
+    if (delta >= 1.0 || kappa >= 1.0e30) { return 1.0; }
+    let r = lattice_reach(a, b, page);
+    if (r.cos_min <= 0.0 || r.near <= 2.0 * r.half_diagonal) { return 1.0; }
+    let area = min(length(cross(a.edge_u.xyz, a.edge_v.xyz)), length(cross(b.edge_u.xyz, b.edge_v.xyz)));
+    let omega = area * r.cos_min / (r.far * r.far);
+    let lu = max(length(a.edge_u.xyz), length(b.edge_u.xyz));
+    let lv = max(length(a.edge_v.xyz), length(b.edge_v.xyz));
+    let perimeter = 4.0 * (asin(min(lu / (2.0 * r.near), 1.0)) + asin(min(lv / (2.0 * r.near), 1.0)));
+    let rho = min(GUARD * asin(min(r.half_diagonal / r.near, 1.0)) * 1.0001, 1.4);
+    let t = tan(rho);
+    let sec2 = 1.0 + t * t;
+    let moved = sec2 * delta;
+    let s = sec2 * perimeter * moved + 3.14159265 * moved * moved;
+    return min(1.5 * kappa * s / omega * 1.0001, 1.0);
+}
+
+// Whether a footprint on the lattice of rect light pose `a` (the page's
+// version) may no longer fit its window with the light at pose `b`, for
+// texels in page box `page` (M9 gate 6). The window holds a footprint up to
+// (1 + LATTICE_MARGIN) times the version's extent along each axis. An
+// extent grows by at most twice the largest difference between two of the
+// footprint's points' moves in the plane: the light's center moves by t
+// and its points by at most r more, so seen from the page the light's
+// points' moves differ by at most 3 (|t|/d)(diagonal/d) + r/d (the
+// direction map's Jacobian varies by 3/d² per unit length), then by sec²ρ
+// in the plane, plus the plane map's own variation (at most 3 tanρ sec⁴ρ
+// per radian) times the light's angular diameter and its move. An extent is
+// at least the footprint's smallest width, at least its area over its
+// diameter.
+fn lattice_grew(a: LightRect, b: LightRect, page: Box3) -> bool {
+    let r = lattice_reach(a, b, page);
+    if (r.cos_min <= 0.0 || r.near <= 2.0 * r.half_diagonal) { return true; }
+    let ca = light_center(a);
+    let cb = light_center(b);
+    let t = length(cb - ca);
+    var rest = 0.0;
+    for (var k = 0u; k < 4u; k++) {
+        rest = max(rest, length((rect_corner(b, k) - cb) - (rect_corner(a, k) - ca)));
+    }
+    let diameter = 2.0 * asin(min(r.half_diagonal / r.near, 1.0));
+    let rho = min(GUARD * 0.5 * diameter * 1.0001, 1.4);
+    let tr = tan(rho);
+    let sec2 = 1.0 + tr * tr;
+    let delta = light_shift(a, b, page);
+    let spread = sec2 * (3.0 * (t / r.near) * (2.0 * r.half_diagonal / r.near) + rest / r.near)
+        + 3.0 * tr * sec2 * sec2 * diameter * delta;
+    let area = min(length(cross(a.edge_u.xyz, a.edge_v.xyz)), length(cross(b.edge_u.xyz, b.edge_v.xyz)));
+    let width = area * r.cos_min / (r.far * r.far) / (sec2 * diameter);
+    return 2.0 * spread * 1.0001 > LATTICE_MARGIN * width;
+}
+
 // One thread per slot (rows of 65,535 workgroups): checks each moving
 // light's ledger. A page read in the frame before re-bakes its texels whose
 // bound exceeds ε (the whole page past its guard or its ring); another page
@@ -3975,8 +4362,8 @@ fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
     let set_aside = atomicLoad(&slot_stale[s]);
     if (info.w == 0u || set_aside == 1u) { return; }
     let visible = slot_used[s] + 1u >= vc.counts.y;
-    // A page set aside is re-baked whole once wanted; nothing else changes
-    // unless a light moved this frame.
+    // A page set aside is checked once wanted; nothing else changes unless a
+    // light moved this frame.
     let lit = vc.ledger.w >> 31u == 1u;
     if (set_aside == 2u && !visible) { return; }
     if (set_aside == 0u && !lit) { return; }
@@ -3999,10 +4386,22 @@ fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
         let page_flags = atomicLoad(&ledger[base + 4u]);
         let mixed_page = (page_flags & 1u) != 0u;
         let age = vc.counts.y - version;
-        var whole = age + 1u >= min(ring, MAX_OFFSET) || set_aside == 2u;
+        // A page set aside and now wanted is checked as any other: its
+        // records were kept while it was hidden, so only what is stale
+        // re-bakes (M9 gate 6; before, it re-baked whole).
+        var whole = age + 1u >= min(ring, MAX_OFFSET);
+        // On a lattice (M9 gate 6): a footprint its lattice could not hold,
+        // or may not hold now, re-bakes the page whole.
+        let lattice = !is_sphere(now);
+        if (lattice && !whole && (page_flags & 8u) != 0u) {
+            whole = true;
+            if (visible) { atomicAdd(&mover_stats[22], 1u); }
+        }
         var stale = array<u32, 3>(0u, 0u, 0u);
         var count = 0u;
         var bound = 0.0;
+        // On a lattice: mixed texels held within their bound (M9 gate 6).
+        var held = false;
         if (!whole) {
             let d0 = light_shift(light_poses[(version % ring) * lights_n + l], now, page);
             // Within the slack every texel that is not mixed holds; past it,
@@ -4019,18 +4418,43 @@ fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
                 continue;
             } else {
                 if (visible) { atomicAdd(&mover_stats[12], 1u); }
+                // On a lattice, mixed texels hold while their bound since
+                // their last bake stays within a hashed share of ε (a half to
+                // all, so pages baked together spread their re-bakes); those
+                // marked unbounded re-bake whenever the light moves.
+                if (lattice) {
+                    let since = atomicLoad(&ledger[base + 3u]);
+                    let kappa = bitcast<f32>(atomicLoad(&ledger[base + 2u]));
+                    if (vc.counts.y - since < ring) {
+                        let b = lattice_bound(light_poses[(since % ring) * lights_n + l], now, page, kappa);
+                        let held_share = 0.5 + 0.5 * f32(vc_hash(vec3<u32>(s, since, 0x27d4eb2du)) & 0xffffu) / 65535.0;
+                        held = b <= bitcast<f32>(vc.ledger.z) * held_share;
+                        // Held texels must still fit their lattice's window
+                        // (clear ones need not: either cone sees nothing).
+                        if (held && lattice_grew(light_poses[(version % ring) * lights_n + l], now, page)) {
+                            held = false;
+                            if (visible) { atomicAdd(&mover_stats[22], 1u); }
+                        }
+                        if (held) { bound = b; }
+                    }
+                }
                 // Mixed texels: their bound, the band the light's edge swept
                 // over the unshadowed light plus ε for snapping, exceeds ε
                 // once the light has moved (this pass runs only then), so
-                // they re-bake.
+                // they re-bake (on a lattice, past their share of ε).
+                let want = select(3u, 7u, held);
                 for (var k = 0u; k < PAGE_TEXELS; k++) {
                     let half = (atomicLoad(&ledger[base + 5u + k / 2u]) >> (16u * (k % 2u))) & 0xffffu;
-                    if ((half & 3u) == 3u) {
+                    if ((half & want) == want) {
                         stale[k / 32u] |= 1u << (k % 32u);
                         count++;
                     }
                 }
-                whole = count == PAGE_TEXELS;
+                if (held && visible) {
+                    atomicAdd(&mover_stats[21], 1u);
+                    atomicAdd(&mover_stats[23], count);
+                }
+                whole = count == PAGE_TEXELS && !held;
             }
         }
         if (whole) { count = PAGE_TEXELS; }
@@ -4074,6 +4498,9 @@ fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
                     n++;
                 }
             }
+            // Its mixed texels baked now (M9 gate 6), unless they held and
+            // only the unbounded ones re-bake.
+            if (!held) { atomicStore(&ledger[base + 3u], vc.counts.y); }
         }
         atomicAdd(&mover_stats[9], count);
         if (!counted) {
@@ -4081,6 +4508,9 @@ fn vc_ledger(@builtin(global_invocation_id) gid: vec3<u32>) {
             atomicAdd(&mover_stats[8], 1u);
         }
     }
+    // A page set aside with nothing stale left to re-bake is shown again
+    // (one with texels re-baked is shown by the fill).
+    if (set_aside == 2u && entry == NONE) { atomicStore(&slot_stale[s], 0u); }
 }
 
 // --- Bounce light in the view cache (M10 gate 1). ---

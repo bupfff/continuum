@@ -74,7 +74,13 @@ impl Cache {
     /// with moving lights, the ledger does; either sizes the bake and the
     /// fill.
     fn encode_bake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 6]) {
-        self.encode_bake_passes(encoder, counts, None);
+        self.encode_bake_passes(encoder, counts, None, false);
+    }
+
+    /// `encode_bake` for a diagnostic re-bake that keeps the moving lights'
+    /// ledger records: pages re-bake on their own lattices (M9 gate 6).
+    fn encode_rebake(&self, encoder: &mut wgpu::CommandEncoder, counts: [u32; 6]) {
+        self.encode_bake_passes(encoder, counts, None, true);
     }
 
     /// `encode_bake`'s passes, or with `only`, that one pass alone and
@@ -85,6 +91,7 @@ impl Cache {
         encoder: &mut wgpu::CommandEncoder,
         counts: [u32; 6],
         only: Option<usize>,
+        keep_ledger: bool,
     ) -> Vec<&'static str> {
         let groups = |n: u32| Dispatch::Groups(n.div_ceil(64), 1);
         let slots = |n: u32| {
@@ -104,7 +111,7 @@ impl Cache {
         let lit = counts[5] > 0 && self.moving_lights;
         let indirect = moved || lit;
         if let Some((passes, binds)) = &self.movers {
-            if self.moving_lights && counts[3] > 0 {
+            if self.moving_lights && counts[3] > 0 && !keep_ledger {
                 list.push(("ledger reset", &passes[4], &binds[4], groups(counts[3])));
             }
             if moved {
@@ -1685,11 +1692,11 @@ impl InstancedRenderer {
         // Each bake pass on its own, waited for.
         if let (Some(cache), Some(counts)) = (&self.cache, counts) {
             let mut none = self.device.create_command_encoder(&Default::default());
-            let labels = cache.encode_bake_passes(&mut none, counts, Some(usize::MAX));
+            let labels = cache.encode_bake_passes(&mut none, counts, Some(usize::MAX), false);
             for (k, label) in labels.into_iter().enumerate() {
                 let pass_start = Instant::now();
                 let mut encoder = self.device.create_command_encoder(&Default::default());
-                cache.encode_bake_passes(&mut encoder, counts, Some(k));
+                cache.encode_bake_passes(&mut encoder, counts, Some(k), false);
                 self.queue.submit([encoder.finish()]);
                 self.wait();
                 if k < 8 {
@@ -1798,8 +1805,10 @@ impl InstancedRenderer {
     /// Diagnostics (M9 gate 2): for moving light `light`, re-bakes every
     /// page shading may read from scratch and compares each page's largest
     /// change of a texel's ratio with the bound the ledger certified for it.
-    /// Restores the cache afterwards, so later frames run as they would
-    /// have. Waits for the GPU.
+    /// A moving rect light re-bakes on each page's own lattice (M9 gate 6:
+    /// the ledger's records are kept for the re-bake). Restores the cache
+    /// afterwards, so later frames run as they would have. Waits for the
+    /// GPU.
     pub fn verify_ledger(&mut self, light: usize) -> LedgerCheck {
         let mut check = LedgerCheck::default();
         let Some(j) = self.moving.iter().position(|&l| l == light) else {
@@ -1839,7 +1848,7 @@ impl InstancedRenderer {
             let counts = cache.state.upload_rebake(&self.queue, part);
             let mut encoder = device.create_command_encoder(&Default::default());
             cache.state.encode_clear(&mut encoder);
-            cache.encode_bake(&mut encoder, counts);
+            cache.encode_rebake(&mut encoder, counts);
             self.queue.submit([encoder.finish()]);
             device
                 .poll(wgpu::PollType::wait_indefinitely())
@@ -1868,6 +1877,21 @@ impl InstancedRenderer {
                 change = change.max((before[at] - after[at]).abs());
             }
             let bound = bounds[slot as usize * moving + j];
+            if std::env::var_os("CONTINUUM_LEDGER_PAGES").is_some() {
+                let words: &[u32] = bytemuck::cast_slice(&records);
+                let base = (slot as usize * moving + j) * 48;
+                let r = &words[base..base + 48];
+                if r[4] & 1 != 0 {
+                    eprintln!(
+                        "page {slot}: version {}, slack {:e}, kappa {:e}, since {}, flags {}, bound {bound:e}, change {change:e}",
+                        r[0],
+                        f32::from_bits(r[1]),
+                        f32::from_bits(r[2]),
+                        r[3],
+                        r[4]
+                    );
+                }
+            }
             check.pages += 1;
             check.largest_change = check.largest_change.max(change);
             check.largest_bound = check.largest_bound.max(bound);
@@ -1880,11 +1904,11 @@ impl InstancedRenderer {
                     let base = (slot as usize * moving + j) * 48;
                     let r = &words[base..base + 48];
                     eprintln!(
-                        "slot {slot}: version {}, guard {:e}, u_min {:e}, alpha {:e}, flags {}, bound {bound}",
+                        "slot {slot}: version {}, slack {:e}, kappa {:e}, since {}, flags {}, bound {bound}",
                         r[0],
                         f32::from_bits(r[1]),
                         f32::from_bits(r[2]),
-                        f32::from_bits(r[3]),
+                        r[3],
                         r[4]
                     );
                     for k in 0..PAGE_TEXELS as usize {

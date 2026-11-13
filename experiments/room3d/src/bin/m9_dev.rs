@@ -1,5 +1,7 @@
 //! M9 development: where a frame's time goes with movers (not a gate).
 //! `cargo run --release -p room3d --bin m9_dev -- <moving 0|1> <frames>`
+//! [sun] [real: a real sun's speed] [nocap: no frame-period cap] [profile]
+//! [720] [trace] [save]
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +20,15 @@ fn main() {
     } else {
         (640, 360)
     };
-    let kernel = MaskConeKernel::new().unwrap();
+    let kernel = if args.iter().any(|a| a == "work") {
+        MaskConeKernel::new_with(continuum_gpu::KernelOptions {
+            count_work: true,
+            ..Default::default()
+        })
+        .unwrap()
+    } else {
+        MaskConeKernel::new().unwrap()
+    };
     kernel.set_prefilter(1.0);
     kernel.set_hardware_rays(hw);
     let field = Field::new(1_000_000, DVec3::ZERO);
@@ -43,6 +53,30 @@ fn main() {
         })
         .create_view(&Default::default());
     let sun_mode = args.iter().any(|a| a == "sun");
+    let real = args.iter().any(|a| a == "real");
+    let options = CacheOptions {
+        frame_budget_ms: if args.iter().any(|a| a == "nocap") {
+            0.0
+        } else {
+            CacheOptions::default().frame_budget_ms
+        },
+        ..Default::default()
+    };
+    let options = match args.iter().find_map(|a| a.strip_prefix("budget=")) {
+        Some(n) => CacheOptions {
+            frame_target_ms: 0.0,
+            bake_budget: n.parse().unwrap(),
+            ..options
+        },
+        None => options,
+    };
+    let options = match args.iter().find_map(|a| a.strip_prefix("max=")) {
+        Some(n) => CacheOptions {
+            bake_budget: n.parse().unwrap(),
+            ..options
+        },
+        None => options,
+    };
     let movable: Vec<usize> = if sun_mode {
         Vec::new()
     } else {
@@ -52,7 +86,8 @@ fn main() {
     let sun_at = |f: usize| {
         let mut l = lights[0];
         if let continuum_gpu::Emitter::Rect(mut rect) = l.emitter {
-            let r = Mat3::from_rotation_z((f as f32 / 240.0).to_radians());
+            let per_frame = if real { 1.0 / 14_400.0 } else { 1.0 / 240.0 };
+            let r = Mat3::from_rotation_z((f as f32 * per_frame).to_radians());
             rect.corner = center + r * (rect.corner - center);
             rect.edge_u = r * rect.edge_u;
             rect.edge_v = r * rect.edge_v;
@@ -69,14 +104,19 @@ fn main() {
         &lights,
         &field.scene,
         origin,
-        cache.then(CacheOptions::default),
+        cache.then_some(options),
         &movable,
         if sun_mode { &[0] } else { &[] },
     );
     let forward = (ground.target - ground.eye).normalize();
     let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
     let profiled = args.iter().any(|a| a == "profile");
+    let profile_from: usize = args
+        .iter()
+        .find_map(|a| a.strip_prefix("profile_from="))
+        .map_or(0, |n| n.parse().unwrap());
     let mut prof = [Duration::ZERO; 5];
+    let mut passes: Vec<(&'static str, Duration)> = Vec::new();
     let mut set = Duration::ZERO;
     let mut call = Duration::ZERO;
     let begin = Instant::now();
@@ -106,20 +146,31 @@ fn main() {
         }
         set += s.elapsed();
         let s = Instant::now();
-        if profiled {
+        if profiled && f >= profile_from {
             let p = r.frame_profiled(camera, &target);
             prof[0] += p.planning;
             prof[1] += p.bake;
             prof[2] += p.visibility;
             prof[3] += p.shading;
             prof[4] += p.readback;
+            for (k, &(label, d)) in p.bake_passes.iter().enumerate() {
+                if label.is_empty() {
+                    continue;
+                }
+                if let Some(e) = passes.iter_mut().find(|e| e.0 == label) {
+                    e.1 += d;
+                } else {
+                    let _ = k;
+                    passes.push((label, d));
+                }
+            }
         } else {
             r.frame(camera, &target);
         }
         call += s.elapsed();
     }
     if profiled {
-        let f = |d: Duration| d.as_secs_f64() * 1e3 / frames as f64;
+        let f = |d: Duration| d.as_secs_f64() * 1e3 / (frames - profile_from) as f64;
         println!(
             "profiled: planning {:.2}, bake {:.2}, visibility {:.2}, shading {:.2}, readback {:.2} ms",
             f(prof[0]),
@@ -128,6 +179,9 @@ fn main() {
             f(prof[3]),
             f(prof[4])
         );
+        for (label, d) in &passes {
+            println!("  bake pass {label}: {:.3} ms", f(*d));
+        }
     }
     r.finish();
     let total = begin.elapsed();
@@ -154,11 +208,23 @@ fn main() {
             .unwrap();
     }
     let log = r.cache_log();
+    let trace_step: usize = args
+        .iter()
+        .find_map(|a| a.strip_prefix("step="))
+        .map_or(10, |n| n.parse().unwrap());
     if args.iter().any(|a| a == "trace") {
-        for s in log.iter().step_by(10) {
+        for s in log.iter().step_by(trace_step) {
             println!(
-                "frame {}: budget {}, spent {}, baked {} pages, GPU bake {:.2} ms, camera {:.2} ms, rebaked {} pages {} texels, candidates {}, invalidated {}, missed {}, visible {}, fallback {}",
+                "frame {}: ledger pages {} texels {}, checked {}, mixed {}, held {}, grew {}, unbounded {}, whole {}; budget {}, spent {}, baked {} pages, GPU bake {:.2} ms, camera {:.2} ms, rebaked {} pages {} texels, candidates {}, invalidated {}, missed {}, visible {}, fallback {}",
                 s.frame,
+                s.ledger_pages,
+                s.ledger_texels,
+                s.ledger_checked,
+                s.ledger_mixed,
+                s.ledger_held,
+                s.ledger_grew,
+                s.ledger_unbounded,
+                s.ledger_whole,
                 s.budget,
                 s.spent,
                 s.pages_baked,
@@ -172,6 +238,9 @@ fn main() {
                 s.visible_pages,
                 s.fallback_pixels
             );
+            if args.iter().any(|a| a == "work") {
+                println!("  work {:?}", s.work);
+            }
         }
     }
     let n = log.len().max(1) as f64;

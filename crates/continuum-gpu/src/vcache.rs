@@ -299,6 +299,16 @@ pub struct CacheStats {
     /// Of those, pages passed whole (every texel fixed, clear or dark,
     /// within the guard).
     pub ledger_whole: u32,
+    /// Of those, pages whose mixed texels held within their bound on a
+    /// lattice (M9 gate 6) instead of re-baking.
+    pub ledger_held: u32,
+    /// Of those read, pages whose mixed texels re-baked because their
+    /// lattice might no longer hold the light's footprint, or re-baked whole
+    /// because it did not (M9 gate 6).
+    pub ledger_grew: u32,
+    /// Texels re-baked on held pages: those whose bins' weights are
+    /// unbounded, the light near or below their horizon (M9 gate 6).
+    pub ledger_unbounded: u32,
     /// Bounce light (M10 gate 1): samples baked in the frame.
     pub indirect_samples: u32,
     /// Of those, samples that met hits with no page resident (re-baked
@@ -2283,6 +2293,9 @@ impl VirtualCache {
         record.ledger_checked = mover[11];
         record.ledger_mixed = mover[12];
         record.ledger_whole = mover[13];
+        record.ledger_held = mover[21];
+        record.ledger_grew = mover[22];
+        record.ledger_unbounded = mover[23];
         record.indirect_incomplete = mover[15];
         record.sky_listed = mover[7];
         record.sky_rebaked += mover[19];
@@ -2934,7 +2947,22 @@ impl VirtualCache {
             }
             self.spent += bounce;
         }
+        if trace_jobs() {
+            eprintln!(
+                "jobs frame {}: budget {:.0}, spent {}, pages {}, jobs {}",
+                self.frame,
+                self.budget,
+                self.spent,
+                self.bake_list.len(),
+                self.jobs.len()
+            );
+        }
     }
+}
+
+fn trace_jobs() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CONTINUUM_TRACE_JOBS").is_some())
 }
 
 /// Diagnostics: the bounce samples' lighting-level wants kept a frame.

@@ -998,9 +998,28 @@ fn view_for(r: &Renderer) -> wgpu::TextureView {
 /// ledger certified, nor than ε.
 #[test]
 fn a_drifting_sun_stays_within_the_ledger() {
+    drifting_sun(0.002);
+}
+
+/// A sun at a real sun's speed (M9 gate 6): its shadows' edges hold within
+/// their certified bound on the light's lattice instead of re-baking every
+/// frame, and every page stays within its bound and ε.
+#[test]
+fn a_slow_sun_holds_its_shadows_edges_within_the_bound() {
+    let (held, changed) = drifting_sun(1.2e-6);
+    assert!(held > 0, "no page held its mixed texels");
+    assert!(
+        changed > 0,
+        "no held page changed: the bound was not exercised"
+    );
+}
+
+/// Drifts the sun by `speed` radians of azimuth a frame for 60 frames,
+/// checking the ledger every 10th; pages held and pages changed.
+fn drifting_sun(speed: f64) -> (u32, u32) {
     let s = scene(DVec3::ZERO);
     let sun = |frame: u32| {
-        let a = 0.002 * frame as f64;
+        let a = speed * frame as f64;
         let toward = DVec3::new(
             0.5 * a.cos() + 0.4 * a.sin(),
             -0.4 * a.cos() + 0.5 * a.sin(),
@@ -1026,15 +1045,17 @@ fn a_drifting_sun_stays_within_the_ledger() {
     for _ in 0..30 {
         r.render(camera(), &view);
     }
-    let mut rebaked = 0;
+    let (mut rebaked, mut held, mut changed) = (0, 0, 0);
     for frame in 1..=60 {
         r.set_light(0, sun(frame));
         r.render(camera(), &view);
         if let Some(stats) = r.stats() {
             rebaked += stats.ledger_texels;
+            held += stats.ledger_held;
             eprintln!(
-                "stats frame {}: moved {}, checked {}, whole {}, mixed {}, pages {}, texels {}, invalid {}",
+                "stats frame {}: held {}, moved {}, checked {}, whole {}, mixed {}, pages {}, texels {}, invalid {}",
                 stats.frame,
+                stats.ledger_held,
                 stats.moved,
                 stats.ledger_checked,
                 stats.ledger_whole,
@@ -1050,9 +1071,11 @@ fn a_drifting_sun_stays_within_the_ledger() {
             assert!(check.pages > 0, "no pages to check");
             assert_eq!(check.violations, 0, "a change beyond its bound: {check:?}");
             assert_eq!(check.over_epsilon, 0, "a change beyond ε: {check:?}");
+            changed += check.changed;
         }
     }
-    eprintln!("texels re-baked by the ledger: {rebaked}");
+    eprintln!("texels re-baked by the ledger: {rebaked}; pages held {held}");
+    (held, changed)
 }
 
 /// Bounce light in the view cache (M10 gate 1): it settles, adds light (most
