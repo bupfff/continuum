@@ -352,6 +352,11 @@ For a window, see `apps/viewer`, which flies through a file with
     slowly than frames render.
     Objects showing their proxy are traced through clusters of 32, so the
     top-level structure stays small as unique objects grow.
+  - Bounce light traces its rays through the hardware ray-tracing
+    structures camera rays use (M14 gate 10), so it needs no lighting
+    level loaded; `CacheOptions::frame_budget_ms` (11 ms by default) keeps
+    the cache's baking from pushing frames past it (36,864 rocks with a
+    sky and bounce: 99th percentile 14.5–15.0 ms).
   - `StreamOptions::fit_budget` (on by default) keeps the camera budget:
     while a view wants more than it holds, the pixel error the levels are
     chosen for grows (reported in `StreamStats::pixel_error`).

@@ -201,10 +201,10 @@ nothing). Four landmarks, in order:
    would need 7.6 GB more GPU memory) fly at about 5 ms a frame on a
    fanless laptop, no frame over 16.7 ms, keeping about 18 KB of GPU
    memory per rock, with 900,000 cached results checked against an
-   independent reference. A sky and bounce light now work with it too
-   (direct light still exact, bounce within half a percent), though not
-   yet within 60 fps at the largest scale. Still to come: that frame
-   budget, and faster settling on new ground.
+   independent reference. With a sky and bounce light too, it still flies
+   within 60 fps (about 10 ms a frame, direct light exact, bounce within
+   3.1% of Cycles on a reference scene). Still to come: faster settling on
+   new ground, and moving objects with it.
 2. **Lighting you can trust in motion.** The cache now always converges
    with bounce light (a loop that never settled is fixed); next, a faster
    sky warm-up, bounded error while flying, more bounces, a moving sun.
