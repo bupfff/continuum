@@ -1516,6 +1516,7 @@ impl InstancedRenderer {
     }
 
     fn frame_to(&mut self, camera: Camera, target: Option<&wgpu::TextureView>) {
+        let started = Instant::now();
         let mut cam = camera_uniform(camera, self.width, self.height, self.radiance);
         cam.right[3] = self.pixel_offset[0];
         cam.up[3] = self.pixel_offset[1];
@@ -1595,6 +1596,7 @@ impl InstancedRenderer {
         }
         if let Some(cache) = &mut self.cache {
             cache.state.after_submit(index);
+            cache.state.end_frame(started.elapsed());
         }
     }
 

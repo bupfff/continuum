@@ -122,7 +122,9 @@ pub struct CacheOptions {
     /// grows by 10%. Between 1,000 and `bake_budget`.
     pub frame_target_ms: f32,
     /// The frame period the bake keeps frames within, measured on the CPU
-    /// (M14 gate 9; 0: none), with a frame target (with `frame_target_ms`
+    /// as the renderer's own frame call, waiting for the GPU included (M14
+    /// gate 9; since M14 gate 11 not the caller's time between calls; 0:
+    /// none), with a frame target (with `frame_target_ms`
     /// 0 the budget stays fixed): while frames take longer, a cap on the bake
     /// budget shrinks in proportion; while they take less than 85% of it,
     /// the cap grows by 5% a frame. It catches what the GPU model does not
@@ -974,12 +976,14 @@ pub(crate) struct VirtualCache {
     /// The frame and submission whose slot use `used_readback` holds.
     used_pending: Option<(u32, wgpu::SubmissionIndex)>,
     used_requested: bool,
-    /// The current bake budget (cones per frame), and when the last frame
-    /// began (for its period).
+    /// The current bake budget (cones per frame).
     budget: f32,
     /// The cap on the bake budget kept by the frame period (M14 gate 9).
     cap: f32,
-    last_begin: Option<Instant>,
+    /// How long the renderer's last frame call took (M14 gate 11: its own
+    /// time, waiting for the GPU included, not the caller's between calls),
+    /// for the frame period.
+    last_frame: Option<Duration>,
     /// GPU timing, where the device has timestamp queries, and the bake
     /// model it feeds.
     pub(crate) timer: Option<GpuTimer>,
@@ -1445,7 +1449,7 @@ impl VirtualCache {
             } else {
                 options.bake_budget as f32
             },
-            last_begin: None,
+            last_frame: None,
             timer: device
                 .features()
                 .contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -2112,6 +2116,12 @@ impl VirtualCache {
         );
     }
 
+    /// The renderer's frame call took `took` (M14 gate 11): the period the
+    /// next frame's budget adapts to.
+    pub(crate) fn end_frame(&mut self, took: Duration) {
+        self.last_frame = Some(took);
+    }
+
     /// After the frame's submission (`index`): starts its readbacks, without
     /// waiting.
     pub(crate) fn after_submit(&mut self, index: wgpu::SubmissionIndex) {
@@ -2137,8 +2147,7 @@ impl VirtualCache {
     /// frame's bake.
     pub(crate) fn begin_frame(&mut self, device: &wgpu::Device, lit_resident: Option<&[bool]>) {
         let start = Instant::now();
-        let period = self.last_begin.map(|t| start - t);
-        self.last_begin = Some(start);
+        let period = self.last_frame.take();
         let slot = (self.frame % 2) as usize;
         if let Some(r) = lit_resident {
             self.lit_resident.clear();
