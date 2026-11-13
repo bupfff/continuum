@@ -428,9 +428,9 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-12, end of the eighth session)
+### 3.8 Next steps, in order (updated 2026-11-13, ninth session)
 
-**Start here (end of the eighth session, 2026-11-12).** The state in one
+**Start here (updated 2026-11-13, ninth session).** The state in one
 place, for a new conversation. Read this block, then the milestone table
 (§6) and the results files it names.
 
@@ -551,7 +551,18 @@ place, for a new conversation. Read this block, then the milestone table
   as lights (M10 G23–G24: 19.71% from Cycles, the faces showing emission
   without the light they reflect, worse supersampled for an unexplained
   reason), a second texture coordinate set, movers under a sky, moving
-  lights' dark state, new material or glTF features, Bevy work.
+  lights' dark state, new material or glTF features, Bevy work; the ray sky
+  with movers and streamed levels (it would trade M14's exact sky for a
+  converging one: rays see camera levels, not lighting levels).
+
+**The ninth session (2026-11-13), gate by gate** (listed first below, then
+the eighth's): a CI test failing since M14 G9 exposed a real bug (movers
+under a sky showed stale texels at small budgets), fixed; then M9 G6
+(moving sun at real speed), M5 G13 (sky through rays), M14 G11 (the cap
+times the renderer's own frames), M4 G12 (pages requested three levels
+finer; the error while flying measured), M10 G25 (more than one bounce),
+all passed. Dev tools added: `sky_dev`, `sky_rays_dev`, `flight_error_dev`,
+`bounces_dev`, `m9_dev` modes (`real`, `nocap`, `budget=`, `profile_from=`).
 
 **The eighth session (2026-11-12), gate by gate:**
 
