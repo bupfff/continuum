@@ -303,6 +303,10 @@ For a window, see `apps/viewer`, which flies through a file with
     within a frame-time budget, coarse first. Shadows are softer while
     flying and sharpen when the view settles. `Renderer::is_settled` tells
     when the view's lighting is complete.
+  - While flying, pixels ask for pages up to three levels finer than the
+    coarse ones shown (`CacheOptions::refine_levels`). On a fast flight
+    over the million boulders the image is about 21% from fully settled
+    ones (M4 gate 12): measured, not bounded.
   - Off, every pixel traces a cone per light every frame: exact, and slow at
     scale.
   - Tuning lives in `CacheOptions`.
@@ -374,6 +378,12 @@ For a window, see `apps/viewer`, which flies through a file with
   - `StreamOptions::fit_budget` (on by default) keeps the camera budget:
     while a view wants more than it holds, the pixel error the levels are
     chosen for grows (reported in `StreamStats::pixel_error`).
+  - A coarser level shades with its own vertex normals. Giving it the
+    finest surface's normals at its vertices keeps the shading detail it
+    dropped (the test rocks do: their settled colour gap to the finest
+    falls from about 2.2% to 1.4%, M14 gate 13).
+  - Levels come from the caller: imported glTF meshes have none (there is
+    no simplifier yet).
   - Hardware camera rays only; not with movers, vertex colors, normal maps,
     cutouts or blending on the levels. `Renderer::stream_stats` reports
     what it did.

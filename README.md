@@ -149,6 +149,7 @@ Selected numbers (1280×720, Apple M4, release builds):
 | Moving objects among a million | 1.06–1.09× a still frame, never stale | M9 G1 |
 | A sun moving at real speed over the million | 0.98–1.02× a still sun, every shown result within a certified bound | M9 G6 |
 | A view with a sky, from an empty cache | warm in 166–400 frames (cones: 1,827–15,905) | M5 G13 |
+| Light bouncing around a closed room | 6.5% from Cycles with 8 bounces (45% with one) | M10 G25 |
 | Changing a light's color | free and exact: nothing is re-computed | M5 G6 |
 
 ## What it can do today
@@ -178,16 +179,19 @@ Honest about where it stands:
   (Vulkan, software adapter) and that the shaders compile for Windows
   (DX12). NVIDIA, AMD and real Windows GPUs are untested.
 - **One ray per pixel,** so distant detail aliases (shimmering far away).
-- **The sky warms up slowly** in the cache: a new view takes 120–300
-  frames to come within 5% of its full sky light.
+- **The sky warms in a few hundred frames** (hardware rays); with moving
+  objects, streamed detail or glass it falls back to a slower path that
+  takes thousands of frames.
 - **Rigid motion only:** no skinned or morphing meshes yet.
-- **Bounce light** is one bounce, and not yet with moving objects.
+- **Bounce light** is one bounce by default (more on request), not yet
+  with moving objects; several bounces are untried with streaming.
 - **Transparency** needs hardware ray queries.
 - **Fanless laptops** slow down under minutes of sustained load.
 - **Streaming is new:** it needs hardware ray queries; streamed lighting
   works with lights, a sky and bounce light but not yet with moving
-  objects; coarser versions of objects shade slightly smoother
-  (about 1–1.6% colour difference when settled).
+  objects; coarser versions of objects shade slightly differently
+  (about 1.2–1.5% colour difference when settled, with the finest
+  version's normals); imported meshes have no coarser versions yet.
 
 ## Where it is going
 
@@ -225,7 +229,10 @@ nothing). Four landmarks, in order:
    pixels read those instead of tracing every tiny surface. Accuracy is
    answered (a fifth to an eighth of one-ray-per-pixel's error on the
    million-boulder field); speed is not (122–135 ms a frame), so it is not
-   in the renderer yet.
+   in the renderer yet. The cost is each pixel walking down to individual
+   boulders; next is a design where the scene's hierarchy holds the
+   coverage of what lies beneath each node, so a distant pixel reads one
+   node instead.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
