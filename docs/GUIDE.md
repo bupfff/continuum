@@ -62,13 +62,16 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   (`Animations::pose`, for `set_transform`). Translation and rotation
   channels, step, linear and cubic-spline; scale channels, morph weights
   and baked instances (non-uniform scale) do not move.
-- **Moving lights, experimental.** Lights listed in
-  `RendererOptions::moving_lights` move (`Renderer::set_light`; not
-  spots). The cache's ledger never shows stale light (M9 gate 2). But
-  while a light moves, pages off screen are set aside and show as missing
-  when they come back into view: a third of the pixels in a fast flight
-  with a fast sun. Not yet with movers or a sky in the cache. Lights
-  change color and intensity freely either way.
+- **Moving lights.** Lights listed in `RendererOptions::moving_lights`
+  move (`Renderer::set_light`; not spots). The cache's ledger never shows a
+  result further from a fresh one than its certified bound and
+  `CacheOptions::ledger_epsilon` (M9 gates 2, 4 and 6). A moving
+  rectangular light (a sun) at a real sun's speed costs about what a still
+  one does: shadow edges hold until their bound reaches ε (M9 gate 6). A
+  fast-moving light re-bakes shadow edges every frame, and pages off screen
+  that need it are hidden until wanted again. Moving sphere lights re-bake
+  shadow edges whenever they move. Not yet with movers or a sky in the
+  cache. Lights change color and intensity freely either way.
 - **Materials.** `InstancedScene::geometry_materials` takes
   metallic and roughness (glTF's model) for the cache's shading: specular
   from lights and one glossy reflection ray per pixel. It is 5.85% from
