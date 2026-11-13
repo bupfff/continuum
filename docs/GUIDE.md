@@ -72,6 +72,14 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   that need it are hidden until wanted again. Moving sphere lights re-bake
   shadow edges whenever they move. Not yet with movers or a sky in the
   cache. Lights change color and intensity freely either way.
+- - **Bounce light.** `CacheOptions::indirect` adds one bounce of diffuse
+  light (M10 gate 1). `CacheOptions::bounces` carries it further: a bounce
+  sample gathers the bounce light of the pages it hits, and pages re-bake
+  until their hits hold enough. A closed room lit by one panel goes from
+  45% to 6.5% of Cycles' 12-bounce image with 8 (M10 gate 25), settling in
+  80 frames; outdoors it adds little and costs about 7× the bounce samples.
+  The setting is a floor (samples can hold a bounce or so more). Not yet
+  tried with streamed levels or movers.
 - **Materials.** `InstancedScene::geometry_materials` takes
   metallic and roughness (glTF's model) for the cache's shading: specular
   from lights and one glossy reflection ray per pixel. It is 5.85% from

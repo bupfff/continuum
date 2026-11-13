@@ -160,7 +160,9 @@ Selected numbers (1280×720, Apple M4, release builds):
   maps, emission (which lights its surroundings), emissive textures, vertex
   colors, alpha cutouts, alpha blending for glass, double-sided faces,
   texture transforms and wrap modes.
-- **One bounce of indirect light**, in the cache.
+- **Indirect light**, in the cache: one bounce by default, more on request
+  (`CacheOptions::bounces`; a closed room goes from 45% to 6.5% of Cycles'
+  fully bounced image with eight).
 - **Moving objects**, exactly, in the same frame; glTF animations play
   through them.
 - **glTF 2.0** import and export, with cameras, lights and animations.
@@ -215,7 +217,9 @@ nothing). Four landmarks, in order:
    rays, closer to Cycles than before). The error while flying is now
    measured against fully settled views (about a fifth of the image on a
    fast flight over the boulder field, mostly from the number of distinct
-   objects needing lighting at once); next, bounding it, and more bounces.
+   objects needing lighting at once), and light can bounce more than once
+   (interiors from 45% to 6.5% of Cycles' fully bounced image). Next,
+   bounding the error while flying.
 3. **Detail smaller than a pixel, without shimmer.** Each object type
    gets a small precomputed map of how it looks from every direction, and
    pixels read those instead of tracing every tiny surface. Accuracy is
