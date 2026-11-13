@@ -12,7 +12,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use continuum::glam::{DVec3, Mat3, Vec3};
+use continuum::glam::{DVec3, Mat3, Vec2, Vec3};
 use continuum::mesh::Surface;
 use std::sync::Arc;
 
@@ -40,6 +40,7 @@ pub struct Shape {
     waves: Vec<[(Vec3, f32); WAVES]>,
     amplitude: f32,
     falloff: f32,
+    finest_normals: bool,
 }
 
 /// The rocks' displacement: the first octave's amplitude (a share of the
@@ -48,6 +49,10 @@ pub struct Shape {
 pub struct Detail {
     pub amplitude: f32,
     pub falloff: f32,
+    /// Whether camera levels coarser than the finest carry the finest
+    /// surface's normals at their vertices (M14 gate 12), the tilt of the
+    /// octaves they drop, instead of their own smoother ones.
+    pub finest_normals: bool,
 }
 
 impl Default for Detail {
@@ -55,6 +60,7 @@ impl Default for Detail {
         Detail {
             amplitude: 0.16,
             falloff: 1.8,
+            finest_normals: true,
         }
     }
 }
@@ -81,6 +87,7 @@ impl Shape {
             waves,
             amplitude: detail.amplitude,
             falloff: detail.falloff,
+            finest_normals: detail.finest_normals,
         }
     }
 
@@ -104,7 +111,42 @@ impl Shape {
     /// finest) as a surface.
     pub fn surface(&self, level: usize) -> Surface {
         let nu = BASE_SEGMENTS << level;
-        let s = Surface::parametric(nu, nu / 2, |u, v| self.point(u, v, level + 1));
+        // A camera level coarser than the finest (M14 gate 12): its
+        // vertices carry the finest surface's normals instead of its own
+        // smoother ones, so it shades with the tilt of the octaves it drops
+        // (at its vertices' spacing).
+        let finest = self.finest_normals && level >= 1 && level + 1 < OCTAVES;
+        let point = |u: f32, v: f32| self.point(u, v, level + 1);
+        let mut s = if finest {
+            Surface::parametric_unshaded(nu, nu / 2, point)
+        } else {
+            Surface::parametric(nu, nu / 2, point)
+        };
+        if finest {
+            // Once per grid vertex (shared by about six triangles); the face's
+            // normal at the poles, where the chart folds.
+            let nv = nu / 2;
+            let amplitudes = self.amplitudes();
+            let mut grid: Vec<Option<Option<Vec3>>> = vec![None; (nu + 1) * (nv + 1)];
+            s.normals = Vec::with_capacity(s.triangles.len());
+            for t in 0..s.triangles.len() {
+                let tri = s.triangles[t];
+                let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
+                let corners = std::array::from_fn(|k| {
+                    let uv = s.uv[t][k];
+                    let i = ((uv.x * nu as f32).round() as usize).min(nu);
+                    let j = ((uv.y * nv as f32).round() as usize).min(nv);
+                    let n = *grid[i * (nv + 1) + j]
+                        .get_or_insert_with(|| self.finest_normal_with(uv, &amplitudes));
+                    match n {
+                        Some(n) if n.dot(face) < 0.0 => -n,
+                        Some(n) => n,
+                        None => face,
+                    }
+                });
+                s.normals.push(corners);
+            }
+        }
         // Outward, judged at the first triangle (as `field::boulder`).
         let t = s.triangles[0];
         if (t[1] - t[0]).cross(t[2] - t[0]).dot(t[0]) < 0.0 {
@@ -112,6 +154,49 @@ impl Shape {
         } else {
             s
         }
+    }
+
+    /// The finest surface's unit normal at chart coordinates `uv`, from the
+    /// displacement's derivatives (none at the poles, where the chart folds).
+    pub fn finest_normal(&self, uv: Vec2) -> Option<Vec3> {
+        self.finest_normal_with(uv, &self.amplitudes())
+    }
+
+    /// Each octave's amplitude (as `point` computes it).
+    fn amplitudes(&self) -> [f32; OCTAVES] {
+        std::array::from_fn(|o| {
+            let f = (2u32 << o) as f32;
+            self.amplitude * (2.0 / f).powf(self.falloff) / (WAVES as f32).sqrt()
+        })
+    }
+
+    /// [`Shape::finest_normal`] with the octaves' amplitudes given.
+    fn finest_normal_with(&self, uv: Vec2, amplitudes: &[f32; OCTAVES]) -> Option<Vec3> {
+        let (theta, phi) = (TAU * uv.x, PI * uv.y);
+        let ((st, ct), (sp, cp)) = (theta.sin_cos(), phi.sin_cos());
+        if sp.abs() < 1e-4 {
+            return None;
+        }
+        let dir = Vec3::new(sp * ct, sp * st, -cp);
+        let dir_u = Vec3::new(-sp * st, sp * ct, 0.0) * TAU;
+        let dir_v = Vec3::new(cp * ct, cp * st, sp) * PI;
+        let (mut r, mut r_u, mut r_v) = (1.0, 0.0, 0.0);
+        for (o, waves) in self.waves.iter().enumerate() {
+            let f = (2u32 << o) as f32;
+            let a = amplitudes[o];
+            for (d, phase) in waves {
+                let (sin, cos) = (PI * f * d.dot(dir) + phase).sin_cos();
+                r += a * sin;
+                let slope = a * cos * PI * f;
+                r_u += slope * d.dot(dir_u);
+                r_v += slope * d.dot(dir_v);
+            }
+        }
+        let squash = Vec3::new(1.0, 1.0, self.squash);
+        let p_u = (dir_u * r + dir * r_u) * squash;
+        let p_v = (dir_v * r + dir * r_v) * squash;
+        let n = p_u.cross(p_v);
+        (n.length() > 0.0).then(|| n.normalize())
     }
 
     /// At least as many triangles as level `level` has (`2 × nu × nv`;

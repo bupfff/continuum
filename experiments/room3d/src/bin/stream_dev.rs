@@ -699,6 +699,7 @@ fn main() {
     let detail = Detail {
         amplitude: arg(2, 0.16) as f32,
         falloff: arg(3, 1.8) as f32,
+        ..Default::default()
     };
     let frames = arg(4, 600.0) as usize;
     let budget = arg(5, 0.0) as u32;

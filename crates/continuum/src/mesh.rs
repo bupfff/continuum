@@ -234,6 +234,14 @@ impl Surface {
     /// normals around each vertex, merged by position, so seams and poles are
     /// smooth.
     pub fn parametric(nu: usize, nv: usize, f: impl Fn(f32, f32) -> Vec3) -> Surface {
+        let mut s = Surface::parametric_unshaded(nu, nv, f);
+        s.normals = smooth_normals(&s.triangles);
+        s
+    }
+
+    /// [`Surface::parametric`] without its smooth normals (left empty), for
+    /// a caller that sets its own.
+    pub fn parametric_unshaded(nu: usize, nv: usize, f: impl Fn(f32, f32) -> Vec3) -> Surface {
         let p = |i: usize, j: usize| f(i as f32 / nu as f32, j as f32 / nv as f32);
         let grid: Vec<Vec<Vec3>> = (0..=nu)
             .map(|i| (0..=nv).map(|j| p(i, j)).collect())
@@ -273,7 +281,6 @@ impl Surface {
                 }
             }
         }
-        s.normals = smooth_normals(&s.triangles);
         s
     }
 
