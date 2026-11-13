@@ -211,8 +211,11 @@ nothing). Four landmarks, in order:
    memory per rock, with 900,000 cached results checked against an
    independent reference. With a sky and bounce light too, it still flies
    within 60 fps (about 10 ms a frame, direct light exact, bounce within
-   3.1% of Cycles on a reference scene). Still to come: faster settling on
-   new ground, and moving objects with it.
+   3.1% of Cycles on a reference scene). Meshes that come with a single
+   level, such as imported ones, can now be simplified into coarser levels
+   that stream the same way and shade as close to the original as
+   hand-made levels. Still to come: faster settling on new ground, and
+   moving objects with it.
 2. **Lighting you can trust in motion.** The cache now always converges
    with bounce light (a loop that never settled is fixed); a sun moving at
    real speed costs what a still one does, with every cached result shown

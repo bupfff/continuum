@@ -347,6 +347,16 @@ For a window, see `apps/viewer`, which flies through a file with
     and follows the zoom (50° to 1.5° onto a rock 103 m away settles
     exact); it costs 0.33–0.42 ms a frame in flight, mostly building
     structures for levels as they load (`docs/results/m14-gate2.md`).
+  - Meshes that come with one level (imported ones):
+    `InstancedScene::simplify_geometries(min_triangles,
+    lighting_triangles)` gives each geometry of at least `min_triangles`
+    triangles coarser levels (`continuum::simplify::levels`: half-edge
+    collapses keeping the finest's vertices, normals and chart and texture
+    coordinates, seams in place) and keeps a level of about
+    `lighting_triangles` for lighting. Not yet for geometries with vertex
+    colors, normal maps, alpha cutoffs or blending. About 1.5 s for 65,536
+    triangles; shading as close to the finest as hand-made levels (M14
+    gate 15).
   - Levels need not be in memory: leave a `Level`'s surface empty (with
     `triangles`, a bound on its count) and give the scene a `LevelSource`
     (`InstancedScene::level_source`); worker threads produce levels as they
