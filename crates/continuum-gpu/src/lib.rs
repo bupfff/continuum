@@ -601,6 +601,8 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_near",
     "hw_m13_tile_roots",
     "hw_m13_bins",
+    "hw_m13_bin_args",
+    "hw_m13_bin_rays",
     "hw_m13_tiles",
     "hw_vc_bake_indirect",
     "hw_vc_bake_sky",
@@ -626,10 +628,15 @@ pub(crate) const HW_M13_CORNERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 82];
 pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 31, 32, 82];
 /// M13 gate 5: the tile pass after the corner rays, with the maps' texture
 /// (85) and sampler (86).
-pub(crate) const M13_TILES_BINDINGS: &[u32] = &[0, 3, 6, 7, 9, 10, 29, 30, 31, 82, 85, 86, 87];
+pub(crate) const M13_TILES_BINDINGS: &[u32] = &[0, 3, 6, 7, 9, 10, 29, 30, 82, 85, 86, 87, 88, 90];
 /// M13 gate 5: the roots pass, one invocation per tile listing the subtree
-/// roots its pixels walk (87).
-pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87];
+/// roots its pixels walk (87); it also restarts the bin rays' list (88).
+pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88];
+/// M13 gate 5: the pixels covered by their corners, and the list of those
+/// tracing bin rays (88); the list's dispatch arguments; the rays.
+pub(crate) const M13_BINS_BINDINGS: &[u32] = &[6, 31, 88];
+pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
+pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[2, 3, 6, 30, 32, 82, 88];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
@@ -1780,6 +1787,38 @@ impl MaskConeKernel {
             *self.m13_maps_info.borrow_mut() = (start.elapsed(), maps.len() * 4);
             if self.profile_stage.get() == 17 {
                 *self.m13_coverage.borrow_mut() = Some(self.coverage_texture(&maps));
+                // Each object's world bounding sphere about its map's centre
+                // (radius 0 without a map), so the walk tests and sets up an
+                // instance without its map's header and transform.
+                let spheres: Vec<[f32; 4]> = flat
+                    .ranges
+                    .iter()
+                    .map(|range| {
+                        let Some(k) = (0..maps[0] as usize).find(|&k| maps[1 + 8 * k] == range[2])
+                        else {
+                            return [0.0; 4];
+                        };
+                        let word = |i: usize| f32::from_bits(maps[1 + 8 * k + i]);
+                        let c = Vec3::new(word(2), word(3), word(4));
+                        let x = range[3];
+                        if x == hierarchy::NONE {
+                            return [c.x, c.y, c.z, word(5)];
+                        }
+                        let row = |j: usize| xforms[4 * x as usize + j];
+                        let s = row(3)[0];
+                        let w = Vec3::new(
+                            row(0)[0] * c.x + row(0)[1] * c.y + row(0)[2] * c.z,
+                            row(1)[0] * c.x + row(1)[1] * c.y + row(1)[2] * c.z,
+                            row(2)[0] * c.x + row(2)[1] * c.y + row(2)[2] * c.z,
+                        ) * s
+                            + Vec3::new(row(0)[3], row(1)[3], row(2)[3]);
+                        [w.x, w.y, w.z, word(5) * s]
+                    })
+                    .collect();
+                buffers.push((
+                    90,
+                    storage("object spheres", bytemuck::cast_slice(&spheres)),
+                ));
             }
             buffers.push((82, storage("coverage maps", bytemuck::cast_slice(&maps))));
         }

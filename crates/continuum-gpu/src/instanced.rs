@@ -18,13 +18,14 @@ use crate::{
     HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
     HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS,
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
-    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_ROOTS_BINDINGS,
-    M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
-    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
-    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS,
-    VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS,
-    VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS,
-    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_COVERAGE_BINDINGS,
+    M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_ROOTS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel,
+    RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
+    VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
+    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
+    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
+    uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -62,6 +63,8 @@ enum CameraDispatch {
     Probes,
     /// One invocation per 8×8 tile (M13 gate 5's roots pass).
     Tiles,
+    /// From the arguments the bin rays' list wrote (M13 gate 5).
+    M13Rays,
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -357,6 +360,10 @@ pub struct InstancedRenderer {
     binds: Vec<wgpu::BindGroup>,
     display_bind: wgpu::BindGroup,
     colors: wgpu::Buffer,
+    /// M13 gates 5–6: per frame, the pixels tracing bin rays and each
+    /// pixel's covered bins (binding 88), and the rays' dispatch arguments
+    /// (89).
+    m13_work: Option<(wgpu::Buffer, wgpu::Buffer)>,
     cache: Option<Cache>,
     /// The rendered image's size: the target's divided by `scale`.
     width: u32,
@@ -1043,9 +1050,14 @@ impl InstancedRenderer {
                     kernel.entry("hw_m13_tile_roots"),
                     M13_ROOTS_BINDINGS.to_vec(),
                 ),
+                (kernel.entry("hw_m13_bins"), M13_BINS_BINDINGS.to_vec()),
                 (
-                    kernel.entry("hw_m13_bins"),
-                    HW_M13_CORNERS_BINDINGS.to_vec(),
+                    kernel.entry("hw_m13_bin_args"),
+                    M13_BIN_ARGS_BINDINGS.to_vec(),
+                ),
+                (
+                    kernel.entry("hw_m13_bin_rays"),
+                    M13_BIN_RAYS_BINDINGS.to_vec(),
                 ),
                 (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
             ],
@@ -1137,6 +1149,8 @@ impl InstancedRenderer {
                 b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
                 b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
                 b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
+                b if b == M13_BIN_ARGS_BINDINGS => CameraDispatch::One,
+                b if b == M13_BIN_RAYS_BINDINGS => CameraDispatch::M13Rays,
                 _ => CameraDispatch::Screen,
             })
             .collect();
@@ -1219,6 +1233,7 @@ impl InstancedRenderer {
             dims_buf,
             binds: Vec::new(),
             colors,
+            m13_work: None,
             cache,
             width,
             height,
@@ -1373,9 +1388,10 @@ impl InstancedRenderer {
         all.push((6, &self.camera_buf));
         all.push((7, &self.colors));
         all.push((31, &vis));
-        // M13 gate 5: each 8×8 tile's subtree roots (a count, then up to 63).
+        // M13 gate 5: each 8×8 tile's subtree roots (a count, then up to 63,
+        // each with its projected box).
         let roots_size = if self.passes.iter().any(|(_, keep)| keep.contains(&87)) {
-            width.div_ceil(8) as u64 * height.div_ceil(8) as u64 * 64 * 4
+            width.div_ceil(8) as u64 * height.div_ceil(8) as u64 * 320 * 4
         } else {
             16
         };
@@ -1386,6 +1402,35 @@ impl InstancedRenderer {
             mapped_at_creation: false,
         });
         all.push((87, &roots));
+        // M13 gates 5–6: a count, then the pixels tracing bin rays and every
+        // pixel's covered bins; the rays' dispatch arguments apart (a buffer
+        // cannot be read for a dispatch and bound for storage in it).
+        self.m13_work = self
+            .passes
+            .iter()
+            .any(|(_, keep)| keep.contains(&88))
+            .then(|| {
+                let buffer = |label, size, usage| {
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size,
+                        usage: wgpu::BufferUsages::STORAGE | usage,
+                        mapped_at_creation: false,
+                    })
+                };
+                (
+                    buffer(
+                        "m13 work",
+                        (8 + 2 * width as u64 * height as u64) * 4,
+                        wgpu::BufferUsages::empty(),
+                    ),
+                    buffer("m13 rays args", 16, wgpu::BufferUsages::INDIRECT),
+                )
+            });
+        if let Some((work, args)) = &self.m13_work {
+            all.push((88, work));
+            all.push((89, args));
+        }
         if let Some(cache) = &self.cache {
             all.extend(cache.state.buffers.iter().map(|(b, buf)| (*b, buf)));
             all.push((41, cache.state.params()));
@@ -1515,6 +1560,11 @@ impl InstancedRenderer {
             }
             (CameraDispatch::Tiles, _) => {
                 pass.dispatch_workgroups(self.width.div_ceil(64), self.height.div_ceil(64), 1)
+            }
+            (CameraDispatch::M13Rays, _) => {
+                if let Some((_, args)) = &self.m13_work {
+                    pass.dispatch_workgroups_indirect(args, 0);
+                }
             }
             _ => pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1),
         }

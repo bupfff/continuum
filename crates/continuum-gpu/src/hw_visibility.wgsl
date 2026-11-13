@@ -572,13 +572,11 @@ fn g5_rect_bins(lo: vec2<f32>, hi: vec2<f32>, pix: vec2<f32>) -> u32 {
 // the distance times that; the next term is about rad / 2f of the radius
 // (under 0.3% at 8 pixels across). Each bin's coordinates in a direction's
 // map then cost two multiply-adds.
-fn instance_map_tex(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
-    let x = meshes[m].w;
-    let c_obj = vec3<f32>(bitcast<f32>(cov_maps[hdr + 2u]), bitcast<f32>(cov_maps[hdr + 3u]), bitcast<f32>(cov_maps[hdr + 4u]));
-    let r_obj = bitcast<f32>(cov_maps[hdr + 5u]);
-    let scale = select(1.0, xforms[4u * x + 3u].x, x != NONE);
-    let centre = m13_to_world(x, c_obj);
-    let radius = r_obj * scale;
+fn instance_map_tex(m: u32, pix: vec2<f32>) -> bool {
+    let sph = m13_spheres[m];
+    let radius = sph.w;
+    if (radius <= 0.0) { return false; }
+    let centre = sph.xyz;
     let rel = centre - camera.eye.xyz;
     let depth = dot(rel, camera.forward.xyz);
     if (depth - radius <= 1e-2) { return false; }
@@ -590,6 +588,9 @@ fn instance_map_tex(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
     // centre lies in the object's square).
     var todo = g5_rect_bins(cp - vec2<f32>(rad), cp + vec2<f32>(rad), pix) & g5_open;
     if (todo == 0u) { return true; }
+    let mesh = meshes[m];
+    let hdr = map_header(mesh.z);
+    let x = mesh.w;
     if ((G5_SKIP & 16u) != 0u) {
         for (var b = 0u; b < 16u; b++) {
             let p = pix + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25 + vec2<f32>(0.125);
@@ -681,9 +682,26 @@ fn instance_map_tex(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
 // --- The tiles' subtree roots (development after the first tile walk). ---
 
 @group(0) @binding(87) var<storage, read_write> m13_roots: array<u32>;
+// Per frame: the count of pixels tracing bin rays, then from word 8 the
+// pixels' list and after it every pixel's word: covered bins (bit b: bin
+// b), bit 16 if it traced bin rays, bit 17 if its corners resolved it.
+@group(0) @binding(88) var<storage, read_write> m13_work: array<atomic<u32>>;
+// The bin rays' dispatch arguments.
+@group(0) @binding(89) var<storage, read_write> m13_args: array<u32>;
+// Each object's world bounding sphere about its coverage map's centre
+// (radius 0: no map).
+@group(0) @binding(90) var<storage, read> m13_spheres: array<vec4<f32>>;
 
-// Roots a tile lists at most (word 0 of its 64 words is the count).
+fn m13_mask_word(pixel: u32) -> u32 {
+    return 8u + u32(camera.params.x) * u32(camera.params.y) + pixel;
+}
+
+// Roots a tile lists at most. A tile's words: the count, then per root
+// its node and (unless the node straddles the eye's plane) its projected
+// box in pixels, as f32 bits (lo, hi), so its pixels test it without
+// loading or projecting the node.
 const G5_ROOTS: u32 = 63u;
+const G5_TILE_WORDS: u32 = 320u;
 // A node is listed once its projected box is at most this many pixels
 // across: the pixels walk below it.
 const G5_CUT_PX: f32 = 8.0;
@@ -700,7 +718,9 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
     let tw = (u32(camera.params.x) + 7u) / 8u;
     let th = (u32(camera.params.y) + 7u) / 8u;
     if (gid.x >= tw || gid.y >= th) { return; }
-    let base = (gid.y * tw + gid.x) * (G5_ROOTS + 1u);
+    // The bin rays' list starts empty (it fills in `hw_m13_bins`).
+    if (gid.x == 0u && gid.y == 0u) { atomicStore(&m13_work[0], 0u); }
+    let base = (gid.y * tw + gid.x) * G5_TILE_WORDS;
     let lo = vec2<f32>(f32(gid.x * 8u), f32(gid.y * 8u));
     let hi = lo + vec2<f32>(8.0);
     set_rect_frustum(lo, hi);
@@ -719,7 +739,12 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
         let extent = sb.hi - sb.lo;
         if (node.info.y > 0u || (sb.behind == 0u && max(extent.x, extent.y) <= G5_CUT_PX)
             || n + sp + 2u > G5_ROOTS || sp + 2u > STACK) {
-            m13_roots[base + 1u + n] = id;
+            let at = base + 1u + 5u * n;
+            m13_roots[at] = id | select(0u, 0x80000000u, sb.behind != 0u);
+            m13_roots[at + 1u] = bitcast<u32>(sb.lo.x);
+            m13_roots[at + 2u] = bitcast<u32>(sb.lo.y);
+            m13_roots[at + 3u] = bitcast<u32>(sb.hi.x);
+            m13_roots[at + 4u] = bitcast<u32>(sb.hi.y);
             n++;
             continue;
         }
@@ -760,23 +785,34 @@ fn g5_first(x: bool) -> bool {
 // out (the bins' rays covered them), the maps read through the texture and
 // the exact box-face test. `on` turns false once the bins are full. Returns
 // the object nodes it visited.
-fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>) -> u32 {
+fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>, root_box: vec4<f32>, root_known: bool) -> u32 {
     let v = view_world();
     var visits = 0u;
     var sp = 1u;
     stack_set(0u, root);
     need_put(0u, *on);
+    var first = true;
     while (sp > 0u) {
         sp--;
         let n = stack_get(sp);
         let mine = need_get(sp) && *on;
+        let known = first && root_known;
+        first = false;
         if (!g5_any(mine)) { continue; }
         let node = nodes[n];
         var descend = false;
         if (mine) {
             visits++;
-            let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
-            var live = sb.behind != 2u && !frustum_misses_box(node.lo.xyz, node.hi.xyz);
+            // The root's box as the roots pass projected it (in front of
+            // the eye, inside the tile's frustum).
+            var sb: ScreenBox;
+            var live = true;
+            if (known) {
+                sb = ScreenBox(root_box.xy, root_box.zw, to_camera(v, (node.lo.xyz + node.hi.xyz) * 0.5).z, 0u);
+            } else {
+                sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+                live = sb.behind != 2u && !frustum_misses_box(node.lo.xyz, node.hi.xyz);
+            }
             // A node over full bins only (or none of the pixel's) cannot
             // change the pixel.
             if (live && sb.behind == 0u && (g5_rect_bins(sb.lo, sb.hi, pix) & g5_open) == 0u) { live = false; }
@@ -796,9 +832,8 @@ fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>) -> u32 {
                         let m = items[k];
                         // Large instances (too large or near for their maps,
                         // which `instance_map_tex` skips) the bins' rays covered.
-                        let hdr = map_header(meshes[m].z);
-                        if (hdr == NONE || (G5_SKIP & 4u) != 0u) { continue; }
-                        instance_map_tex(m, hdr, pix);
+                        if ((G5_SKIP & 4u) != 0u) { continue; }
+                        instance_map_tex(m, pix);
                     }
                     g5_refresh_open();
                     if (g5_open == 0u) { *on = false; }
@@ -828,21 +863,19 @@ fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>) -> u32 {
 
 // M13 gate 5's bins pass (profile stage 17), after `hw_m13_corners`: a
 // pixel whose four corners hit the same large object is covered. Another
-// traces its 16 bin rays (a bin whose ray meets a large object is covered)
-// only if one of the 16 corners of its 3×3 block hits a large object.
-// Writes into the pixel's `vis` word w its covered bins (bit b: bin b),
-// bit 16 if it traced bin rays and bit 17 if its corners resolved it.
+// is listed to trace its 16 bin rays (a bin whose ray meets a large object
+// is covered) only if one of the 16 corners of its 3×3 block hits a large
+// object. Starts each pixel's word.
 @compute @workgroup_size(8, 8)
 fn hw_m13_bins(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
     let pixel = gid.y * w + gid.x;
-    let pix = vec2<f32>(f32(gid.x), f32(gid.y));
     if (gid.x + 1u < w && gid.y + 1u < h) {
         let a = vis[pixel];
         if (a.x != NONE && a.y == 1u && vis[pixel + 1u].x == a.x && vis[pixel + w].x == a.x && vis[pixel + w + 1u].x == a.x) {
-            vis[pixel].w = 0xffffu | (1u << 17u);
+            atomicStore(&m13_work[m13_mask_word(pixel)], 0xffffu | (1u << 17u));
             return;
         }
     }
@@ -854,25 +887,45 @@ fn hw_m13_bins(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (vis[cy * w + cx].y == 1u) { near_large = true; }
         }
     }
-    var mask = 0u;
+    var word = 0u;
     if (near_large && (G5_SKIP & 1u) == 0u) {
-        mask = 1u << 16u;
-        let tz = camera.params.z;
-        let aspect = camera.params.x / camera.params.y;
-        for (var k = 0u; k < 16u; k++) {
-            let p = pix + (vec2<f32>(f32(k % 4u), f32(k / 4u)) + vec2<f32>(0.5)) * 0.25;
-            let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
-            let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
-            let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
-            let hit = hw_trace(camera.eye.xyz, dir, 0.0);
-            if (hit.x != NONE && m13_large(hit.x)) { mask |= 1u << k; }
-        }
+        word = 1u << 16u;
+        let i = atomicAdd(&m13_work[0], 1u);
+        atomicStore(&m13_work[8u + i], pixel);
     }
-    vis[pixel].w = mask;
+    atomicStore(&m13_work[m13_mask_word(pixel)], word);
+}
+
+// The bin rays' dispatch arguments: 16 rays a listed pixel, 64 a workgroup.
+@compute @workgroup_size(1)
+fn hw_m13_bin_args() {
+    let groups = (atomicLoad(&m13_work[0]) * 16u + 63u) / 64u;
+    let x = min(groups, 65535u);
+    m13_args[0] = x;
+    m13_args[1] = select(1u, (groups + x - 1u) / x, x > 0u);
+    m13_args[2] = 1u;
+}
+
+// One invocation per bin ray of a listed pixel: through the bin's centre;
+// a bin whose ray meets a large object is covered.
+@compute @workgroup_size(64)
+fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let t = (wg.y * nwg.x + wg.x) * 64u + li;
+    if (t >= atomicLoad(&m13_work[0]) * 16u) { return; }
+    let pixel = atomicLoad(&m13_work[8u + t / 16u]);
+    let k = t % 16u;
+    let w = u32(camera.params.x);
+    let p = vec2<f32>(f32(pixel % w), f32(pixel / w)) + (vec2<f32>(f32(k % 4u), f32(k / 4u)) + vec2<f32>(0.5)) * 0.25;
+    let tz = camera.params.z;
+    let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * camera.params.x / camera.params.y;
+    let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
+    let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+    let hit = hw_trace(camera.eye.xyz, dir, 0.0);
+    if (hit.x != NONE && m13_large(hit.x)) { atomicOr(&m13_work[m13_mask_word(pixel)], 1u << k); }
 }
 
 // M13 gate 5 (profile stage 17), one workgroup per 8×8 tile after
-// `hw_m13_tile_roots` and `hw_m13_bins`: each pixel not covered walks its
+// `hw_m13_tile_roots` and the bin rays: each pixel not covered walks its
 // tile's listed subtrees in order (instances through the maps' texture, far
 // nodes splatted) until its bins are full. Writes (coverage, object nodes
 // the pixel visited (0 where the corners resolved it), 2 × the tile's roots
@@ -886,19 +939,35 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     let pixel = gid.y * w + gid.x;
     let pix = vec2<f32>(f32(gid.x), f32(gid.y));
     var word = 0u;
-    if (inside) { word = vis[pixel].w; }
+    if (inside) { word = atomicLoad(&m13_work[m13_mask_word(pixel)]); }
     for (var b = 0u; b < 16u; b++) { pbin[b] = select(0.0, 1.0, (word & (1u << b)) != 0u); }
     let resolved = (word & (1u << 17u)) != 0u;
     let traced = (word & (1u << 16u)) != 0u;
     g5_open = ~word & 0xffffu;
     var on = inside && g5_open != 0u && (G5_SKIP & 2u) == 0u;
-    let base = (wid.y * ((w + 7u) / 8u) + wid.x) * (G5_ROOTS + 1u);
+    let base = (wid.y * ((w + 7u) / 8u) + wid.x) * G5_TILE_WORDS;
     let count = m13_roots[base];
     set_pixel_frustum(pix);
     var visits = 0u;
     for (var r = 0u; r < count; r++) {
         if (!g5_any(on)) { break; }
-        visits += g5_walk_subtree(m13_roots[base + 1u + r], pix, &on);
+        let at = base + 1u + 5u * r;
+        let id = m13_roots[at];
+        // A root in front of the eye over none of the pixel's open bins is
+        // skipped from its stored box.
+        var mine = on;
+        if ((id & 0x80000000u) == 0u) {
+            let lo = vec2<f32>(bitcast<f32>(m13_roots[at + 1u]), bitcast<f32>(m13_roots[at + 2u]));
+            let hi = vec2<f32>(bitcast<f32>(m13_roots[at + 3u]), bitcast<f32>(m13_roots[at + 4u]));
+            mine = mine && (g5_rect_bins(lo, hi, pix) & g5_open) != 0u;
+        }
+        if (!g5_any(mine)) { continue; }
+        // A pixel whose bins are full or that the root misses takes no part.
+        var walking = mine;
+        let known = (id & 0x80000000u) == 0u;
+        let rb = vec4<f32>(bitcast<f32>(m13_roots[at + 1u]), bitcast<f32>(m13_roots[at + 2u]), bitcast<f32>(m13_roots[at + 3u]), bitcast<f32>(m13_roots[at + 4u]));
+        visits += g5_walk_subtree(id & 0x7fffffffu, pix, &walking, rb, known);
+        if (mine && !walking) { on = false; }
     }
     if (inside) {
         var sum = 0.0;
