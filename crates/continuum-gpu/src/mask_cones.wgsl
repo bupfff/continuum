@@ -6308,55 +6308,71 @@ fn map_coverage_from(gid: vec3<u32>, rays_did_large: bool) -> vec3<f32> {
     let pix = vec2<f32>(f32(gid.x), f32(gid.y));
     set_pixel_frustum(pix);
     let v = view_world();
-    if (bins_full(false)) { return vec3<f32>(1.0, 0.0, 0.0); }
+    // As a packet (M5 gate 5's traversal; development after M13 gate 4): a
+    // subgroup walks the union of its pixels' walks, each pixel acting only
+    // on the nodes its own walk would visit, so their loads coincide. A
+    // pixel whose bins fill stops acting. Its coverage is the same (the
+    // bins combine independently of order).
+    var on = !bins_full(false);
     var object_nodes = 0u;
     sc_tri_nodes = 0u;
     var sp = 1u;
     stack_set(0u, 0u);
+    need_put(0u, on);
     while (sp > 0u) {
         sp--;
         let n = stack_get(sp);
+        let mine = need_get(sp) && on;
+        if (!packet_any(mine)) { continue; }
         let node = nodes[n];
-        object_nodes++;
-        let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
-        if (sb.behind == 2u) { continue; }
-        if (sb.behind == 0u && rect_overlap(sb, pix) <= 0.0) { continue; }
-        // A node over full bins only cannot change the pixel.
-        if (sb.behind == 0u && !touches_open_bin(sb, pix)) { continue; }
-        // Within a pixel, or (far, at grazing views) no taller than a bin:
-        // splat, spread over its projected box.
-        let extent = sb.hi - sb.lo;
-        if (sb.behind == 0u && node.info.z == 0u && light.objects.x != NONE
-            && (max(extent.x, extent.y) <= 1.0 || min(extent.x, extent.y) <= 0.25)) {
-            let dir = normalize(camera.eye.xyz - (node.lo.xyz + node.hi.xyz) * 0.5);
-            let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
-            if (sil > 1e-30) {
-                splat_bins(sb, pix, 1.0 - exp(-node_front_area(light.objects.x + n, dir) / sil), sil, false);
-                if (bins_full(false)) { break; }
+        var descend = false;
+        if (mine) {
+            object_nodes++;
+            let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+            var live = sb.behind != 2u;
+            if (live && sb.behind == 0u && rect_overlap(sb, pix) <= 0.0) { live = false; }
+            // A node over full bins only cannot change the pixel.
+            if (live && sb.behind == 0u && !touches_open_bin(sb, pix)) { live = false; }
+            if (live) {
+                // Within a pixel, or (far, at grazing views) no taller than a
+                // bin: splat, spread over its projected box.
+                let extent = sb.hi - sb.lo;
+                if (sb.behind == 0u && node.info.z == 0u && light.objects.x != NONE
+                    && (max(extent.x, extent.y) <= 1.0 || min(extent.x, extent.y) <= 0.25)) {
+                    let dir = normalize(camera.eye.xyz - (node.lo.xyz + node.hi.xyz) * 0.5);
+                    let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
+                    if (sil > 1e-30) {
+                        splat_bins(sb, pix, 1.0 - exp(-node_front_area(light.objects.x + n, dir) / sil), sil, false);
+                        if (bins_full(false)) { on = false; }
+                    }
+                } else if (node.info.y > 0u) {
+                    for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                        let m = items[k];
+                        if (rays_did_large && m13_large(m)) { continue; }
+                        let hdr = map_header(meshes[m].z);
+                        if (!(hdr != NONE && instance_map_bins(m, hdr, pix)) && !rays_did_large) { mesh_bins(m, pix, sp); }
+                    }
+                    if (bins_full(false)) { on = false; }
+                } else {
+                    descend = true;
+                }
             }
-            continue;
         }
-        if (node.info.y > 0u) {
-            for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                let m = items[k];
-                if (rays_did_large && m13_large(m)) { continue; }
-                let hdr = map_header(meshes[m].z);
-                if (!(hdr != NONE && instance_map_bins(m, hdr, pix)) && !rays_did_large) { mesh_bins(m, pix, sp); }
-            }
-            if (bins_full(false)) { break; }
-        } else if (sp + 2u <= STACK) {
-            var near = node.info.x;
-            var far = node.info.x + 1u;
-            let a = nodes[near];
-            let b = nodes[far];
-            if (to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z) {
-                near = node.info.x + 1u;
-                far = node.info.x;
-            }
-            stack_set(sp, far);
-            stack_set(sp + 1u, near);
-            sp += 2u;
+        if (!packet_any(descend) || node.info.y > 0u || sp + 2u > STACK) { continue; }
+        var near = node.info.x;
+        var far = node.info.x + 1u;
+        let a = nodes[near];
+        let b = nodes[far];
+        // The packet's first pixel orders the children for all.
+        if (packet_first(to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z)) {
+            near = node.info.x + 1u;
+            far = node.info.x;
         }
+        stack_set(sp, far);
+        stack_set(sp + 1u, near);
+        need_put(sp, descend);
+        need_put(sp + 1u, descend);
+        sp += 2u;
     }
     var sum = 0.0;
     for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }

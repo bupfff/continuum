@@ -559,7 +559,12 @@ place, for a new conversation. Read this block, then the milestone table
    lit appearance) of what is under them, so a far pixel reads a node
    instead of walking to each instance (memory and correlation within a
    node are the open questions; M13 G2's independent splats lost
-   correlation). Needs a design step before a gate.
+   correlation). Needs a design step before a gate. Development the same
+   day: the walk as a packet (`map_coverage_from`, a subgroup walking the
+   union of its pixels' walks) gives the same coverage 14% faster from 150
+   m (49.7 against 57.7 ms) and no faster standing; letting nodes up to 4 or
+   16 pixels splat changed nothing (nodes above the leaves span more than
+   that at 10,000 boulders, so pixels walk down to instances).
 6. **The showcase;** the NVIDIA benchmark when funded.
 - Parked features (untouched unless a landmark needs them): emissive faces
   as lights (M10 G23–G24: 19.71% from Cycles, the faces showing emission
