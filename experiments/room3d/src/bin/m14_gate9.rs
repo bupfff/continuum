@@ -390,13 +390,13 @@ fn main() -> std::io::Result<()> {
         let (sc, sd, sw) = compare(
             &ours.read_cache_pages(0),
             &reference.read_cache_pages(0),
-            false,
+            true,
             false,
         );
         let (kc, kd, kw) = compare(
             &ours.read_cache_pages(1),
             &reference.read_cache_pages(1),
-            false,
+            true,
             true,
         );
         sun_compared += sun.0 + sc;
