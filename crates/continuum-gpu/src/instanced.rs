@@ -16,14 +16,14 @@ use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
-    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS,
-    InstancedScene, Light, LightGpu, M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS,
-    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
-    VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
-    VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    HW_VC_BAKE_SKY_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS,
+    HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu, M13_COVERAGE_BINDINGS,
+    M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
+    SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS,
+    VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS,
+    VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS,
+    VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS,
+    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -233,6 +233,8 @@ struct Cache {
     indirect: Option<(wgpu::ComputePipeline, Option<wgpu::BindGroup>)>,
     /// Whether that pass traces through hardware ray queries (M14 gate 10).
     indirect_hw: bool,
+    /// Sky samples through hardware ray queries (M5 gate 13).
+    sky_hw: bool,
 }
 
 /// What [`InstancedRenderer::verify_cache`] found: resident pages that
@@ -977,6 +979,15 @@ impl InstancedRenderer {
         // Bounce samples trace through the camera's structures where there
         // are some (M14 gate 10).
         let bounce_hw = hw.is_some() && !pixel_cones;
+        // Sky samples through the same structures (M5 gate 13), where they
+        // hold the lighting's geometry: not with movers (a second
+        // structure), streamed levels (camera levels differ from lighting
+        // levels) or alpha-blended objects (cones weigh their opacity).
+        let sky_rays = bounce_hw
+            && cache.is_some_and(|o| o.sky_rays)
+            && movable.is_empty()
+            && stream.is_none()
+            && !scene.geometry_blend.iter().any(|b| b.is_some());
         let visibility = hw.as_ref().map(|hw| {
             if hw.movers.is_some() {
                 (
@@ -1119,10 +1130,15 @@ impl InstancedRenderer {
                 (kernel.entry(name), None)
             }),
             indirect_hw: bounce_hw,
+            sky_hw: sky_rays,
             passes: [
                 kernel.entry("vc_update"),
                 kernel.entry("vc_bake"),
-                kernel.entry("vc_bake_sky"),
+                kernel.entry(if sky_rays {
+                    "hw_vc_bake_sky"
+                } else {
+                    "vc_bake_sky"
+                }),
                 kernel.entry("vc_fill"),
             ],
             binds: Vec::new(),
@@ -1130,6 +1146,11 @@ impl InstancedRenderer {
         let mut cache = cache;
         if hw_edges && let Some(c) = &mut cache {
             c.state.set_hardware_edges(blend);
+        }
+        if let Some(c) = &mut cache
+            && c.sky_hw
+        {
+            c.state.set_sky_rays();
         }
         let colors = Self::colors_buffer(&device, width, height);
         let mut renderer = InstancedRenderer {
@@ -1323,10 +1344,18 @@ impl InstancedRenderer {
                 .zip([
                     VC_UPDATE_BINDINGS,
                     VC_BAKE_BINDINGS,
-                    VC_BAKE_SKY_BINDINGS,
+                    if cache.sky_hw {
+                        HW_VC_BAKE_SKY_BINDINGS
+                    } else {
+                        VC_BAKE_SKY_BINDINGS
+                    },
                     VC_FILL_BINDINGS,
                 ])
-                .map(|(pipeline, keep)| bind_group(device, pipeline, &all, &[], None, keep))
+                .enumerate()
+                .map(|(k, (pipeline, keep))| {
+                    let tl: &[_] = if k == 2 && cache.sky_hw { &tlas } else { &[] };
+                    bind_group(device, pipeline, &all, tl, None, keep)
+                })
                 .collect();
             let movers: Option<Vec<wgpu::BindGroup>> = cache.movers.as_ref().map(|(passes, _)| {
                 passes

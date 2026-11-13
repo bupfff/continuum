@@ -595,6 +595,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_corners",
     "hw_m13_near",
     "hw_vc_bake_indirect",
+    "hw_vc_bake_sky",
 ];
 
 /// Bindings the `visibility` pass uses.
@@ -653,6 +654,9 @@ pub(crate) const HW_VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
     2, 3, 8, 23, 24, 30, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 45, 52, 54, 55, 56, 57, 58, 64,
     73, 74, 75,
 ];
+/// Sky samples through hardware ray queries (M5 gate 13).
+pub(crate) const HW_VC_BAKE_SKY_BINDINGS: &[u32] =
+    &[2, 3, 23, 24, 30, 32, 33, 34, 38, 41, 46, 47, 54, 64];
 /// Bounce light's samples (M10 gate 1).
 pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
     0, 2, 3, 8, 9, 10, 23, 24, 25, 26, 30, 33, 34, 35, 36, 37, 38, 39, 41, 42, 45, 52, 54, 55, 56,

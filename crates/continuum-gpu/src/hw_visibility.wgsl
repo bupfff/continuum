@@ -393,3 +393,41 @@ fn hw_vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invo
     }
     bounce_finish(li, job, sum, missing);
 }
+
+// Whether a ray from `eye` along `dir` meets nothing (FORCE_OPAQUE |
+// TERMINATE_ON_FIRST_HIT: visibility only).
+fn hw_sky_open(eye: vec3<f32>, dir: vec3<f32>) -> bool {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x5u, 0xffu, 0.0, 3.4e38, eye, dir));
+    rayQueryProceed(&rq);
+    return rayQueryGetCommittedIntersection(&rq).kind == 0u;
+}
+
+// Sky samples through hardware ray queries (M5 gate 13): each of a sky
+// sample's six jobs traces 32 of the hemicube's 192 bins around the texel's
+// normal, one ray through each bin's center, and adds the projected solid
+// angle of the bins whose ray meets nothing (a uniform sky's light per unit
+// radiance, as `vc_bake_sky`'s faces add theirs).
+@compute @workgroup_size(64)
+fn hw_vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let count = vc.sky.x + appended_sky();
+    let j = gid.x;
+    let listed = j < 6u * count;
+    let f = min(j / max(count, 1u), 5u);
+    let k = j % max(count, 1u);
+    let sample = sky_samples[k];
+    let t = page_texel(sample.x, sample.y);
+    let s = vc_surface(t.m, t.c, t.n, t.texel);
+    let on = listed && t.inside && s.ok;
+    var value = 0.0;
+    if (on) {
+        for (var q = 0u; q < 32u; q++) {
+            let b = 32u * f + q;
+            let dir = normalize(bin_world(s.normal, bin_local(b, IND_R)));
+            // The uniform sky lies above the horizon.
+            if (dir.z > 0.0 && hw_sky_open(s.apex, dir)) { value += hemicube_weight(b); }
+        }
+    }
+    if (listed) { sky_partial[6u * k + f] = select(0.0, value, on); }
+}

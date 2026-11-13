@@ -142,8 +142,19 @@ pub struct CacheOptions {
     /// much as tens of sun texels (M5 gate 5). 0: every texel.
     pub sky_spacing: f32,
     /// What a sky sample counts against the bake budget, in sun texels (at
-    /// least 1).
+    /// least 1), through cones (M5 gate 5; a cone sample measured about 17
+    /// sun texels' GPU time on the boulder field in 2026-11).
     pub sky_sample_cost: u32,
+    /// Sky samples through hardware ray queries where camera rays use them
+    /// (M5 gate 13): the 192 directions of a hemicube around the texel's
+    /// normal, each bin open if its ray meets nothing, instead of six cube
+    /// faces of mask cones. About 14× cheaper per sample on the boulder
+    /// field. Not yet with movers, streamed levels or alpha-blended objects,
+    /// which keep cones.
+    pub sky_rays: bool,
+    /// What a sky sample through rays counts against the bake budget, in
+    /// sun texels (at least 1; about 1.2 measured).
+    pub sky_ray_cost: u32,
     /// Moving lights (M9 gate 2): the largest change of a texel's ratio
     /// (its light's shadowed share) the cache may show before re-baking it.
     pub ledger_epsilon: f32,
@@ -214,6 +225,8 @@ impl Default for CacheOptions {
             pages: 1 << 19,
             sky_spacing: 0.0,
             sky_sample_cost: 10,
+            sky_rays: true,
+            sky_ray_cost: 1,
             ledger_epsilon: 0.01,
             indirect: false,
             emission_bounce: true,
@@ -912,6 +925,8 @@ pub(crate) struct VirtualCache {
     /// Silhouette rays through ray queries (M7 gate 4): `hw_edges` lists
     /// edge pixels for `vc_shade_edges` (buffer 81; counted in the stats).
     hardware_edges: bool,
+    /// Sky samples trace hardware rays (M5 gate 13).
+    sky_rays: bool,
     /// The extra samples' list (buffer 81): silhouette rays through ray
     /// queries, or layers behind alpha-blended surfaces (M10 gate 16).
     extra_samples: bool,
@@ -1390,6 +1405,7 @@ impl VirtualCache {
             lit_pins: Vec::new(),
             sky_due: HashMap::new(),
             hardware_edges: false,
+            sky_rays: false,
             extra_samples: false,
             sky_rebaked: 0,
             mover_ids: HashMap::new(),
@@ -1990,6 +2006,20 @@ impl VirtualCache {
     /// Bounce light is on.
     pub(crate) fn indirect(&self) -> bool {
         self.options.indirect
+    }
+
+    /// Sky samples trace hardware rays from now on (M5 gate 13).
+    pub(crate) fn set_sky_rays(&mut self) {
+        self.sky_rays = true;
+    }
+
+    /// What a sky sample counts against the bake budget.
+    fn sky_cost(&self) -> u32 {
+        if self.sky_rays {
+            self.options.sky_ray_cost.max(1)
+        } else {
+            self.options.sky_sample_cost
+        }
     }
 
     pub(crate) fn set_hardware_edges(&mut self, blend: bool) {
@@ -2623,7 +2653,7 @@ impl VirtualCache {
             }
             // Only within the limit (M5 gate 9: a sky that does not fit
             // waits, as a new page's would).
-            let cost = self.sky_layout(k).2 * self.options.sky_sample_cost;
+            let cost = self.sky_layout(k).2 * self.sky_cost();
             if self.spent + cost > limit && !self.bake_list.is_empty() {
                 break;
             }
@@ -2640,9 +2670,8 @@ impl VirtualCache {
             // w 3: the sky alone (the fill keeps an invalid mark).
             self.bake_bounds.push([b[4], b[5], b[6], 3.0]);
             let samples = self.push_sky_samples(index, k);
-            self.spent += samples * self.options.sky_sample_cost;
-            self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] +=
-                samples * self.options.sky_sample_cost;
+            self.spent += samples * self.sky_cost();
+            self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] += samples * self.sky_cost();
             self.sky_rebaked += 1;
         }
     }
@@ -2805,9 +2834,7 @@ impl VirtualCache {
             } else {
                 0
             };
-            let cost = inside[0] * inside[1] * self.lights
-                + samples * self.options.sky_sample_cost
-                + bounce;
+            let cost = inside[0] * inside[1] * self.lights + samples * self.sky_cost() + bounce;
             // The first page always fits, so a page costlier than the whole
             // budget still gets baked.
             if self.spent + lit_reserved + cost > budget
