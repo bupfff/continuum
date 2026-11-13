@@ -1,10 +1,32 @@
 # M14 gate 9: the frame budget with a sky and bounce light at scale
 
-**FAIL** (frame budget; run incomplete). A cap on the cache's bake budget
-kept by the measured frame period lowered gate 8's flights from 14.1–15.9
-ms to 13.2–13.3 ms on average, but the 99th percentile stayed at 19–24 ms.
-The run was stopped from outside (the session's usage limit) during the
-certification part's last flight; what it measured is below.
+**FAIL** (frame budget only). Run twice: the first run was disturbed (the
+user reported a game running on the machine) and then stopped from outside
+by the session's usage limit; the second, complete run on a clear machine
+gave the same frame times. A cap on the cache's bake budget kept by the
+measured frame period lowered gate 8's flights from 14.1–15.9 ms to
+12.8–13.1 ms on average, but the 99th percentile stayed at 19.8–21.6 ms.
+Certification and bounce passed.
+
+## Second run (complete, clear machine), 2026-11-13
+
+| Criterion | Flight 0 | Flight 1 | Flight 2 | Bar | Result |
+|---|---|---|---|---|---|
+| 1. (b) Mean frame | 12.75 ms | 12.76 ms | 13.12 ms | at most 16.7 ms | PASS |
+| 1. (b) 99th percentile | **19.82 ms** | **20.30 ms** | **21.62 ms** | at most 16.7 ms | FAIL |
+| 1. (b) Worst frame | 23.61 ms | 25.69 ms | **163.29 ms** | at most 33.3 ms | FAIL |
+| 1. (b) Frames over 16.7 ms (reported) | 172 | 158 | 135 | | |
+| 2. (a) Sun / sky pages compared in flight, differing | 63,080, 0 | 59,547, 0 | 99,257, 0 | none differing | PASS |
+| 2. (a) Settled shown pages compared, differing | 19,711, 0 | 25,595, 0 | 18,852, 0 | none differing | PASS |
+| 2. Pages compared in all | 286,042 sun and 286,042 sky | | | at least 100,000 and 30,000 | PASS |
+| 3. (a) Settled image's mean difference | 0.076% | 0.079% | 0.065% | at most 1% | PASS |
+
+The binary for this run counted only pages shown here in the settled
+comparison (as the criterion states; changed after the first run, which
+counted every resident page). Bake budget 7,249–12,559 units on average,
+at its cap; 78–106 pages baked a frame.
+
+## First run (disturbed, stopped)
 
 | Criterion | Flight 0 | Flight 1 | Flight 2 | Bar | Result |
 |---|---|---|---|---|---|
