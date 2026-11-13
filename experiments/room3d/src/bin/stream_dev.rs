@@ -205,7 +205,13 @@ fn main() {
         kernel.set_prefilter(1.0);
         kernel.set_sky_prefilter(8.0);
         kernel.set_hardware_rays(true);
-        kernel.set_sky(continuum::glam::Vec3::ZERO);
+        // SKY and BOUNCE as gate 8 (M14 gate 9's diagnosis).
+        let sky_on = std::env::var_os("SKY").is_some();
+        kernel.set_sky(continuum::glam::Vec3::splat(if sky_on {
+            0.05
+        } else {
+            0.0
+        }));
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let target = kernel
             .device()
@@ -234,7 +240,10 @@ fn main() {
             &[Rocks::sun()],
             &rocks.scene,
             DVec3::ZERO,
-            Some(CacheOptions::default()),
+            Some(CacheOptions {
+                indirect: std::env::var_os("BOUNCE").is_some(),
+                ..Default::default()
+            }),
             StreamOptions {
                 budget_triangles: 8 << 20,
                 cpu_cache_bytes: 2 << 30,
@@ -279,6 +288,28 @@ fn main() {
             );
             // The cache's and the lighting pool's logs are a frame or two
             // behind the call; the streamer's is the call's own.
+            // One frame profiled pass by pass at the flight's last view
+            // (M14 gate 9's diagnosis).
+            if std::env::var_os("PROFILE").is_some() {
+                let p = r.frame_profiled(camera(1799), &target);
+                let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+                println!(
+                    "  profiled: bake {:.2} ms ({}), visibility {:.2}, shading {:.2}, readback {:.2}, planning {:.2}, \
+                     passes {:?}",
+                    ms(p.bake),
+                    p.bake_passes
+                        .iter()
+                        .filter(|(l, _)| !l.is_empty())
+                        .map(|(l, d)| format!("{l} {:.2}", ms(*d)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    ms(p.visibility),
+                    ms(p.shading),
+                    ms(p.readback),
+                    ms(p.planning),
+                    p.passes.map(ms),
+                );
+            }
             for &f in order.iter().take(8) {
                 let st = stream.get(f).copied().unwrap_or_default();
                 let li = lit.get(f).copied().unwrap_or_default();
@@ -286,7 +317,7 @@ fn main() {
                 println!(
                     "  frame {f}: {:.2} ms; camera streaming {:.2} ms ({:.2}/{:.2}/{:.2}/{:.2}), {} loads {} evictions, \
                      {} produced; lighting {:.2} ms, {} loads, {} produced; cache planning {:.2} ms, waiting {:.2} ms, \
-                     {} pages baked",
+                     {} pages baked (budget {})",
                     times[f],
                     st.cpu_ms,
                     st.stage_ms[0],
@@ -302,6 +333,7 @@ fn main() {
                     ca.map_or(0.0, |c| c.planning.as_secs_f64() * 1e3),
                     ca.map_or(0.0, |c| c.waiting.as_secs_f64() * 1e3),
                     ca.map_or(0, |c| c.pages_baked),
+                    ca.map_or(0, |c| c.budget),
                 );
             }
         }

@@ -509,10 +509,16 @@ place, for a new conversation. Read this block, then the milestone table
    not depend on it.
 2. **The frame budget with a sky and bounce at scale** (G9 failed: a
    frame-period cap on the bake budget holds the mean at 13 ms, but the
-   99th percentile is 19–24 ms): measure a slow frame's parts at 36,864
-   rocks with a sky and bounce (`stream_dev` `SPIKES` with them), then fix
-   what varies (lighting levels produced for bounce samples are 3–6× gate
-   7's). Gate binaries compare settled pages only where shown here.
+   99th percentile is 19–24 ms). Measured after G9 (`stream_dev`
+   `SKY=1 BOUNCE=1 PROFILE=1 SPIKES=128`, 16,384 rocks): a profiled frame
+   has 10–11 ms of GPU work before any streaming: bake 3.3–4.5 ms (bounce
+   samples about 2 ms even at the minimum budget: compute rays through
+   every object), visibility 2.2 ms, shading 2.8–3.5 ms, readback 0.9–1.3
+   ms; slow frames have the bake at its floor and wait for the GPU. So the
+   levers are the fixed costs, not the bake budget: bounce rays' cost at
+   scale (hardware rays, or fewer samples per retry), shading with the sky
+   and bounce channels, the readback. Gate binaries compare settled pages
+   only where shown here.
 3. **Lighting in motion** (Landmark 2): the sky's warm-up, the error while
    flying measured against a settled reference, more than one bounce, a
    moving sun at real speed.
