@@ -196,6 +196,125 @@ fn main() {
         }
         return;
     }
+    if let Ok(side) = std::env::var("FLIGHTS9") {
+        // Gate 9's timed flights (field (b), a sky and bounce, warmed 1,200
+        // frames, then 1,800 timed), with `FRAME_BUDGET` (ms) for the
+        // cache: to choose gate 10's change (M14).
+        let side: usize = side.parse().unwrap_or(192);
+        let budget_ms: f32 = std::env::var("FRAME_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15.0);
+        let kernel = MaskConeKernel::new().expect("a GPU");
+        kernel.set_prefilter(1.0);
+        kernel.set_sky_prefilter(8.0);
+        kernel.set_hardware_rays(true);
+        kernel.set_sky(continuum::glam::Vec3::splat(0.05));
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target = kernel
+            .device()
+            .create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 1280,
+                    height: 720,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let rocks = Rocks::lighting_on_demand(side, 6.0);
+        let mut r = InstancedRenderer::with_streaming(
+            &kernel,
+            format,
+            1280,
+            720,
+            1,
+            &[Rocks::sun()],
+            &rocks.scene,
+            DVec3::ZERO,
+            Some(CacheOptions {
+                indirect: true,
+                frame_budget_ms: budget_ms,
+                ..Default::default()
+            }),
+            StreamOptions {
+                budget_triangles: 8 << 20,
+                cpu_cache_bytes: 2 << 30,
+                lighting_triangles: 491_520,
+                ..Default::default()
+            },
+        );
+        r.wait();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        for k in 0..3 {
+            let camera = |f: usize| flight(k, f as f32 / 1799.0, 192.0, 50.0);
+            for _ in 0..1200 {
+                r.frame(camera(0), &target);
+            }
+            r.finish();
+            let c0 = r.cache_log().len();
+            let (s0, l0) = (r.stream_log().len(), r.lighting_log().0.len());
+            let mut times = Vec::with_capacity(1800);
+            let begin = std::time::Instant::now();
+            for f in 0..1800 {
+                let call = std::time::Instant::now();
+                r.frame(camera(f), &target);
+                times.push(call.elapsed().as_secs_f64() * 1e3);
+            }
+            r.finish();
+            let mean = begin.elapsed().as_secs_f64() * 1e3 / 1800.0;
+            let mut sorted = times.clone();
+            sorted.sort_by(f64::total_cmp);
+            let cache = &r.cache_log()[c0..];
+            let n = cache.len().max(1) as f64;
+            println!(
+                "frame budget {budget_ms} ms, flight {k}: mean {mean:.2} ms, p99 {:.2}, worst {:.2}, over 16.7 ms {}; \
+                 bake budget {:.0}, {:.1} pages baked a frame",
+                sorted[sorted.len() * 99 / 100],
+                sorted[sorted.len() - 1],
+                times.iter().filter(|&&t| t > 16.7).count(),
+                cache.iter().map(|c| c.budget as f64).sum::<f64>() / n,
+                cache.iter().map(|c| c.pages_baked as f64).sum::<f64>() / n,
+            );
+            let stream = &r.stream_log()[s0..];
+            let lit = &r.lighting_log().0[l0..];
+            let timed: Vec<_> = cache.iter().filter(|c| c.timed).collect();
+            let avg = |v: &mut dyn Iterator<Item = f64>, n: usize| v.sum::<f64>() / n.max(1) as f64;
+            println!(
+                "  parts: camera streaming {:.2} ms, lighting {:.2} ms ({:.1} loads), planning {:.2} ms, waiting {:.2} \
+                 ms; GPU bake {:.2} ms, camera {:.2} ms ({} timed); sky samples {:.0}, bounce samples {:.0} a frame",
+                avg(&mut stream.iter().map(|s| s.cpu_ms as f64), stream.len()),
+                avg(&mut lit.iter().map(|s| s.cpu_ms as f64), lit.len()),
+                avg(&mut lit.iter().map(|s| s.loads as f64), lit.len()),
+                avg(
+                    &mut cache.iter().map(|c| c.planning.as_secs_f64() * 1e3),
+                    cache.len()
+                ),
+                avg(
+                    &mut cache.iter().map(|c| c.waiting.as_secs_f64() * 1e3),
+                    cache.len()
+                ),
+                avg(&mut timed.iter().map(|c| c.gpu_bake_ms as f64), timed.len()),
+                avg(
+                    &mut timed.iter().map(|c| c.gpu_render_ms as f64),
+                    timed.len()
+                ),
+                timed.len(),
+                avg(&mut cache.iter().map(|c| c.sky_samples as f64), cache.len()),
+                avg(
+                    &mut cache.iter().map(|c| c.indirect_samples as f64),
+                    cache.len()
+                ),
+            );
+        }
+        return;
+    }
     if let Ok(side) = std::env::var("SPIKES") {
         // Gate 6's spike (M14 gate 7): its field, options and three flights
         // in order (each settled at its first view, then 1,800 frames), each

@@ -4171,11 +4171,72 @@ var<workgroup> ind_lit_missing: atomic<u32>;
 // shown (M14 gate 8).
 const BOUNCE_WANT: u32 = 0x80000000u;
 
-@compute @workgroup_size(64)
-fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    lane = li;
-    if (li == 0u) { atomicStore(&ind_lit_missing, NONE); }
-    workgroupBarrier();
+// One bounce bin's light at a hit along `dir` from `apex` (M10): the hit
+// page's direct light reflected, its emission, into `sum`; the bin's weight
+// `w` if the page is missing (requested), else 0. Shared by the compute and
+// the hardware bounce bakes (M14 gate 10).
+fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>) -> f32 {
+    if (hit.mesh == NONE) { return 0.0; }
+    let lights_n = min(arrayLength(&lights), IND_SKY);
+    let sky_ch = vc.sky.z;
+    let p = apex + dir * hit.distance;
+    // A back face: the sample sees inside geometry; no light.
+    let tv = 3u * hit.tri;
+    let geometric = normal_to_world(hit.mesh, cross(tris[tv + 1u].xyz - tris[tv].xyz, tris[tv + 2u].xyz - tris[tv].xyz));
+    if (dot(geometric, dir) > 0.0) { return 0.0; }
+    // The hit's own emission (M10 gate 11): radiance over the bin's
+    // projected solid angle; no page needed.
+    if (vc.extra.x == 1u) {
+        (*sum)[IND_GLOW] += bounce_emission_at(hit.mesh, hit.tri, p, hit.distance * IND_BIN_ANGLE) * w;
+    }
+    // The page at the hit, at the mip of the bin's footprint or the finest
+    // coarser one resident.
+    let footprint = hit.distance * IND_BIN_ANGLE;
+    let hc = tri_vchart[hit.tri];
+    let uv = chart_uv(hit.mesh, hit.tri, p);
+    let top = vc_top_mip(hc, hit.mesh);
+    let ratio = footprint * vc.params.x / object_scale(hit.mesh);
+    var want = 0u;
+    if (ratio > 1.0) { want = min(u32(round(log2(ratio))), top); }
+    var slot = NONE;
+    var r: PageRef;
+    for (var q = want; q <= top; q++) {
+        r = vc_page(hit.mesh, hc, uv, q);
+        slot = vc_find_any(r.key);
+        if (slot != NONE) { break; }
+    }
+    if (slot == NONE) {
+        vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY);
+        return w;
+    }
+    let hn = shading_normal(hit.mesh, hit.tri, p, -dir);
+    let hp = p + hit.normal * surface_offset(length(p));
+    let reflect = bounce_albedo(hit.mesh, hit.tri, p, footprint) * (w / 3.14159265);
+    for (var l = 0u; l < lights_n; l++) {
+        var direct = vc_bilinear(slot, r, l);
+        if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
+        (*sum)[l] += reflect * direct;
+    }
+    // Lights past the third (M10 gate 21): at their radiance, in the
+    // emission channel (absolute radiance).
+    for (var l = lights_n; l < arrayLength(&lights); l++) {
+        var direct = vc_bilinear(slot, r, l);
+        if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
+        (*sum)[IND_GLOW] += reflect * direct * lights[l].radiance.xyz;
+    }
+    (*sum)[IND_SKY] += reflect * vc_bilinear(slot, r, sky_ch);
+    return 0.0;
+}
+
+// A bounce sample's job: its page, texel and surface.
+struct BounceJob {
+    e: vec4<u32>,
+    k: u32,
+    listed: bool,
+    surf: TexelSurface,
+}
+
+fn bounce_job(wg: vec3<u32>) -> BounceJob {
     let j = wg.x + wg.y * 65535u;
     let listed = j < vc.indirect.x;
     let job = indirect_jobs[min(j, max(vc.indirect.x, 1u) - 1u)];
@@ -4187,75 +4248,13 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let n = vc_grid(c, m, mip);
     let k = job.y;
     let texel = min(page * PAGE + vec2<u32>(4u * (k % 3u), 4u * (k / 3u)), n - vec2<u32>(1u));
-    let surf = vc_surface(m, c, n, texel);
-    let lights_n = min(arrayLength(&lights), IND_SKY);
-    let sky_ch = vc.sky.z;
-    var sum = array<vec3<f32>, 5>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-    var missing = 0.0;
-    if (listed && surf.ok) {
-        for (var b = li; b < IND_BINS; b += 64u) {
-            let dir = normalize(bin_world(surf.normal, bin_local(b, IND_R)));
-            lit_missing = NONE;
-            let hit = primary_hit(surf.apex, dir);
-            // A ray that met an absent lighting level (M14 gate 8): its bin
-            // is missing, as with an absent page at the hit; the level is
-            // wanted and the sample retried.
-            if (lit_missing != NONE) {
-                atomicMin(&ind_lit_missing, lit_missing);
-                missing += hemicube_weight(b);
-                continue;
-            }
-            if (hit.mesh == NONE) { continue; }
-            let p = surf.apex + dir * hit.distance;
-            // A back face: the sample sees inside geometry; no light.
-            let tv = 3u * hit.tri;
-            let geometric = normal_to_world(hit.mesh, cross(tris[tv + 1u].xyz - tris[tv].xyz, tris[tv + 2u].xyz - tris[tv].xyz));
-            if (dot(geometric, dir) > 0.0) { continue; }
-            let w = hemicube_weight(b);
-            // The hit's own emission (M10 gate 11): radiance over the bin's
-            // projected solid angle; no page needed.
-            if (vc.extra.x == 1u) {
-                sum[IND_GLOW] += bounce_emission_at(hit.mesh, hit.tri, surf.apex + dir * hit.distance, hit.distance * IND_BIN_ANGLE) * w;
-            }
-            // The page at the hit, at the mip of the bin's footprint or the
-            // finest coarser one resident.
-            let footprint = hit.distance * IND_BIN_ANGLE;
-            let hc = tri_vchart[hit.tri];
-            let uv = chart_uv(hit.mesh, hit.tri, p);
-            let top = vc_top_mip(hc, hit.mesh);
-            let ratio = footprint * vc.params.x / object_scale(hit.mesh);
-            var want = 0u;
-            if (ratio > 1.0) { want = min(u32(round(log2(ratio))), top); }
-            var slot = NONE;
-            var r: PageRef;
-            for (var q = want; q <= top; q++) {
-                r = vc_page(hit.mesh, hc, uv, q);
-                slot = vc_find_any(r.key);
-                if (slot != NONE) { break; }
-            }
-            if (slot == NONE) {
-                vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY);
-                missing += w;
-                continue;
-            }
-            let hn = shading_normal(hit.mesh, hit.tri, p, -dir);
-            let hp = p + hit.normal * surface_offset(length(p));
-            let reflect = bounce_albedo(hit.mesh, hit.tri, p, footprint) * (w / 3.14159265);
-            for (var l = 0u; l < lights_n; l++) {
-                var direct = vc_bilinear(slot, r, l);
-                if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
-                sum[l] += reflect * direct;
-            }
-            // Lights past the third (M10 gate 21): at their radiance, in the
-            // emission channel (absolute radiance).
-            for (var l = lights_n; l < arrayLength(&lights); l++) {
-                var direct = vc_bilinear(slot, r, l);
-                if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
-                sum[IND_GLOW] += reflect * direct * lights[l].radiance.xyz;
-            }
-            sum[IND_SKY] += reflect * vc_bilinear(slot, r, sky_ch);
-        }
-    }
+    return BounceJob(e, k, listed, vc_surface(m, c, n, texel));
+}
+
+// Sums the workgroup's bins and stores the sample (lane 0), listing its page
+// for a retry if more than a hundredth of the hemisphere was missing, and
+// any absent lighting level a ray met (M14 gate 8).
+fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32) {
     for (var ch = 0u; ch < IND_CH; ch++) { ind_partial[li * IND_CH + ch] = vec4<f32>(sum[ch], 0.0); }
     ind_missing[li] = missing;
     workgroupBarrier();
@@ -4268,16 +4267,15 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         }
         workgroupBarrier();
     }
-    if (li == 0u && listed) {
+    if (li == 0u && job.listed) {
         for (var ch = 0u; ch < IND_CH; ch++) {
             let v = ind_partial[ch].xyz;
             // The y's second half is 1 once baked (0: never).
-            indirect[indirect_at(e.w, k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, 1.0)));
+            indirect[indirect_at(job.e.w, job.k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, 1.0)));
         }
-        // Missing more than a hundredth of the hemisphere: re-bake later.
         if (ind_missing[0] > 0.01 * 3.14159265) {
             let q = atomicAdd(&mover_stats[15], 1u);
-            if (q < INCOMPLETE_CAP) { incomplete[q] = e.w; }
+            if (q < INCOMPLETE_CAP) { incomplete[q] = job.e.w; }
         }
         // An absent lighting level a ray met: listed with the page flagged
         // as wanting it only (the page stays shown; its samples retry).
@@ -4285,11 +4283,38 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         if (absent != NONE) {
             let q = atomicAdd(&mover_stats[20], 1u);
             if (q < MISSING_CAP) {
-                incomplete[INCOMPLETE_CAP + 2u * q] = e.w | BOUNCE_WANT;
+                incomplete[INCOMPLETE_CAP + 2u * q] = job.e.w | BOUNCE_WANT;
                 incomplete[INCOMPLETE_CAP + 2u * q + 1u] = absent;
             }
         }
     }
+}
+
+@compute @workgroup_size(64)
+fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    if (li == 0u) { atomicStore(&ind_lit_missing, NONE); }
+    workgroupBarrier();
+    let job = bounce_job(wg);
+    var sum = array<vec3<f32>, 5>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    var missing = 0.0;
+    if (job.listed && job.surf.ok) {
+        for (var b = li; b < IND_BINS; b += 64u) {
+            let dir = normalize(bin_world(job.surf.normal, bin_local(b, IND_R)));
+            lit_missing = NONE;
+            let hit = primary_hit(job.surf.apex, dir);
+            // A ray that met an absent lighting level (M14 gate 8): its bin
+            // is missing, as with an absent page at the hit; the level is
+            // wanted and the sample retried.
+            if (lit_missing != NONE) {
+                atomicMin(&ind_lit_missing, lit_missing);
+                missing += hemicube_weight(b);
+                continue;
+            }
+            missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum);
+        }
+    }
+    bounce_finish(li, job, sum, missing);
 }
 
 // Bounce irradiance (RGB, scaled by each channel's radiance) at a cached

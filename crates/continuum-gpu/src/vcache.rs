@@ -125,7 +125,9 @@ pub struct CacheOptions {
     /// (M14 gate 9; 0: none): while frames take longer, a cap on the bake
     /// budget shrinks in proportion; while they take less than 85% of it,
     /// the cap grows by 5% a frame. It catches what the GPU model does not
-    /// see (structures built, uploads, the CPU's own work).
+    /// see (structures built, uploads, the CPU's own work). 11 ms by default
+    /// (M14 gate 10): frames vary by about 5 ms around it under heavy
+    /// streaming, so their 99th percentile stays within 16.7 ms.
     pub frame_budget_ms: f32,
     /// Pages the pool holds. Each texel holds one channel per light, then
     /// the sky's, so the pool takes 81 × 4 bytes × channels per page: 340 MB
@@ -207,7 +209,7 @@ impl Default for CacheOptions {
             request_tile: 4,
             bake_budget: 20_000,
             frame_target_ms: 14.0,
-            frame_budget_ms: 15.0,
+            frame_budget_ms: 11.0,
             pages: 1 << 19,
             sky_spacing: 0.0,
             sky_sample_cost: 10,
@@ -2173,9 +2175,11 @@ impl VirtualCache {
         // `collect` adds its wait to `waiting`.
         self.planning += start.elapsed().saturating_sub(self.waiting);
         // Bounce samples' wants last: the slots serve direct light first.
+        // Diagnostics: `CONTINUUM_BOUNCE_WANTS=<n>` keeps at most n a frame.
         if self.lighting {
+            let cap = bounce_wants_cap();
             self.lit_wants
-                .extend(self.lit_bounce.iter().map(|&(o, _)| o));
+                .extend(self.lit_bounce.iter().rev().take(cap).map(|&(o, _)| o));
         }
         if self.lighting && trace_lighting() {
             let resident = self.lit_resident.iter().filter(|&&r| r).count();
@@ -2929,6 +2933,17 @@ impl VirtualCache {
             self.spent += bounce;
         }
     }
+}
+
+/// Diagnostics: the bounce samples' lighting-level wants kept a frame.
+fn bounce_wants_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("CONTINUUM_BOUNCE_WANTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX)
+    })
 }
 
 /// Diagnostics: `CONTINUUM_TRACE_LIT` set prints, each frame, what the plan

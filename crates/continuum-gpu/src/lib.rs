@@ -594,6 +594,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_edges",
     "hw_m13_corners",
     "hw_m13_near",
+    "hw_vc_bake_indirect",
 ];
 
 /// Bindings the `visibility` pass uses.
@@ -645,6 +646,12 @@ pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
 pub(crate) const VC_SHADE_EDGES_BINDINGS: &[u32] = &[
     79, 0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55,
     56, 57, 58, 62, 73, 76, 81,
+];
+/// Bounce light's samples through hardware ray queries (M14 gate 10): no
+/// compute hierarchy (0, 9, 10, 25, 26), the acceleration structure (32).
+pub(crate) const HW_VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
+    2, 3, 8, 23, 24, 30, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 45, 52, 54, 55, 56, 57, 58, 64,
+    73, 74, 75,
 ];
 /// Bounce light's samples (M10 gate 1).
 pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[

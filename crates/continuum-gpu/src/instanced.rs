@@ -15,14 +15,15 @@ use crate::stream::{
 use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
-    HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VISIBILITY_BINDINGS,
-    HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
-    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, MaskConeKernel,
-    RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
-    VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
-    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
-    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS,
-    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
+    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS,
+    InstancedScene, Light, LightGpu, M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS,
+    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
+    VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
+    VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
+    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
+    uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -223,6 +224,8 @@ struct Cache {
     moving_lights: bool,
     /// Bounce light's sample pass and its bind group (M10 gate 1).
     indirect: Option<(wgpu::ComputePipeline, Option<wgpu::BindGroup>)>,
+    /// Whether that pass traces through hardware ray queries (M14 gate 10).
+    indirect_hw: bool,
 }
 
 /// What [`InstancedRenderer::verify_cache`] found: resident pages that
@@ -964,6 +967,9 @@ impl InstancedRenderer {
                 let dynamic = stream.map_or(0, |o| crate::stream::detailed_capacity(scene, &o));
                 kernel.hw_scene(scene, origin, movable, dynamic)
             });
+        // Bounce samples trace through the camera's structures where there
+        // are some (M14 gate 10).
+        let bounce_hw = hw.is_some() && !pixel_cones;
         let visibility = hw.as_ref().map(|hw| {
             if hw.movers.is_some() {
                 (
@@ -1095,9 +1101,17 @@ impl InstancedRenderer {
             }),
             has_movers: !movable.is_empty(),
             moving_lights: !moving_lights.is_empty(),
-            indirect: options
-                .indirect
-                .then(|| (kernel.entry("vc_bake_indirect"), None)),
+            // Bounce rays through hardware ray queries where camera rays
+            // use them (M14 gate 10).
+            indirect: options.indirect.then(|| {
+                let name = if bounce_hw {
+                    "hw_vc_bake_indirect"
+                } else {
+                    "vc_bake_indirect"
+                };
+                (kernel.entry(name), None)
+            }),
+            indirect_hw: bounce_hw,
             passes: [
                 kernel.entry("vc_update"),
                 kernel.entry("vc_bake"),
@@ -1325,14 +1339,25 @@ impl InstancedRenderer {
         });
         let bounce_bind = self.cache.as_ref().and_then(|cache| {
             cache.indirect.as_ref().map(|(pipeline, _)| {
-                bind_group(
-                    device,
-                    pipeline,
-                    &all,
-                    &[],
-                    Some(&self.textures),
-                    VC_BAKE_INDIRECT_BINDINGS,
-                )
+                if cache.indirect_hw {
+                    bind_group(
+                        device,
+                        pipeline,
+                        &all,
+                        &tlas,
+                        Some(&self.textures),
+                        HW_VC_BAKE_INDIRECT_BINDINGS,
+                    )
+                } else {
+                    bind_group(
+                        device,
+                        pipeline,
+                        &all,
+                        &[],
+                        Some(&self.textures),
+                        VC_BAKE_INDIRECT_BINDINGS,
+                    )
+                }
             })
         });
         if let (Some(cache), Some(bind)) = (&mut self.cache, bounce_bind)

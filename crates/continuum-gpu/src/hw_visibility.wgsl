@@ -336,3 +336,60 @@ fn hw_m13_near(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     colors[pixel] = vec4<f32>(map_coverage_from(gid, true), 1.0);
 }
 
+
+// Bounce light's rays through hardware ray queries (M14 gate 10): the
+// nearest hit among the camera's structures (camera levels, clusters of
+// proxies), so a ray never needs a lighting level. Where the sample's own
+// object shows a camera level or a proxy, hits on it are skipped: those
+// surfaces differ from the lighting level the sample sits on by up to the
+// level's error, so near hits would be its own surface.
+fn hw_bounce_hit(eye: vec3<f32>, dir: vec3<f32>, own: u32) -> Hit {
+    var hit = Hit(3.4e38, NONE, NONE, vec3<f32>(0.0));
+    let x = meshes[own].w;
+    let streamed = x != NONE && (bitcast<u32>(xforms[4u * x + 3u].w) & 0x40000000u) != 0u;
+    var rq: ray_query;
+    if (streamed) {
+        // Through candidates: FORCE_NO_OPAQUE.
+        rayQueryInitialize(&rq, scene_as, RayDesc(0x2u, 0xffu, 0.0, 3.4e38, eye, dir));
+        while (rayQueryProceed(&rq)) {
+            let c = rayQueryGetCandidateIntersection(&rq);
+            if (hw_object(c.instance_custom_data, c.geometry_index).x != own) {
+                rayQueryConfirmIntersection(&rq);
+            }
+        }
+    } else {
+        // FORCE_OPAQUE: the nearest face, front or back (the gather skips
+        // back faces, as the compute walk's hits).
+        rayQueryInitialize(&rq, scene_as, RayDesc(0x1u, 0xffu, 0.0, 3.4e38, eye, dir));
+        rayQueryProceed(&rq);
+    }
+    let h = rayQueryGetCommittedIntersection(&rq);
+    if (h.kind != 0u) {
+        let o = hw_object(h.instance_custom_data, h.geometry_index);
+        let t = cam_tri(o.x, o.y, h.primitive_index);
+        let v0 = tris[3u * t].xyz;
+        let n = normalize(normal_to_world(o.x, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0)));
+        hit = Hit(h.t, o.x, t, select(n, -n, dot(n, dir) > 0.0));
+    }
+    return hit;
+}
+
+// `vc_bake_indirect` with its rays through hardware ray queries (M14 gate
+// 10).
+@compute @workgroup_size(64)
+fn hw_vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    if (li == 0u) { atomicStore(&ind_lit_missing, NONE); }
+    workgroupBarrier();
+    let job = bounce_job(wg);
+    var sum = array<vec3<f32>, 5>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    var missing = 0.0;
+    if (job.listed && job.surf.ok) {
+        for (var b = li; b < IND_BINS; b += 64u) {
+            let dir = normalize(bin_world(job.surf.normal, bin_local(b, IND_R)));
+            let hit = hw_bounce_hit(job.surf.apex, dir, job.e.x);
+            missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum);
+        }
+    }
+    bounce_finish(li, job, sum, missing);
+}
