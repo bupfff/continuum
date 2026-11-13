@@ -148,6 +148,7 @@ Selected numbers (1280×720, Apple M4, release builds):
 | One bounce of light | 1.79% from Cycles (7.09% without it) | M10 G1 |
 | Moving objects among a million | 1.06–1.09× a still frame, never stale | M9 G1 |
 | A sun moving at real speed over the million | 0.98–1.02× a still sun, every shown result within a certified bound | M9 G6 |
+| A view with a sky, from an empty cache | warm in 166–400 frames (cones: 1,827–15,905) | M5 G13 |
 | Changing a light's color | free and exact: nothing is re-computed | M5 G6 |
 
 ## What it can do today
@@ -207,10 +208,12 @@ nothing). Four landmarks, in order:
    3.1% of Cycles on a reference scene). Still to come: faster settling on
    new ground, and moving objects with it.
 2. **Lighting you can trust in motion.** The cache now always converges
-   with bounce light (a loop that never settled is fixed), and a sun moving
-   at real speed costs what a still one does, with every cached result
-   shown within a certified bound of a fresh one. Next, a faster sky
-   warm-up, bounded error while flying, more bounces.
+   with bounce light (a loop that never settled is fixed); a sun moving at
+   real speed costs what a still one does, with every cached result shown
+   within a certified bound of a fresh one; and a view with a sky warms in
+   a few hundred frames instead of thousands (sky light through hardware
+   rays, closer to Cycles than before). Next, bounded error while flying,
+   more bounces.
 3. **Detail smaller than a pixel, without shimmer.** Each object type
    gets a small precomputed map of how it looks from every direction, and
    pixels read those instead of tracing every tiny surface. Accuracy is

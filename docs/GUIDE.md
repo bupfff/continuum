@@ -171,11 +171,14 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   half the pixels are edges (M7 gate 4; compute rays 24×).
   `CacheOptions::edge_samples` 2 traces one diagonal pair instead of four
   quarters: about 0.8× the cost for less of the gain (development only).
-- **The sky converges slowly** in the cache: a view takes hundreds to
-  thousands of frames to warm (M5 G5). With `CacheOptions::sky_later` (the
-  default) pages bake their lights first and their sky later, so views come
-  within 5% of their warm image in 120–300 frames (M5 G9). Not with bounce
-  light, movers or moving lights. The sky is opt-in.
+- **The sky** traces hardware rays where camera rays do
+  (`CacheOptions::sky_rays`, the default): views of the boulder field warm
+  in 166–400 frames from an empty cache (M5 G13). With movers, streamed
+  levels or alpha-blended objects it uses mask cones, about 14× slower per
+  sample: a view then takes thousands of frames to warm (M5 G5). With
+  `CacheOptions::sky_later` (the default) pages bake their lights first and
+  their sky later, so shadows show first (M5 G9); not with bounce light,
+  movers or moving lights. The sky is opt-in.
 - **Sustained speed on fanless laptops.** Flights with several lights hold
   60 Hz while the machine is cool. After minutes of load, the GPU slows and
   frames take 20 ms or more (M5 G8).
