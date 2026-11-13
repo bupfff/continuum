@@ -390,6 +390,55 @@ fn main() -> std::io::Result<()> {
     }
 
     // `M13_END=1` in development: the settled frame at the flight's end.
+    // `M13_PROFILE=1` in development: each pass's time (submitted and
+    // waited for alone, median of 10) at three settled views, the gate's
+    // headings (not tuned on: a design step's profile).
+    if dev && std::env::var_os("M13_PROFILE").is_some() {
+        let ahead_view = |height: f32, down: f32| {
+            let d = f32::to_radians(down);
+            let eye = Vec3::new(ground.eye.x, ground.eye.y, height);
+            Camera {
+                eye,
+                target: eye + flat0 * d.cos() - Vec3::Z * d.sin(),
+                vertical_fov_degrees: ground.vertical_fov_degrees,
+            }
+        };
+        let names = [
+            "corners",
+            "roots",
+            "bins",
+            "bin args",
+            "bin rays",
+            "pixels",
+            "page args",
+            "bakes",
+        ];
+        for (name, camera) in [
+            ("standing", ahead_view(1.7, 0.0)),
+            ("150 m up", ahead_view(150.0, 45.0)),
+            ("20 m up, 10° down", ahead_view(20.0, 10.0)),
+        ] {
+            let mut r = new_renderer();
+            let (settled, _, pages) = settled_frame(&mut r, camera);
+            let mut per: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+            for _ in 0..10 {
+                let p = r.frame_profiled(camera, &view_target);
+                for (k, v) in per.iter_mut().enumerate() {
+                    v.push(ms(p.passes[k]));
+                }
+            }
+            let parts: Vec<String> = per
+                .iter_mut()
+                .zip(names)
+                .map(|(v, n)| format!("{n} {:.2}", median(v)))
+                .collect();
+            println!(
+                "{name}: settled frame {settled:.2} ms ({pages} pages); passes alone (ms): {}",
+                parts.join(", ")
+            );
+        }
+        return Ok(());
+    }
     // `M13_COST=budget,pairs` in development: the bakes' cost alone.
     if let Some((budget, pairs)) = std::env::var("M13_COST")
         .ok()

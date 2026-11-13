@@ -692,8 +692,9 @@ settled 0.212× / 0.135× one ray's coverage error in 16.12 / 17.11 ms,
 `docs/results/m13-gate6.md`) and **gate 7** (pages keep up with a 10 m/s
 flight: 1.191× the settled frame against 1.2×, `docs/results/m13-gate7.md`).
 The next task is item 3's remainder: the 10 ms bar (the flight's view
-settles at 21.6–29.3 ms, standing 16, 150 m up 17), then colour in the
-same pages; see item 3 below.
+settles at 21.6–29.3 ms, standing 16, 150 m up 17), starting from a design
+step on the profile in `docs/results/m13-10ms-profile.md` (the pixels' pass
+is 72–76% of every view); then colour in the same pages; see item 3 below.
 
 - **The user's direction.** Core first (2026-11-08), sharpened 2026-11-12:
   be excellent at three things (**scale, detail, lighting**) and adequate
