@@ -103,6 +103,11 @@ pub struct CacheOptions {
     /// Pixels a texel should span; each pixel's mip is chosen for this (log2
     /// rounded).
     pub pixels_per_texel: f32,
+    /// Levels a page request refines by (M4 gate 12): a pixel showing a page
+    /// coarser than the one it wants asks for the page this many levels
+    /// finer (or the wanted one, if nearer), so a view arrives coarse to
+    /// fine in fewer rounds. 1 to 4; 3 by default (1 before).
+    pub refine_levels: u32,
     /// One pixel per `request_tile × request_tile` reports a missing page each
     /// frame (a different one each frame).
     pub request_tile: u32,
@@ -220,6 +225,7 @@ impl Default for CacheOptions {
         CacheOptions {
             base_texel: 0.005,
             pixels_per_texel: 2.0,
+            refine_levels: 3,
             request_tile: 4,
             bake_budget: 20_000,
             frame_target_ms: 14.0,
@@ -1721,7 +1727,7 @@ impl VirtualCache {
                 self.inv_base,
                 pixel_angle,
                 self.options.pixels_per_texel,
-                0.0,
+                self.options.refine_levels.clamp(1, 4) as f32,
             ],
             sky: [
                 self.sky_samples.len() as u32,

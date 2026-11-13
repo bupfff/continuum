@@ -66,6 +66,7 @@ fn main() {
     };
     let options = CacheOptions {
         sky_rays: !args.iter().any(|a| a == "cones"),
+        refine_levels: arg("refine=").unwrap_or(3),
         ..options
     };
     let cached = || {

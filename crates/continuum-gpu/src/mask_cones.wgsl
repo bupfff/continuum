@@ -4953,8 +4953,12 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     var found = false;
     var found_guess = false;
     var mip = wanted;
-    // The key of the page one mip finer than `mip` (the last missing one).
+    // The keys of the pages one to four mips finer than `mip` (the last
+    // missing ones).
     var finer = vec3<u32>(0u);
+    var finer2 = vec3<u32>(0u);
+    var finer3 = vec3<u32>(0u);
+    var finer4 = vec3<u32>(0u);
     loop {
         let r = vc_page(hit.mesh, c, uv, mip);
         let slot = vc_find(r.key);
@@ -4965,11 +4969,20 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
             found_ref = r;
             found = true;
             if (mip > wanted) {
+                // Up to `refine_levels` finer (M4 gate 12): fewer rounds
+                // from coarse to fine.
+                let step = u32(vc.params.w);
                 vc_request_key = finer;
+                if (step >= 2u && mip >= wanted + 2u) { vc_request_key = finer2; }
+                if (step >= 3u && mip >= wanted + 3u) { vc_request_key = finer3; }
+                if (step >= 4u && mip >= wanted + 4u) { vc_request_key = finer4; }
                 vc_request_priority = 32u - min(mip - wanted, 30u);
             }
             break;
         }
+        finer4 = finer3;
+        finer3 = finer2;
+        finer2 = finer;
         finer = r.key;
         if (r.coarsest || mip >= 30u) { break; }
         mip += 1u;
