@@ -94,6 +94,167 @@ smaller than its footprint, so cost is bounded by screen size, not scene size.
 Builds on Lacewell et al. 2008, Bako et al. 2022, Weier et al. 2023; ours is
 non-neural, fitted for mask cones, and portable. Not a novelty claim.
 
+#### The far field for sub-pixel coverage (M13's design, 2026-11-13)
+
+The goal is Landmark 3's coverage pass, about 10 ms at 1280×720 on the
+million-boulder field, from M13 gate 4's 122–135 ms at the same accuracy
+(0.218× one ray's coverage error standing, 0.132× from 150 m).
+
+**Where the time goes at full size** (`docs/results/m13-far-field-profile.md`,
+development).
+- *From 150 m:* gate 4's path (with the packet walk) takes 104 ms: the
+  bins' hardware rays about 51, the maps' reads about 24, and a walk from
+  the root to the instances in every pixel about 27 (67 object nodes a
+  pixel). Every boulder there is 2–5 pixels across, so no node above the
+  instances is small enough to stop at. **Nodes holding coverage cannot
+  help this view**; it needs fewer rays, cheaper reads and a shared walk.
+- *Standing:* 122 ms. Pixels above the horizon walked about 40 nodes each
+  for nothing, because the side planes' test cannot reject boxes straddling
+  the eye's plane; testing the boxes' faces removes that exactly (36.0 →
+  18.6 nodes a pixel, the same coverage, 113 ms). The rest is the horizon:
+  a pixel there sees boulders from about 540 m to the field's edge, each
+  about a pixel across, and walks up to thousands of nodes and reads their
+  maps. **This is the far field, and what nodes holding coverage are for.**
+  Its depth is the problem: even nodes exactly one pixel wide would line a
+  grazing pixel's frustum about f·ln(far/near) deep (f is 772 pixels a
+  radian: about a thousand), so a far pixel must stop at nodes that are
+  deep along the view and thin on screen.
+
+**The pass, in five parts** (A, B, C and E for both views; D for the far
+field):
+
+- **A. Exact culling by the boxes' faces.** Also reject a box when the
+  pixel's (or tile's) frustum lies wholly on the eye's side of one of its
+  faces: every frustum edge direction points away from that face and the
+  eye is beyond it. Exact; done in development (above).
+- **B. The bins' rays only near large objects.** The corner rays (one per
+  pixel, 2 ms) already say which corners hit a large object (more than 8
+  pixels across). A pixel traces its 16 bin rays only if one of the 16
+  corners of its 3×3 block hits one (and its own four do not all hit the
+  same one). It misses only slivers of large objects whose silhouettes cross
+  between corners, measured by the gate's accuracy. Today every unresolved
+  pixel traces them, including the sky and from 150 m 96% of pixels whose
+  instances are all small.
+- **C. One walk per tile** (a beam, Heckbert & Hanrahan 1984): an 8×8 tile
+  walks the object hierarchy once against its frustum, nearest first, and
+  lists its entries (small instances, nodes splatted today, D's pages) in
+  workgroup memory in chunks; after each chunk each pixel evaluates the
+  entries over its open bins, and the walk stops when every pixel's bins
+  are full. The top of the hierarchy, today walked by each of the tile's 64
+  pixels, is walked once. The entries and their per-bin combination are the
+  per-pixel walk's, so the coverage is the same up to rounding.
+- **D. Hierarchy nodes holding coverage: view-dependent coverage pages.**
+  Below.
+- **E. Lighter reads of the instances' maps:** 8-bit texels in a texture
+  array (a layer per direction), one hardware-filtered sample per bin and
+  direction instead of four loads with address arithmetic each.
+
+**D in detail.**
+- *Representation:* a node's **page** is its coverage seen from the eye,
+  at one texel per bin: 512 8-bit texels in a shape from 32×16 to 128×4 (or
+  transposed), so a slab seen at grazing angles, wide and a pixel tall,
+  fits. Each texel holds the share of 4×4 rays from the bake eye `E`
+  through its square that meet the node's contents. The page's header holds
+  `E`, its plane (through the node's centre, facing `E`), the plane's axes
+  and texel sizes. A pixel reads it per bin where the bin's ray crosses the
+  plane, bilinearly: about 64 byte loads for a whole node, against 256
+  loads for one instance's map today.
+- *Correlation:* within a node it is exact, since the rays see its
+  contents together (two boulders in line count once), and it is kept to a
+  bin in the pixel, since texels are no larger than bins in either axis
+  (M13 gate 2's saturation came from one number per node). Across entries,
+  pages combine per bin as independent occluders, as instances do today.
+- *Which nodes:* during C's walk, a node whose projected box fits a page
+  shape at one texel per bin is an entry if its page is resident and valid;
+  otherwise it is descended as today, and requested if it fits (a request
+  list deduplicated on the GPU, as the view cache's). Nodes holding movers
+  (their subtree is never prefiltered) never get pages. Instanced geometry
+  keeps its shared per-geometry maps for instances: pages for 30,000
+  instances from 150 m would cost millions of rays a frame to keep valid
+  in motion, and the shared maps need no bakes.
+- *Baking:* by hardware ray queries, each ray clipped to the node's box,
+  a hit accepted only if its instance lies in the node's item range (a
+  subtree's items are contiguous in the hierarchy's item list; one u32 an
+  instance maps it back). 8,192 rays a page; baked within a time budget
+  each frame. No preprocessing beyond the item ranges.
+- *Reuse and its bound:* read from an eye `E′`, a point of the node's
+  contents (at most `L/2` from the plane, `L` the box's depth seen from
+  `E`) lands within `|ΔE⊥| L / 2D` of where `E` saw it (`D` its distance, `D ≫ L`),
+  that is `2 f |ΔE⊥| L / D²` bins (a bin is `D / 4f` wide at `D`). A page
+  is valid while that is at most a quarter of a bin and its texels stay
+  within 0.7–1.4 bins (zoom, approach). A page past its bound is not read
+  (the node is descended) until re-baked, so accuracy never depends on
+  staleness, only frame time. Estimates: at the standing view's horizon,
+  nodes of 32–64 boulders (`L` about 16 m at 1 km) stay valid for about 5
+  m of the eye's motion; seen from above, a slab's `L` is its thickness and
+  pages last tens of metres.
+- *Memory:* bounded by the screen, not the scene: a pool of pages (32,768
+  pages, 16 MB plus headers, in the first gate), nodes beyond it descended.
+  Estimates: the standing view needs 2,000–5,000 pages (30–60 entries a
+  horizon pixel against about 1,200 instances), the view from 150 m none,
+  a view from 1 km up over the whole field 60,000–115,000. Precomputed
+  maps for every node would need a million unique maps (64 GB at the
+  instances' resolution).
+- *Streaming (M14):* pages bake against whatever levels are resident;
+  unique objects small on screen have no shared maps, so pages (a leaf of
+  one object) serve them too. Pages want their contents' levels at a bin's
+  resolution, finer than camera feedback's half pixel: open, for a later
+  gate.
+- *Later, appearance:* texels add premultiplied lit colour from the
+  lighting cache at each ray's hit, so far pixels shade from the same
+  reads; it is also the root fix for the error while flying (far pixels
+  stop asking every object's lighting pages, M4 G12).
+
+**Considered and set aside:**
+- *Precomputed directional maps per node*, as the instances': a million
+  unique nodes (memory above), and a square over the bounding sphere leaves
+  a grazing slab one texel row tall, M13 gate 2's saturation again.
+- *An opacity volume per node*: voxels combined along the ray as
+  independent (exponential) count a boulder spanning two voxels twice;
+  voxels larger than the boulders lose where in the pixel the coverage
+  sits. That is the correlation problem Vicini et al. 2021 address with
+  non-exponential transmittance.
+- *Scalars per node* (Lacewell et al. 2008; M13 gate 2): saturation.
+
+**Prior art (checked 2026-11-13 from abstracts, not full papers):**
+- Shade et al. 1996, *Hierarchical image caching*: images of a BSP tree's
+  nodes cached, drawn on quads and re-rendered when an error metric is
+  exceeded. **The closest found.** D differs in holding coverage at
+  sub-pixel bins rather than colour, baking by rays restricted to the
+  node's contents, combining per bin with the other entries, and
+  bounding reuse by position.
+- Schaufler & Stürzlinger 1996 (a 3D image cache) and Yoon et al. 2006
+  (R-LODs: planes in kd-tree nodes as levels of detail for rays): to check.
+- Gobbetti & Marton 2005, *Far Voxels*: inner nodes hold a view-dependent
+  appearance fitted to rays cast against the full-resolution model;
+  precomputed, voxels, rasterized.
+- Lacewell et al. 2008: directional opacity per BVH node, composited.
+- Heitz & Neyret 2012: sparse voxel octrees whose voxels hold sub-voxel
+  Gaussian descriptors; cone rays compute occlusion within the pixel's
+  footprint and combine fragments as an A-buffer.
+- Loubet & Neyret 2017: macroscopic surfaces as meshes, sub-resolution
+  ones as a microflake volume with an occlusion-preserving voxelization.
+- Vicini et al. 2021: non-exponential transmittance for correlation across
+  volume elements. Weier et al. 2023: neural, correlation along rays in a
+  sparse multi-level voxel grid.
+
+No novelty claimed. View-dependent coverage pages at sub-pixel bins over a
+hierarchy's cut, baked by restricted hardware rays and reused within a
+positional bound, alongside shared per-geometry maps, is not known to us in
+this form; that stays hedged until the papers are read in full.
+
+**Gates** (stubs written before any implementation, criteria in their doc
+comments):
+- **M13 G5** (A, B, C, E): accuracy at most 0.25× one ray's error
+  standing and 0.15× from 150 m (gate 4: 0.218× and 0.132×, a stated loss
+  of about 15%); at most 25 ms from 150 m and 50 ms standing (the horizon
+  is left for G6).
+- **M13 G6** (D on G5): the same accuracy with pages baked; at most 20 ms
+  in both views with pages resident; pages within 32 MB; and, along a
+  walk standing with pages re-baked within a budget, every frame checked
+  within 0.3× one ray's error.
+- Later: the 10 ms bar, flights, then appearance in the same pages.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -473,13 +634,14 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-13, end of the ninth session)
+### 3.8 Next steps, in order (updated 2026-11-13, tenth session)
 
-**Start here (updated 2026-11-13, end of the ninth session).** The state
-in one place, for a new conversation. Read this block, then the milestone
-table (§6) and the results files it names. Everything through commit
-`a6799f6` is pushed; the next task is item 1 of "Next, in order" below
-(a design step, no code), then the three smaller items.
+**Start here (updated 2026-11-13, tenth session).** The state in one
+place, for a new conversation. Read this block, then the milestone table
+(§6) and the results files it names. Item 1 of "Next, in order" below (the
+design for M13's far field, §3.4) is done; the next task is item 2.1
+(bounding the error while flying), then items 2.2 and 2.3, then M13's
+gates 5 and 6 (stubs written).
 
 - **The user's direction.** Core first (2026-11-08), sharpened 2026-11-12:
   be excellent at three things (**scale, detail, lighting**) and adequate
@@ -547,59 +709,34 @@ table (§6) and the results files it names. Everything through commit
    and with streamed lighting, the ray sky with movers and streamed levels.
 3. **Detail without shimmer at frame rate:** sub-pixel coverage and colour
    in about 10 ms at 720p. *Done:* coverage accuracy (M13 G3–G4: 0.13–0.22×
-   one ray's error). *Left:* speed (122–135 ms; scoped, the design step
-   is item 1) and appearance.
+   one ray's error). *Designed (§3.4):* the far field and the pass's
+   speed, in two gates (stubs `m13_gate5`, `m13_gate6`). *Left:* speed
+   (122–135 ms, those gates) and appearance.
 4. **One showcase scene** with all three, at 60 fps against Cycles, the
    quality dial working. *Not started.*
 
 **Next, in order (the user's order, 2026-11-13):** the design step for
-M13's far field first, then the three smaller items, then the design's
-gates.
+M13's far field first (done), then the three smaller items, then the
+design's gates.
 
-1. **Design step: M13's far field through hierarchy nodes that hold
-   coverage** (Landmark 3; the goal is a coverage pass of about 10 ms at
-   1280×720 on the million boulders, today 122–135 ms). Where the time
-   goes (development, M13 G4's path at 10,000 boulders): standing 25.5 ms,
-   150 m up 57.7 ms; without the coverage maps' reads (four directions
-   bilinearly for each of 16 bins, up to 256 reads per instance per pixel)
-   24.9 and 43.0 ms. So the walk (23–28 object nodes a pixel, thousands at
-   the horizon) and the bins' rays (16 per unresolved pixel, 96% of pixels
-   from 150 m: about 14 million a frame) carry it. Tried in development:
-   the walk as a packet (`map_coverage_from`, a subgroup walking the union
-   of its pixels' walks; committed) gives the same coverage 14% faster from
-   150 m (49.7 against 57.7 ms) and no faster standing; letting nodes up to
-   4 or 16 pixels across splat changed nothing (above the leaves, nodes
-   span more than that at 10,000 boulders, so pixels walk down to
-   instances); a tile-shared walk saved only 20–24% in M1 G3. A far pixel
-   must stop at a node, so nodes must hold the coverage of what is under
-   them. The design settles, in writing, before any gate stub:
-   - **Representation:** directional coverage maps per node like the
-     instances' (opacity from 256 directions, 16×16 texels with mips), with
-     fewer directions or texels, or a small opacity volume per node.
-   - **Which nodes, and memory:** nodes from about a pixel across at the
-     views' distances upward, within a stated budget at a million boulders
-     (the instances' resolution, 64 KB a node, is too much for every node).
-   - **Correlation:** a parent's map built by tracing its contents from
-     each direction keeps where in the node the coverage sits (to its
-     texels), unlike M13 G2's independent splats, which saturated pixels
-     whose boulders all sit low in them; how sibling nodes combine within
-     a pixel's 4×4 bins.
-   - **Build and streaming:** the cost of building the maps once for a
-     static hierarchy (on the GPU, by rays), and what happens with M14's
-     unique streamed objects.
-   - **Later, appearance:** the same nodes holding lit colour, which is
-     also the root fix for the error while flying (per-object page demand,
-     M4 G12).
-   - **Prior art, hedged until checked:** Lacewell et al. 2008 and Weier et
-     al. 2023 (§9); to check: Heitz & Neyret 2012 (appearance in sparse
-     voxel octrees), Loubet & Neyret 2017 (hybrid mesh-volume levels of
-     detail), Vicini et al. 2021 (non-exponential transmittance for
-     correlated aggregates).
-
-   Output: the design in this file (§3.4 and M13's milestone row), then
-   gate stubs: accuracy within M13 G4's (0.218× one ray's coverage error
-   standing, 0.132× from 150 m) or a stated loss, speed toward 10 ms with
-   an intermediate bar.
+1. **Done (2026-11-13, tenth session): the design step for M13's far
+   field.** Profiled first at full size (development,
+   `docs/results/m13-far-field-profile.md`): from 150 m (104 ms) half is
+   the bins' rays, the rest the maps' reads and a walk from the root to the
+   instances in every pixel, and no node above the instances is small
+   enough to stop at, so nodes holding coverage cannot help that view;
+   standing (122 ms) the sky's pixels walked boxes straddling the eye's
+   plane for nothing (removed exactly in development: 36 → 18.6 nodes a
+   pixel) and the horizon is the far field. The design (§3.4, "The far
+   field for sub-pixel coverage") has five parts: A exact culling by the
+   boxes' faces, B the bins' rays only near large objects, C one walk per
+   8×8 tile, E lighter map reads (gate 5, both views), and D hierarchy
+   nodes holding coverage as **view-dependent coverage pages** (a node's
+   coverage seen from the eye at one texel per bin, baked by hardware rays
+   restricted to its contents, reused within a positional bound, a pool
+   bounded by the screen; gate 6, the horizon). Prior art checked from
+   abstracts; the closest is Shade et al. 1996's hierarchical image
+   caching. Stubs: `m13_gate5`, `m13_gate6`.
 2. **The smaller items, in this order:**
    1. **Bounding the error while flying** (the last word of Landmark 2).
       M4 G12 measured it (20.8% from settled on a fast flight), nothing
@@ -627,8 +764,9 @@ gates.
       G13) or chart-space normal maps baked from the finest. A normal bound
       in level choice is a further option (on the rocks it would pull the
       finest level out to about 39 m).
-3. **M13's far-field gates** from the design, then appearance (colour in
-   the same nodes).
+3. **M13's far-field gates** from the design (§3.4): gate 5 (A, B, C, E),
+   gate 6 (coverage pages), then the 10 ms bar, flights and appearance
+   (colour in the same pages).
 4. **The showcase;** the NVIDIA benchmark when funded.
 
 **Open, not scheduled** (after the above, or when a landmark needs them):
@@ -1105,7 +1243,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M10 GI and reflections | More bounces, cascades of mask cones, roughness cones | G1 one bounce in the view cache (**failed** on criterion 3 only: on the textured scene, 1.79% from Cycles with one bounce against 7.09% without; warm frame 1.07×, settling 1.21×; but 794 pages baked in the 30 frames after re-coloring, from cache activity resuming after supersampling, not from re-coloring, `docs/results/m10-gate1.md`); G3 secondary requests for hits (**failed** on its re-coloring check, a procedure bug; settling with materials 1.12× instead of 6.9×; accuracy kept, 1.45%/9.01%, `docs/results/m10-gate3.md`); G4 re-coloring with a corrected settle (**passed**: 0 pages baked, `docs/results/m10-gate4.md`); G2 metallic-roughness materials and glossy reflections (**failed** on accuracy: 8.94% from Cycles against 6%, 12.71% without reflection rays; warm frame 1.82× against 2×, `docs/results/m10-gate2.md`); G5 normal maps (**passed**: 3.63% from Cycles with the maps, 26.42% ignoring them; warm frame 1.04×, `docs/results/m10-gate5.md`); G6 alpha cutouts as geometry (**failed**, no criterion reached: the opaque control never settled, from a CPU/shader texel-grid mismatch now fixed, `docs/results/m10-gate6.md`); G7 gate 6 re-run (**passed**: 3.29% from Cycles masking the cards, 34.07% with them opaque; warm frame 1.15×, `docs/results/m10-gate7.md`); G8 exactly back-to-back faces (**failed** on accuracy: speed fixed, 1.03× the 1 mm scene's bake time; but Metal ray queries ignore `CULL_BACK_FACING`, so camera rays hit either coincident face, 5.01% from Cycles, `docs/results/m10-gate8.md`); G10 gate 2 re-run (**passed**: 5.85% from Cycles, warm frame 1.68×; specular from lights had applied Karis's normalization twice, so sun highlights on metal were low, `docs/results/m10-gate10.md`); G9 gate 8 re-run with back-face hits re-traced (**failed** on its 0.5% bound against the 1 mm control, 1.08%, which mostly measures that control's own offset: 1 mm to 2 mm moves the image as much; 3.42% from Cycles against the control's 3.37%; bake 1.21×, warm frame 1.04×; fixes kept, `docs/results/m10-gate9.md`); G11 emission lights its surroundings (**failed**: scored over all pixels, which the lights' visible disks decide, 109.67%; 1.00×, `docs/results/m10-gate11.md`); G12 the same over surfaces (**failed** on the absolute bound: 7.46% from Cycles against 5%, 18.00% without (0.41×); 1.00×; kept, `docs/results/m10-gate12.md`); G13 MikkTSpace tangents (**failed**: 11.80% against the triangles' frames' 11.75% where they differ; 1.00×; kept, `docs/results/m10-gate13.md`); G14 emissive textures (**failed** from the reference: 62.86%, Cycles lit the double-sided sign from its coincident faces, `docs/results/m10-gate14.md`); G15 re-run with a one-sided sign (**passed**: 6.35% over surfaces, texture ignored 491.34%; 1.00×, `docs/results/m10-gate15.md`); G16 alpha blending (**failed** on speed: 4.71% from Cycles, panes opaque 57.31%; 1.33× the frame against 1.3×; kept, `docs/results/m10-gate16.md`); G17 vertex colors (**failed** on speed: 1.29% from Cycles, colors ignored 57.63%; but 1.15× the frame against 1.1×, a transient that development runs did not reproduce, `docs/results/m10-gate17.md`); G18 its speed re-measured in five interleaved rounds (**passed**: 1.004×, `docs/results/m10-gate18.md`); G19 blending's speed (**passed**: 1.226× the frame against 1.3×, layers traced in the visibility pass and the list shaded by an indirect dispatch; 4.70% from Cycles, `docs/results/m10-gate19.md`); G20 texture wrap modes (**passed**: 2.18% from Cycles with clamped and mirrored textures, 67.44% repeating; 0.996× the frame, `docs/results/m10-gate20.md`); G21 bounce light with more than three lights (**failed**, no result: crashed at re-coloring on a missing buffer usage, output lost, `docs/results/m10-gate21.md`); G22 its re-run (**failed** on speed: 1.167× the frame with bounce against 1.15×, bounce light's own cost on that night scene, 1.165× with three lights too; accuracy 3.07% from Cycles against 17.78% without bounce; re-coloring a later light 0.407% from a fresh renderer; kept, `docs/results/m10-gate22.md`); G23 emissive faces as area lights (**failed**, accuracy not reached: 1.286× the frame, then the view never settled at a sub-pixel offset, a loop with bounce samples; settling 6× slower; kept as experimental, `docs/results/m10-gate23.md`); G24 its re-run with the loop fixed (**failed** on accuracy, 19.71% from Cycles against 5%, the faces showing their emission without the light they reflect; **liveness passed**: both renderers settle at all 16 sub-pixel offsets in 132–869 frames, since pages baked for bounce hits stay resident while bounce samples wait, `docs/results/m10-gate24.md`); G25 more than one bounce (**passed**: bounce samples gather the bounce light of the pages they hit and record the bounces they hold, pages re-baking until their hits hold enough; the showcase's closed room 6.54% from Cycles at 12 bounces with 8 bounces against 45.36% with one, settled in 80 frames; the textured scene 2.11% against 2.36%; opt-in, `docs/results/m10-gate25.md`) |
 | M11 showcase | Bistro/Sponza, UE5 side-by-side | Published comparisons in motion |
 | M12 deforming geometry | Subtree refit | Characters in the showcase |
-| M13 prefiltered appearance (Landmark 3) | Hierarchy nodes keep lit appearance; pixel cones stop at pixel-size nodes | Sub-pixel detail without aliasing, cost bounded by the screen. G1 coverage only (**failed**: from 150 m 0.38× one ray's coverage error, passing, but 1.2–2 s a frame, about 100× too slow: each node visit rasterizes into 8×8 bins; standing failed mostly on a flawed measure, buried boulder parts the ground hid in the reference only, `docs/results/m13-gate1.md`); G2 a scalar per-node test (**failed**: 257–281 ms a frame, about 26× over; accuracy 0.38× one ray's from 150 m, 0.59× standing, where one horizon row holds 84% of the error: independent splats saturate a pixel whose boulders all sit low in it, correlation that sub-pixel bins keep, `docs/results/m13-gate2.md`); G3 directional coverage maps and 4×4 bins (**failed** on speed only: accuracy **passes** both views, 0.264× one ray's error standing and 0.231× from 150 m; but 178–707 ms a frame, long tails where partly covered pixels never stop, `docs/results/m13-gate3.md`); G4 near surfaces by hardware rays at pixel corners and bins (**failed** on speed only: accuracy 0.218× and 0.132×; 122–135 ms against a 50 ms intermediate bar, the far field's walk left, `docs/results/m13-gate4.md`); scoped after (development, not a gate: at 10,000 boulders the walk to instances and 16 bin rays per unresolved pixel carry the cost, the maps' reads little; the walk as a packet is 14% faster from 150 m; next, a design for hierarchy nodes holding coverage, §3.8 item 1) |
+| M13 prefiltered appearance (Landmark 3) | Hierarchy nodes keep lit appearance; pixel cones stop at pixel-size nodes | Sub-pixel detail without aliasing, cost bounded by the screen. G1 coverage only (**failed**: from 150 m 0.38× one ray's coverage error, passing, but 1.2–2 s a frame, about 100× too slow: each node visit rasterizes into 8×8 bins; standing failed mostly on a flawed measure, buried boulder parts the ground hid in the reference only, `docs/results/m13-gate1.md`); G2 a scalar per-node test (**failed**: 257–281 ms a frame, about 26× over; accuracy 0.38× one ray's from 150 m, 0.59× standing, where one horizon row holds 84% of the error: independent splats saturate a pixel whose boulders all sit low in it, correlation that sub-pixel bins keep, `docs/results/m13-gate2.md`); G3 directional coverage maps and 4×4 bins (**failed** on speed only: accuracy **passes** both views, 0.264× one ray's error standing and 0.231× from 150 m; but 178–707 ms a frame, long tails where partly covered pixels never stop, `docs/results/m13-gate3.md`); G4 near surfaces by hardware rays at pixel corners and bins (**failed** on speed only: accuracy 0.218× and 0.132×; 122–135 ms against a 50 ms intermediate bar, the far field's walk left, `docs/results/m13-gate4.md`); scoped after (development, not a gate: at 10,000 boulders the walk to instances and 16 bin rays per unresolved pixel carry the cost, the maps' reads little; the walk as a packet is 14% faster from 150 m); profiled at full size (development, `docs/results/m13-far-field-profile.md`: from 150 m 104 ms, about half the bins' rays, the rest the maps' reads and a root-to-instance walk, with no node above the instances small enough to stop at; standing 122 ms, the sky's pixels walking boxes straddling the eye's plane for nothing, removed exactly, and the horizon's far field); **far-field design** (2026-11-13, §3.4): exact culling by the boxes' faces, the bins' rays only near large objects, one walk per 8×8 tile, lighter map reads (gate 5), and hierarchy nodes holding coverage as view-dependent coverage pages at one texel per bin, baked by hardware rays restricted to the node's contents and reused within a positional bound (gate 6); G5 and G6 stubs written |
 | M14 unique geometry at scale (Landmark 1) | Geometry and hierarchy streamed by need, prefiltered nodes standing in | A scene several times GPU memory at frame rate. G1 camera levels streamed by need (**failed** on frame rate in one flight of three: 256 unique rocks whose finest levels are 6.35× a 2.5M-triangle budget, never over it; settled coverage 0.062–0.096× one ray's error from fully resident, 0.013–0.029% of pixels differ in flight, 3.4× less GPU memory; but 1.074×, 1.085× and **1.124×** the resident frame against 1.10×, from about half a load a frame at about 1 ms each; settled colour 1.3–1.6% off, smoother normals at coarser levels, `docs/results/m14-gate1.md`); G2 fewer, cheaper loads and a zoom (**failed** on frame rate in three flights of four: 1.091×, **1.110×, 1.111×, 1.113×** against 1.10×, streaming 0.33–0.42 ms a frame, 2.0–2.5% of a 60 fps frame; passed: never over budget, settled coverage 0.072–0.087× one ray's error, 0.011–0.028% of pixels off in flight, the zoom from 50° to 1.5° on a rock 103 m away exact settled with the working set 1.55 → 0.52 million triangles; paged pool, staging belt, level chains; a load about 29 ns a triangle, 22 of it the structure's build, `docs/results/m14-gate2.md`); G3 beyond CPU memory within a 60 fps budget (**passed**: 4,096 unique rocks, finest levels 32× an 8.4-million-triangle budget and 33 GB packed against 25.8 GB of memory, generated on demand by worker threads into a 2 GiB cache; three 1,800-frame flights at 4.8–5.3 ms mean, 99th percentile 7.9–8.8 ms, worst 14.5 ms, never over budget or cap; settled within 0.018–0.030× one ray's error of every rock at its ideal level; a 2 ms-a-frame time budget deferred 384–926 loads a flight, `docs/results/m14-gate3.md`); G4 lighting levels streamed, certified (**passed**: lighting levels 8× their budget; 2.68 million shown cache pages in flight and every settled page in common bit-identical to a renderer with all lighting levels resident; GPU memory at creation 0.486× gate 3's way; flights 5.4–6.9 ms mean, worst 18.2 ms; proxy levels for camera rays, stubs and slots for lighting levels, pages baked against an absent level hidden and re-baked, `docs/results/m14-gate4.md`); G5 lighting levels produced on demand, certified beyond one renderer (**failed** on the frame budget only: 36,864 unique rocks, lighting levels produced by worker threads into a 256 MB CPU cache, 72× the slots and 26.9× the cache, never over either; 676,080 pages in the flights' region identical to a reference holding the region's 4,941 rocks with every lighting level resident, the longest shadow 7.89 m inside a 12 m margin; 27.7 KB of GPU memory and 15.2 KB of CPU heap a rock, 0.128× and 0.052× a lighting level resident; but **26–39 ms** mean frames, p99 51–66 ms, worst 67–90 ms, with 34–62 lighting loads a frame, `docs/results/m14-gate5.md`); G6 gate 5's world within 60 fps (**failed** on one frame: means 6.16, 6.53, 6.18 ms, p99 10.2–11.9 ms, worst 13.2, 17.1 and **42.3 ms** against 33.3; 1,416,782 pages identical to the subset reference; 17.8 KB of GPU memory and 14.9 KB of CPU heap a rock; lighting uploads through a staging belt, a persistent residency set and incremental top-level builds in patched wgpu, clusters of 32 proxies, the streamer's scans narrowed, `docs/results/m14-gate6.md`); G7 frame-time stability at scale (**passed**: gate 6's world with no frame over 16.7 ms, means 5.86, 5.26, 4.76 ms, p99 8.3–10.1 ms, worst 15.8 ms; 908,545 pages identical; producer threads at utility QoS, CPU-cache frees on a background thread, 32 MB staging chunks; lighting levels now 21 frames late on new ground and views settle in up to 4,791 frames, `docs/results/m14-gate7.md`); G8 a sky and bounce light with streamed lighting (**failed** on the frame budget only: on 9,216 rocks 436,004 sun and 436,002 sky pages identical to every lighting level resident, settled images within 0.07–0.52% (bounce); on 36,864 rocks means 14.1–15.9 ms but p99 **20.5–25.1 ms**; 20.0 KB of GPU memory a rock; the sky's bake marks pages, every absent object listed once a frame, stubs of four hierarchy levels, bounce counting absent levels as missing and retrying, retries and skies baked alone waiting unpinned, `docs/results/m14-gate8.md`); G9 the frame budget with a sky and bounce (**failed** on the frame budget only; run twice, the first disturbed by a game on the machine and stopped by the usage limit, the second clean: a frame-period cap on the bake budget took means to 12.8–13.1 ms but p99 stayed **19.8–21.6 ms**, one frame 163 ms; 286,042 sun and sky pages identical, bounce within 0.065–0.079%, `docs/results/m14-gate9.md`); G10 bounce rays through hardware ray queries, the frame budget with a sky and bounce (**passed**: 36,864 rocks with a sky and bounce at 9.2–10.2 ms mean, p99 14.5–15.0 ms, worst 28.3 ms; 177,375 sun and sky pages identical; bounce within 0.025–0.58% settled; M10 G22's scene 3.09% from Cycles (3.07% with compute rays); the frame budget 11 ms by default, `docs/results/m14-gate10.md`); G11 the frame-period cap times the renderer's own frame calls (**passed**: gate 10's flights 9.2–9.9 ms mean, p99 14.4–15.3 ms; reading the image back every 20th frame warms M5 G13's views in 0.96–1.05× the undisturbed frames, against up to 4.5× before, `docs/results/m14-gate11.md`); G12 coarser levels shade with the finest's normals (**failed** on criterion 3, a method fault: streamed rocks 0.56–0.65× as far from the finest-resident images (1.25–1.48% against 1.95–2.54%), levels produced in 0.87× the time; but the resident images, which the change does not touch, differed by 0.0045% at one view from the time-based budget's timing, identical with a fixed budget, `docs/results/m14-gate12.md`); G13 gate 12 with a fixed bake budget (**passed**: 0.649×, 0.641×, 0.561× the colour difference from the finest-resident images; production 0.87×; resident images identical, `docs/results/m14-gate13.md`) |
 
 ## 7. Benchmark protocol
