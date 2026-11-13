@@ -584,6 +584,7 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_args_edges",
     "m13_coverage",
     "m13_coverage_maps",
+    "vc_error_probes",
 ];
 
 /// The hardware-ray module's entry points (`hw_visibility.wgsl`).
@@ -596,6 +597,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_near",
     "hw_vc_bake_indirect",
     "hw_vc_bake_sky",
+    "hw_vc_error_shares",
 ];
 
 /// Bindings the `visibility` pass uses.
@@ -657,6 +659,14 @@ pub(crate) const HW_VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
 /// Sky samples through hardware ray queries (M5 gate 13).
 pub(crate) const HW_VC_BAKE_SKY_BINDINGS: &[u32] =
     &[2, 3, 23, 24, 30, 32, 33, 34, 38, 41, 46, 47, 54, 64];
+/// The error while flying (M4 gate 13): each probe's exact shares (light
+/// cones through the compute hierarchy, sky rays through the acceleration
+/// structure, 32), then its shading with them (the cache's shading
+/// bindings and the probes, 84).
+pub(crate) const HW_VC_ERROR_SHARES_BINDINGS: &[u32] = &[2, 3, 6, 24, 30, 31, 32, 41, 52, 84];
+pub(crate) const VC_ERROR_PROBES_BINDINGS: &[u32] = &[
+    79, 0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 33, 35, 36, 37, 40, 41, 52, 55, 56, 57, 58, 62, 76, 84,
+];
 /// Bounce light's samples (M10 gate 1).
 pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
     0, 2, 3, 8, 9, 10, 23, 24, 25, 26, 30, 33, 34, 35, 36, 37, 38, 39, 41, 42, 45, 52, 54, 55, 56,

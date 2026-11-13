@@ -16,14 +16,15 @@ use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
-    HW_VC_BAKE_SKY_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS,
-    HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu, M13_COVERAGE_BINDINGS,
-    M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
-    SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS,
-    VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_FILL_BINDINGS,
-    VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS,
-    VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS,
-    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS,
+    HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
+    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, MaskConeKernel,
+    RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
+    VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
+    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
+    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
+    uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -56,6 +57,9 @@ enum CameraDispatch {
     Screen,
     One,
     Listed,
+    /// One workgroup, or one invocation, per probe pixel (M4 gate 13).
+    ProbeGroups,
+    Probes,
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -1012,7 +1016,7 @@ impl InstancedRenderer {
             keep.push(31);
             keep
         };
-        let passes = match (cache.is_some(), visibility) {
+        let mut passes = match (cache.is_some(), visibility) {
             // M13: the scalar coverage walk in its own entry point (profile
             // stage 14), so it does not run at the pixel-cone entry's
             // occupancy.
@@ -1080,9 +1084,27 @@ impl InstancedRenderer {
                 (kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()),
             ],
         };
+        // The error while flying, reported (M4 gate 13): probe pixels after
+        // shading, through ray queries (not with movers, whose own
+        // structure the sky's rays do not trace).
+        if cache.as_ref().is_some_and(|o| o.error_probes > 0)
+            && !pixel_cones
+            && hw.as_ref().is_some_and(|hw| hw.movers.is_none())
+        {
+            passes.push((
+                kernel.entry("hw_vc_error_shares"),
+                HW_VC_ERROR_SHARES_BINDINGS.to_vec(),
+            ));
+            passes.push((
+                kernel.entry("vc_error_probes"),
+                VC_ERROR_PROBES_BINDINGS.to_vec(),
+            ));
+        }
         let camera_dispatch: Vec<CameraDispatch> = passes
             .iter()
             .map(|(_, bindings)| match bindings.as_slice() {
+                b if b == HW_VC_ERROR_SHARES_BINDINGS => CameraDispatch::ProbeGroups,
+                b if b == VC_ERROR_PROBES_BINDINGS => CameraDispatch::Probes,
                 b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
                 b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
                 _ => CameraDispatch::Screen,
@@ -1435,6 +1457,14 @@ impl InstancedRenderer {
         pass.set_bind_group(0, &self.binds[k], &[]);
         match (self.camera_dispatch[k], &self.cache) {
             (CameraDispatch::One, _) => pass.dispatch_workgroups(1, 1, 1),
+            // A workgroup per probe for the shares, an invocation per probe
+            // for the shading.
+            (CameraDispatch::ProbeGroups, Some(cache)) => {
+                pass.dispatch_workgroups(cache.state.probes(), 1, 1)
+            }
+            (CameraDispatch::Probes, Some(cache)) => {
+                pass.dispatch_workgroups(cache.state.probes().div_ceil(64), 1, 1)
+            }
             (CameraDispatch::Listed, Some(cache)) => {
                 pass.dispatch_workgroups_indirect(cache.state.buffer(66), 36)
             }

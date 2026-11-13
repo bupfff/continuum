@@ -4991,20 +4991,24 @@ var<private> vc_request_key: vec3<u32> = vec3<u32>(0u);
 var<private> vc_request_priority: u32 = 0u;
 var<private> vc_fell_back: bool = false;
 
-// The color of surface `hit` seen along camera ray `dir`, lit from the
-// cache: the page of the wanted mip, or failing that the finest coarser one
-// resident, or failing that unshadowed light. `sample`: the pixel samples
-// this frame (its request and statistics count).
-fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
-    let surface = camera.eye.xyz + dir * hit.distance;
-    let c = tri_vchart[hit.tri];
-    let uv = chart_uv(hit.mesh, hit.tri, surface);
-    let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
-    // Irradiance per unit radiance from the found page: lights, then sky.
-    var found_slot = NONE;
-    var found_ref: PageRef;
-    var found = false;
-    var found_guess = false;
+// The page a pixel shows: the wanted mip's, or the finest coarser one
+// resident (`found` false: none). Sets the pixel's request: up to
+// `refine_levels` finer than the page found (M4 gate 12), or the coarsest
+// missing page.
+struct ShownPage {
+    slot: u32,
+    r: PageRef,
+    found: bool,
+    // The page's sky is still a guess.
+    guess: bool,
+    mip: u32,
+};
+
+fn vc_find_shown(m: u32, c: u32, uv: vec2<f32>, wanted: u32) -> ShownPage {
+    var out: ShownPage;
+    out.slot = NONE;
+    out.found = false;
+    out.guess = false;
     var mip = wanted;
     // The keys of the pages one to four mips finer than `mip` (the last
     // missing ones).
@@ -5013,14 +5017,14 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     var finer3 = vec3<u32>(0u);
     var finer4 = vec3<u32>(0u);
     loop {
-        let r = vc_page(hit.mesh, c, uv, mip);
+        let r = vc_page(m, c, uv, mip);
         let slot = vc_find(r.key);
         if (slot != NONE) {
             slot_used[slot] = vc.counts.y;
-            found_guess = sky_guess;
-            found_slot = slot;
-            found_ref = r;
-            found = true;
+            out.guess = sky_guess;
+            out.slot = slot;
+            out.r = r;
+            out.found = true;
             if (mip > wanted) {
                 // Up to `refine_levels` finer (M4 gate 12): fewer rounds
                 // from coarse to fine.
@@ -5040,8 +5044,143 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         if (r.coarsest || mip >= 30u) { break; }
         mip += 1u;
     }
+    out.mip = mip;
+    if (!out.found) {
+        vc_request_key = finer;
+        vc_request_priority = 1u;
+    }
+    return out;
+}
+
+// The lights' and the sky's part of a pixel's irradiance (per unit
+// radiance, then times each light's radiance) and the lights' specular
+// light, from page `f`'s shares times the unshadowed light at the pixel
+// (unshadowed light and the open sky without a page), or with `exact` from
+// the probe's shares (M4 gate 13). Everything else in a pixel's color is the
+// same whichever shares it takes.
+fn vc_light_terms(exact: bool, f: ShownPage, point: vec3<f32>, normal: vec3<f32>, base: vec3<f32>, mat: vec2<f32>, dir: vec3<f32>) -> array<vec3<f32>, 2> {
     var e = vec3<f32>(0.0);
+    var spec = vec3<f32>(0.0);
+    let pbr = mat.y >= 0.0;
     let count = arrayLength(&lights);
+    if (f.found || exact) {
+        // Each light's cached shadowed share, times its unshadowed
+        // light here.
+        for (var l = 0u; l < count; l++) {
+            if (vc.sky.w == 1u || exact) {
+                var share = 1.0;
+                if (exact && l < 8u) {
+                    share = err_probe_shares[l];
+                } else if (f.found) {
+                    share = vc_bilinear(f.slot, f.r, l);
+                }
+                // Shadowed pixels need no unshadowed light.
+                if (share > 0.0) {
+                    let open = unshadowed_rect(point, normal, lights[l]);
+                    e += lights[l].radiance.xyz * share * open;
+                    if (pbr) {
+                        spec += lights[l].radiance.xyz * share * open * specular_light(point, normal, -dir, lights[l], base, mat);
+                    }
+                }
+            } else {
+                e += lights[l].radiance.xyz * vc_bilinear(f.slot, f.r, l);
+            }
+        }
+        if (exact) {
+            e += sky_scale(normal) * err_probe_sky;
+        } else if (f.guess) {
+            e += sky_open(normal);
+        } else {
+            e += sky_scale(normal) * vc_bilinear(f.slot, f.r, count);
+        }
+    } else {
+        // Unshadowed light from each light.
+        for (var l = 0u; l < count; l++) {
+            e += lights[l].radiance.xyz * unshadowed_rect(point, normal, lights[l]);
+        }
+        // The sky above the horizon, with the ground below it: a
+        // guess until a page arrives.
+        e += sky_open(normal);
+    }
+    return array<vec3<f32>, 2>(e, spec);
+}
+
+// The error while flying, reported (M4 gate 13): a probe's exact shares
+// (the first eight lights' and the sky's), for `vc_light_terms`.
+var<private> err_probe_shares: array<f32, 8>;
+var<private> err_probe_sky: f32 = 0.0;
+
+// Per probe, 16 words: each light's exact share (0–7) and the sky's (8),
+// from `hw_vc_error_shares`; then from `vc_error_probes` the squared
+// difference between shown and exact summed over channels (12), the exact
+// value summed over channels (13), 1 on a surface (14).
+@group(0) @binding(84) var<storage, read_write> err_probes: array<f32>;
+
+// Probe `k`'s pixel: an R2 pattern, moved each frame.
+fn err_probe_pixel(k: u32) -> vec3<u32> {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    let f = f32(vc.counts.y);
+    let q = fract(vec2<f32>(0.5) + vec2<f32>(0.7548776662, 0.5698402910) * f32(k)
+        + vec2<f32>(fract(f * 0.6180339887), fract(f * 0.4142135624)));
+    return vec3<u32>(min(u32(q.x * f32(w)), w - 1u), min(u32(q.y * f32(h)), h - 1u), 0u);
+}
+
+// One invocation per probe pixel, after shading (M4 gate 13): the color
+// the pixel was shown less the difference its lights' and sky's terms make
+// when they take the exact shares `hw_vc_error_shares` found instead of the
+// page's (the rest of its color is the same either way). Pixels on the sky
+// or a light are shown exactly.
+@compute @workgroup_size(64)
+fn vc_error_probes(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let k = gid.x;
+    if (k >= vc.extra.z) { return; }
+    let gp = err_probe_pixel(k);
+    let pixel = gp.y * u32(camera.params.x) + gp.x;
+    let dir = camera_dir(gp);
+    let hit = recorded_hit(pixel, dir);
+    let surf = hit.mesh != NONE && vis[pixel].w == 0u;
+    let shown = colors[pixel].xyz;
+    var exact = shown;
+    if (surf) {
+        for (var l = 0u; l < 8u; l++) { err_probe_shares[l] = err_probes[16u * k + l]; }
+        err_probe_sky = err_probes[16u * k + 8u];
+        let surface = camera.eye.xyz + dir * hit.distance;
+        let c = tri_vchart[hit.tri];
+        let uv = chart_uv(hit.mesh, hit.tri, surface);
+        let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
+        let f = vc_find_shown(hit.mesh, c, uv, wanted);
+        let point = surface + hit.normal * surface_offset(hit.distance);
+        let normal = mapped_normal(hit.mesh, hit.tri, surface, shading_normal(hit.mesh, hit.tri, surface, -dir), hit.distance, dir);
+        let base = surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal);
+        let mat = material_at(hit.mesh, hit.tri, surface, hit.normal, hit.distance, dir);
+        let a = vc_light_terms(false, f, point, normal, base, mat, dir);
+        let b = vc_light_terms(true, f, point, normal, base, mat, dir);
+        // As `vc_hit_color` combines them.
+        var diffuse = base;
+        if (mat.y >= 0.0) {
+            let ab = env_brdf(max(dot(normal, -dir), 1e-4), mat.y);
+            diffuse = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
+        }
+        exact = shown - (diffuse * (a[0] - b[0]) / 3.14159265 + (a[1] - b[1]));
+    }
+    let d = shown - exact;
+    err_probes[16u * k + 12u] = dot(d, d);
+    err_probes[16u * k + 13u] = exact.x + exact.y + exact.z;
+    err_probes[16u * k + 14u] = select(0.0, 1.0, surf);
+}
+
+// The color of surface `hit` seen along camera ray `dir`, lit from the
+// cache: the page of the wanted mip, or failing that the finest coarser one
+// resident, or failing that unshadowed light. `sample`: the pixel samples
+// this frame (its request and statistics count).
+fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
+    let surface = camera.eye.xyz + dir * hit.distance;
+    let c = tri_vchart[hit.tri];
+    let uv = chart_uv(hit.mesh, hit.tri, surface);
+    let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
+    let f = vc_find_shown(hit.mesh, c, uv, wanted);
     let point = surface + hit.normal * surface_offset(hit.distance);
     let normal = mapped_normal(hit.mesh, hit.tri, surface, shading_normal(hit.mesh, hit.tri, surface, -dir), hit.distance, dir);
     let base = surface_albedo(hit.mesh, hit.tri, surface, hit.distance, dir, hit.normal);
@@ -5051,54 +5190,21 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     // Emission (with its texture, M10 gate 14) for the pixel's footprint.
     let glow_footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share * hit.distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(hit.normal, dir)), 0.2);
     let glow = emission_at(hit.mesh, hit.tri, surface, glow_footprint);
-    var spec = vec3<f32>(0.0);
-    if (found) {
-        // Each light's cached shadowed share, times its unshadowed
-        // light here.
-        for (var l = 0u; l < count; l++) {
-            if (vc.sky.w == 1u) {
-                // Shadowed pixels need no unshadowed light.
-                let share = vc_bilinear(found_slot, found_ref, l);
-                if (share > 0.0) {
-                    let open = unshadowed_rect(point, normal, lights[l]);
-                    e += lights[l].radiance.xyz * share * open;
-                    if (pbr) {
-                        spec += lights[l].radiance.xyz * share * open * specular_light(point, normal, -dir, lights[l], base, mat);
-                    }
-                }
-            } else {
-                e += lights[l].radiance.xyz * vc_bilinear(found_slot, found_ref, l);
-            }
+    let terms = vc_light_terms(false, f, point, normal, base, mat, dir);
+    var e = terms[0];
+    var spec = terms[1];
+    if (!f.found || f.guess) { vc_fell_back = true; }
+    if (f.found && vc.indirect.y == 1u) {
+        e += indirect_light(f.slot, f.r);
+        // A page shown without bounce samples (baked for a hit): ask for
+        // them.
+        if (unpack2x16float(indirect[indirect_at(f.slot, 0u, 0u)].y).y == 0.0) {
+            vc_request(vc_page(hit.mesh, c, uv, f.mip).key, 1u | WANTS_SAMPLES);
         }
-        if (found_guess) {
-            vc_fell_back = true;
-            e += sky_open(normal);
-        } else {
-            e += sky_scale(normal) * vc_bilinear(found_slot, found_ref, count);
-        }
-        if (vc.indirect.y == 1u) {
-            e += indirect_light(found_slot, found_ref);
-            // A page shown without bounce samples (baked for a hit): ask for
-            // them.
-            if (unpack2x16float(indirect[indirect_at(found_slot, 0u, 0u)].y).y == 0.0) {
-                vc_request(vc_page(hit.mesh, c, uv, mip).key, 1u | WANTS_SAMPLES);
-            }
-        }
-    } else {
-        vc_fell_back = true;
-        vc_request_key = finer;
-        vc_request_priority = 1u;
-        // Unshadowed light from each light.
-        for (var l = 0u; l < count; l++) {
-            e += lights[l].radiance.xyz * unshadowed_rect(point, normal, lights[l]);
-        }
-        // The sky above the horizon, with the ground below it: a
-        // guess until a page arrives.
-        e += sky_open(normal);
     }
     if (sample) {
         atomicAdd(&vc_stats[2], 1u);
-        if (found && mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
+        if (f.found && f.mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
     }
     if (!pbr) { return base * e / 3.14159265 + glow; }
     // Metallic-roughness: the specular layer's directional albedo (the

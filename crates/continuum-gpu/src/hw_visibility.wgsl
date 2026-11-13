@@ -431,3 +431,99 @@ fn hw_vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     }
     if (listed) { sky_partial[6u * k + f] = select(0.0, value, on); }
 }
+
+// --- The error while flying, reported (M4 gate 13). ---
+
+// Whether the segment from `p` along unit `w` for `t` meets nothing
+// (FORCE_OPAQUE | TERMINATE_ON_FIRST_HIT).
+fn hw_segment_open(p: vec3<f32>, w: vec3<f32>, t: f32) -> bool {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x5u, 0xffu, 0.0, t, p, w));
+    rayQueryProceed(&rq);
+    return rayQueryGetCommittedIntersection(&rq).kind == 0u;
+}
+
+// Per lane: each light's visible and whole weight, then the sky's open
+// weight (17 values a lane).
+var<workgroup> err_red: array<f32, 1088>;
+
+// One workgroup per probe pixel, before `vc_error_probes`: each light's
+// shadowed share (the first eight) and the sky's at the pixel's own point,
+// into the probe's words 0–8, by hardware rays spread over the lanes. A
+// light's share is the visible part of its irradiance over 64 points (an
+// 8×8 grid on a rectangle, or across a sphere's disk), one ray each; the
+// sky's is `hw_vc_bake_sky`'s (the projected solid angle of the hemicube's
+// 192 bins whose ray meets nothing), three bins a lane. One where the light
+// is below the horizon, as the bake.
+@compute @workgroup_size(64)
+fn hw_vc_error_shares(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let k = wg.x;
+    let listed = k < vc.extra.z;
+    let gp = err_probe_pixel(k);
+    let w = u32(camera.params.x);
+    let pixel = gp.y * w + gp.x;
+    let dir = camera_dir(gp);
+    let hit = recorded_hit(pixel, dir);
+    let surf = listed && hit.mesh != NONE && vis[pixel].w == 0u;
+    let surface = camera.eye.xyz + dir * hit.distance;
+    let p = surface + hit.normal * surface_offset(hit.distance);
+    var n = vec3<f32>(0.0, 0.0, 1.0);
+    if (surf) { n = shading_normal(hit.mesh, hit.tri, surface, -dir); }
+    let count = min(arrayLength(&lights), 8u);
+    for (var i = 0u; i < 17u; i++) { err_red[17u * li + i] = 0.0; }
+    if (surf) {
+        let gu = (f32(li % 8u) + 0.5) / 8.0;
+        let gv = (f32(li / 8u) + 0.5) / 8.0;
+        for (var l = 0u; l < count; l++) {
+            let r = lights[l];
+            var y = r.corner.xyz + r.edge_u.xyz * gu + r.edge_v.xyz * gv;
+            var facing = 1.0;
+            if (is_sphere(r)) {
+                // Across the disk the sphere shows the point (a square grid
+                // mapped to the disk).
+                let c = r.corner.xyz;
+                let to = normalize(c - p);
+                let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(to.z) < 0.9);
+                let a = normalize(cross(helper, to));
+                let b = cross(to, a);
+                let q = vec2<f32>(gu, gv) * 2.0 - vec2<f32>(1.0);
+                let ang = 6.2831853 * gv;
+                y = c + (a * cos(ang) + b * sin(ang)) * (r.edge_u.x * sqrt(gu));
+                facing = 1.0 + 0.0 * q.x;
+            } else {
+                facing = abs(dot(normalize(cross(r.edge_u.xyz, r.edge_v.xyz)), normalize(y - p)));
+            }
+            let to_y = y - p;
+            let t = length(to_y);
+            let wy = to_y / max(t, 1e-20);
+            let g = max(dot(n, wy), 0.0) * facing / max(t * t, 1e-20);
+            if (g > 0.0) {
+                err_red[17u * li + 2u * l + 1u] = g;
+                if (hw_segment_open(p, wy, t * (1.0 - 1e-4))) { err_red[17u * li + 2u * l] = g; }
+            }
+        }
+        if (vc.sky.y == 1u) {
+            var sky = 0.0;
+            for (var q = 0u; q < 3u; q++) {
+                let b = li + 64u * q;
+                let d = normalize(bin_world(n, bin_local(b, IND_R)));
+                if (d.z > 0.0 && hw_sky_open(p, d)) { sky += hemicube_weight(b); }
+            }
+            err_red[17u * li + 16u] = sky;
+        }
+    }
+    workgroupBarrier();
+    if (li == 0u && listed) {
+        var sums: array<f32, 17>;
+        for (var i = 0u; i < 17u; i++) { sums[i] = 0.0; }
+        for (var j = 0u; j < 64u; j++) {
+            for (var i = 0u; i < 17u; i++) { sums[i] += err_red[17u * j + i]; }
+        }
+        for (var l = 0u; l < 8u; l++) {
+            let whole = sums[2u * l + 1u];
+            err_probes[16u * k + l] = select(1.0, sums[2u * l] / max(whole, 1e-30), whole > 0.0);
+        }
+        err_probes[16u * k + 8u] = sums[16];
+    }
+}

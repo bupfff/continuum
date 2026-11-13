@@ -75,6 +75,12 @@ const INCOMPLETE_CAP: u32 = 1 << 14;
 /// geometry's object, listed per frame at most (pairs after the incomplete
 /// list; the shader's `MISSING_CAP`).
 const MISSING_CAP: u32 = 1 << 14;
+/// Probe pixels a frame at most (M4 gate 13), 16 words each (f32): the
+/// exact shares (0–8), then the squared difference between shown and exact
+/// summed over channels (12), the exact value summed over channels (13) and
+/// 1 on a surface (14).
+const MAX_PROBES: u32 = 4096;
+const PROBE_BYTES: u64 = 64;
 /// Flags a missing list's slot as a bounce sample's want (the shader's
 /// `BOUNCE_WANT`, M14 gate 8).
 const BOUNCE_WANT: u32 = 0x8000_0000;
@@ -198,6 +204,13 @@ pub struct CacheOptions {
     /// or 2 (one diagonal pair, alternating from pixel to pixel), averaged
     /// with the pixel's own ray.
     pub edge_samples: u32,
+    /// The error while flying, reported (M4 gate 13): pixels a frame (up to
+    /// 4,096; 0: off) shaded both as shown and with each light's share and
+    /// the sky's computed at the pixel's own point, from which
+    /// [`CacheStats::error_estimate`] and [`CacheStats::error_bound`]
+    /// estimate the image's relative RMSE from exact lighting. Needs
+    /// hardware ray queries (the sky's share); bounce light is not probed.
+    pub error_probes: u32,
     /// Experiments only: glossy reflection rays for materials (M10 gate 2;
     /// on by default).
     #[doc(hidden)]
@@ -252,6 +265,7 @@ impl Default for CacheOptions {
             indirect_sample_cost: 8,
             edge_rays: false,
             edge_samples: 4,
+            error_probes: 0,
             glossy_rays: true,
             self_spacing: 0.01,
             sky_later: true,
@@ -349,6 +363,17 @@ pub struct CacheStats {
     /// Pixels shaded with four rays at silhouettes (M7 gate 3; not counted
     /// with `KernelOptions::count_work`).
     pub edge_pixels: u32,
+    /// With [`CacheOptions::error_probes`] (M4 gate 13): an estimate of the
+    /// frame's relative RMSE (as `room3d::cycles::relative_rmse`: the RMS
+    /// difference over the mean) from the image lit exactly at every
+    /// pixel's point, from its probe pixels; 0 without probes.
+    pub error_estimate: f32,
+    /// A one-sided 95% upper bound on that error (the probes' mean squared
+    /// difference plus 1.645 standard errors).
+    pub error_bound: f32,
+    /// Of the probes, those on a surface (the rest see the sky or a light,
+    /// shown exactly).
+    pub error_probes: u32,
     /// Movers under a sky (M9 gate 3): slots listed for a sky re-bake.
     pub sky_listed: u32,
     /// Pages read in the frame before that movers' sky charges touched.
@@ -1292,6 +1317,15 @@ impl VirtualCache {
             ),
             // Pairs listed missing this frame, a hash bitset (M14 gate 8).
             (83, empty("lit seen", 1 << 13, copy_dst)),
+            // Probe pixels (M4 gate 13).
+            (
+                84,
+                empty(
+                    "error probes",
+                    options.error_probes.clamp(1, MAX_PROBES) as u64 * PROBE_BYTES,
+                    wgpu::BufferUsages::COPY_SRC,
+                ),
+            ),
             (
                 77,
                 empty(
@@ -1539,7 +1573,8 @@ impl VirtualCache {
                         + INVALID_CAP as u64 * 4
                         + INCOMPLETE_CAP as u64 * 4
                         + SKY_LIST_CAP as u64 * 4
-                        + MISSING_CAP as u64 * 8,
+                        + MISSING_CAP as u64 * 8
+                        + self.probes() as u64 * PROBE_BYTES,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
@@ -1547,6 +1582,21 @@ impl VirtualCache {
                 pending: None,
             })
             .collect();
+    }
+
+    /// Probe pixels a frame (M4 gate 13; 0: off).
+    pub(crate) fn probes(&self) -> u32 {
+        self.options.error_probes.min(MAX_PROBES)
+    }
+
+    /// Where the probes start in a readback buffer of `tiles` request tiles.
+    fn probes_at(tiles: u64) -> u64 {
+        tiles * 16
+            + STATS_BYTES
+            + TIMESTAMP_BYTES
+            + MOVER_STATS_BYTES
+            + (INVALID_CAP + INCOMPLETE_CAP + SKY_LIST_CAP) as u64 * 4
+            + MISSING_CAP as u64 * 8
     }
 
     pub(crate) fn buffer(&self, binding: u32) -> &wgpu::Buffer {
@@ -1775,10 +1825,11 @@ impl VirtualCache {
             ],
             // x: 1 if bounce samples gather emission (M10 gate 11).
             // y: bounces (M10 gate 25).
+            // z: probe pixels (M4 gate 13).
             extra: [
                 (self.options.indirect && self.options.emission_bounce) as u32,
                 self.options.bounces.clamp(1, 8),
-                0,
+                self.probes(),
                 0,
             ],
         };
@@ -2140,6 +2191,15 @@ impl VirtualCache {
                 );
             }
         }
+        if self.probes() > 0 {
+            encoder.copy_buffer_to_buffer(
+                self.buffer(84),
+                0,
+                &r.buffer,
+                Self::probes_at(r.tiles as u64),
+                self.probes() as u64 * PROBE_BYTES,
+            );
+        }
         self.used_requested = self.frame.is_multiple_of(32) && self.used_pending.is_none();
         if self.used_requested {
             encoder.copy_buffer_to_buffer(self.buffer(40), 0, &self.used_readback, 0, None);
@@ -2422,6 +2482,22 @@ impl VirtualCache {
         record.at_wanted = counters[3];
         record.work.copy_from_slice(&counters[4..16]);
         record.edge_pixels = counters[15];
+        // The error while flying (M4 gate 13): over the probes, the mean
+        // squared difference and mean exact value give the relative RMSE.
+        let probes = self.options.error_probes.min(MAX_PROBES) as usize;
+        if probes > 0 {
+            let at = Self::probes_at(tiles as u64) as usize;
+            let p: &[f32] = bytemuck::cast_slice(&raw[at..at + probes * PROBE_BYTES as usize]);
+            let n = probes as f64;
+            let (d, s): (Vec<f64>, Vec<f64>) =
+                p.chunks(16).map(|q| (q[12] as f64, q[13] as f64)).unzip();
+            let dm = d.iter().sum::<f64>() / n;
+            let sm = (s.iter().sum::<f64>() / n).max(1e-30);
+            let var = d.iter().map(|x| (x - dm).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
+            record.error_estimate = ((3.0 * dm).sqrt() / sm) as f32;
+            record.error_bound = ((3.0 * (dm + 1.645 * (var / n).sqrt())).sqrt() / sm) as f32;
+            record.error_probes = p.chunks(16).filter(|q| q[14] > 0.0).count() as u32;
+        }
         self.appended = 0.8 * self.appended + 0.2 * appended as f32;
         self.evict_invalid(&invalid, frame);
         // Sky re-bakes for movers (M9 gate 3): a receiver's now; a moved
