@@ -85,6 +85,38 @@ The caller sets ε and a frame budget; the library guarantees one and reports th
 other. When the budget is short, cones widen: the image softens but stays stable,
 with no aliasing, noise or ghosting. Foveation falls out for free.
 
+**The error while flying, reported (design, 2026-11-13; Landmark 2).** At
+a frame budget the cache shows coarser pages than pixels want while it
+catches up (M4 G12: 20.8% from settled on a fast flight), and nothing
+reported it. The renderer now reports, each frame, an estimate of the
+image's relative RMSE from its settled image and an upper bound on it.
+- *Why an estimate, not a certificate.* A coarser page holds point samples
+  at its texel centres, not means over its texels' areas, so a pixel near a
+  shadow edge can be off by the light's whole value; a certified bound per
+  pixel would be the light itself. (Pages whose texels held area means
+  would make one: values in [0, 1] with mean `c` deviate by at most
+  `c(1 − c)` in mean square. A possible later step.)
+- *How.* `N` probe pixels a frame, on a low-discrepancy pattern that moves
+  each frame, are shaded twice: as shown, and with each light's share and
+  the sky's computed at the pixel's own surface point by the bake's own
+  tests (the light's mask cone; the sky's 192 hardware rays) instead of read
+  from pages. Over the probes, the mean squared difference and the mean
+  value give the estimate (`sqrt(3·mean d)/mean s`, as `relative_rmse`), and
+  a one-sided 95% bound from the squared differences' spread. Pixels on the
+  sky count with no error.
+- *What it measures.* The shown image against lighting exact at each
+  pixel: the settled image plus the settled cache's own interpolation
+  error, whose size the estimate shows at rest. Bounce light is not
+  probed (both shadings take the page's), so the estimate leaves out the
+  bounce's error; the default has no bounce.
+- *Cost.* `N` cones per light and `192 N` rays; 512 probes, estimated
+  at under half a millisecond.
+- *Next, the dial's other side:* an error-first mode in which the caller
+  sets ε, the renderer raises the bake budget while the bound exceeds it,
+  and the frame time is reported.
+
+Gate: **M4 G13** (stub `m4_gate13`).
+
 ### 3.4 Prefiltered hybrid hierarchy (infrastructure)
 
 One hierarchy whose leaves are triangle clusters (imported assets), field bricks
