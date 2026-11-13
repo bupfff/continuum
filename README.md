@@ -222,17 +222,21 @@ nothing). Four landmarks, in order:
    measured against fully settled views (about a fifth of the image on a
    fast flight over the boulder field, mostly from the number of distinct
    objects needing lighting at once), and light can bounce more than once
-   (interiors from 45% to 6.5% of Cycles' fully bounced image). Next,
-   bounding the error while flying.
+   (interiors from 45% to 6.5% of Cycles' fully bounced image). The
+   renderer can now report each frame an estimate of its error against
+   exact lighting, with a 95% bound, from 512 probe pixels (on that
+   flight the bound held in every check, for 2% of the frame).
 3. **Detail smaller than a pixel, without shimmer.** Each object type
    gets a small precomputed map of how it looks from every direction, and
    pixels read those instead of tracing every tiny surface. Accuracy is
    answered (a fifth to an eighth of one-ray-per-pixel's error on the
    million-boulder field); speed is not (122–135 ms a frame), so it is not
    in the renderer yet. The cost is each pixel walking down to individual
-   boulders; next is a design where the scene's hierarchy holds the
-   coverage of what lies beneath each node, so a distant pixel reads one
-   node instead.
+   boulders, and at full size half of it is extra rays. The design for
+   both is written: fewer rays, one walk shared by a tile of pixels, and
+   far nodes of the scene's hierarchy holding small images of their own
+   coverage, re-made as the viewpoint moves, so a distant pixel reads one
+   node instead of thousands of boulders.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
