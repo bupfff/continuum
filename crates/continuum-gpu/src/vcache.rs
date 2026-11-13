@@ -114,13 +114,19 @@ pub struct CacheOptions {
     /// `bake_budget`). Where the device has timestamp queries (M5 gate 5),
     /// the bake and the camera passes are timed on the GPU, bake time is fit
     /// as a latency plus a cost per unit of budget, and the budget is what
-    /// fits the target after the camera passes, 20% more and less on
-    /// alternate frames so the fit can tell latency from cost. Otherwise (M4
-    /// gate 11),
+    /// fits the target after the camera passes, and 20% less on alternate
+    /// frames so the fit can tell latency from cost (M14 gate 9: only less).
+    /// Otherwise (M4 gate 11),
     /// when the CPU had to wait for the GPU and the last frame took longer,
     /// the budget scales by target / period, and when a frame is quicker, it
     /// grows by 10%. Between 1,000 and `bake_budget`.
     pub frame_target_ms: f32,
+    /// The frame period the bake keeps frames within, measured on the CPU
+    /// (M14 gate 9; 0: none): while frames take longer, a cap on the bake
+    /// budget shrinks in proportion; while they take less than 85% of it,
+    /// the cap grows by 5% a frame. It catches what the GPU model does not
+    /// see (structures built, uploads, the CPU's own work).
+    pub frame_budget_ms: f32,
     /// Pages the pool holds. Each texel holds one channel per light, then
     /// the sky's, so the pool takes 81 × 4 bytes × channels per page: 340 MB
     /// at the default 2^19 pages with one light, 680 MB with three. Fewer
@@ -201,6 +207,7 @@ impl Default for CacheOptions {
             request_tile: 4,
             bake_budget: 20_000,
             frame_target_ms: 14.0,
+            frame_budget_ms: 15.0,
             pages: 1 << 19,
             sky_spacing: 0.0,
             sky_sample_cost: 10,
@@ -249,6 +256,8 @@ pub struct CacheStats {
     pub evicting: Duration,
     /// The bake budget the frame planned with (sun texels, or their worth).
     pub budget: u32,
+    /// The cap the frame period kept on it (M14 gate 9).
+    pub budget_cap: u32,
     /// Of `budget`, what the frame's plan used.
     pub spent: u32,
     /// Diagnostics: of `spent`, the units of the pages planned per mip level,
@@ -940,6 +949,8 @@ pub(crate) struct VirtualCache {
     /// The current bake budget (cones per frame), and when the last frame
     /// began (for its period).
     budget: f32,
+    /// The cap on the bake budget kept by the frame period (M14 gate 9).
+    cap: f32,
     last_begin: Option<Instant>,
     /// GPU timing, where the device has timestamp queries, and the bake
     /// model it feeds.
@@ -1424,6 +1435,7 @@ impl VirtualCache {
                     period: queue.get_timestamp_period(),
                 }),
             model: BakeModel::new(),
+            cap: options.bake_budget as f32,
             evict_queue: Vec::new(),
             overflowed: None,
         };
@@ -1723,6 +1735,7 @@ impl VirtualCache {
             evicted: std::mem::take(&mut self.evicted),
             planning: std::mem::take(&mut self.planning),
             budget: self.budget as u32,
+            budget_cap: self.cap as u32,
             spent: self.spent,
             spent_by_mip: self.spent_by_mip,
             timed: self.timer.is_some(),
@@ -2102,8 +2115,10 @@ impl VirtualCache {
             // Only once a frame has been timed. Alternate frames bake 20%
             // more and less, so the fit can tell latency from cost.
             if self.latest > 0 {
+                // Below the model only (M14 gate 9): its budget is already
+                // what fits the target.
                 let dither = if self.frame.is_multiple_of(2) {
-                    1.2
+                    1.0
                 } else {
                     0.8
                 };
@@ -2127,6 +2142,20 @@ impl VirtualCache {
                 MIN_BUDGET.min(self.options.bake_budget as f32),
                 self.options.bake_budget as f32,
             );
+        }
+        // The frame period's cap (M14 gate 9).
+        let budget_ms = self.options.frame_budget_ms;
+        if budget_ms > 0.0
+            && let Some(period) = period
+        {
+            let period = period.as_secs_f32() * 1e3;
+            let floor = MIN_BUDGET.min(self.options.bake_budget as f32);
+            if period > budget_ms {
+                self.cap = (self.budget.min(self.cap) * budget_ms / period).max(floor);
+            } else if period < 0.85 * budget_ms {
+                self.cap = (self.cap * 1.05).min(self.options.bake_budget as f32);
+            }
+            self.budget = self.budget.min(self.cap);
         }
         let evicting = Instant::now();
         self.refresh_pinned();
