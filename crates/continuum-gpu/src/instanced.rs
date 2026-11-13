@@ -44,9 +44,9 @@ pub struct FrameProfile {
     /// Planning the frame's bake on the CPU (from the requests of two frames
     /// before).
     pub planning: Duration,
-    /// The first four camera passes, in order, each submitted and waited
+    /// The first twelve camera passes, in order, each submitted and waited
     /// for alone.
-    pub passes: [Duration; 4],
+    pub passes: [Duration; 12],
     /// The bake's passes, in order, each submitted and waited for alone,
     /// with their labels (diagnostics; empty labels past the last).
     pub bake_passes: [(&'static str, Duration); 8],
@@ -366,6 +366,10 @@ pub struct InstancedRenderer {
     /// pixel's covered bins (binding 88), and the rays' dispatch arguments
     /// (89).
     m13_work: Option<(wgpu::Buffer, wgpu::Buffer)>,
+    /// M13 gate 7: GPU timestamps around the page arguments' pass (0, 1)
+    /// and the page bakes (2, 3) (a query set, its resolve buffer, a
+    /// readback buffer, nanoseconds a tick), where the device has them.
+    m13_timer: Option<(wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer, f32)>,
     cache: Option<Cache>,
     /// The rendered image's size: the target's divided by `scale`.
     width: u32,
@@ -1246,6 +1250,7 @@ impl InstancedRenderer {
             binds: Vec::new(),
             colors,
             m13_work: None,
+            m13_timer: None,
             cache,
             width,
             height,
@@ -1377,23 +1382,44 @@ impl InstancedRenderer {
         }
     }
 
+    /// M13 gate 7: the GPU time of the last frame's page passes (arguments
+    /// and bakes, each timed on its own) in milliseconds, after the frame is
+    /// waited for; None without timestamps.
+    #[doc(hidden)]
+    pub fn m13_page_ms(&self) -> Option<f64> {
+        let (_, _, readback, period) = self.m13_timer.as_ref()?;
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let ticks: [u64; 4] = {
+            let data = slice.get_mapped_range().expect("mapped timestamps");
+            let words: &[u64] = bytemuck::cast_slice(&data);
+            [words[0], words[1], words[2], words[3]]
+        };
+        readback.unmap();
+        let span = |a: u64, b: u64| b.saturating_sub(a) as f64 * *period as f64 / 1e6;
+        Some(span(ticks[0], ticks[1]) + span(ticks[2], ticks[3]))
+    }
+
     /// M13 gate 6: the coverage pages' counters after the last frame (see
     /// `g6_state` in `hw_visibility.wgsl`: 2 bakes, 6 requests, 8 pages
     /// used, 10 baked in all, 11 nodes fitting no page, 12 page roots, 14
-    /// the largest shift read in 1/10,000 bin).
+    /// the largest shift read in 1/10,000 bin, 26 refreshes baked).
     #[doc(hidden)]
-    pub fn m13_page_counters(&self) -> [u32; 16] {
+    pub fn m13_page_counters(&self) -> [u32; 32] {
         let Some((_, state)) = self.scene.iter().find(|(b, _)| *b == 92) else {
-            return [0; 16];
+            return [0; 32];
         };
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("page counters"),
-            size: 64,
+            size: 128,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(state, 0, &readback, 0, 64);
+        encoder.copy_buffer_to_buffer(state, 0, &readback, 0, 128);
         self.queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -1402,7 +1428,7 @@ impl InstancedRenderer {
             .expect("poll");
         let words: Vec<u32> =
             bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped counters")).to_vec();
-        let mut out = [0; 16];
+        let mut out = [0; 32];
         out.copy_from_slice(&words);
         out
     }
@@ -1481,6 +1507,37 @@ impl InstancedRenderer {
             all.push((88, work));
             all.push((89, args));
         }
+        self.m13_timer = (self
+            .passes
+            .iter()
+            .any(|(_, keep)| keep.as_slice() == M13_PAGE_BAKE_BINDINGS)
+            && device.features().contains(wgpu::Features::TIMESTAMP_QUERY))
+        .then(|| {
+            let buffer = |label, usage| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: 32,
+                    usage,
+                    mapped_at_creation: false,
+                })
+            };
+            (
+                device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("page timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 4,
+                }),
+                buffer(
+                    "page timestamps resolve",
+                    wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                ),
+                buffer(
+                    "page timestamps readback",
+                    wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                ),
+                self.queue.get_timestamp_period(),
+            )
+        });
         if let Some(cache) = &self.cache {
             all.extend(cache.state.buffers.iter().map(|(b, buf)| (*b, buf)));
             all.push((41, cache.state.params()));
@@ -1581,17 +1638,33 @@ impl InstancedRenderer {
             .as_ref()
             .and_then(|c| c.state.timer.as_ref())
             .map(|t| &t.set);
-        let (pipeline, _) = &self.passes[k];
+        let (pipeline, keep) = &self.passes[k];
+        // M13 gate 7: each page pass's span (queries 0–1 the arguments, 2–3
+        // the bakes).
+        let page_writes = self.m13_timer.as_ref().and_then(|(query_set, ..)| {
+            let first = if keep.as_slice() == M13_PAGE_ARGS_BINDINGS {
+                0
+            } else if keep.as_slice() == M13_PAGE_BAKE_BINDINGS {
+                2
+            } else {
+                return None;
+            };
+            Some(wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(first),
+                end_of_pass_write_index: Some(first + 1),
+            })
+        });
         // Only the first writes (query 2); the display pass ends the span.
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: None,
-            timestamp_writes: set.filter(|_| k == 0).map(|query_set| {
+            timestamp_writes: page_writes.or(set.filter(|_| k == 0).map(|query_set| {
                 wgpu::ComputePassTimestampWrites {
                     query_set,
                     beginning_of_pass_write_index: Some(2),
                     end_of_pass_write_index: None,
                 }
-            }),
+            })),
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.binds[k], &[]);
@@ -1753,6 +1826,10 @@ impl InstancedRenderer {
         }
         for k in 0..self.passes.len() {
             self.encode_camera_pass(&mut encoder, k);
+        }
+        if let Some((set, resolve, readback, _)) = &self.m13_timer {
+            encoder.resolve_query_set(set, 0..4, resolve, 0);
+            encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, 32);
         }
         self.encode_camera_end(&mut encoder);
         if let Some(stream) = &self.stream {
@@ -1928,7 +2005,7 @@ impl InstancedRenderer {
             self.queue.submit([commands]);
             let submitted = submit.elapsed();
             self.wait();
-            if k < 4 {
+            if k < 12 {
                 profile.passes[k] = start.elapsed();
             }
             if k == 0 {

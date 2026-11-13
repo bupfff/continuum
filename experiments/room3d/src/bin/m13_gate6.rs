@@ -274,10 +274,14 @@ fn main() -> std::io::Result<()> {
         kernel.set_hardware_rays(true);
         kernel.set_profile_stage(18);
         let camera = views[0].1;
+        let budget_with: u32 = std::env::var("M13_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(WALK_BUDGET);
         let mut r = renderer(&kernel, &field, origin, &lights);
         let (mut without, mut with) = (Vec::new(), Vec::new());
         for k in 0..20 {
-            let budget = if k % 2 == 0 { 0 } else { WALK_BUDGET };
+            let budget = if k % 2 == 0 { 0 } else { budget_with };
             r.set_m13_page_budget(budget);
             let start = Instant::now();
             r.frame(camera, &view_target);
@@ -292,10 +296,10 @@ fn main() -> std::io::Result<()> {
         without.sort_by(f64::total_cmp);
         with.sort_by(f64::total_cmp);
         println!(
-            "bake cost: {:.2} ms a frame without bakes, {:.2} ms with {WALK_BUDGET}: {:.3} ms a page",
+            "bake cost: {:.2} ms a frame without bakes, {:.2} ms with {budget_with}: {:.3} ms a page",
             without[5],
             with[5],
-            (with[5] - without[5]) / WALK_BUDGET as f64
+            (with[5] - without[5]) / budget_with as f64
         );
         return Ok(());
     }
@@ -394,10 +398,8 @@ fn main() -> std::io::Result<()> {
         let (seconds, checks, turn) = if dev { (3, 3, 20.0) } else { (10, 10, 0.0) };
         // `M13_FLY=height,down,speed` in development: fly instead of walk
         // (metres, degrees down, metres a second).
-        let fly: Option<(f32, f32, f32)> = std::env::var("M13_FLY")
-            .ok()
-            .filter(|_| dev)
-            .and_then(|v| {
+        let fly: Option<(f32, f32, f32)> =
+            std::env::var("M13_FLY").ok().filter(|_| dev).and_then(|v| {
                 let p: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
                 (p.len() == 3).then(|| (p[0], p[1], p[2]))
             });
@@ -413,7 +415,13 @@ fn main() -> std::io::Result<()> {
         // `M13_WARM=1` in development: settle at the walk's start first.
         if dev && std::env::var_os("M13_WARM").is_some() {
             r.set_m13_page_budget(SETTLE_BUDGET);
-            settle(&mut r, field_view(height, down, turn, 0.0), &view_target, 200, false);
+            settle(
+                &mut r,
+                field_view(height, down, turn, 0.0),
+                &view_target,
+                200,
+                false,
+            );
         }
         r.set_m13_page_budget(WALK_BUDGET);
         let mut saved = Vec::new();

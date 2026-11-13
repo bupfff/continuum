@@ -635,13 +635,13 @@ pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
 ];
 /// M13 gate 6: the coverage pages' bakes after the pixels' pass, and their
 /// dispatch.
-pub(crate) const M13_PAGE_ARGS_BINDINGS: &[u32] = &[91, 92, 93, 94];
+pub(crate) const M13_PAGE_ARGS_BINDINGS: &[u32] = &[6, 91, 92, 93, 94];
 pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[3, 6, 9, 32, 91, 92, 94, 95];
 /// M13 gate 6's coverage pages: the pool, the requests' list, the state's
 /// counters, and the pages baked a frame by default.
 pub(crate) const M13_PAGE_POOL: usize = 32_768;
 pub(crate) const M13_PAGE_REQUESTS: usize = 4_096;
-pub(crate) const M13_PAGE_META: usize = 16;
+pub(crate) const M13_PAGE_META: usize = 32;
 pub(crate) const M13_PAGE_BUDGET: u32 = 64;
 /// M13 gate 5: the roots pass, one invocation per tile listing the subtree
 /// roots its pixels walk (87); it also restarts the bin rays' list (88).
@@ -1842,8 +1842,8 @@ impl MaskConeKernel {
 
     /// M13 gate 6's coverage pages (stage 18; stage 17 has them off): the
     /// hierarchy's item ranges and each object's place among the items (91),
-    /// the pages' state (92: counters, requests, their pages, the
-    /// node-to-page table, request marks, use marks), the bakes' dispatch arguments (93), the
+    /// the pages' state (92: counters, requests, their pages, refreshes,
+    /// the node-to-page table, request marks, use marks), the bakes' dispatch arguments (93), the
     /// pages' headers (94) and texels (95).
     fn m13_page_buffers(
         &self,
@@ -1875,10 +1875,10 @@ impl MaskConeKernel {
         fixed.extend(ranges.iter().flatten());
         fixed.extend(place);
         let pages_on = self.profile_stage.get() == 18;
-        let mut state = vec![0u32; M13_PAGE_META + 2 * M13_PAGE_REQUESTS + 2 * n + M13_PAGE_POOL];
+        let mut state = vec![0u32; M13_PAGE_META + 3 * M13_PAGE_REQUESTS + 2 * n + M13_PAGE_POOL];
         state[4] = if pages_on { M13_PAGE_BUDGET } else { 0 };
         state[9] = pages_on as u32;
-        for w in &mut state[M13_PAGE_META + 2 * M13_PAGE_REQUESTS..][..n] {
+        for w in &mut state[M13_PAGE_META + 3 * M13_PAGE_REQUESTS..][..n] {
             *w = hierarchy::NONE;
         }
         let mut headers = vec![[0.0f32; 4]; 5 * M13_PAGE_POOL];
