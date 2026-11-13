@@ -80,11 +80,15 @@ and the item ranges (13 MB).
 - **The horizon is solved when settled.** Pages cut the standing frame from
   38 to 16 ms; the longest walk from 3,275 nodes to 940, and accuracy is
   slightly better (0.212× against 0.219×).
-- **In motion pages lag.** Walking at 1.5 m/s, the view asks for thousands
-  of pages a frame (mid-field pages of 8 boulders go stale within metres)
-  and 20 bakes a frame keep up with a fraction; frames ran 34 ms. Accuracy
-  holds because unbaked nodes are walked, but a flight at frame rate needs
-  cheaper bakes, bakes ordered by what they save, or pages that stay valid
-  longer (bigger, farther nodes first).
+- **A cold pool fills slowly; a warm one keeps up with walking.** On the
+  gate's walk the pool started cold, and at 20 bakes a frame the view's
+  10,000 pages took most of the walk to arrive (frames 34 ms median).
+  After the run (development, the turned view, starting settled): the same
+  walk needs 1.5 bakes a frame (at most 6), frames 16.2 ms median and 19.7
+  worst. Flying at 10 m/s 20 m up (10° down, settled start), pages baked
+  together expire together after about 15 m: requests climb to about 2,000
+  a frame against 20 baked, and frames reach 41 ms (accuracy 0.151–0.155×,
+  since unbaked nodes are walked). Next: cheaper bakes and bake eyes led
+  along the motion (M13 gate 7).
 - **150 m up** uses no pages and runs 17 ms; the 10 ms bar needs more there
   (corner and bin rays about 5 ms, map reads and the walk the rest).

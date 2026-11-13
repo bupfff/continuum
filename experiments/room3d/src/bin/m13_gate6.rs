@@ -392,6 +392,16 @@ fn main() -> std::io::Result<()> {
     // second (development: 3 s along the turned view, 3 checks).
     if !dev || walk_dev {
         let (seconds, checks, turn) = if dev { (3, 3, 20.0) } else { (10, 10, 0.0) };
+        // `M13_FLY=height,down,speed` in development: fly instead of walk
+        // (metres, degrees down, metres a second).
+        let fly: Option<(f32, f32, f32)> = std::env::var("M13_FLY")
+            .ok()
+            .filter(|_| dev)
+            .and_then(|v| {
+                let p: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+                (p.len() == 3).then(|| (p[0], p[1], p[2]))
+            });
+        let (height, down, speed) = fly.unwrap_or((1.7, 0.0, 1.5));
         let frames = 60 * seconds;
         let at: Vec<usize> = (0..checks)
             .map(|k| 60 + k * (frames - 60) / checks)
@@ -400,17 +410,28 @@ fn main() -> std::io::Result<()> {
         kernel.set_hardware_rays(true);
         kernel.set_profile_stage(18);
         let mut r = renderer(&kernel, &field, origin, &lights);
+        // `M13_WARM=1` in development: settle at the walk's start first.
+        if dev && std::env::var_os("M13_WARM").is_some() {
+            r.set_m13_page_budget(SETTLE_BUDGET);
+            settle(&mut r, field_view(height, down, turn, 0.0), &view_target, 200, false);
+        }
         r.set_m13_page_budget(WALK_BUDGET);
         let mut saved = Vec::new();
         let (mut baked, mut most_baked, mut largest, mut asked) = (0u64, 0u32, 0u32, 0u64);
         let mut frame_ms = Vec::new();
         for f in 0..frames {
-            let camera = field_view(1.7, 0.0, turn, 1.5 * f as f32 / 60.0);
+            let camera = field_view(height, down, turn, speed * f as f32 / 60.0);
             let start = Instant::now();
             r.frame(camera, &view_target);
             r.wait();
             frame_ms.push(ms(start.elapsed()));
             let c = r.m13_page_counters();
+            if dev && f % 15 == 0 {
+                println!(
+                    "  walk frame {f}: {:.2} ms, {} asked, {} baked, {} pages read",
+                    frame_ms[f], c[6], c[2], c[8]
+                );
+            }
             baked += c[2] as u64;
             most_baked = most_baked.max(c[2]);
             largest = largest.max(c[14]);

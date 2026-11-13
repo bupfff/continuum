@@ -238,8 +238,8 @@ nothing). Four landmarks, in order:
    objects, a tile of pixels shares the top of its walk, and far groups of
    boulders hold small images of their own coverage, re-made as the
    viewpoint moves, so a pixel at the horizon reads one image instead of
-   hundreds of boulders. Those images lag when moving fast, and it is not
-   in the renderer yet.
+   hundreds of boulders. They keep up with walking but not yet with fast
+   flight, and it is not in the renderer yet.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
