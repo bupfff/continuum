@@ -306,7 +306,14 @@ For a window, see `apps/viewer`, which flies through a file with
   - While flying, pixels ask for pages up to three levels finer than the
     coarse ones shown (`CacheOptions::refine_levels`). On a fast flight
     over the million boulders the image is about 21% from fully settled
-    ones (M4 gate 12): measured, not bounded.
+    ones (M4 gate 12).
+  - `RendererOptions::cache_options.error_probes` (for example 512; off by default) reports
+    each frame's error: `Renderer::stats()` gives `error_estimate`, the
+    image's relative RMSE from lighting exact at every pixel, and
+    `error_bound`, a 95% upper bound on it, from probe pixels shaded both
+    ways (M4 gate 13: the bound held in every check on that flight). It
+    costs about 1 ms of GPU time a frame, needs hardware ray queries, and
+    leaves out bounce light.
   - Off, every pixel traces a cone per light every frame: exact, and slow at
     scale.
   - Tuning lives in `CacheOptions`.
