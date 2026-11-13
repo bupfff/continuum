@@ -534,9 +534,44 @@ fn hw_vc_error_shares(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
 @group(0) @binding(85) var cov_tex: texture_2d_array<f32>;
 @group(0) @binding(86) var cov_sampler: sampler;
 
+// Directions' maps read per bin: 4 (the four nearest, blended
+// bilinearly), 2 (the nearest along one axis of the directions' grid, the
+// two nearest along the axis whose fraction is nearer a half, blended), or
+// 1 (the nearest).
+const G5_DIRS: u32 = 2u;
+
+// The pixel's bins not yet full (bit b: bin b), kept by the walk.
+var<private> g5_open: u32 = 0xffffu;
+
+fn g5_refresh_open() {
+    var m = 0u;
+    for (var b = 0u; b < 16u; b++) {
+        if (pbin[b] < 0.9999) { m |= 1u << b; }
+    }
+    g5_open = m;
+}
+
+// The pixel's bins whose squares the screen rectangle [lo, hi) overlaps.
+fn g5_rect_bins(lo: vec2<f32>, hi: vec2<f32>, pix: vec2<f32>) -> u32 {
+    let a = vec2<i32>(max(floor((lo - pix) * 4.0), vec2<f32>(0.0)));
+    let b = vec2<i32>(min(ceil((hi - pix) * 4.0) - vec2<f32>(1.0), vec2<f32>(3.0)));
+    if (any(b < a)) { return 0u; }
+    let row = (0xfu >> u32(3 - b.x)) & (0xfu << u32(a.x));
+    // Rows a.y through b.y: the row's bits repeated every four bits.
+    let rows = (0xffffu >> u32(4 * (3 - b.y))) & (0xffffu << u32(4 * a.y));
+    return rows & (row * 0x1111u);
+}
+
 // `instance_map_bins` reading the maps' texture (8 bits, filtered by the
 // hardware): object `m`, at most MAP_LIMIT_PX across, into the pixel's
-// bins. False if it is too large or too near.
+// bins. False if it is too large or too near. Where a bin's ray passes the
+// object's centre (its closest approach, in the object's frame over its
+// radius) is taken affine in the bin's screen position about the centre's
+// ray: the ray turns by `(I - c cᵀ) dD` (`c` the centre's direction, `D`
+// the ray's unnormalized direction) and its closest approach moves by
+// the distance times that; the next term is about rad / 2f of the radius
+// (under 0.3% at 8 pixels across). Each bin's coordinates in a direction's
+// map then cost two multiply-adds.
 fn instance_map_tex(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
     let x = meshes[m].w;
     let c_obj = vec3<f32>(bitcast<f32>(cov_maps[hdr + 2u]), bitcast<f32>(cov_maps[hdr + 3u]), bitcast<f32>(cov_maps[hdr + 4u]));
@@ -551,46 +586,91 @@ fn instance_map_tex(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
     let rad = radius * f / depth;
     if (2.0 * rad > MAP_LIMIT_PX) { return false; }
     let cp = cam_to_pixels(to_camera(view_world(), centre));
-    if (cp.x + rad <= pix.x || cp.y + rad <= pix.y || cp.x - rad >= pix.x + 1.0 || cp.y - rad >= pix.y + 1.0) { return true; }
-    let dw = normalize(rel);
-    var d = dw;
-    if (x != NONE) { d = normalize(rotate_to_object(x, dw)); }
+    // Its square's open bins (by their squares; a bin is read where its
+    // centre lies in the object's square).
+    var todo = g5_rect_bins(cp - vec2<f32>(rad), cp + vec2<f32>(rad), pix) & g5_open;
+    if (todo == 0u) { return true; }
+    if ((G5_SKIP & 16u) != 0u) {
+        for (var b = 0u; b < 16u; b++) {
+            let p = pix + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25 + vec2<f32>(0.125);
+            if (abs(p.x - cp.x) > rad || abs(p.y - cp.y) > rad) { continue; }
+            pbin[b] = 1.0 - (1.0 - pbin[b]) * 0.5;
+        }
+        return true;
+    }
+    // The object's rotation (world to object), loaded once.
+    var r0 = vec3<f32>(1.0, 0.0, 0.0);
+    var r1 = vec3<f32>(0.0, 1.0, 0.0);
+    var r2 = vec3<f32>(0.0, 0.0, 1.0);
+    if (x != NONE) {
+        r0 = xforms[4u * x].xyz;
+        r1 = xforms[4u * x + 1u].xyz;
+        r2 = xforms[4u * x + 2u].xyz;
+    }
+    let len = length(rel);
+    let c = rel / len;
+    let d = normalize(r0 * c.x + r1 * c.y + r2 * c.z);
     let g = (oct_encode(d) + vec2<f32>(1.0)) * 0.5 * f32(MAP_DIRS) - vec2<f32>(0.5);
     let i0 = floor(g);
     let fr = g - i0;
     let texels_per_bin = 0.25 * depth / f / (2.0 * radius / f32(MAP_TEXELS));
     let level = clamp(round(log2(max(texels_per_bin, 1e-6))), 0.0, 4.0);
     let first = (hdr - 1u) / 8u * MAP_DIRS * MAP_DIRS;
+    // The closest approach's change per pixel across and down, world then
+    // object frame, over the radius.
+    let tz = camera.params.z;
+    let k = dot(c, camera.forward.xyz) * len / radius;
+    let ex = camera.right.xyz * (2.0 * tz / camera.params.y);
+    let ey = camera.up.xyz * (-2.0 * tz / camera.params.y);
+    let wx = (ex - c * dot(c, ex)) * k;
+    let wy = (ey - c * dot(c, ey)) * k;
+    let qx = r0 * wx.x + r1 * wx.y + r2 * wx.z;
+    let qy = r0 * wy.x + r1 * wy.y + r2 * wy.z;
     var layers: array<u32, 4>;
     var weights: array<f32, 4>;
-    var us: array<vec3<f32>, 4>;
-    var vs: array<vec3<f32>, 4>;
-    for (var k = 0u; k < 4u; k++) {
-        let ix = u32(clamp(i32(i0.x) + i32(k & 1u), 0, i32(MAP_DIRS) - 1));
-        let iy = u32(clamp(i32(i0.y) + i32(k >> 1u), 0, i32(MAP_DIRS) - 1));
-        layers[k] = first + iy * MAP_DIRS + ix;
+    var uvx: array<vec2<f32>, 4>;
+    var uvy: array<vec2<f32>, 4>;
+    let dirs = G5_DIRS;
+    let along_x = abs(fr.x - 0.5) <= abs(fr.y - 0.5);
+    for (var k = 0u; k < dirs; k++) {
+        var ix = u32(clamp(i32(i0.x) + i32(k & 1u), 0, i32(MAP_DIRS) - 1));
+        var iy = u32(clamp(i32(i0.y) + i32(k >> 1u), 0, i32(MAP_DIRS) - 1));
         weights[k] = select(1.0 - fr.x, fr.x, (k & 1u) == 1u) * select(1.0 - fr.y, fr.y, (k >> 1u) == 1u);
+        if (dirs == 1u) {
+            ix = u32(clamp(round(g.x), 0.0, f32(MAP_DIRS) - 1.0));
+            iy = u32(clamp(round(g.y), 0.0, f32(MAP_DIRS) - 1.0));
+            weights[k] = 1.0;
+        } else if (dirs == 2u) {
+            if (along_x) {
+                ix = u32(clamp(i32(i0.x) + i32(k), 0, i32(MAP_DIRS) - 1));
+                iy = u32(clamp(round(g.y), 0.0, f32(MAP_DIRS) - 1.0));
+                weights[k] = select(1.0 - fr.x, fr.x, k == 1u);
+            } else {
+                ix = u32(clamp(round(g.x), 0.0, f32(MAP_DIRS) - 1.0));
+                iy = u32(clamp(i32(i0.y) + i32(k), 0, i32(MAP_DIRS) - 1));
+                weights[k] = select(1.0 - fr.y, fr.y, k == 1u);
+            }
+        }
+        layers[k] = first + iy * MAP_DIRS + ix;
         let dk = oct_decode((vec2<f32>(f32(ix), f32(iy)) + vec2<f32>(0.5)) / f32(MAP_DIRS) * 2.0 - vec2<f32>(1.0));
         let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(dk.z) < 0.999);
-        us[k] = normalize(cross(helper, dk));
-        vs[k] = cross(dk, us[k]);
+        let u = normalize(cross(helper, dk));
+        let v = cross(dk, u);
+        uvx[k] = vec2<f32>(dot(qx, u), dot(qx, v)) * 0.5;
+        uvy[k] = vec2<f32>(dot(qy, u), dot(qy, v)) * 0.5;
     }
-    let tz = camera.params.z;
-    let aspect = camera.params.x / camera.params.y;
-    for (var b = 0u; b < 16u; b++) {
-        let p = bin_lo(pix, b) + vec2<f32>(0.125);
-        if (abs(p.x - cp.x) > rad || abs(p.y - cp.y) > rad) { continue; }
-        let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
-        let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
-        let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
-        let qw = camera.eye.xyz + dir * dot(rel, dir) - centre;
-        var q = qw / r_obj;
-        if (x != NONE) { q = rotate_to_object(x, qw) / (scale * r_obj); }
+    let p0 = pix + vec2<f32>(0.125) - cp;
+    while (todo != 0u) {
+        let b = countTrailingZeros(todo);
+        todo &= todo - 1u;
+        let o = p0 + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25;
+        if (abs(o.x) > rad || abs(o.y) > rad) { continue; }
         var cov = 0.0;
-        for (var k = 0u; k < 4u; k++) {
+        for (var k = 0u; k < dirs; k++) {
             if (weights[k] <= 0.0) { continue; }
-            let uv = (vec2<f32>(dot(q, us[k]), dot(q, vs[k])) + vec2<f32>(1.0)) * 0.5;
+            let uv = vec2<f32>(0.5) + uvx[k] * o.x + uvy[k] * o.y;
             if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { continue; }
+            if ((G5_SKIP & 8u) != 0u) { cov += weights[k] * 0.5; continue; }
             cov += weights[k] * textureSampleLevel(cov_tex, cov_sampler, uv, layers[k], level).x;
         }
         pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - clamp(cov, 0.0, 1.0));
@@ -598,126 +678,205 @@ fn instance_map_tex(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
     return true;
 }
 
-// Entries a tile's walk lists per chunk: screen rectangles, and (bits:
-// the node with the top bit, or the instance; then the splat's opacity,
-// silhouette and depth, or the instance's map header).
-const G5_CHUNK: u32 = 128u;
-var<workgroup> g5_box: array<vec4<f32>, 128>;
-var<workgroup> g5_info: array<vec4<f32>, 128>;
-var<workgroup> g5_n: u32;
-var<workgroup> g5_go: u32;
-var<workgroup> g5_visits: u32;
-var<workgroup> g5_open: atomic<u32>;
-// Each pixel's open bins' bounding rectangle (empty: lo above hi), for the
-// walk to skip nodes over full bins only.
-var<workgroup> g5_rects: array<vec4<f32>, 64>;
-// The walk's stack depth and visits (the first invocation's).
-var<private> g5_sp: u32 = 0u;
-var<private> g5_count: u32 = 0u;
-// Development switches (bit 0: no bin rays, 1: no reading of entries, 2: no
-// walk).
-const G5_SKIP: u32 = 0u;
+// --- The tiles' subtree roots (development after the first tile walk). ---
 
-// Whether the screen rectangle [a, b) meets any of the tile's (corner at
-// `lo`) pixels' open bins' rectangles; boxes over more than 16 pixels are
-// taken as meeting one (testing them costs more than it saves).
-fn g5_touches_open(a: vec2<f32>, b: vec2<f32>, lo: vec2<f32>) -> bool {
-    let p0 = vec2<i32>(clamp(floor(a - lo), vec2<f32>(0.0), vec2<f32>(7.0)));
-    let p1 = vec2<i32>(clamp(ceil(b - lo) - vec2<f32>(1.0), vec2<f32>(0.0), vec2<f32>(7.0)));
-    if ((p1.x - p0.x + 1) * (p1.y - p0.y + 1) > 16) { return true; }
-    for (var y = p0.y; y <= p1.y; y++) {
-        for (var x = p0.x; x <= p1.x; x++) {
-            let r = g5_rects[u32(y * 8 + x)];
-            if (b.x > r.x && b.y > r.y && a.x < r.z && a.y < r.w) { return true; }
-        }
-    }
-    return false;
-}
+@group(0) @binding(87) var<storage, read_write> m13_roots: array<u32>;
 
-// This pixel's open bins' bounding rectangle (empty if none).
-fn g5_open_rect(pix: vec2<f32>, open: bool) -> vec4<f32> {
-    var r = vec4<f32>(3.4e38, 3.4e38, -3.4e38, -3.4e38);
-    if (!open) { return r; }
-    for (var b = 0u; b < 16u; b++) {
-        if (pbin[b] >= 0.9999) { continue; }
-        let l = bin_lo(pix, b);
-        r = vec4<f32>(min(r.xy, l), max(r.zw, l + vec2<f32>(0.25)));
-    }
-    return r;
-}
+// Roots a tile lists at most (word 0 of its 64 words is the count).
+const G5_ROOTS: u32 = 63u;
+// A node is listed once its projected box is at most this many pixels
+// across: the pixels walk below it.
+const G5_CUT_PX: f32 = 8.0;
 
-// The first invocation walks the object hierarchy against the tile's
-// frustum (`set_rect_frustum`, the exact box-face test included), nearest
-// first, listing up to a chunk of entries: object nodes small enough to
-// splat (gate 4's rule), and instances small enough for their maps (large
-// ones the bins' rays cover).
-fn g5_walk(lo: vec2<f32>, hi: vec2<f32>) {
+// M13 gate 5's roots pass (profile stage 17), one invocation per 8×8 tile
+// after `hw_m13_corners`: walks the object hierarchy against the tile's
+// frustum (the exact box-face test included), nearest first, and lists the
+// roots of the subtrees its pixels walk: leaves, nodes at most G5_CUT_PX
+// across, and, once the list would overflow, the nodes it would have
+// descended. The listed subtrees hold every node the tile's frustum meets.
+@compute @workgroup_size(8, 8)
+fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let tw = (u32(camera.params.x) + 7u) / 8u;
+    let th = (u32(camera.params.y) + 7u) / 8u;
+    if (gid.x >= tw || gid.y >= th) { return; }
+    let base = (gid.y * tw + gid.x) * (G5_ROOTS + 1u);
+    let lo = vec2<f32>(f32(gid.x * 8u), f32(gid.y * 8u));
+    let hi = lo + vec2<f32>(8.0);
+    set_rect_frustum(lo, hi);
     let v = view_world();
     var n = 0u;
-    loop {
-        if (g5_sp == 0u || n + 2u > G5_CHUNK) { break; }
-        g5_sp--;
-        let id = stack_get(g5_sp);
+    var sp = 1u;
+    stack_set(0u, 0u);
+    // At each pop, n + sp is at most G5_ROOTS.
+    while (sp > 0u) {
+        sp--;
+        let id = stack_get(sp);
         let node = nodes[id];
-        g5_count++;
         let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
         if (sb.behind == 2u || frustum_misses_box(node.lo.xyz, node.hi.xyz)) { continue; }
         if (sb.behind == 0u && (sb.hi.x <= lo.x || sb.hi.y <= lo.y || sb.lo.x >= hi.x || sb.lo.y >= hi.y)) { continue; }
-        if (sb.behind == 0u && !g5_touches_open(sb.lo, sb.hi, lo)) { continue; }
         let extent = sb.hi - sb.lo;
-        if (sb.behind == 0u && node.info.z == 0u && light.objects.x != NONE
-            && (max(extent.x, extent.y) <= 1.0 || min(extent.x, extent.y) <= 0.25)) {
-            let dir = normalize(camera.eye.xyz - (node.lo.xyz + node.hi.xyz) * 0.5);
-            let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
-            if (sil > 1e-30) {
-                g5_box[n] = vec4<f32>(sb.lo, sb.hi);
-                g5_info[n] = vec4<f32>(bitcast<f32>(0x80000000u | id), 1.0 - exp(-node_front_area(light.objects.x + id, dir) / sil), sil, sb.depth);
-                n++;
+        if (node.info.y > 0u || (sb.behind == 0u && max(extent.x, extent.y) <= G5_CUT_PX)
+            || n + sp + 2u > G5_ROOTS || sp + 2u > STACK) {
+            m13_roots[base + 1u + n] = id;
+            n++;
+            continue;
+        }
+        var near = node.info.x;
+        var far = node.info.x + 1u;
+        let a = nodes[near];
+        let b = nodes[far];
+        if (to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z) {
+            near = node.info.x + 1u;
+            far = node.info.x;
+        }
+        stack_set(sp, far);
+        stack_set(sp + 1u, near);
+        sp += 2u;
+    }
+    m13_roots[base] = n;
+}
+
+// Development switches (bit 0: no bin rays, 1: no walks, 2: no map reads,
+// 3: no texture samples in them, 4: no set-up or samples either).
+const G5_SKIP: u32 = 0u;
+// Whether the pixels' walks go as packets (a subgroup walking the union of
+// its pixels' walks) or each on its own.
+const G5_PACKETS: bool = true;
+
+fn g5_any(x: bool) -> bool {
+    if (G5_PACKETS) { return packet_any(x); }
+    return x;
+}
+
+fn g5_first(x: bool) -> bool {
+    if (G5_PACKETS) { return packet_first(x); }
+    return x;
+}
+
+// The pixel's walk of the subtree under `root` (its frustum set), nearest
+// first, as a packet: `map_coverage_from`'s walk with large instances left
+// out (the bins' rays covered them), the maps read through the texture and
+// the exact box-face test. `on` turns false once the bins are full. Returns
+// the object nodes it visited.
+fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>) -> u32 {
+    let v = view_world();
+    var visits = 0u;
+    var sp = 1u;
+    stack_set(0u, root);
+    need_put(0u, *on);
+    while (sp > 0u) {
+        sp--;
+        let n = stack_get(sp);
+        let mine = need_get(sp) && *on;
+        if (!g5_any(mine)) { continue; }
+        let node = nodes[n];
+        var descend = false;
+        if (mine) {
+            visits++;
+            let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+            var live = sb.behind != 2u && !frustum_misses_box(node.lo.xyz, node.hi.xyz);
+            // A node over full bins only (or none of the pixel's) cannot
+            // change the pixel.
+            if (live && sb.behind == 0u && (g5_rect_bins(sb.lo, sb.hi, pix) & g5_open) == 0u) { live = false; }
+            if (live) {
+                let extent = sb.hi - sb.lo;
+                if (sb.behind == 0u && node.info.z == 0u && light.objects.x != NONE
+                    && (max(extent.x, extent.y) <= 1.0 || min(extent.x, extent.y) <= 0.25)) {
+                    let dir = normalize(camera.eye.xyz - (node.lo.xyz + node.hi.xyz) * 0.5);
+                    let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
+                    if (sil > 1e-30) {
+                        splat_bins(sb, pix, 1.0 - exp(-node_front_area(light.objects.x + n, dir) / sil), sil, false);
+                        g5_refresh_open();
+                        if (g5_open == 0u) { *on = false; }
+                    }
+                } else if (node.info.y > 0u) {
+                    for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
+                        let m = items[k];
+                        // Large instances (too large or near for their maps,
+                        // which `instance_map_tex` skips) the bins' rays covered.
+                        let hdr = map_header(meshes[m].z);
+                        if (hdr == NONE || (G5_SKIP & 4u) != 0u) { continue; }
+                        instance_map_tex(m, hdr, pix);
+                    }
+                    g5_refresh_open();
+                    if (g5_open == 0u) { *on = false; }
+                } else {
+                    descend = true;
+                }
             }
-        } else if (node.info.y > 0u) {
-            for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
-                let m = items[k];
-                if (m13_large(m)) { continue; }
-                let hdr = map_header(meshes[m].z);
-                let x = meshes[m].w;
-                let c_obj = vec3<f32>(bitcast<f32>(cov_maps[hdr + 2u]), bitcast<f32>(cov_maps[hdr + 3u]), bitcast<f32>(cov_maps[hdr + 4u]));
-                let scale = select(1.0, xforms[4u * x + 3u].x, x != NONE);
-                let centre = m13_to_world(x, c_obj);
-                let depth = dot(centre - camera.eye.xyz, camera.forward.xyz);
-                let rad = bitcast<f32>(cov_maps[hdr + 5u]) * scale * camera.params.y / (2.0 * camera.params.z) / depth;
-                let cp = cam_to_pixels(to_camera(v, centre));
-                if (cp.x + rad <= lo.x || cp.y + rad <= lo.y || cp.x - rad >= hi.x || cp.y - rad >= hi.y) { continue; }
-                if (!g5_touches_open(cp - vec2<f32>(rad), cp + vec2<f32>(rad), lo)) { continue; }
-                g5_box[n] = vec4<f32>(cp - vec2<f32>(rad), cp + vec2<f32>(rad));
-                g5_info[n] = vec4<f32>(bitcast<f32>(m), bitcast<f32>(hdr), 0.0, 0.0);
-                n++;
-            }
-        } else if (g5_sp + 2u <= STACK) {
-            var near = node.info.x;
-            var far = node.info.x + 1u;
-            let a = nodes[near];
-            let b = nodes[far];
-            if (to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z) {
-                near = node.info.x + 1u;
-                far = node.info.x;
-            }
-            stack_set(g5_sp, far);
-            stack_set(g5_sp + 1u, near);
-            g5_sp += 2u;
+        }
+        if (!g5_any(descend) || node.info.y > 0u || sp + 2u > STACK) { continue; }
+        var near = node.info.x;
+        var far = node.info.x + 1u;
+        let a = nodes[near];
+        let b = nodes[far];
+        if (g5_first(to_camera(v, (b.lo.xyz + b.hi.xyz) * 0.5).z < to_camera(v, (a.lo.xyz + a.hi.xyz) * 0.5).z)) {
+            near = node.info.x + 1u;
+            far = node.info.x;
+        }
+        stack_set(sp, far);
+        stack_set(sp + 1u, near);
+        need_put(sp, descend);
+        need_put(sp + 1u, descend);
+        sp += 2u;
+    }
+    return visits;
+}
+
+
+// M13 gate 5's bins pass (profile stage 17), after `hw_m13_corners`: a
+// pixel whose four corners hit the same large object is covered. Another
+// traces its 16 bin rays (a bin whose ray meets a large object is covered)
+// only if one of the 16 corners of its 3×3 block hits a large object.
+// Writes into the pixel's `vis` word w its covered bins (bit b: bin b),
+// bit 16 if it traced bin rays and bit 17 if its corners resolved it.
+@compute @workgroup_size(8, 8)
+fn hw_m13_bins(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let pixel = gid.y * w + gid.x;
+    let pix = vec2<f32>(f32(gid.x), f32(gid.y));
+    if (gid.x + 1u < w && gid.y + 1u < h) {
+        let a = vis[pixel];
+        if (a.x != NONE && a.y == 1u && vis[pixel + 1u].x == a.x && vis[pixel + w].x == a.x && vis[pixel + w + 1u].x == a.x) {
+            vis[pixel].w = 0xffffu | (1u << 17u);
+            return;
         }
     }
-    g5_n = n;
+    var near_large = false;
+    for (var dy = -1; dy <= 2; dy++) {
+        for (var dx = -1; dx <= 2; dx++) {
+            let cx = u32(clamp(i32(gid.x) + dx, 0, i32(w) - 1));
+            let cy = u32(clamp(i32(gid.y) + dy, 0, i32(h) - 1));
+            if (vis[cy * w + cx].y == 1u) { near_large = true; }
+        }
+    }
+    var mask = 0u;
+    if (near_large && (G5_SKIP & 1u) == 0u) {
+        mask = 1u << 16u;
+        let tz = camera.params.z;
+        let aspect = camera.params.x / camera.params.y;
+        for (var k = 0u; k < 16u; k++) {
+            let p = pix + (vec2<f32>(f32(k % 4u), f32(k / 4u)) + vec2<f32>(0.5)) * 0.25;
+            let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
+            let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
+            let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+            let hit = hw_trace(camera.eye.xyz, dir, 0.0);
+            if (hit.x != NONE && m13_large(hit.x)) { mask |= 1u << k; }
+        }
+    }
+    vis[pixel].w = mask;
 }
 
 // M13 gate 5 (profile stage 17), one workgroup per 8×8 tile after
-// `hw_m13_corners`. A pixel whose four corners hit the same large object is
-// covered. Another traces its 16 bin rays (a bin whose ray meets a large
-// object is covered) only if one of the 16 corners of its 3×3 block hits a
-// large object. Then the tile's walk lists its entries in chunks; each pixel
-// adds those over its open bins (instances through the maps' texture, nodes
-// splatted), until every pixel's bins are full or the walk ends. Writes
-// (coverage, the tile's node visits (0 where the corners resolved the
-// pixel), 2 × entries evaluated + 1 if it traced bin rays).
+// `hw_m13_tile_roots` and `hw_m13_bins`: each pixel not covered walks its
+// tile's listed subtrees in order (instances through the maps' texture, far
+// nodes splatted) until its bins are full. Writes (coverage, object nodes
+// the pixel visited (0 where the corners resolved it), 2 × the tile's roots
+// + 1 if it traced bin rays).
 @compute @workgroup_size(8, 8)
 fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: vec3<u32>) {
     lane = li;
@@ -726,92 +885,24 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     let inside = gid.x < w && gid.y < h;
     let pixel = gid.y * w + gid.x;
     let pix = vec2<f32>(f32(gid.x), f32(gid.y));
-    for (var b = 0u; b < 16u; b++) { pbin[b] = 0.0; }
-    var resolved = false;
-    var traced = false;
-    if (inside) {
-        if (gid.x + 1u < w && gid.y + 1u < h) {
-            let a = vis[pixel];
-            if (a.x != NONE && a.y == 1u && vis[pixel + 1u].x == a.x && vis[pixel + w].x == a.x && vis[pixel + w + 1u].x == a.x) {
-                resolved = true;
-                for (var b = 0u; b < 16u; b++) { pbin[b] = 1.0; }
-            }
-        }
-        if (!resolved && (G5_SKIP & 1u) == 0u) {
-            var near_large = false;
-            for (var dy = -1; dy <= 2; dy++) {
-                for (var dx = -1; dx <= 2; dx++) {
-                    let cx = u32(clamp(i32(gid.x) + dx, 0, i32(w) - 1));
-                    let cy = u32(clamp(i32(gid.y) + dy, 0, i32(h) - 1));
-                    if (vis[cy * w + cx].y == 1u) { near_large = true; }
-                }
-            }
-            if (near_large) {
-                traced = true;
-                let tz = camera.params.z;
-                let aspect = camera.params.x / camera.params.y;
-                for (var k = 0u; k < 16u; k++) {
-                    let p = pix + (vec2<f32>(f32(k % 4u), f32(k / 4u)) + vec2<f32>(0.5)) * 0.25;
-                    let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
-                    let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
-                    let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
-                    let hit = hw_trace(camera.eye.xyz, dir, 0.0);
-                    pbin[k] = select(0.0, 1.0, hit.x != NONE && m13_large(hit.x));
-                }
-            }
-        }
+    var word = 0u;
+    if (inside) { word = vis[pixel].w; }
+    for (var b = 0u; b < 16u; b++) { pbin[b] = select(0.0, 1.0, (word & (1u << b)) != 0u); }
+    let resolved = (word & (1u << 17u)) != 0u;
+    let traced = (word & (1u << 16u)) != 0u;
+    g5_open = ~word & 0xffffu;
+    var on = inside && g5_open != 0u && (G5_SKIP & 2u) == 0u;
+    let base = (wid.y * ((w + 7u) / 8u) + wid.x) * (G5_ROOTS + 1u);
+    let count = m13_roots[base];
+    set_pixel_frustum(pix);
+    var visits = 0u;
+    for (var r = 0u; r < count; r++) {
+        if (!g5_any(on)) { break; }
+        visits += g5_walk_subtree(m13_roots[base + 1u + r], pix, &on);
     }
-    var open_bins = inside && !resolved && !bins_full(false);
-    g5_rects[li] = g5_open_rect(pix, open_bins);
-    workgroupBarrier();
-    let tile_lo = vec2<f32>(f32(wid.x * 8u), f32(wid.y * 8u));
-    let tile_hi = tile_lo + vec2<f32>(8.0);
-    if (li == 0u) {
-        set_rect_frustum(tile_lo, tile_hi);
-        g5_sp = select(1u, 0u, (G5_SKIP & 4u) != 0u);
-        g5_count = 0u;
-        stack_set(0u, 0u);
-    }
-    var evaluated = 0u;
-    loop {
-        if (li == 0u) {
-            g5_walk(tile_lo, tile_hi);
-            atomicStore(&g5_open, 0u);
-        }
-        let n = workgroupUniformLoad(&g5_n);
-        if (open_bins && (G5_SKIP & 2u) == 0u) {
-            for (var e = 0u; e < n; e++) {
-                let bx = g5_box[e];
-                if (bx.z <= pix.x || bx.w <= pix.y || bx.x >= pix.x + 1.0 || bx.y >= pix.y + 1.0) { continue; }
-                let info = g5_info[e];
-                let bits = bitcast<u32>(info.x);
-                evaluated++;
-                let sb = ScreenBox(bx.xy, bx.zw, info.w, 0u);
-                if (!touches_open_bin(sb, pix)) { continue; }
-                if ((bits & 0x80000000u) != 0u) {
-                    splat_bins(sb, pix, info.y, info.z, false);
-                } else {
-                    instance_map_tex(bits, bitcast<u32>(info.y), pix);
-                }
-                if (bins_full(false)) {
-                    open_bins = false;
-                    break;
-                }
-            }
-        }
-        if (open_bins) { atomicAdd(&g5_open, 1u); }
-        g5_rects[li] = g5_open_rect(pix, open_bins);
-        workgroupBarrier();
-        if (li == 0u) {
-            g5_go = select(0u, 1u, g5_sp > 0u && atomicLoad(&g5_open) > 0u);
-            g5_visits = g5_count;
-        }
-        if (workgroupUniformLoad(&g5_go) == 0u) { break; }
-    }
-    let visits = workgroupUniformLoad(&g5_visits);
     if (inside) {
         var sum = 0.0;
         for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }
-        colors[pixel] = vec4<f32>(sum / 16.0, select(f32(visits), 0.0, resolved), f32(2u * evaluated + select(0u, 1u, traced)), 1.0);
+        colors[pixel] = vec4<f32>(sum / 16.0, select(f32(visits), 0.0, resolved), f32(2u * count + select(0u, 1u, traced)), 1.0);
     }
 }

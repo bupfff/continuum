@@ -599,6 +599,8 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_edges",
     "hw_m13_corners",
     "hw_m13_near",
+    "hw_m13_tile_roots",
+    "hw_m13_bins",
     "hw_m13_tiles",
     "hw_vc_bake_indirect",
     "hw_vc_bake_sky",
@@ -619,12 +621,15 @@ pub(crate) const M13_COVERAGE_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26,
 /// `m13_coverage_maps` (M13 gate 3): with the coverage maps (82).
 pub(crate) const M13_MAPS_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 82];
 /// M13 gate 4: the corner rays (`hw_m13_corners`), and the coverage pass
-/// after them (`m13_coverage_near`).
+/// after them (`m13_coverage_near`); gate 5's bin rays (`hw_m13_bins`).
 pub(crate) const HW_M13_CORNERS_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 82];
 pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29, 30, 31, 32, 82];
 /// M13 gate 5: the tile pass after the corner rays, with the maps' texture
 /// (85) and sampler (86).
-pub(crate) const M13_TILES_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 29, 30, 31, 32, 82, 85, 86];
+pub(crate) const M13_TILES_BINDINGS: &[u32] = &[0, 3, 6, 7, 9, 10, 29, 30, 31, 82, 85, 86, 87];
+/// M13 gate 5: the roots pass, one invocation per tile listing the subtree
+/// roots its pixels walk (87).
+pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =

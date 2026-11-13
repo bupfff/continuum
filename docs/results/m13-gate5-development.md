@@ -1,4 +1,4 @@
-# M13 gate 5 in development (not run): where the implementation stands
+# M13 gate 5 in development: how the implementation got to its run
 
 Not a gate result: the state of gate 5's implementation (profile stage 17,
 `hw_m13_tiles` in `hw_visibility.wgsl`) at the end of the tenth session,
@@ -60,3 +60,34 @@ node visits a tile 131 (at most 8,471); from 150 m 1.3 entries (at most 8),
   lower roots); the maps' read with the nearest direction only (a quarter
   of the samples and set-up), if accuracy allows. The horizon's long
   walks stay for gate 6's coverage pages.
+
+## Eleventh session: two passes, cheaper map reads (development, full size)
+
+Same scene and views (`M13_DEV=1M`, the passes alone). Accuracy in
+development was measured on other views than the gate's (`M13_ACC=1`:
+standing turned 20°, and 120 m up at 40° turned −20°), so the gate's views
+were not tuned on. Roblox ran during the first rows (the control read
+126.5 / 94.7 ms early on, 185.9 / 129.7 ms at its worst); the rows from the
+cut-size test on ran with the machine otherwise idle.
+
+| Version | Standing | 150 m up |
+|---|---|---|
+| Gate 4's path (control, `M13_STAGE=16`) | 126.5 ms | 94.7 ms |
+| Roots pass (one invocation a tile, subtrees ≤ 8 px) + packet walks below | 85.9 | 28.7 |
+| … walks each on its own (no packets) | 116.8 | 32.7 |
+| + full bins skipped in map reads, two directions (quiet machine) | 51–53 | 25.5 |
+| + set-up linearized about the centre ray | 49.8 | 22.6 |
+| + open bins as a bit mask (walk tests, map reads' bins) | 42.6 | 22.8 |
+| + bin rays in their own pass | **38.8** | **20.4** |
+| … walks each on its own (no packets) | 42.5 | 20.3 |
+
+Accuracy on the development views (relative RMSE against 16×16 rays, as a
+multiple of one ray's): four directions 0.199× standing, 0.131× from 120 m;
+the nearest direction alone 0.199× and 0.147× (40 / 18 ms, too near the
+0.15× bar); two directions along one axis 0.199× and 0.133–0.134× (kept).
+Linearizing, the bit masks and the separate pass left the coverage as it was.
+
+Where the time went from 150 m before the last two rows (skipping parts):
+corner rays and roots 3.1 ms, bin rays 6.3, walk 3.5, map reads 9.2 (their
+texture samples about 2 of it). The cut size (4, 8, 16 pixels) changed
+little; 8 kept.

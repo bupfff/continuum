@@ -29,6 +29,19 @@
 //! - E. The instances' maps as 8-bit texels in a texture array (a layer per
 //!   direction), one hardware-filtered sample per bin and direction.
 //!
+//! Changed before the first run, after development at full size
+//! (`docs/results/m13-gate5-development.md`; criteria unchanged):
+//! - C as two passes: one invocation per tile walks to the roots of
+//!   subtrees at most 8 pixels across (at most 63 a tile, the rest listed
+//!   as they stand), and each pixel walks those subtrees nearest first, as a
+//!   packet (gate 4's walk from lower roots), until its bins are full. A
+//!   single invocation walking for the tile's 64 held the other 63 idle.
+//! - B in its own pass, writing each pixel's covered bins.
+//! - E reads two directions' maps (the nearest along the axis of the
+//!   directions' grid whose fraction is nearer a half, blended) instead of
+//!   four, with each bin's map coordinates affine in its screen position
+//!   about the instance's centre ray; open bins kept as a bit mask.
+//!
 //! Scene, views and reference are gate 4's: the million-boulder field
 //! without its ground (in the reference and the test alike), standing at
 //! 1.7 m and 150 m up looking 45° down, 1280×720; per pixel, the share of
@@ -45,13 +58,15 @@
 //!    stays a 10 ms coverage pass.
 //!
 //! Reported: the share of pixels tracing bin rays and resolved by their
-//! corners; entries per tile and per pixel; each part's time in a
-//! development profile after the gate.
+//! corners; subtree roots per tile and object nodes per pixel; each part's
+//! time in a development profile after the gate.
 //!
 //! `cargo run --release -p room3d --bin m13_gate5`
 //!
 //! `M13_DEV=1` runs a development check (10,000 boulders, the passes alone;
-//! `M13_DEV=1M` at full size), whose numbers are not the gate's.
+//! `M13_DEV=1M` at full size), whose numbers are not the gate's;
+//! `M13_STAGE=16` with it times gate 4's path instead, as a control;
+//! `M13_ACC=1` with it measures accuracy too, on other views than the gate's.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -139,6 +154,12 @@ fn main() -> std::io::Result<()> {
     let dev = std::env::var_os("M13_DEV").is_some();
     // `M13_DEV=1M`: the development check at full size.
     let full = std::env::var("M13_DEV").is_ok_and(|v| v == "1M");
+    // `M13_STAGE=16` in development: gate 4's path, as a timing control.
+    let stage = std::env::var("M13_STAGE")
+        .ok()
+        .filter(|_| dev)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(17);
     let mut field = Field::new(if dev && !full { 10_000 } else { 1_000_000 }, DVec3::ZERO);
     let origin = field.origin_near_camera();
     let (ground, light) = field.relative(origin);
@@ -147,19 +168,35 @@ fn main() -> std::io::Result<()> {
     field.scene.instances.remove(0);
     let forward = (ground.target - ground.eye).normalize();
     let flat = Vec3::new(forward.x, forward.y, 0.0).normalize();
-    let field_view = |height: f32, down_degrees: f32| {
+    let field_view = |height: f32, down_degrees: f32, turn_degrees: f32| {
         let d = down_degrees.to_radians();
         let eye = Vec3::new(ground.eye.x, ground.eye.y, height);
+        let (s, c) = turn_degrees.to_radians().sin_cos();
+        let flat = Vec3::new(flat.x * c - flat.y * s, flat.x * s + flat.y * c, 0.0);
         Camera {
             eye,
             target: eye + flat * d.cos() - Vec3::Z * d.sin(),
             vertical_fov_degrees: ground.vertical_fov_degrees,
         }
     };
-    let views = [
-        ("standing", field_view(1.7, 0.0)),
-        ("150 m up", field_view(150.0, 45.0)),
-    ];
+    // `M13_ACC=1` in development: accuracy too, on other views than the
+    // gate's (turned 20° either way, 120 m up at 40°), so development does
+    // not tune on the gate's views.
+    let acc = dev && std::env::var_os("M13_ACC").is_some();
+    let views = if acc {
+        [
+            ("standing (development view)", field_view(1.7, 0.0, 20.0)),
+            (
+                "120 m up (development view)",
+                field_view(120.0, 40.0, -20.0),
+            ),
+        ]
+    } else {
+        [
+            ("standing", field_view(1.7, 0.0, 0.0)),
+            ("150 m up", field_view(150.0, 45.0, 0.0)),
+        ]
+    };
     let save = |name: &str, px: &[[f32; 3]]| -> std::io::Result<()> {
         let mut image = flatland::img::Image::new(W as usize, H as usize, [0; 3]);
         for (i, p) in px.iter().enumerate() {
@@ -174,7 +211,7 @@ fn main() -> std::io::Result<()> {
     for (name, camera) in views {
         kernel.set_prefilter(8.0);
         kernel.set_hardware_rays(true);
-        kernel.set_profile_stage(17);
+        kernel.set_profile_stage(stage);
         let mut r = renderer(&kernel, &field, origin, &lights);
         frame(&mut r, camera, &view_target);
         let mut times: Vec<Duration> = (0..10)
@@ -192,13 +229,13 @@ fn main() -> std::io::Result<()> {
         let n = out.len() as f64;
         let resolved = out.iter().filter(|p| p[1] == 0.0).count() as f64 / n;
         let traced = out.iter().filter(|p| p[2] as u32 % 2 == 1).count() as f64 / n;
-        let entries = out.iter().map(|p| (p[2] as u32 / 2) as f64).sum::<f64>() / n;
-        let max_entries = out.iter().map(|p| p[2] as u32 / 2).max().unwrap_or(0);
-        let visits = out.iter().map(|p| p[1] as f64).sum::<f64>()
-            / out.iter().filter(|p| p[1] > 0.0).count().max(1) as f64;
+        let roots = out.iter().map(|p| (p[2] as u32 / 2) as f64).sum::<f64>() / n;
+        let max_roots = out.iter().map(|p| p[2] as u32 / 2).max().unwrap_or(0);
+        let walked = out.iter().filter(|p| p[1] > 0.0).count().max(1) as f64;
+        let visits = out.iter().map(|p| p[1] as f64).sum::<f64>() / walked;
         let max_visits = out.iter().map(|p| p[1]).fold(0.0f32, f32::max);
         say(format!(
-            "{name}: {ours_ms:.2} ms a frame; {:.1}% of pixels resolved by their corners, {:.1}% tracing bin rays; entries evaluated a pixel {entries:.1} (at most {max_entries}); node visits a tile {visits:.0} (at most {max_visits:.0}); mean coverage {:.4}",
+            "{name}: {ours_ms:.2} ms a frame; {:.1}% of pixels resolved by their corners, {:.1}% tracing bin rays; subtree roots a tile {roots:.1} (at most {max_roots}); object nodes a walking pixel {visits:.1} (at most {max_visits:.0}); mean coverage {:.4}",
             100.0 * resolved,
             100.0 * traced,
             out.iter().map(|p| p[0] as f64).sum::<f64>() / n
@@ -209,7 +246,7 @@ fn main() -> std::io::Result<()> {
         ours_images.push(gray(&out));
         speed.push(ours_ms);
     }
-    if dev {
+    if dev && !acc {
         return Ok(());
     }
     let mut pass = true;
@@ -258,9 +295,15 @@ fn main() -> std::io::Result<()> {
             mean_cov(ours),
             mean_cov(&one)
         ));
+        if dev {
+            continue;
+        }
         save(&format!("{slug}_reference"), &reference)?;
         save(&format!("{slug}_ours"), ours)?;
         save(&format!("{slug}_one_ray"), &one)?;
+    }
+    if dev {
+        return Ok(());
     }
     say(format!("Verdict: {}", verdict(pass)));
     std::fs::write(out_dir.join("m13_gate5.txt"), report)?;

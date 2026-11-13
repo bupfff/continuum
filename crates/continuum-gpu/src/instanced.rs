@@ -18,13 +18,13 @@ use crate::{
     HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
     HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS,
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
-    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_TILES_BINDINGS,
-    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
-    VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
-    VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS,
-    VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS,
-    VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS,
-    camera_uniform, uniform_buffer,
+    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_ROOTS_BINDINGS,
+    M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
+    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
+    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS,
+    VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS,
+    VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS,
+    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -60,6 +60,8 @@ enum CameraDispatch {
     /// One workgroup, or one invocation, per probe pixel (M4 gate 13).
     ProbeGroups,
     Probes,
+    /// One invocation per 8×8 tile (M13 gate 5's roots pass).
+    Tiles,
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -1037,6 +1039,14 @@ impl InstancedRenderer {
                     kernel.entry("hw_m13_corners"),
                     HW_M13_CORNERS_BINDINGS.to_vec(),
                 ),
+                (
+                    kernel.entry("hw_m13_tile_roots"),
+                    M13_ROOTS_BINDINGS.to_vec(),
+                ),
+                (
+                    kernel.entry("hw_m13_bins"),
+                    HW_M13_CORNERS_BINDINGS.to_vec(),
+                ),
                 (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
             ],
             (false, _) if pixel_cones && kernel.profile_stage.get() == 16 => vec![
@@ -1126,6 +1136,7 @@ impl InstancedRenderer {
                 b if b == VC_ERROR_PROBES_BINDINGS => CameraDispatch::Probes,
                 b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
                 b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
+                b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
                 _ => CameraDispatch::Screen,
             })
             .collect();
@@ -1362,6 +1373,19 @@ impl InstancedRenderer {
         all.push((6, &self.camera_buf));
         all.push((7, &self.colors));
         all.push((31, &vis));
+        // M13 gate 5: each 8×8 tile's subtree roots (a count, then up to 63).
+        let roots_size = if self.passes.iter().any(|(_, keep)| keep.contains(&87)) {
+            width.div_ceil(8) as u64 * height.div_ceil(8) as u64 * 64 * 4
+        } else {
+            16
+        };
+        let roots = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tile roots"),
+            size: roots_size,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        all.push((87, &roots));
         if let Some(cache) = &self.cache {
             all.extend(cache.state.buffers.iter().map(|(b, buf)| (*b, buf)));
             all.push((41, cache.state.params()));
@@ -1488,6 +1512,9 @@ impl InstancedRenderer {
             }
             (CameraDispatch::Listed, Some(cache)) => {
                 pass.dispatch_workgroups_indirect(cache.state.buffer(66), 36)
+            }
+            (CameraDispatch::Tiles, _) => {
+                pass.dispatch_workgroups(self.width.div_ceil(64), self.height.div_ceil(64), 1)
             }
             _ => pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1),
         }
