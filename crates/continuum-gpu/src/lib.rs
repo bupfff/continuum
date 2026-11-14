@@ -1023,6 +1023,13 @@ impl MaskConeKernel {
                 "const G10_BIN_RAYS_ALL: bool = true;",
                 "const G10_BIN_RAYS_ALL: bool = false;",
             ),
+            // A small instance's sun visibility as the cosine-weighted share
+            // of five points (the model's reference is a hard shadow per
+            // sample: one point matches it better).
+            (
+                "const G12_OBJECT_RAYS: u32 = 1u;",
+                "const G12_OBJECT_RAYS: u32 = 5u;",
+            ),
         ] {
             assert!(hw.contains(from), "{from} not found");
             hw = hw.replacen(from, to, 1);

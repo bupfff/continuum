@@ -761,7 +761,7 @@ fn g8_instance(m: u32) {
         let sun = g9_sun(centre);
         let lo = oct_encode(normalize(g8_rotate(q, sun.l))) * 0.5 + vec2<f32>(0.5);
         var vis = 1.0;
-        if (G9_SHADOWS) { vis = g11_object_open(m, centre + sun.l * (radius * 1.05), sun); }
+        if (G9_SHADOWS) { vis = g12_object_fraction(m, centre, radius, sun); }
         // The light's irradiance where the instance is over the eye's (the
         // light is near enough to vary across the scene), carried in the
         // albedo, so pixels light it by the eye's.
@@ -3225,4 +3225,42 @@ fn g12_target(to: u32, word: u32, kind: u32, index: u32, sub: u32) {}
 // irradiance; the variant lit by the cache: the sky's).
 fn g12_ambient(albedo: vec3<f32>) -> vec3<f32> {
     return albedo * g9_e * G9_AMBIENT / 3.14159265;
+}
+
+// The share of the light's irradiance on object `m`'s bounding sphere that
+// arrives (M13 gate 12, development): shadow rays from its sunward point and
+// four points 60° from it, weighted by their cosines (G12_OBJECT_RAYS: 5,
+// the variant lit by the cache; 1 the sunward point alone, gate 9's and the
+// model's), cached per object while the light and the scene are still (a
+// word: 1 + the share × 254; 0 unknown).
+const G12_OBJECT_RAYS: u32 = 1u;
+fn g12_object_fraction(m: u32, centre: vec3<f32>, radius: f32, sun: G9Sun) -> f32 {
+    let at = 16u * G11_BUCKETS + m;
+    if (G11_CACHE) {
+        let word = atomicLoad(&g11_sun[at]);
+        if (word != 0u) { return f32(word - 1u) / 254.0; }
+    }
+    let l = sun.l;
+    let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(l.z) < 0.9);
+    let u = normalize(cross(helper, l));
+    let v = cross(l, u);
+    // Each point weighted by its cosine to the light (the share of the
+    // light's irradiance on the sphere that arrives).
+    var open = 0.0;
+    var total = 0.0;
+    for (var k = 0u; k < G12_OBJECT_RAYS; k++) {
+        var d = l;
+        var weight = 1.0;
+        if (k > 0u) {
+            let a = f32(k - 1u) * 1.5707963;
+            d = 0.5 * l + 0.8660254 * (cos(a) * u + sin(a) * v);
+            weight = 0.5;
+        }
+        let q = centre + d * (radius * 1.05);
+        if (hw_segment_open(q, l, sun.dist)) { open += weight; }
+        total += weight;
+    }
+    let share = open / total;
+    if (G11_CACHE) { atomicStore(&g11_sun[at], 1u + u32(round(share * 254.0))); }
+    return share;
 }

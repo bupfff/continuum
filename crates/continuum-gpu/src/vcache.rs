@@ -2504,6 +2504,9 @@ impl VirtualCache {
         // object's page (listed once per sky bake) a while later.
         for entry in sky_listed {
             let (slot, own) = (entry & 0x7fff_ffff, entry >> 31 == 1);
+            if trace_bakes() {
+                eprintln!("sky listed frame {frame} slot {slot} own {own}");
+            }
             let due = if own { frame + SKY_SETTLE } else { frame };
             self.sky_due.insert(slot, due);
         }
@@ -2799,6 +2802,12 @@ impl VirtualCache {
             self.sky_due.remove(&slot);
             self.last_used[slot as usize] = self.frame;
             let (m, c, mip, page) = unpack(k);
+            if trace_bakes() {
+                eprintln!(
+                    "sky alone frame {} page m{m} c{c} mip{mip} {page:?} slot {slot}",
+                    self.frame
+                );
+            }
             let index = self.bake_list.len() as u32;
             self.bake_list.push([k[0], k[1], k[2], slot]);
             let b = self.page_bounds(m, c, mip, page);

@@ -205,9 +205,10 @@ fn g12_scatter_record(i: u32) {
 }
 
 // A small instance's ambient light: the sky's radiance over the open share
-// of its hemisphere (development: a constant share, G12_SKY_OPEN), as
-// albedo × E / π with E = π L × open.
-const G12_SKY_OPEN: f32 = 0.75;
+// of its points' hemispheres, as albedo × E / π with E = π L × open. The
+// share is a sphere's resting on a plane, averaged over its surface (each
+// point sees (1 + cos θ) / 2 of the sky): a half (development constant).
+const G12_SKY_OPEN: f32 = 0.5;
 fn g12_ambient(albedo: vec3<f32>) -> vec3<f32> {
     return albedo * light.sky.xyz * G12_SKY_OPEN;
 }

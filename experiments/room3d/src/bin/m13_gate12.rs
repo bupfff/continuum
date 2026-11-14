@@ -88,7 +88,19 @@ fn cached(
         lights,
         &field.scene,
         origin,
-        CacheOptions::default(),
+        // A fixed bake budget for the sub-pixel path (no frame target, no
+        // period cap): its camera passes alone pass both (about 16 ms), which
+        // would shrink the bakes to their least and take thousands of frames
+        // to settle. Settled frames bake nothing either way.
+        if sub {
+            CacheOptions {
+                frame_target_ms: 0.0,
+                frame_budget_ms: 0.0,
+                ..CacheOptions::default()
+            }
+        } else {
+            CacheOptions::default()
+        },
     );
     kernel.set_pixel_cones(false);
     kernel.set_profile_stage(0);
@@ -212,10 +224,14 @@ fn main() {
                 .save(&out_dir.join(format!("m13_gate12_{name}.png")))
                 .expect("save");
         };
+        let only = std::env::var("M13_VIEW").ok();
         for (name, camera) in [
             ("standing_dev", view(1.7, 0.0, 20.0)),
             ("120m_dev", view(120.0, 40.0, -20.0)),
         ] {
+            if only.as_ref().is_some_and(|v| !name.starts_with(v.as_str())) {
+                continue;
+            }
             let mut one = cached(&kernel, &field, origin, &lights, false);
             let n1 = settle(&mut one, camera, &view_target, 8, 3000);
             let mut one_times: Vec<f64> = (0..10)
@@ -264,6 +280,14 @@ fn main() {
                 .collect();
             times.sort_by(f64::total_cmp);
             let b = frame(&mut sub, camera, &view_target);
+            // With `M13_ACC`: each pixel's class (large objects, pages,
+            // horizon, shadow edge), for the error's split.
+            let class = std::env::var_os("M13_ACC").is_some().then(|| {
+                sub.set_m13_state_word(28, 1);
+                let c = frame(&mut sub, camera, &view_target);
+                sub.set_m13_state_word(28, 0);
+                c
+            });
             drop(sub);
             let mean = |px: &[[f32; 3]]| {
                 let n = px.len() as f64;
@@ -274,6 +298,48 @@ fn main() {
             let scale = l[l.len() * 99 / 100].max(1e-6);
             save(&format!("{name}_one_ray"), &a, scale);
             save(&format!("{name}_sub"), &b, scale);
+            if let (Some(reference), Some(class)) = (&reference, &class) {
+                let sq = |x: &[f32; 3], y: &[f32; 3]| -> f64 {
+                    x.iter().zip(y).map(|(p, q)| ((p - q) as f64).powi(2)).sum()
+                };
+                let names = ["large", "pages", "horizon", "shadow edge"];
+                let mut ours_by = [0.0f64; 16];
+                let mut one_by = [0.0f64; 16];
+                let mut count = [0usize; 16];
+                for k in 0..reference.len() {
+                    let c = class[k];
+                    let z = c[2].round() as usize;
+                    let id = (c[0] > 0.5) as usize
+                        | ((c[1] > 0.5) as usize) << 1
+                        | (z & 1) << 2
+                        | ((z >> 1) & 1) << 3;
+                    ours_by[id] += sq(&b[k], &reference[k]);
+                    one_by[id] += sq(&a[k], &reference[k]);
+                    count[id] += 1;
+                }
+                let total_one: f64 = one_by.iter().sum();
+                for id in 0..16 {
+                    if count[id] == 0 {
+                        continue;
+                    }
+                    let parts: Vec<&str> = (0..4)
+                        .filter(|q| id >> q & 1 == 1)
+                        .map(|q| names[q])
+                        .collect();
+                    println!(
+                        "  {:>26}: {:5.1}% of pixels; squared error ours {:.4}, one ray {:.4} (of one ray's total); ratio there {:.3}",
+                        if parts.is_empty() {
+                            "small only".to_string()
+                        } else {
+                            parts.join("+")
+                        },
+                        100.0 * count[id] as f64 / reference.len() as f64,
+                        ours_by[id] / total_one,
+                        one_by[id] / total_one,
+                        (ours_by[id] / one_by[id].max(1e-30)).sqrt()
+                    );
+                }
+            }
             if let Some(reference) = &reference {
                 let e_ours = relative_rmse(&b, reference);
                 let e_one = relative_rmse(&a, reference);
