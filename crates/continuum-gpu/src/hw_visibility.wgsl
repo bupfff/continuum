@@ -3067,6 +3067,8 @@ const G11_BUCKETS: u32 = 1048576u;
 const G10_BIN_RAYS_ALL: bool = true;
 // Development: the cache on.
 const G11_CACHE: bool = true;
+// A cell's width in bins at its distance (rounded to a power of two).
+const G11_CELL: f32 = 1.0;
 
 fn g11_hash(a: u32) -> u32 {
     var x = a;
@@ -3080,8 +3082,9 @@ fn g11_hash(a: u32) -> u32 {
 
 // A point's bucket and its cell's fingerprint (30 bits, not zero).
 fn g11_key(p: vec3<f32>, dist: f32) -> vec3<u32> {
-    // A bin's width at the point: the pixel's over four.
-    let f = dist * camera.params.z * 0.5 / camera.params.y;
+    // A cell's width: G11_CELL bins at the point (a bin the pixel's over
+    // four).
+    let f = G11_CELL * dist * camera.params.z * 0.5 / camera.params.y;
     let lvl = clamp(round(log2(max(f, 1e-9))) + 12.0, 0.0, 30.0);
     let size = exp2(lvl - 12.0);
     let ic = vec3<i32>(floor(p / size));

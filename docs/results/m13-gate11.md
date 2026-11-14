@@ -87,9 +87,19 @@ page bakes a frame:
 
 In motion the sun cache mostly misses: its cells are about a bin wide and
 filled only where corners and centres land (one point in sixteen cells),
-so a moving view lands in new cells and traces again. Coarser cells (about
-a pixel) would be filled densely by the corners' lattice and reused in
-motion, at some cost to shadow edges when settled. Next for motion: that
-trade measured, then a flight gate with colour (gate 7's, with colour's
-bars).
+so a moving view lands in new cells and traces again. Coarser cells are
+filled densely by the corners' lattice and reused in motion, but quantize
+the sun's visibility (development views for accuracy, the same paths for
+motion):
+
+| Cell width | Accuracy (standing / 120 m) | Walk median / p95 | 150 m flight median / p95 |
+|---|---|---|---|
+| A bin (gate 11) | 0.33× / 0.39× | 17.0 / 18.1 ms | 20.1 / 26.1 ms |
+| Half a pixel | 0.35× / 0.40× | 16.4 / 17.7 ms | 18.5 / 20.4 ms |
+| A pixel | 0.44× / 0.55× | 15.5 / 17.1 ms | 16.5 / 17.2 ms |
+
+Next for motion: visibility that stays exact where the view moves (cells
+at bin width filled more densely, or reused across a shift without
+quantizing edges), then a flight gate with colour (gate 7's flight with
+colour's bars).
 
