@@ -364,9 +364,7 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
             large = select(1u, 0u, g9_is_background(full.x) && G9_BG_NOT_LARGE);
             var c = vec3<f32>(0.5);
             if ((G10_PROBE & 512u) == 0u) { c = g9_shade_hit(full.x, full.y, bitcast<f32>(full.z), camera.eye.xyz, dir); }
-            m13_plain[at] = bitcast<u32>(c.x);
-            m13_plain[at + 1u * g9_p()] = bitcast<u32>(c.y);
-            m13_plain[at + 2u * g9_p()] = bitcast<u32>(c.z);
+            m13_plain[at] = g12_cpack(c);
             m13_plain[at + 3u * g9_p()] = full.x;
             m13_plain[at + 4u * g9_p()] = full.z;
             m13_plain[at + 6u * g9_p()] = u32(g9_last_v);
@@ -1259,11 +1257,8 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
     }
     m13_plain[at + 4u * g9_p()] = NONE;
     let claims = g9_claims(at);
-    if ((G10_PROBE & 256u) == 0u) {
-        atomicStore(&m13_work[claims], NONE);
-        atomicStore(&m13_work[claims + g9_p()], NONE);
-        atomicStore(&m13_work[claims + 2u * g9_p()], 0u);
-    }
+    // The claims start cleared to zero each frame (a buffer clear: objects
+    // are kept inverted, so zero is NONE).
     m13_plain[at + 19u * g9_p()] = NONE;
     if ((G10_PROBE & 128u) != 0u) { return; }
     // The pixel's corners, as vectors (M13 gate 10: loaded once).
@@ -1358,7 +1353,7 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
                 var claimed = bb.x;
                 if (bb.x == NONE) { claimed = G9_SKY; }
                 for (var slot = 5u; slot < 15u; slot += 5u) {
-                    let old = atomicLoad(&m13_work[claims + (slot / 5u - 1u) * g9_p()]);
+                    let old = ~atomicLoad(&m13_work[claims + (slot / 5u - 1u) * g9_p()]);
                     if (old == NONE) {
                         var c = g9_sky();
                         var dist = 3.4e38;
@@ -1416,7 +1411,7 @@ fn g9_store_large(at: u32, slot: u32, c: vec3<f32>, dist: f32, object: u32) {
     if (slot == 0u) {
         m13_plain[at + 4u * p] = object;
     } else {
-        atomicStore(&m13_work[g9_claims(at) + (slot / 5u - 1u) * p], object);
+        atomicStore(&m13_work[g9_claims(at) + (slot / 5u - 1u) * p], ~object);
     }
 }
 
@@ -1431,9 +1426,7 @@ fn g9_corner_background(at: u32, dir: vec3<f32>, shade: bool) {
     if (!shade || bg.x == NONE) { return; }
     var c = vec3<f32>(0.5);
     if ((G10_PROBE & 512u) == 0u) { c = g9_shade_hit(bg.x, bg.y, bitcast<f32>(bg.z), e, dir); }
-    m13_plain[at] = bitcast<u32>(c.x);
-    m13_plain[at + 1u * g9_p()] = bitcast<u32>(c.y);
-    m13_plain[at + 2u * g9_p()] = bitcast<u32>(c.z);
+    m13_plain[at] = g12_cpack(c);
     m13_plain[at + 3u * g9_p()] = bg.x;
     m13_plain[at + 4u * g9_p()] = bg.z;
     m13_plain[at + 6u * g9_p()] = u32(g9_last_v);
@@ -1522,7 +1515,7 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
             }
         }
         for (var slot = 5u; slot < 15u; slot += 5u) {
-            let claim = atomicCompareExchangeWeak(&m13_work[g9_claims(at) + (slot / 5u - 1u) * g9_p()], NONE, claimed);
+            let claim = atomicCompareExchangeWeak(&m13_work[g9_claims(at) + (slot / 5u - 1u) * g9_p()], 0u, ~claimed);
             if (claim.exchanged) {
                 var dist = 3.4e38;
                 var c = g9_sky();
@@ -1536,7 +1529,7 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
                 m13_plain[at + (slot + 2u) * g9_p()] = bitcast<u32>(c.z);
                 m13_plain[at + (slot + 3u) * g9_p()] = bitcast<u32>(dist);
             }
-            if (claim.exchanged || claim.old_value == claimed) {
+            if (claim.exchanged || ~claim.old_value == claimed) {
                 // Bins: the mask word's low bits for the first, word 15's
                 // for the second.
                 atomicOr(&m13_work[g9_claims(at) + 2u * g9_p()], 1u << (k + select(16u, 0u, slot == 5u)));
@@ -2532,9 +2525,10 @@ fn g10_entry(pixel: u32, resolved: bool, traced: bool, cws: vec4<u32>, co: vec4<
     if (!traced && !resolved && !G10_BG_SHADOWS) { return; }
     let p = g9_p();
     let cv = vec4<u32>(m13_plain[cws.x + 6u * p], m13_plain[cws.y + 6u * p], m13_plain[cws.z + 6u * p], m13_plain[cws.w + 6u * p]);
-    let cr = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x], m13_plain[cws.y], m13_plain[cws.z], m13_plain[cws.w]));
-    let cg = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + p], m13_plain[cws.y + p], m13_plain[cws.z + p], m13_plain[cws.w + p]));
-    let cb = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 2u * p], m13_plain[cws.y + 2u * p], m13_plain[cws.z + 2u * p], m13_plain[cws.w + 2u * p]));
+    let crgb = g12_corner_colours(cws);
+    let cr = crgb[0];
+    let cg = crgb[1];
+    let cb = crgb[2];
     // The corners' large objects (a corner's hit that is not its
     // background), the first two.
     let large = (co != vec4<u32>(NONE)) & (co != cbg);
@@ -2651,7 +2645,7 @@ fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgrou
         var k = 0u;
         if ((l1 & bit) != 0u) { k = 1u; } else if ((l2 & bit) != 0u) { k = 2u; }
         var obj = bg;
-        if (k > 0u) { obj = atomicLoad(&m13_work[g9_claims(at) + (k - 1u) * p]); }
+        if (k > 0u) { obj = ~atomicLoad(&m13_work[g9_claims(at) + (k - 1u) * p]); }
         var word = 0u;
         if (((head >> (G10_SHADE + k)) & 1u) != 0u && obj != NONE && obj != G9_SKY) {
             if (k == 0u) {
@@ -2704,14 +2698,13 @@ struct G12Corners {
 
 fn g12_corners(cws: vec4<u32>) -> G12Corners {
     let p = g9_p();
+    let rgb = g12_corner_colours(cws);
     return G12Corners(
         vec4<u32>(m13_plain[cws.x + 3u * p], m13_plain[cws.y + 3u * p], m13_plain[cws.z + 3u * p], m13_plain[cws.w + 3u * p]),
         vec4<u32>(m13_plain[cws.x + 5u * p], m13_plain[cws.y + 5u * p], m13_plain[cws.z + 5u * p], m13_plain[cws.w + 5u * p]),
         vec4<u32>(m13_plain[cws.x + 6u * p], m13_plain[cws.y + 6u * p], m13_plain[cws.z + 6u * p], m13_plain[cws.w + 6u * p]),
         bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 7u * p], m13_plain[cws.y + 7u * p], m13_plain[cws.z + 7u * p], m13_plain[cws.w + 7u * p])),
-        bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x], m13_plain[cws.y], m13_plain[cws.z], m13_plain[cws.w])),
-        bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + p], m13_plain[cws.y + p], m13_plain[cws.z + p], m13_plain[cws.w + p])),
-        bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 2u * p], m13_plain[cws.y + 2u * p], m13_plain[cws.z + 2u * p], m13_plain[cws.w + 2u * p])));
+        rgb[0], rgb[1], rgb[2]);
 }
 
 // A background bin's point on the background (by its corners' 1/t,
@@ -2864,7 +2857,7 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
     if (G9_RED_SKY) { sky = vec3<f32>(sky.x * 20.0, 0.0, 0.0); }
     let at = g9_large_word(pixel);
     let p = g9_p();
-    let objs = vec3<u32>(m13_plain[at + 4u * p], atomicLoad(&m13_work[g9_claims(at)]), atomicLoad(&m13_work[g9_claims(at) + p]));
+    let objs = vec3<u32>(m13_plain[at + 4u * p], ~atomicLoad(&m13_work[g9_claims(at)]), ~atomicLoad(&m13_work[g9_claims(at) + p]));
     let bg_colour = vec3<f32>(bitcast<f32>(m13_plain[at]), bitcast<f32>(m13_plain[at + 1u * p]), bitcast<f32>(m13_plain[at + 2u * p]));
     let large_colour = vec3<f32>(bitcast<f32>(m13_plain[at + 5u * p]), bitcast<f32>(m13_plain[at + 6u * p]), bitcast<f32>(m13_plain[at + 7u * p]));
     let second_colour = vec3<f32>(bitcast<f32>(m13_plain[at + 10u * p]), bitcast<f32>(m13_plain[at + 11u * p]), bitcast<f32>(m13_plain[at + 12u * p]));
@@ -2872,9 +2865,10 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
     let y1 = min(gid.y + 1u, h - 1u);
     let cws = vec4<u32>(g9_corner_word(gid.y * w + gid.x), g9_corner_word(gid.y * w + x1), g9_corner_word(y1 * w + gid.x), g9_corner_word(y1 * w + x1));
     let co = vec4<u32>(m13_plain[cws.x + 3u * p], m13_plain[cws.y + 3u * p], m13_plain[cws.z + 3u * p], m13_plain[cws.w + 3u * p]);
-    let cr = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x], m13_plain[cws.y], m13_plain[cws.z], m13_plain[cws.w]));
-    let cg = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + p], m13_plain[cws.y + p], m13_plain[cws.z + p], m13_plain[cws.w + p]));
-    let cbl = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 2u * p], m13_plain[cws.y + 2u * p], m13_plain[cws.z + 2u * p], m13_plain[cws.w + 2u * p]));
+    let crgb = g12_corner_colours(cws);
+    let cr = crgb[0];
+    let cg = crgb[1];
+    let cbl = crgb[2];
     // Each object's corners as a mask (1 where the corner shows it).
     let m_bg = select(vec4<f32>(0.0), vec4<f32>(1.0), co == vec4<u32>(objs.x));
     let m_l1 = select(vec4<f32>(0.0), vec4<f32>(1.0), co == vec4<u32>(objs.y));
@@ -3086,4 +3080,21 @@ fn g11_object_open(m: u32, q: vec3<f32>, sun: G9Sun) -> f32 {
     let open = hw_segment_open(q, sun.l, sun.dist);
     atomicStore(&g11_sun[at], select(2u, 3u, open));
     return select(0.0, 1.0, open);
+}
+
+// A corner's colour in one word (M13 appearance, third): square roots of
+// its share of twice the brightest a surface lit fully can be (the light is
+// nearer some points than the eye).
+fn g12_cpack(c: vec3<f32>) -> u32 {
+    return g10_pack(c, 2.0 * g9_scale());
+}
+
+// The four corners' colours (red, green, blue across the corners).
+fn g12_corner_colours(cws: vec4<u32>) -> array<vec4<f32>, 3> {
+    let s = 2.0 * g9_scale();
+    let a = g10_unpack(m13_plain[cws.x], s);
+    let b = g10_unpack(m13_plain[cws.y], s);
+    let c = g10_unpack(m13_plain[cws.z], s);
+    let d = g10_unpack(m13_plain[cws.w], s);
+    return array<vec4<f32>, 3>(vec4<f32>(a.x, b.x, c.x, d.x), vec4<f32>(a.y, b.y, c.y, d.y), vec4<f32>(a.z, b.z, c.z, d.z));
 }

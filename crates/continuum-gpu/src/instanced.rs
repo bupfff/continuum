@@ -1584,7 +1584,7 @@ impl InstancedRenderer {
                     buffer(
                         "m13 work",
                         (8 + 5 * pixels) * 4,
-                        wgpu::BufferUsages::COPY_SRC,
+                        wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                     ),
                     buffer("m13 rays args", 48, wgpu::BufferUsages::INDIRECT),
                     // Colour (M13 gates 9–10): per pixel 20 words, per corner
@@ -1974,8 +1974,14 @@ impl InstancedRenderer {
             );
         }
         if self.one_pass {
-            // M13's colour pass (profile stage 20): every pass's dispatch in
-            // one compute pass (wgpu orders the dispatches' storage).
+            // M13's colour pass (profile stage 20): the claims (three words a
+            // pixel after the header, the list and the masks) start at zero;
+            // every pass's dispatch in one compute pass (wgpu orders the
+            // dispatches' storage).
+            if let Some((work, _, _, _)) = &self.m13_work {
+                let pixels = self.width as u64 * self.height as u64;
+                encoder.clear_buffer(work, (8 + 2 * pixels) * 4, Some(3 * pixels * 4));
+            }
             let mut pass = encoder.begin_compute_pass(&Default::default());
             for k in 0..self.passes.len() {
                 self.dispatch_camera(&mut pass, k);
