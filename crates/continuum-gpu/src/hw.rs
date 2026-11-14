@@ -605,14 +605,43 @@ pub(crate) fn build(
     for &m in movable {
         is_movable[m] = true;
     }
+    // M13 gate 9: objects far larger than most (the hierarchy's oversized
+    // set: a diagonal over 64 times the median) keep mask bit 0, the others
+    // lose it, so a ray with cull mask 1 sees only such a background.
+    let diagonal: Vec<f32> = geometries
+        .iter()
+        .map(|g| {
+            let (lo, hi) = g.iter().flatten().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), &p| (lo.min(p), hi.max(p)),
+            );
+            if g.is_empty() {
+                0.0
+            } else {
+                (hi - lo).length()
+            }
+        })
+        .collect();
+    let sizes: Vec<f32> = objects
+        .iter()
+        .map(|o| diagonal.get(o.geometry).copied().unwrap_or(0.0) * o.scale)
+        .collect();
+    let median = if sizes.is_empty() {
+        0.0
+    } else {
+        let mut sorted = sizes.clone();
+        let mid = sorted.len() / 2;
+        *sorted.select_nth_unstable_by(mid, f32::total_cmp).1
+    };
     for (k, o) in objects.iter().enumerate() {
         if slots[k] == NONE {
             continue;
         }
         let Some(b) = &blas[o.geometry] else { continue };
         if !is_movable[k] {
+            let mask = if sizes[k] > 64.0 * median { 0xff } else { 0xfe };
             tlas[slots[k] as usize] =
-                Some(wgpu::TlasInstance::new(b, transforms[k], k as u32, 0xff));
+                Some(wgpu::TlasInstance::new(b, transforms[k], k as u32, mask));
         }
     }
     if let Some((c, _, _)) = &cluster_set {

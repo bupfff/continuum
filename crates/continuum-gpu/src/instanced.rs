@@ -20,13 +20,13 @@ use crate::{
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
     M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS,
     M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS,
-    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_ROOTS_BINDINGS, M13_TILES_BINDINGS,
-    MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS,
-    VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS,
-    VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS,
-    VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS,
-    VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS,
-    camera_uniform, uniform_buffer,
+    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS,
+    M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
+    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
+    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS,
+    VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS,
+    VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS,
+    VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -509,6 +509,9 @@ fn bind_group(
             binding: 79,
             resource: wgpu::BindingResource::TextureView(&t.normals),
         });
+    }
+    if std::env::var_os("CONTINUUM_BIND_DEBUG").is_some() {
+        eprintln!("bind group: keep {keep:?}, entries {}", entries.len());
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("instanced render"),
@@ -1004,7 +1007,7 @@ impl InstancedRenderer {
         // Pixel cones need no camera rays, so no acceleration structure.
         // M13 gate 4 (profile stage 16) traces corner rays in hardware.
         let hw = (kernel.uses_hardware_rays()
-            && (!pixel_cones || matches!(kernel.profile_stage.get(), 16..=18)))
+            && (!pixel_cones || matches!(kernel.profile_stage.get(), 16..=20)))
         .then(|| {
             // Top-level slots for objects showing finer levels than
             // their proxies (M14 gate 6).
@@ -1051,37 +1054,43 @@ impl InstancedRenderer {
             // M13: the scalar coverage walk in its own entry point (profile
             // stage 14), so it does not run at the pixel-cone entry's
             // occupancy.
-            (false, _) if pixel_cones && matches!(kernel.profile_stage.get(), 17 | 18) => vec![
-                (kernel.entry("hw_m13_prep"), M13_PREP_BINDINGS.to_vec()),
-                (
-                    kernel.entry("hw_m13_tile_roots"),
-                    M13_ROOTS_BINDINGS.to_vec(),
-                ),
-                // After the roots: corners only in tiles that may hold a
-                // large instance (M13 gate 8).
-                (
-                    kernel.entry("hw_m13_corners_tiles"),
-                    M13_CORNERS_TILES_BINDINGS.to_vec(),
-                ),
-                (kernel.entry("hw_m13_bins"), M13_BINS_BINDINGS.to_vec()),
-                (
-                    kernel.entry("hw_m13_bin_args"),
-                    M13_BIN_ARGS_BINDINGS.to_vec(),
-                ),
-                (
-                    kernel.entry("hw_m13_bin_rays"),
-                    M13_BIN_RAYS_BINDINGS.to_vec(),
-                ),
-                (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
-                (
-                    kernel.entry("hw_m13_page_args"),
-                    M13_PAGE_ARGS_BINDINGS.to_vec(),
-                ),
-                (
-                    kernel.entry("hw_m13_page_bake"),
-                    M13_PAGE_BAKE_BINDINGS.to_vec(),
-                ),
-            ],
+            (false, _) if pixel_cones && matches!(kernel.profile_stage.get(), 17 | 18 | 20) => {
+                vec![
+                    (kernel.entry("hw_m13_prep"), M13_PREP_BINDINGS.to_vec()),
+                    (
+                        kernel.entry("hw_m13_tile_roots"),
+                        M13_ROOTS_BINDINGS.to_vec(),
+                    ),
+                    // After the roots: corners only in tiles that may hold a
+                    // large instance (M13 gate 8).
+                    (
+                        kernel.entry("hw_m13_corners_tiles"),
+                        M13_CORNERS_TILES_BINDINGS.to_vec(),
+                    ),
+                    (kernel.entry("hw_m13_bins"), M13_BINS_BINDINGS.to_vec()),
+                    (
+                        kernel.entry("hw_m13_bin_args"),
+                        M13_BIN_ARGS_BINDINGS.to_vec(),
+                    ),
+                    (
+                        kernel.entry("hw_m13_bin_rays"),
+                        M13_BIN_RAYS_BINDINGS.to_vec(),
+                    ),
+                    (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
+                    (
+                        kernel.entry("hw_m13_page_args"),
+                        M13_PAGE_ARGS_BINDINGS.to_vec(),
+                    ),
+                    (
+                        kernel.entry("hw_m13_page_bake"),
+                        M13_PAGE_BAKE_BINDINGS.to_vec(),
+                    ),
+                ]
+            }
+            (false, _) if pixel_cones && kernel.profile_stage.get() == 19 => vec![(
+                kernel.entry("hw_m13_reference"),
+                M13_REFERENCE_BINDINGS.to_vec(),
+            )],
             (false, _) if pixel_cones && kernel.profile_stage.get() == 16 => vec![
                 (
                     kernel.entry("hw_m13_corners"),
@@ -1505,7 +1514,7 @@ impl InstancedRenderer {
                 (
                     buffer(
                         "m13 work",
-                        (8 + 2 * width as u64 * height as u64) * 4,
+                        (8 + 30 * width as u64 * height as u64) * 4,
                         wgpu::BufferUsages::empty(),
                     ),
                     buffer("m13 rays args", 16, wgpu::BufferUsages::INDIRECT),

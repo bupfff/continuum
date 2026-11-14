@@ -606,6 +606,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_bin_args",
     "hw_m13_bin_rays",
     "hw_m13_tiles",
+    "hw_m13_reference",
     "hw_m13_page_args",
     "hw_m13_page_bake",
     "hw_vc_bake_indirect",
@@ -633,21 +634,27 @@ pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29,
 /// M13 gate 5: the tile pass after the corner rays, with the maps' texture
 /// (85) and sampler (86).
 pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
-    0, 6, 7, 9, 10, 29, 85, 86, 87, 88, 91, 92, 95, 96, 97, 98, 100,
+    0, 6, 7, 8, 9, 10, 29, 52, 85, 86, 87, 88, 91, 92, 94, 95, 96, 97, 98, 100,
 ];
 /// M13 gate 6: the coverage pages' bakes after the pixels' pass, and their
 /// dispatch.
 pub(crate) const M13_PAGE_ARGS_BINDINGS: &[u32] = &[6, 91, 92, 93, 94];
+/// M13 gate 9: the reference, one shaded ray a pixel at its sample offset.
+pub(crate) const M13_REFERENCE_BINDINGS: &[u32] = &[2, 3, 6, 7, 8, 24, 30, 32, 52, 55, 56, 57, 58];
 /// M13 gate 8: the corner rays after the roots pass, in tiles that may hold
 /// a large instance.
-pub(crate) const M13_CORNERS_TILES_BINDINGS: &[u32] = &[3, 6, 31, 32, 87, 92, 96];
+pub(crate) const M13_CORNERS_TILES_BINDINGS: &[u32] = &[
+    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 87, 88, 90, 92, 96,
+];
 /// M13 gate 8: the once-a-frame pass: page records, the nodes' projections
 /// and instance records, one invocation per page, node and object.
-pub(crate) const M13_PREP_BINDINGS: &[u32] = &[6, 9, 90, 91, 92, 94, 96, 97, 98];
-pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[3, 6, 9, 32, 91, 92, 94, 95];
+pub(crate) const M13_PREP_BINDINGS: &[u32] = &[6, 8, 9, 32, 52, 90, 91, 92, 94, 96, 97, 98];
+pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[
+    2, 3, 6, 8, 9, 24, 30, 32, 52, 55, 56, 57, 58, 91, 92, 94, 95,
+];
 /// M13 gate 6's coverage pages: the pool, the requests' list, the state's
 /// counters, and the pages baked a frame by default.
-pub(crate) const M13_PAGE_POOL: usize = 16_384;
+pub(crate) const M13_PAGE_POOL: usize = 8_192;
 pub(crate) const M13_PAGE_REQUESTS: usize = 4_096;
 pub(crate) const M13_PAGE_META: usize = 32;
 pub(crate) const M13_PAGE_BUDGET: u32 = 64;
@@ -656,9 +663,11 @@ pub(crate) const M13_PAGE_BUDGET: u32 = 64;
 pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88, 91, 92, 97, 98, 99];
 /// M13 gate 5: the pixels covered by their corners, and the list of those
 /// tracing bin rays (88); the list's dispatch arguments; the rays.
-pub(crate) const M13_BINS_BINDINGS: &[u32] = &[6, 31, 88];
+pub(crate) const M13_BINS_BINDINGS: &[u32] =
+    &[2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 88, 92, 96];
 pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
-pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[3, 6, 32, 88, 92, 96];
+pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] =
+    &[2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 96];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
@@ -1789,7 +1798,7 @@ impl MaskConeKernel {
         let mut buffers = buffers;
         // M13 gate 3 (profile stage 15): each placed geometry's directional
         // coverage maps.
-        if matches!(self.profile_stage.get(), 15..=18) {
+        if matches!(self.profile_stage.get(), 15..=18 | 20) {
             let start = std::time::Instant::now();
             let tris: Vec<(&[continuum::mesh::Tri], Option<u32>)> = scene
                 .geometries
@@ -1807,8 +1816,28 @@ impl MaskConeKernel {
                 .collect();
             let maps = coverage_maps::build(&tris);
             *self.m13_maps_info.borrow_mut() = (start.elapsed(), maps.len() * 4);
-            if matches!(self.profile_stage.get(), 17 | 18) {
-                *self.m13_coverage.borrow_mut() = Some(self.coverage_texture(&maps));
+            if matches!(self.profile_stage.get(), 17 | 18 | 20) {
+                // M13 gate 9: the placed geometries' normals (the maps'
+                // order and spheres).
+                let placed: Vec<usize> = (0..tris.len()).filter(|&g| tris[g].1.is_some()).collect();
+                let normals: Vec<Vec<[u8; 3]>> = if self.profile_stage.get() == 20 {
+                    placed
+                        .iter()
+                        .enumerate()
+                        .map(|(k, &g)| {
+                            let word = |i: usize| f32::from_bits(maps[1 + 8 * k + i]);
+                            coverage_maps::geometry_normals(
+                                &scene.geometries[g].triangles,
+                                &scene.geometries[g].normals,
+                                Vec3::new(word(2), word(3), word(4)),
+                                word(5),
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                *self.m13_coverage.borrow_mut() = Some(self.coverage_texture(&maps, &normals));
                 // M13 gate 8: per map (a layer per geometry and direction)
                 // the bounding rectangle of its finest level's texels that
                 // are not zero (texels u0, v0, then u1, v1 past the last, a
@@ -1840,17 +1869,50 @@ impl MaskConeKernel {
                 // rotation from world to object as a quaternion (w at least
                 // 0, left out) and its maps' first layer.
                 let dirs = coverage_maps::DIRS * coverage_maps::DIRS;
+                // M13 gate 9: background objects (far larger than most, as
+                // the hardware structure's mask bit 0 marks them), bit 31 of
+                // the first layer's word.
+                let diagonal: Vec<f32> = scene
+                    .geometries
+                    .iter()
+                    .map(|g| {
+                        let (lo, hi) = g.triangles.iter().flatten().fold(
+                            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                            |(lo, hi), &p| (lo.min(p), hi.max(p)),
+                        );
+                        if g.triangles.is_empty() {
+                            0.0
+                        } else {
+                            (hi - lo).length()
+                        }
+                    })
+                    .collect();
+                let sizes: Vec<f32> = scene
+                    .instances
+                    .iter()
+                    .map(|i| diagonal.get(i.geometry).copied().unwrap_or(0.0) * i.scale)
+                    .collect();
+                let median = if sizes.is_empty() {
+                    0.0
+                } else {
+                    let mut sorted = sizes.clone();
+                    let mid = sorted.len() / 2;
+                    *sorted.select_nth_unstable_by(mid, f32::total_cmp).1
+                };
+                let background = |m: usize| sizes.get(m).is_some_and(|&size| size > 64.0 * median);
                 let spheres: Vec<[f32; 4]> = flat
                     .ranges
                     .iter()
-                    .flat_map(|range| {
+                    .enumerate()
+                    .flat_map(|(m, range)| {
+                        let flag = if background(m) { 1u32 << 31 } else { 0 };
                         let Some(k) = (0..maps[0] as usize).find(|&k| maps[1 + 8 * k] == range[2])
                         else {
-                            return [[0.0; 4]; 2];
+                            return [[0.0; 4], [0.0, 0.0, 0.0, f32::from_bits(flag)]];
                         };
                         let word = |i: usize| f32::from_bits(maps[1 + 8 * k + i]);
                         let c = Vec3::new(word(2), word(3), word(4));
-                        let first = f32::from_bits(k as u32 * dirs);
+                        let first = f32::from_bits((k as u32 * dirs) | flag);
                         let x = range[3];
                         if x == hierarchy::NONE {
                             return [[c.x, c.y, c.z, word(5)], [0.0, 0.0, 0.0, first]];
@@ -1915,7 +1977,7 @@ impl MaskConeKernel {
                     96,
                     self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("instance records"),
-                        size: flat.ranges.len().max(1) as u64 * 32,
+                        size: flat.ranges.len().max(1) as u64 * 48,
                         usage: wgpu::BufferUsages::STORAGE,
                         mapped_at_creation: false,
                     }),
@@ -1960,10 +2022,12 @@ impl MaskConeKernel {
         let mut fixed = vec![n as u32];
         fixed.extend(ranges.iter().flatten());
         fixed.extend(place);
-        let pages_on = self.profile_stage.get() == 18;
+        let pages_on = matches!(self.profile_stage.get(), 18 | 20);
         let mut state = vec![0u32; M13_PAGE_META + 3 * M13_PAGE_REQUESTS + 2 * n + M13_PAGE_POOL];
         state[4] = if pages_on { M13_PAGE_BUDGET } else { 0 };
         state[9] = pages_on as u32;
+        // M13 gate 9: colour (profile stage 20).
+        state[27] = (self.profile_stage.get() == 20) as u32;
         for w in &mut state[M13_PAGE_META + 3 * M13_PAGE_REQUESTS..][..n] {
             *w = hierarchy::NONE;
         }
@@ -2000,7 +2064,7 @@ impl MaskConeKernel {
             ),
             (
                 95,
-                init("page texels", &vec![0; M13_PAGE_POOL * 2048], none),
+                init("page texels", &vec![0; M13_PAGE_POOL * 2048 * 4], none),
             ),
             (97, init("page records", &vec![0; M13_PAGE_POOL * 48], none)),
         ]
@@ -2009,7 +2073,11 @@ impl MaskConeKernel {
     /// The coverage maps buffer's maps as an 8-bit texture array (M13 gate
     /// 5): layer `256 k + d` holds placed geometry `k`'s direction `d`, its
     /// mip levels the map's levels; sampled bilinearly, clamped at the edge.
-    fn coverage_texture(&self, maps: &[u32]) -> (wgpu::TextureView, wgpu::Sampler) {
+    fn coverage_texture(
+        &self,
+        maps: &[u32],
+        normals: &[Vec<[u8; 3]>],
+    ) -> (wgpu::TextureView, wgpu::Sampler) {
         let (dirs, texels, per) = coverage_maps::layout();
         let placed = (maps[0] as usize).max(1);
         let layers = placed as u32 * dirs * dirs;
@@ -2024,14 +2092,16 @@ impl MaskConeKernel {
             mip_level_count: levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            // Coverage, then (M13 gate 9) the texels' mean normal
+            // octahedrally encoded.
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         for level in 0..levels {
             let side = texels >> level;
             let offset: u32 = (0..level).map(|l| (texels >> l) * (texels >> l)).sum();
-            let mut bytes = vec![0u8; (side * side * layers) as usize];
+            let mut bytes = vec![0u8; 4 * (side * side * layers) as usize];
             for k in 0..maps[0] as usize {
                 let base = maps[1 + 8 * k + 1] as usize;
                 for d in 0..(dirs * dirs) as usize {
@@ -2039,8 +2109,16 @@ impl MaskConeKernel {
                     let layer = k * (dirs * dirs) as usize + d;
                     for t in 0..(side * side) as usize {
                         let v = f32::from_bits(maps[at + t]);
-                        bytes[layer * (side * side) as usize + t] =
-                            (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        let o = 4 * (layer * (side * side) as usize + t);
+                        bytes[o] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        let n = normals
+                            .get(k)
+                            .and_then(|g| g.get(d * per as usize + offset as usize + t))
+                            .copied()
+                            .unwrap_or([128, 128, 255]);
+                        bytes[o + 1] = n[0];
+                        bytes[o + 2] = n[1];
+                        bytes[o + 3] = n[2];
                     }
                 }
             }
@@ -2054,7 +2132,7 @@ impl MaskConeKernel {
                 &bytes,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(side),
+                    bytes_per_row: Some(4 * side),
                     rows_per_image: Some(side),
                 },
                 wgpu::Extent3d {
