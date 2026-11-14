@@ -452,6 +452,36 @@ the cache's bin-wide cells are filled only where corners land, so a moving
 view misses. The cache is now emptied when a light moves and every frame
 with movers.
 
+**Into the renderer (design, 2026-11-14).** Gates 5–11 ran the sub-pixel
+pass as a diagnostic profile stage with its own lighting model (one sun
+and a constant ambient). The renderer lights surfaces from its cache
+(mask cones: soft shadows from every light's area, a sky, bounce light).
+Bringing the pass in means its colour comes from the renderer's lighting,
+not a second model:
+- **A. An option.** `RendererOptions` gains the sub-pixel camera path for
+  instanced scenes (coverage and colour through maps, pages, corners and
+  bin rays) in place of one ray a pixel; the cache keeps baking as now.
+- **B. Large hits read the cache.** Corners, bin rays and the samples of
+  pixels the corners resolved shade their hit as the renderer's shade pass
+  does (the cache's texels at the hit, every light and the sky), so a
+  large object looks the same as with one ray a pixel, without its
+  shimmer. The sun cache becomes unnecessary for them (the lighting cache
+  holds visibility already).
+- **C. Small instances** (map entries): direct light per light from the
+  maps' normals and a visibility per instance and light (gate 9's, cached
+  per object); sky and bounce from the cache's coarsest level for the
+  instance (one irradiance), or the hierarchy node's when the instance has
+  none resident. Their error against per-sample lighting is measured
+  first.
+- **D. Coverage pages** bake colour from the same shading at their hits.
+- **Gates:** M13 G12, the option in the renderer on the field with its
+  lights and sky: colour within 0.5× one ray's error against a 16×16
+  supersampled reference shaded by the renderer's own lighting (cache
+  settled), at most 16.7 ms settled in gate 11's views. Then G13, motion:
+  a walk and a 10 m/s flight with colour within 1.2× the settled frame at
+  their place (95th percentile), the sun visibility's cells reused across
+  shifts (gate 11's after-run trade).
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -872,9 +902,12 @@ one ray's colour error, 13.85/14.69 ms settled; `docs/results/m13-gate11.md`,
 development in `docs/results/m13-gate11-development.md`): the gates' bars
 for Landmark 3 (coverage 10 ms, colour 15 ms) are met settled on the
 field's views; the landmark's "about 10 ms" with colour is not. The next
-tasks: the path into the renderer behind its API (it is a diagnostic
-profile stage, 20), with the sun cache invalidated when lights or objects
-move and flights measured with colour; then the showcase (item 4). Real-frame pass times come from Instruments
+task is §3.4's "Into the renderer" (design written 2026-11-14): the
+sub-pixel path as a renderer option whose colour comes from the
+renderer's lighting cache (gate 12), then motion with colour (gate 13;
+development after gate 11: a 10 m/s flight 150 m up runs 1.37× settled
+because the sun cache misses where the view moves); then the showcase
+(item 4). Real-frame pass times come from Instruments
 (`xcrun xctrace record --template 'Metal System Trace'`, table
 `metal-gpu-intervals`); profile mode (`M13_PROFILE=1`) times passes alone.
 
