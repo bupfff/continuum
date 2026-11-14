@@ -21,7 +21,8 @@ Apple M4 (fanless MacBook Air), 1280×720, release build, run once at full
 size on 2026-11-14 (stub and method in `d52d42e`, before the run). Speed
 timed first. Machine free of other work; control just before, gate 4's path
 at full size: 111.3 ms standing, 91.1 ms from 150 m (gate 9: 109.5 and
-91.1). Output in `experiments/room3d/out/m13_gate10_run.log`.
+91.1). The run's output was saved as it ran (`experiments/room3d/out/`,
+not in the repository); its lines are the numbers above.
 
 ## Method (on gate 9's pass, profile stage 20)
 
