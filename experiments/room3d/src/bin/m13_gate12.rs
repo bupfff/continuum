@@ -110,6 +110,18 @@ fn settle(
         r.wait();
         let s = r.cache_stats();
         let pages = r.m13_page_counters()[6];
+        if std::env::var_os("M13_VERBOSE").is_some() && k % 100 == 0 {
+            println!(
+                "    frame {k}: cache requests {}, pages baked {}, texels {}, sky samples {}, resident {}, evicted {}, fallback pixels {}; coverage pages asked {pages}",
+                s.map_or(0, |s| s.requests),
+                s.map_or(0, |s| s.pages_baked),
+                s.map_or(0, |s| s.texels_baked),
+                s.map_or(0, |s| s.sky_samples),
+                s.map_or(0, |s| s.resident),
+                s.map_or(0, |s| s.evicted),
+                s.map_or(0, |s| s.fallback_pixels)
+            );
+        }
         if s.is_some_and(|s| s.requests == 0 && s.pages_baked == 0) && pages == 0 {
             calm += 1;
             if calm >= quiet {
@@ -171,7 +183,10 @@ fn main() {
         let origin = field.origin_near_camera();
         let (ground, light) = field.relative(origin);
         let lights = [Light::white(light, field.radiance)];
-        kernel.set_sky(field.sky());
+        // `M13_NOSKY=1` in development: lights alone.
+        if std::env::var_os("M13_NOSKY").is_none() {
+            kernel.set_sky(field.sky());
+        }
         let view_target = target(&kernel);
         let forward = (ground.target - ground.eye).normalize();
         let flat0 = Vec3::new(forward.x, forward.y, 0.0).normalize();
@@ -203,6 +218,19 @@ fn main() {
         ] {
             let mut one = cached(&kernel, &field, origin, &lights, false);
             let n1 = settle(&mut one, camera, &view_target, 8, 3000);
+            let mut one_times: Vec<f64> = (0..10)
+                .map(|_| {
+                    let t = Instant::now();
+                    one.frame(camera, &view_target);
+                    one.wait();
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            one_times.sort_by(f64::total_cmp);
+            println!(
+                "{name}: one ray a pixel with the cache, settled: {:.2} ms",
+                one_times[5]
+            );
             let a = frame(&mut one, camera, &view_target);
             // `M13_ACC=1`: the reference, 16×16 samples a pixel shaded by the
             // renderer (its cache settled first), and the colour error.

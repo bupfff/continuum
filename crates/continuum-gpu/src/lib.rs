@@ -1017,6 +1017,12 @@ impl MaskConeKernel {
             ("fn g12_stamp_advanced(", "fn g12_stamp_advanced_model("),
             ("fn g12_target(", "fn g12_target_model("),
             ("fn g12_ambient(", "fn g12_ambient_model("),
+            // Bin rays light only objects their corners do not suffice for:
+            // each lit hit costs the cache's full shading (gate 12, development).
+            (
+                "const G10_BIN_RAYS_ALL: bool = true;",
+                "const G10_BIN_RAYS_ALL: bool = false;",
+            ),
         ] {
             assert!(hw.contains(from), "{from} not found");
             hw = hw.replacen(from, to, 1);

@@ -904,7 +904,10 @@ for Landmark 3 (coverage 10 ms, colour 15 ms) are met settled on the
 field's views; the landmark's "about 10 ms" with colour is not. The next
 task is §3.4's "Into the renderer" (design written 2026-11-14): the
 sub-pixel path as a renderer option whose colour comes from the
-renderer's lighting cache (gate 12), then motion with colour (gate 13;
+renderer's lighting cache (gate 12; stub committed; development in
+`docs/results/m13-gate12-development.md`: the path runs lit by the cache
+through deferred lighting of large hits, 0.41–0.49× one ray's error at
+16–28 ms; next, cheaper lighting of bins and the sky's settling), then motion with colour (gate 13;
 development after gate 11: a 10 m/s flight 150 m up runs 1.37× settled
 because the sun cache misses where the view moves); then the showcase
 (item 4). Real-frame pass times come from Instruments
