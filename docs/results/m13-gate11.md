@@ -62,9 +62,10 @@ in the repository); its lines are the numbers above.
 
 ## What the numbers say
 
-- **Landmark 3's colour bar is met on these views:** sub-pixel coverage
+- **The colour bar (15 ms) is met on these views:** sub-pixel coverage
   and colour within 0.34–0.39× one ray's error in 13.9–14.7 ms settled at
   1280×720 on the fanless M4, against 9 ms for coverage alone (gate 8).
+  Landmark 3 asks for about 10 ms with colour; that is not met.
 - **What made it:** caching the sun's visibility in world space (the
   ground's shadow rays were the largest cost from 150 m), shading bins one
   by one only where a pixel's corners disagree, and a centre sample for the

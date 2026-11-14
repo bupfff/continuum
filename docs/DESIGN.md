@@ -864,8 +864,9 @@ with the user's go-ahead (2026-11-13). **Gate 10** (twelfth session)
 ms against 15; `docs/results/m13-gate10.md`, development in
 `docs/results/m13-gate10-development.md`). **Gate 11 passed** (0.335×/0.386×
 one ray's colour error, 13.85/14.69 ms settled; `docs/results/m13-gate11.md`,
-development in `docs/results/m13-gate11-development.md`): Landmark 3's
-coverage and colour bars are met settled on the field's views. The next
+development in `docs/results/m13-gate11-development.md`): the gates' bars
+for Landmark 3 (coverage 10 ms, colour 15 ms) are met settled on the
+field's views; the landmark's "about 10 ms" with colour is not. The next
 tasks: the path into the renderer behind its API (it is a diagnostic
 profile stage, 20), with the sun cache invalidated when lights or objects
 move and flights measured with colour; then the showcase (item 4). Real-frame pass times come from Instruments

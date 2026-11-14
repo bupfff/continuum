@@ -378,6 +378,10 @@ pub struct InstancedRenderer {
     /// Every camera pass's dispatch in one compute pass (M13's colour pass,
     /// profile stage 20).
     one_pass: bool,
+    /// The M13 colour pass's cache of the sun's visibility (binding 104),
+    /// and whether it must be emptied before the next frame (a light moved).
+    m13_sun: Option<wgpu::Buffer>,
+    m13_sun_stale: bool,
     /// M13 gate 7: GPU timestamps around the page arguments' pass (0, 1)
     /// and the page bakes (2, 3) (a query set, its resolve buffer, a
     /// readback buffer, nanoseconds a tick), where the device has them.
@@ -736,6 +740,8 @@ impl InstancedRenderer {
             ),
             "moving spots are not supported"
         );
+        // The M13 colour pass's cached visibility of the lights is stale.
+        self.m13_sun_stale = true;
         let gpu = LightGpu::from(&light);
         let buffer = &self
             .scene
@@ -1294,6 +1300,8 @@ impl InstancedRenderer {
             m13_work: None,
             m13_timer: None,
             one_pass: cache.is_none() && pixel_cones && kernel.profile_stage.get() == 20,
+            m13_sun: None,
+            m13_sun_stale: false,
             cache,
             width,
             height,
@@ -1623,13 +1631,14 @@ impl InstancedRenderer {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("m13 sun cache"),
                     size: (16 * 1_048_576 + objects + 16) * 4,
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
             });
         if let Some(buf) = &sun_cache {
             all.push((104, buf));
         }
+        self.m13_sun = sun_cache.clone();
         if let Some((work, args, plain, shaded)) = &self.m13_work {
             all.push((88, work));
             all.push((89, args));
@@ -1987,6 +1996,15 @@ impl InstancedRenderer {
                 let pixels = self.width as u64 * self.height as u64;
                 encoder.clear_buffer(work, (8 + 2 * pixels) * 4, Some(3 * pixels * 4));
             }
+            // The sun's cache holds only while the lights and the objects are
+            // still: emptied after a light moved, and every frame with movers.
+            let movers = self.hw.as_ref().is_some_and(|hw| hw.movers.is_some());
+            if let Some(sun) = &self.m13_sun
+                && (self.m13_sun_stale || movers)
+            {
+                encoder.clear_buffer(sun, 0, None);
+            }
+            self.m13_sun_stale = false;
             let mut pass = encoder.begin_compute_pass(&Default::default());
             for k in 0..self.passes.len() {
                 self.dispatch_camera(&mut pass, k);
