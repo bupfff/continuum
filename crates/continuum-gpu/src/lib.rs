@@ -605,6 +605,10 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_bins",
     "hw_m13_bin_args",
     "hw_m13_bin_rays",
+    "hw_m13_shade_list",
+    "hw_m13_shade_args",
+    "hw_m13_shade_rays",
+    "hw_m13_resolve",
     "hw_m13_tiles",
     "hw_m13_reference",
     "hw_m13_page_args",
@@ -634,7 +638,7 @@ pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29,
 /// M13 gate 5: the tile pass after the corner rays, with the maps' texture
 /// (85) and sampler (86).
 pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
-    0, 6, 7, 8, 9, 10, 29, 52, 85, 86, 87, 88, 91, 92, 94, 95, 96, 97, 98, 100,
+    0, 6, 7, 8, 9, 10, 29, 31, 52, 85, 86, 87, 88, 91, 92, 94, 95, 96, 97, 98, 100, 102,
 ];
 /// M13 gate 6: the coverage pages' bakes after the pixels' pass, and their
 /// dispatch.
@@ -644,13 +648,13 @@ pub(crate) const M13_REFERENCE_BINDINGS: &[u32] = &[2, 3, 6, 7, 8, 24, 30, 32, 5
 /// M13 gate 8: the corner rays after the roots pass, in tiles that may hold
 /// a large instance.
 pub(crate) const M13_CORNERS_TILES_BINDINGS: &[u32] = &[
-    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 87, 88, 90, 92, 96,
+    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 87, 90, 92, 96, 101, 102,
 ];
 /// M13 gate 8: the once-a-frame pass: page records, the nodes' projections
 /// and instance records, one invocation per page, node and object.
 pub(crate) const M13_PREP_BINDINGS: &[u32] = &[6, 8, 9, 32, 52, 90, 91, 92, 94, 96, 97, 98];
 pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[
-    2, 3, 6, 8, 9, 24, 30, 32, 52, 55, 56, 57, 58, 91, 92, 94, 95,
+    2, 3, 6, 8, 9, 24, 30, 32, 52, 55, 56, 57, 58, 91, 92, 94, 95, 101,
 ];
 /// M13 gate 6's coverage pages: the pool, the requests' list, the state's
 /// counters, and the pages baked a frame by default.
@@ -663,11 +667,21 @@ pub(crate) const M13_PAGE_BUDGET: u32 = 64;
 pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88, 91, 92, 97, 98, 99];
 /// M13 gate 5: the pixels covered by their corners, and the list of those
 /// tracing bin rays (88); the list's dispatch arguments; the rays.
-pub(crate) const M13_BINS_BINDINGS: &[u32] =
-    &[2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 88, 92, 96];
+pub(crate) const M13_BINS_BINDINGS: &[u32] = &[
+    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 88, 92, 96, 101, 102,
+];
 pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
+/// M13 gate 10 (development): bins shaded one by one where a pixel's
+/// corners do not suffice: the list of pixels, its arguments, the bins.
+pub(crate) const M13_SHADE_LIST_BINDINGS: &[u32] = &[6, 88, 92, 102];
+pub(crate) const M13_SHADE_ARGS_BINDINGS: &[u32] = &[89, 92];
+/// M13 gate 10: what the bins leave, coloured after the pixels' pass.
+pub(crate) const M13_RESOLVE_BINDINGS: &[u32] = &[6, 7, 31, 52, 88, 90, 92, 102];
+pub(crate) const M13_SHADE_RAYS_BINDINGS: &[u32] = &[
+    2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 90, 92, 101, 102,
+];
 pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] =
-    &[2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 96];
+    &[2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 96, 102];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
@@ -1933,16 +1947,21 @@ impl MaskConeKernel {
                     })
                     .collect();
                 // Per node the radius of its largest instance (unbounded for
-                // instances without maps, always large).
+                // instances without maps, always large; with colour, M13 gate
+                // 10, background objects are found by their own rays and
+                // count as none).
+                let colour = self.profile_stage.get() == 20;
                 let mut largest = vec![0.0f32; nodes.len()];
                 for k in (0..nodes.len()).rev() {
                     let info = nodes[k].info;
                     largest[k] = if info[1] > 0 {
                         (info[0]..info[0] + info[1])
                             .map(|i| {
-                                let r = spheres
-                                    .get(2 * items[i as usize] as usize)
-                                    .map_or(0.0, |s| s[3]);
+                                let m = items[i as usize] as usize;
+                                if colour && background(m) {
+                                    return 0.0;
+                                }
+                                let r = spheres.get(2 * m).map_or(0.0, |s| s[3]);
                                 if r > 0.0 { r } else { 1e30 }
                             })
                             .fold(0.0, f32::max)

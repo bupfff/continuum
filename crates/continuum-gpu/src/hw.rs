@@ -121,6 +121,10 @@ pub(crate) struct HwScene {
     /// The movable objects' own top-level structure (they are left out of
     /// `tlas`), rebuilt as they move, and those objects.
     pub movers: Option<(wgpu::Tlas, Vec<u32>)>,
+    /// M13 gate 9: a top-level structure of the background objects alone
+    /// (far larger than most), so a ray for what lies behind small objects
+    /// traverses only those (a mask still visits every box).
+    pub background: wgpu::Tlas,
     blas: Vec<Option<wgpu::Blas>>,
     _vertices: wgpu::Buffer,
     /// Each object's top-level transform, kept for objects whose geometry
@@ -657,8 +661,26 @@ pub(crate) fn build(
             tlas[(c.base + c.blas.len() as u32 + k) as usize] = Some(null_instance(&c.null_blas));
         }
     }
+    // The background objects' own structure (at least one slot: an empty
+    // one is never hit).
+    let background_objects: Vec<usize> = (0..objects.len())
+        .filter(|&k| {
+            sizes[k] > 64.0 * median && blas[objects[k].geometry].is_some() && !is_movable[k]
+        })
+        .collect();
+    let mut background = device.create_tlas(&wgpu::CreateTlasDescriptor {
+        label: Some("background"),
+        max_instances: background_objects.len().max(1) as u32,
+        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+    });
+    for (slot, &k) in background_objects.iter().enumerate() {
+        if let Some(b) = &blas[objects[k].geometry] {
+            background[slot] = Some(wgpu::TlasInstance::new(b, transforms[k], k as u32, 0xff));
+        }
+    }
     let mut encoder = device.create_command_encoder(&Default::default());
-    encoder.build_acceleration_structures(entries.iter(), std::iter::once(&tlas));
+    encoder.build_acceleration_structures(entries.iter(), [&tlas, &background]);
     drop(entries);
     let movers = (!movable.is_empty()).then(|| {
         let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
@@ -672,6 +694,7 @@ pub(crate) fn build(
     let mut scene = HwScene {
         tlas,
         movers,
+        background,
         blas,
         _vertices: vertex_buffer,
         transforms,

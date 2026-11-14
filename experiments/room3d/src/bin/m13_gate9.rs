@@ -308,14 +308,23 @@ fn main() -> std::io::Result<()> {
             "bins",
             "bin args",
             "bin rays",
+            "shade list",
+            "shade args",
+            "shade rays",
             "pixels",
+            "resolve",
             "page args",
             "bakes",
         ];
         for (name, camera) in views {
             kernel.set_prefilter(8.0);
             kernel.set_hardware_rays(true);
-            kernel.set_profile_stage(OURS);
+            kernel.set_profile_stage(
+                std::env::var("M13_PSTAGE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(OURS),
+            );
             let mut r = renderer(&kernel, &field, origin, &lights);
             r.set_m13_page_budget(SETTLE_BUDGET);
             settle(&mut r, camera, &view_target, 200, false);
@@ -335,6 +344,81 @@ fn main() -> std::io::Result<()> {
                 })
                 .collect();
             println!("{name}: {}", parts.join(", "));
+            let c = r.m13_page_counters();
+            println!("  shaded pixels {}, counters 31: {}", c[30], c[31]);
+        }
+        return Ok(());
+    }
+    // `M13_SPLIT=1` in development: the colour error split by pixel class
+    // (large objects, pages, the background differing across bins).
+    if dev && std::env::var_os("M13_SPLIT").is_some() {
+        for (name, camera) in views {
+            kernel.set_prefilter(8.0);
+            kernel.set_hardware_rays(true);
+            kernel.set_profile_stage(OURS);
+            let mut r = renderer(&kernel, &field, origin, &lights);
+            r.set_m13_page_budget(SETTLE_BUDGET);
+            settle(&mut r, camera, &view_target, 200, false);
+            let ours = frame(&mut r, camera, &view_target);
+            r.set_m13_state_word(28, 1);
+            let class = frame(&mut r, camera, &view_target);
+            drop(r);
+            let (reference, one) =
+                reference(&kernel, &field, origin, &lights, camera, &view_target);
+            let norm: f64 = reference
+                .iter()
+                .flatten()
+                .map(|v| (*v as f64).powi(2))
+                .sum();
+            let sq = |a: &[f32; 3], b: &[f32; 3]| -> f64 {
+                a.iter().zip(b).map(|(x, y)| ((x - y) as f64).powi(2)).sum()
+            };
+            let names = ["large", "pages", "horizon", "shadow edge"];
+            let label = |id: usize| -> String {
+                let parts: Vec<&str> = (0..4)
+                    .filter(|b| id >> b & 1 == 1)
+                    .map(|b| names[b])
+                    .collect();
+                if parts.is_empty() {
+                    "small only".into()
+                } else {
+                    parts.join("+")
+                }
+            };
+            let mut ours_by = [0.0f64; 16];
+            let mut one_by = [0.0f64; 16];
+            let mut count = [0usize; 16];
+            for k in 0..reference.len() {
+                let c = class[k];
+                let z = c[2].round() as usize;
+                let id = (c[0] > 0.5) as usize
+                    | ((c[1] > 0.5) as usize) << 1
+                    | (z & 1) << 2
+                    | ((z >> 1) & 1) << 3;
+                ours_by[id] += sq(&ours[k], &reference[k]);
+                one_by[id] += sq(&one[k], &reference[k]);
+                count[id] += 1;
+            }
+            let total_one: f64 = one_by.iter().sum();
+            println!(
+                "{name}: ours {:.2}%, one ray {:.2}% ({:.3}×)",
+                100.0 * (ours_by.iter().sum::<f64>() / norm).sqrt(),
+                100.0 * (total_one / norm).sqrt(),
+                (ours_by.iter().sum::<f64>() / total_one).sqrt()
+            );
+            for id in 0..16 {
+                if count[id] == 0 {
+                    continue;
+                }
+                println!(
+                    "  {:>26}: {:5.1}% of pixels; squared error ours {:.4}, one ray {:.4} (of one ray's total); ratio there {:.3}",
+                    label(id),
+                    100.0 * count[id] as f64 / reference.len() as f64,
+                    ours_by[id] / total_one,
+                    one_by[id] / total_one,
+                    (ours_by[id] / one_by[id].max(1e-30)).sqrt()
+                );
+            }
         }
         return Ok(());
     }

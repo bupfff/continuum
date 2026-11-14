@@ -20,7 +20,8 @@ use crate::{
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
     M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS,
     M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS,
-    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS,
+    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_RESOLVE_BINDINGS,
+    M13_ROOTS_BINDINGS, M13_SHADE_ARGS_BINDINGS, M13_SHADE_LIST_BINDINGS, M13_SHADE_RAYS_BINDINGS,
     M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
     VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
     VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS,
@@ -47,7 +48,7 @@ pub struct FrameProfile {
     pub planning: Duration,
     /// The first twelve camera passes, in order, each submitted and waited
     /// for alone.
-    pub passes: [Duration; 12],
+    pub passes: [Duration; 16],
     /// The bake's passes, in order, each submitted and waited for alone,
     /// with their labels (diagnostics; empty labels past the last).
     pub bake_passes: [(&'static str, Duration); 8],
@@ -369,7 +370,7 @@ pub struct InstancedRenderer {
     /// M13 gates 5–6: per frame, the pixels tracing bin rays and each
     /// pixel's covered bins (binding 88), and the rays' dispatch arguments
     /// (89).
-    m13_work: Option<(wgpu::Buffer, wgpu::Buffer)>,
+    m13_work: Option<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)>,
     /// M13 gate 7: GPU timestamps around the page arguments' pass (0, 1)
     /// and the page bakes (2, 3) (a query set, its resolve buffer, a
     /// readback buffer, nanoseconds a tick), where the device has them.
@@ -1076,7 +1077,23 @@ impl InstancedRenderer {
                         kernel.entry("hw_m13_bin_rays"),
                         M13_BIN_RAYS_BINDINGS.to_vec(),
                     ),
+                    (
+                        kernel.entry("hw_m13_shade_list"),
+                        M13_SHADE_LIST_BINDINGS.to_vec(),
+                    ),
+                    (
+                        kernel.entry("hw_m13_shade_args"),
+                        M13_SHADE_ARGS_BINDINGS.to_vec(),
+                    ),
+                    (
+                        kernel.entry("hw_m13_shade_rays"),
+                        M13_SHADE_RAYS_BINDINGS.to_vec(),
+                    ),
                     (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
+                    (
+                        kernel.entry("hw_m13_resolve"),
+                        M13_RESOLVE_BINDINGS.to_vec(),
+                    ),
                     (
                         kernel.entry("hw_m13_page_args"),
                         M13_PAGE_ARGS_BINDINGS.to_vec(),
@@ -1181,6 +1198,8 @@ impl InstancedRenderer {
                 b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
                 b if b == M13_BIN_ARGS_BINDINGS => CameraDispatch::One,
                 b if b == M13_BIN_RAYS_BINDINGS => CameraDispatch::M13Rays,
+                b if b == M13_SHADE_ARGS_BINDINGS => CameraDispatch::One,
+                b if b == M13_SHADE_RAYS_BINDINGS => CameraDispatch::M13Rays,
                 b if b == M13_PAGE_ARGS_BINDINGS => CameraDispatch::One,
                 b if b == M13_PAGE_BAKE_BINDINGS => CameraDispatch::M13Pages,
                 b if b == M13_PREP_BINDINGS => CameraDispatch::Prep,
@@ -1399,6 +1418,17 @@ impl InstancedRenderer {
         }
     }
 
+    /// M13 (development): sets word `index` of the coverage pages' state
+    /// (see `g6_state` in `hw_visibility.wgsl`; 28: the pixels' pass writes
+    /// each pixel's class instead of its colour).
+    #[doc(hidden)]
+    pub fn set_m13_state_word(&self, index: u32, value: u32) {
+        if let Some((_, state)) = self.scene.iter().find(|(b, _)| *b == 92) {
+            self.queue
+                .write_buffer(state, 4 * index as u64, &value.to_le_bytes());
+        }
+    }
+
     /// M13 gate 7: the GPU time of the last frame's page passes (arguments
     /// and bakes, each timed on its own) in milliseconds, after the frame is
     /// waited for; None without timestamps.
@@ -1511,18 +1541,33 @@ impl InstancedRenderer {
                         mapped_at_creation: false,
                     })
                 };
+                let pixels = width as u64 * height as u64;
                 (
+                    // The header, the list, the masks, and (M13 gates 9–10)
+                    // three words a pixel that bin rays claim.
                     buffer(
                         "m13 work",
-                        (8 + 30 * width as u64 * height as u64) * 4,
+                        (8 + 5 * pixels) * 4,
                         wgpu::BufferUsages::empty(),
                     ),
                     buffer("m13 rays args", 16, wgpu::BufferUsages::INDIRECT),
+                    // Colour (M13 gates 9–10): per pixel 20 words, per corner
+                    // 8, then the shaded bins' list (18 words an entry).
+                    buffer(
+                        "m13 colour",
+                        if self.passes.iter().any(|(_, keep)| keep.contains(&102)) {
+                            (28 * pixels + 18 * 262_144) * 4
+                        } else {
+                            16
+                        },
+                        wgpu::BufferUsages::empty(),
+                    ),
                 )
             });
-        if let Some((work, args)) = &self.m13_work {
+        if let Some((work, args, plain)) = &self.m13_work {
             all.push((88, work));
             all.push((89, args));
+            all.push((102, plain));
         }
         self.m13_timer = (self
             .passes
@@ -1565,6 +1610,7 @@ impl InstancedRenderer {
             if let Some((movers, _)) = &hw.movers {
                 tlas.push((59, movers));
             }
+            tlas.push((101, &hw.background));
         }
         self.binds = self
             .passes
@@ -1702,7 +1748,7 @@ impl InstancedRenderer {
                 pass.dispatch_workgroups(self.width.div_ceil(64), self.height.div_ceil(64), 1)
             }
             (CameraDispatch::M13Rays, _) => {
-                if let Some((_, args)) = &self.m13_work {
+                if let Some((_, args, _)) = &self.m13_work {
                     pass.dispatch_workgroups_indirect(args, 0);
                 }
             }
