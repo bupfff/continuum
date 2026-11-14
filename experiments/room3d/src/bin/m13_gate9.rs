@@ -308,7 +308,6 @@ fn main() -> std::io::Result<()> {
             "bins",
             "bin args",
             "bin rays",
-            "shade list",
             "shade args",
             "shade rays",
             "pixels",
