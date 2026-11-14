@@ -1,14 +1,62 @@
-//! M13 gate 11 (development; the stub is not written yet): colour in the
-//! coverage pass, appearance third (DESIGN §3.4).
+//! M13 gate 11: colour in the coverage pass (appearance, third).
 //!
-//! Gate 10 passed colour and failed speed (0.383×/0.465×; 16.05/18.03 ms
-//! against 15; `docs/results/m13-gate10.md`). Development here: the sun's
-//! visibility cached in world space, backgrounds' bins shaded one by one
-//! through it, cheaper map samples. Settled now also means the sun cache
-//! missed nothing in the last frame.
+//! M13 gate 10 passed colour and failed speed: 0.383× and 0.465× one ray's
+//! colour error (bar 0.5×), 16.05 and 18.03 ms settled (bar 15)
+//! (`docs/results/m13-gate10.md`). From 150 m most of colour's cost was the
+//! ground's shadow rays (one a corner) and work per map sample. DESIGN
+//! §3.4, "Appearance, third", named the levers; this gate takes them.
 //!
-//! `M13_DEV=1` (10,000 boulders; `M13_DEV=1M` at full size), with
-//! `M13_ACC=1`, `M13_SPLIT=1`, `M13_PROFILE=1`, `M13_REF=1` as gate 10's.
+//! The model and the reference are gate 9's (and 10's): colour = albedo ×
+//! (E_sun · max(0, n·l) · V + E_amb) / π, V a hard shadow toward the light's
+//! centre, E_amb a fifth of the sun's normal irradiance, a constant sky;
+//! per pixel the mean of 16×16 samples, each one ray shaded by the model.
+//!
+//! Method, on gate 10's pass (profile stage 20):
+//! - **The sun's visibility cached in world space** while the light and the
+//!   scene are still: cells about a bin wide at their distance from the eye
+//!   (powers of two), a word a cell (30 bits of its key's fingerprint, 2 of
+//!   visibility), the cells of a 4×4×4 brick in one 16-word bucket; per
+//!   object for the records' sunward point. A miss traces the shadow ray and
+//!   fills the cell. Settled now also means a frame with no miss.
+//! - **The background's shadow edges inside a pixel:** where the corners
+//!   showing the background disagree on the sun, the visibility at the
+//!   pixel's centre too (from the cache); each background bin takes the
+//!   visibility of its nearest sample (centre or corner, half each where
+//!   equally near) and the mean colour of the corners lit or shadowed
+//!   accordingly.
+//! - **Cheaper passes:** every dispatch in one compute pass; the buried test
+//!   without a branch, shading constants per record; corner colours in one
+//!   word; claims cleared by a buffer clear; the resolve's common cases
+//!   (background only, or split by the sun) summed at once; corners whose
+//!   own hit is the background trace no background ray; pixels the corners
+//!   resolved shaded sample by sample where the corners' colours differ by
+//!   more than 15% (gate 10: 10%).
+//!
+//! Scene: the million-boulder field with its ground and light, 1280×720;
+//! views standing at 1.7 m and 150 m up looking 45° down (gates 4–10's).
+//!
+//! Pass criterion, fixed before the first run (gate 10's bars):
+//! 1. **Colour:** relative RMSE of the RGB image from the reference at most
+//!    0.5× one ray's, standing and from 150 m.
+//! 2. **Speed:** settled (every wanted page baked, no sun-cache miss), at
+//!    most 15 ms a frame in both views (median of 10 frames each waited
+//!    for), timed first.
+//!
+//! Reported: the 20 m view (gate 7's flight view) settled; pixels shaded bin
+//! by bin; mean colour against the reference's.
+//!
+//! Disclosed before the run: developed at full size on the gate's scene,
+//! speed on the gate's views (13.9 and 14.7 ms in development, criterion 2
+//! narrowly from 150 m), accuracy on other views only (0.33× and 0.39×;
+//! `docs/results/m13-gate11-development.md`).
+//!
+//! `cargo run --release -p room3d --bin m13_gate11`
+//!
+//! `M13_DEV=1` runs a development check (10,000 boulders; `M13_DEV=1M` at
+//! full size), whose numbers are not the gate's; with it `M13_ACC=1`
+//! measures colour on other views than the gate's, `M13_SPLIT=1` splits
+//! that error by pixel class, `M13_PROFILE=1` times each pass alone, and
+//! `M13_REF=1` renders only the reference and the one-ray image.
 
 use std::fmt::Write as _;
 use std::path::Path;

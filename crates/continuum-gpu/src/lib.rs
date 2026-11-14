@@ -645,9 +645,8 @@ pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
 /// dispatch.
 pub(crate) const M13_PAGE_ARGS_BINDINGS: &[u32] = &[6, 91, 92, 93, 94];
 /// M13 gate 9: the reference, one shaded ray a pixel at its sample offset.
-pub(crate) const M13_REFERENCE_BINDINGS: &[u32] = &[
-    2, 3, 6, 7, 8, 24, 30, 32, 52, 55, 56, 57, 58, 104,
-];
+pub(crate) const M13_REFERENCE_BINDINGS: &[u32] =
+    &[2, 3, 6, 7, 8, 24, 30, 32, 52, 55, 56, 57, 58, 104];
 /// M13 gate 8: the corner rays after the roots pass, in tiles that may hold
 /// a large instance.
 pub(crate) const M13_CORNERS_TILES_BINDINGS: &[u32] = &[
@@ -655,9 +654,7 @@ pub(crate) const M13_CORNERS_TILES_BINDINGS: &[u32] = &[
 ];
 /// M13 gate 8: the once-a-frame pass: page records, the nodes' projections
 /// and instance records, one invocation per page, node and object.
-pub(crate) const M13_PREP_BINDINGS: &[u32] = &[
-    6, 8, 9, 32, 52, 90, 91, 92, 94, 96, 97, 98, 104,
-];
+pub(crate) const M13_PREP_BINDINGS: &[u32] = &[6, 8, 9, 32, 52, 90, 91, 92, 94, 96, 97, 98, 104];
 pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[
     2, 3, 6, 8, 9, 24, 30, 32, 52, 55, 56, 57, 58, 91, 92, 94, 95, 101, 104,
 ];
