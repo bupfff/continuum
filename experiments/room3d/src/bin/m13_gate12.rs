@@ -1,4 +1,4 @@
-//! M13 gate 12 (stub): the sub-pixel path in the renderer, lit by its cache.
+//! M13 gate 12: the sub-pixel path in the renderer, lit by its cache.
 //!
 //! Gates 5–11 ran sub-pixel coverage and colour as a diagnostic profile
 //! stage with its own lighting model (one sun, a constant ambient); gate 11
@@ -8,15 +8,30 @@
 //! from the renderer's own lighting (the cache: every light's area, the
 //! sky, bounce light), not a second model.
 //!
-//! Method (to be developed; DESIGN §3.4, parts A–D):
-//! - A. `RendererOptions` gains the sub-pixel camera path for instanced
-//!   scenes in place of one ray a pixel; the lighting cache bakes as now.
-//! - B. Large hits (corners, bin rays, samples of pixels the corners
-//!   resolved) are shaded as the renderer's shade pass shades its hit.
-//! - C. Small instances (map entries): direct light per light from the
-//!   maps' normals and a visibility per instance and light; sky and bounce
-//!   from the cache's coarsest level for the instance (or its node's).
-//! - D. Coverage pages bake colour from the same shading.
+//! Method as developed (DESIGN §3.4, parts A–D, changed before the first
+//! run; `docs/results/m13-gate12-development.md`):
+//! - A. The renderer takes the sub-pixel path with its cache, pixel cones
+//!   and profile stage 20 (`InstancedRenderer`; a `RendererOptions` field
+//!   comes after the gate). The passes that shade come from a variant of
+//!   the hardware-ray module; binding lists come from naga's analysis.
+//! - B. Large hits (corners, the centres of pixels whose background needs
+//!   one, samples of pixels the corners resolved, bins of objects no corner
+//!   shows) are recorded and lit by the cache's own shading in passes of
+//!   their own (the device's 29 buffers a stage do not hold both); a
+//!   corner keeps its cached shares (the light's, the sky's), and a bin of
+//!   an object its corners show is lit from them bilinearly with its own
+//!   point, normal and albedo.
+//! - C. Small instances: direct light from the maps' normals and a sun
+//!   visibility per instance (the cosine-weighted share of five points on
+//!   its bounding sphere's sunlit side, cached per object); the sky's
+//!   radiance over half the hemisphere (a sphere resting on a plane). Not
+//!   from the cache yet.
+//! - D. Coverage pages bake colour by the model (from their own eye), not
+//!   the cache yet.
+//! - The cache bakes with a fixed budget on this path (no frame target or
+//!   period cap: its camera passes alone pass both, which shrank the bakes
+//!   to their least); settled frames bake nothing. Settled: eight frames in
+//!   a row with no request and no page baked, and no coverage page asked.
 //!
 //! Scene: the million-boulder field with its ground, its lights and a sky,
 //! 1280×720; gate 11's views (standing at 1.7 m, 150 m up looking 45° down).
@@ -33,7 +48,16 @@
 //! Reported: the frame with one ray a pixel and the cache (the renderer's
 //! present path) in the same views; the 20 m view settled.
 //!
+//! Disclosed before the run: developed at full size on the gate's scene,
+//! on other views for both speed and accuracy (0.420× and 0.426×; 16.0–16.6
+//! ms, criterion 2 within a few percent of its bar).
+//!
 //! `cargo run --release -p room3d --bin m13_gate12`
+//!
+//! `M13_DEV=1` (10,000 boulders; `1M` at full size) runs development checks
+//! on other views (`M13_ACC=1` colour and its split by pixel class,
+//! `M13_NOSKY=1`, `M13_VIEW=standing|120`, `M13_VERBOSE=1`); `M13_BINDINGS=1`
+//! prints each entry point's bindings.
 
 use std::path::Path;
 use std::time::Instant;
@@ -362,7 +386,150 @@ fn main() {
         }
         return;
     }
-    println!(
-        "M13 gate 12 is a stub: the method is not implemented yet (DESIGN §3.4, \"Into the renderer\")."
-    );
+    gate();
+}
+
+/// The gate: speed first in both views (settled), the 20 m view reported,
+/// then colour against the reference.
+fn gate() {
+    let Some(kernel) = MaskConeKernel::new() else {
+        println!("No GPU adapter available.");
+        return;
+    };
+    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("out");
+    std::fs::create_dir_all(&out_dir).expect("out");
+    let mut report = String::new();
+    let mut say = |line: String| {
+        println!("{line}");
+        report.push_str(&line);
+        report.push('\n');
+    };
+    let verdict = |c: bool| if c { "PASS" } else { "FAIL" };
+    let field = Field::new(1_000_000, DVec3::ZERO);
+    let origin = field.origin_near_camera();
+    let (ground, light) = field.relative(origin);
+    let lights = [Light::white(light, field.radiance)];
+    kernel.set_sky(field.sky());
+    let view_target = target(&kernel);
+    let forward = (ground.target - ground.eye).normalize();
+    let flat0 = Vec3::new(forward.x, forward.y, 0.0).normalize();
+    let view = |height: f32, down_degrees: f32| {
+        let d = down_degrees.to_radians();
+        let eye = Vec3::new(ground.eye.x, ground.eye.y, height);
+        Camera {
+            eye,
+            target: eye + flat0 * d.cos() - Vec3::Z * d.sin(),
+            vertical_fov_degrees: ground.vertical_fov_degrees,
+        }
+    };
+    let views = [
+        ("standing", view(1.7, 0.0)),
+        ("150 m up", view(150.0, 45.0)),
+    ];
+    let median_ms = |r: &mut InstancedRenderer, camera: Camera| {
+        let mut t: Vec<f64> = (0..10)
+            .map(|_| {
+                let s = Instant::now();
+                r.frame(camera, &view_target);
+                r.wait();
+                s.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        t.sort_by(f64::total_cmp);
+        t[5]
+    };
+    let mut pass = true;
+    // 2. Speed, first; the images kept for criterion 1.
+    let mut ours = Vec::new();
+    for (name, camera) in views {
+        let mut sub = cached(&kernel, &field, origin, &lights, true);
+        sub.set_m13_page_budget(512);
+        let frames = settle(&mut sub, camera, &view_target, 8, 3000);
+        let t = median_ms(&mut sub, camera);
+        let c2 = t <= 16.7 && frames < 3000;
+        pass &= c2;
+        say(format!(
+            "{name}: 2. settled frame {t:.2} ms (at most 16.7): {}; settled in {frames} frames",
+            verdict(c2)
+        ));
+        ours.push(frame(&mut sub, camera, &view_target));
+    }
+    {
+        let camera = view(20.0, 10.0);
+        let mut sub = cached(&kernel, &field, origin, &lights, true);
+        sub.set_m13_page_budget(512);
+        let frames = settle(&mut sub, camera, &view_target, 8, 3000);
+        let t = median_ms(&mut sub, camera);
+        say(format!(
+            "20 m up, 10° down (reported): settled frame {t:.2} ms; settled in {frames} frames"
+        ));
+    }
+    // 1. Colour, and the renderer's own path's frame (reported).
+    let save = |name: &str, px: &[[f32; 3]], scale: f32| {
+        let mut image = flatland::img::Image::new(W as usize, H as usize, [0; 3]);
+        for (i, p) in px.iter().enumerate() {
+            let c = p.map(|v| ((v / scale).clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8);
+            image.set(i % W as usize, i / W as usize, c);
+        }
+        image
+            .save(&out_dir.join(format!("m13_gate12_{name}.png")))
+            .expect("save");
+    };
+    for (k, (name, camera)) in views.into_iter().enumerate() {
+        let mut one = cached(&kernel, &field, origin, &lights, false);
+        let frames = settle(&mut one, camera, &view_target, 8, 3000);
+        let t_one = median_ms(&mut one, camera);
+        let single = frame(&mut one, camera, &view_target);
+        let mut reference = vec![[0.0f32; 3]; (W * H) as usize];
+        for s in 0..256 {
+            let (dx, dy) = (
+                ((s % 16) as f32 + 0.5) / 16.0 - 0.5,
+                ((s / 16) as f32 + 0.5) / 16.0 - 0.5,
+            );
+            one.set_pixel_offset(dx, dy);
+            for (r, p) in reference
+                .iter_mut()
+                .zip(frame(&mut one, camera, &view_target))
+            {
+                for (v, c) in r.iter_mut().zip(p) {
+                    *v += c / 256.0;
+                }
+            }
+        }
+        drop(one);
+        let e_ours = relative_rmse(&ours[k], &reference);
+        let e_one = relative_rmse(&single, &reference);
+        let c1 = e_ours <= 0.5 * e_one;
+        pass &= c1;
+        let mean = |px: &[[f32; 3]]| {
+            let n = px.len() as f64;
+            [0, 1, 2].map(|c| px.iter().map(|p| p[c] as f64).sum::<f64>() / n)
+        };
+        let (mr, mo) = (mean(&reference), mean(&ours[k]));
+        say(format!(
+            "{name}: 1. colour {:.2}% from the reference, one ray {:.2}% ({:.3}×, at most 0.5×): {}; mean colour: reference ({:.4}, {:.4}, {:.4}), ours ({:.4}, {:.4}, {:.4})",
+            100.0 * e_ours,
+            100.0 * e_one,
+            e_ours / e_one,
+            verdict(c1),
+            mr[0],
+            mr[1],
+            mr[2],
+            mo[0],
+            mo[1],
+            mo[2]
+        ));
+        say(format!(
+            "{name}: the renderer's own path (one ray a pixel, the cache) settled in {frames} frames, {t_one:.2} ms (reported)"
+        ));
+        let slug = name.replace(' ', "_");
+        let mut l: Vec<f32> = reference.iter().map(|p| p[0].max(p[1]).max(p[2])).collect();
+        l.sort_by(f32::total_cmp);
+        let scale = l[l.len() * 99 / 100].max(1e-6);
+        save(&format!("{slug}_reference"), &reference, scale);
+        save(&format!("{slug}_ours"), &ours[k], scale);
+        save(&format!("{slug}_one_ray"), &single, scale);
+    }
+    say(format!("Verdict: {}", verdict(pass)));
+    std::fs::write(out_dir.join("m13_gate12.txt"), report).expect("report");
 }
