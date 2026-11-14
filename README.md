@@ -239,12 +239,13 @@ nothing). Four landmarks, in order:
    boulders hold small images of their own coverage, re-made as the
    viewpoint moves, so a pixel at the horizon reads one image instead of
    hundreds of boulders. They keep up with walking and with a 10 m/s
-   flight. Colour through the same path is now within half of
-   one-ray-per-pixel's error from both views: where a pixel's corners
-   disagree (a sun shadow's edge, a fold of rock), its 16 sub-pixel samples
-   are shaded one by one. Its speed is the open part: 16–18 ms a frame
-   against a 15 ms target, most of it shadow rays on the ground and work
-   per sample. It is not in the renderer yet.
+   flight. Colour through the same path is about a third of
+   one-ray-per-pixel's error from both views, in 13.9–14.7 ms a frame once
+   the view has settled (target 15): where a pixel's corners disagree (a
+   sun shadow's edge, a fold of rock), its sub-pixel samples are shaded one
+   by one, and the sun's visibility of still surfaces is kept in a
+   world-space cache instead of re-traced each frame. It is not in the
+   renderer yet, and flying with colour is not measured.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
