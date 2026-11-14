@@ -301,21 +301,27 @@ fn main() -> std::io::Result<()> {
     // and the sun cache's misses a frame.
     if dev && std::env::var_os("M13_FLY").is_some() {
         let paths: [(&str, Box<dyn Fn(usize) -> Camera>); 2] = [
-            ("walk standing, 1.5 m/s", Box::new(|f: usize| {
-                let mut c = view(1.7, 0.0, 0.0);
-                let step = (c.target - c.eye).normalize() * (1.5 * f as f32 / 60.0);
-                c.eye += Vec3::new(step.x, step.y, 0.0);
-                c.target += Vec3::new(step.x, step.y, 0.0);
-                c
-            })),
-            ("flight 150 m up, 10 m/s", Box::new(|f: usize| {
-                let mut c = view(150.0, 45.0, 0.0);
-                let fwd = c.target - c.eye;
-                let step = Vec3::new(fwd.x, fwd.y, 0.0).normalize() * (10.0 * f as f32 / 60.0);
-                c.eye += step;
-                c.target += step;
-                c
-            })),
+            (
+                "walk standing, 1.5 m/s",
+                Box::new(|f: usize| {
+                    let mut c = view(1.7, 0.0, 0.0);
+                    let step = (c.target - c.eye).normalize() * (1.5 * f as f32 / 60.0);
+                    c.eye += Vec3::new(step.x, step.y, 0.0);
+                    c.target += Vec3::new(step.x, step.y, 0.0);
+                    c
+                }),
+            ),
+            (
+                "flight 150 m up, 10 m/s",
+                Box::new(|f: usize| {
+                    let mut c = view(150.0, 45.0, 0.0);
+                    let fwd = c.target - c.eye;
+                    let step = Vec3::new(fwd.x, fwd.y, 0.0).normalize() * (10.0 * f as f32 / 60.0);
+                    c.eye += step;
+                    c.target += step;
+                    c
+                }),
+            ),
         ];
         for (name, path) in paths.iter() {
             kernel.set_prefilter(8.0);
