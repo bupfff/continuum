@@ -374,6 +374,9 @@ pub struct InstancedRenderer {
     /// pixel's covered bins (binding 88), and the rays' dispatch arguments
     /// (89).
     m13_work: Option<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)>,
+    /// Every camera pass's dispatch in one compute pass (M13's colour pass,
+    /// profile stage 20).
+    one_pass: bool,
     /// M13 gate 7: GPU timestamps around the page arguments' pass (0, 1)
     /// and the page bakes (2, 3) (a query set, its resolve buffer, a
     /// readback buffer, nanoseconds a tick), where the device has them.
@@ -1289,6 +1292,7 @@ impl InstancedRenderer {
             colors,
             m13_work: None,
             m13_timer: None,
+            one_pass: cache.is_none() && pixel_cones && kernel.profile_stage.get() == 20,
             cache,
             width,
             height,
@@ -1759,7 +1763,7 @@ impl InstancedRenderer {
             .as_ref()
             .and_then(|c| c.state.timer.as_ref())
             .map(|t| &t.set);
-        let (pipeline, keep) = &self.passes[k];
+        let (_, keep) = &self.passes[k];
         // M13 gate 7: each page pass's span (queries 0–1 the arguments, 2–3
         // the bakes).
         let page_writes = self.m13_timer.as_ref().and_then(|(query_set, ..)| {
@@ -1787,6 +1791,12 @@ impl InstancedRenderer {
                 }
             })),
         });
+        self.dispatch_camera(&mut pass, k);
+    }
+
+    /// Pass `k`'s pipeline, bindings and dispatch into an open compute pass.
+    fn dispatch_camera(&self, pass: &mut wgpu::ComputePass, k: usize) {
+        let (pipeline, _) = &self.passes[k];
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.binds[k], &[]);
         match (self.camera_dispatch[k], &self.cache) {
@@ -1963,8 +1973,17 @@ impl InstancedRenderer {
                 per_meter,
             );
         }
-        for k in 0..self.passes.len() {
-            self.encode_camera_pass(&mut encoder, k);
+        if self.one_pass {
+            // M13's colour pass (profile stage 20): every pass's dispatch in
+            // one compute pass (wgpu orders the dispatches' storage).
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            for k in 0..self.passes.len() {
+                self.dispatch_camera(&mut pass, k);
+            }
+        } else {
+            for k in 0..self.passes.len() {
+                self.encode_camera_pass(&mut encoder, k);
+            }
         }
         if let Some((set, resolve, readback, _)) = &self.m13_timer {
             encoder.resolve_query_set(set, 0..4, resolve, 0);

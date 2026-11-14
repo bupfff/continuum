@@ -1295,6 +1295,22 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
         m13_plain[at + 16u * g9_p()] = 0u;
         m13_plain[at + 17u * g9_p()] = 0u;
         m13_plain[at + 18u * g9_p()] = 0u;
+        // M13 appearance, third: where the corners showing the background
+        // disagree on the sun, its visibility at the pixel's centre too
+        // (from the sun's cache), in word 0 (2 shadowed, 3 lit; its colour
+        // is the corners' here).
+        if (G12_CENTRE) {
+            let showing = co == vec4<u32>(cb.x);
+            let cv = vec4<u32>(m13_plain[cws.x + 6u * pw], m13_plain[cws.y + 6u * pw], m13_plain[cws.z + 6u * pw], m13_plain[cws.w + 6u * pw]);
+            let n = dot(select(vec4<u32>(0u), vec4<u32>(1u), showing), vec4<u32>(1u));
+            let lit = dot(select(vec4<u32>(0u), vec4<u32>(1u), showing & (cv != vec4<u32>(0u))), vec4<u32>(1u));
+            if (lit != 0u && lit != n && all(cbd < vec4<f32>(3.0e38))) {
+                let tc = 4.0 / dot(vec4<f32>(1.0), vec4<f32>(1.0) / cbd);
+                let pc = e + dir * tc;
+                let open = g11_sun_open(pc, -dir, tc, g9_sun(pc), true);
+                m13_plain[at] = select(2u, 3u, open);
+            }
+        }
         return;
     }
     if (G10_CORNER_BG && agree && cb.x == NONE) {
@@ -1380,6 +1396,10 @@ fn g9_corners_large(at: u32, obj: u32, cws: vec4<u32>) {
     g9_store_large(at, 5u, vec3<f32>(0.0), far, obj);
     atomicStore(&m13_work[g9_claims(at) + 2u * g9_p()], 0xffffu);
 }
+
+// Development (M13 appearance, third): the background's sun visibility at
+// a pixel's centre where its corners disagree.
+const G12_CENTRE: bool = true;
 
 // Development (M13 gate 10): a pixel's background from its corners where
 // they agree (no ray of its own).
@@ -1481,19 +1501,25 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
             let base = g10_shaded_word(entry);
             let head = m13_shaded[base + 16u];
             var v = -1.0;
+            // An object its corners show and suffice for keeps their colours
+            // (development: G10_BIN_RAYS_ALL shades every bin).
+            var shade = true;
             for (var j = 1u; j < 3u; j++) {
-                if (m13_shaded[base + 16u + j] == hit.x && ((head >> (G10_TRACE + j)) & 1u) == 0u) {
-                    v = select(0.0, 1.0, ((head >> (G10_LIT + j)) & 1u) != 0u);
+                if (m13_shaded[base + 16u + j] == hit.x) {
+                    if (((head >> (G10_TRACE + j)) & 1u) == 0u) { v = select(0.0, 1.0, ((head >> (G10_LIT + j)) & 1u) != 0u); }
+                    if (!G10_BIN_RAYS_ALL && ((head >> (G10_SHADE + j)) & 1u) == 0u) { shade = false; }
                 }
             }
-            let e = camera.eye.xyz;
-            let dist = bitcast<f32>(hit.z);
-            let ph = e + dir * dist;
-            let v0 = tris[3u * hit.y].xyz;
-            var ng = normalize(normal_to_world(hit.x, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
-            if (dot(ng, dir) > 0.0) { ng = -ng; }
-            let c = g10_shade(hit.x, hit.y, ph, dist, dir, ng, shading_normal(hit.x, hit.y, ph, -dir), v);
-            m13_shaded[base + k] = g10_pack(c, g9_scale()) | G10_SHADED_BIT;
+            if (shade) {
+                let e = camera.eye.xyz;
+                let dist = bitcast<f32>(hit.z);
+                let ph = e + dir * dist;
+                let v0 = tris[3u * hit.y].xyz;
+                var ng = normalize(normal_to_world(hit.x, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
+                if (dot(ng, dir) > 0.0) { ng = -ng; }
+                let c = g10_shade(hit.x, hit.y, ph, dist, dir, ng, shading_normal(hit.x, hit.y, ph, -dir), v);
+                m13_shaded[base + k] = g10_pack(c, g9_scale()) | G10_SHADED_BIT;
+            }
         }
         for (var slot = 5u; slot < 15u; slot += 5u) {
             let claim = atomicCompareExchangeWeak(&m13_work[g9_claims(at) + (slot / 5u - 1u) * g9_p()], NONE, claimed);
@@ -2501,6 +2527,9 @@ fn g10_corner_flags(k: u32, x: u32, co: vec4<u32>, cr: vec4<f32>, cg: vec4<f32>,
 // corners do not suffice for its object, and (G10_BG_SHADOWS) one whose
 // corners disagree on the background's sun visibility.
 fn g10_entry(pixel: u32, resolved: bool, traced: bool, cws: vec4<u32>, co: vec4<u32>, cbg: vec4<u32>) {
+    // Most pixels need nothing: no bin rays, not resolved, and no
+    // background shaded bin by bin.
+    if (!traced && !resolved && !G10_BG_SHADOWS) { return; }
     let p = g9_p();
     let cv = vec4<u32>(m13_plain[cws.x + 6u * p], m13_plain[cws.y + 6u * p], m13_plain[cws.z + 6u * p], m13_plain[cws.w + 6u * p]);
     let cr = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x], m13_plain[cws.y], m13_plain[cws.z], m13_plain[cws.w]));
@@ -2852,6 +2881,32 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
     let m_l2 = select(vec4<f32>(0.0), vec4<f32>(1.0), co == vec4<u32>(objs.z));
     let shaded = m13_plain[at + 19u * p];
     let scale = g9_scale();
+    // M13 appearance, third: the background's sun visibility at the centre
+    // where its corners disagree (word 0: 2 or 3): each background bin takes
+    // the visibility of its nearest sample among the centre and the
+    // corners (half each where equally near), and the colour of the corners
+    // with that visibility.
+    let centre = m13_plain[at];
+    var vc = 0.0;
+    var lit_c = vec3<f32>(0.0);
+    var dark_c = vec3<f32>(0.0);
+    // Per corner: bit k if it shows the background, bit 4 + k if lit too.
+    var bits = 0u;
+    var split = G12_CENTRE && objs.x != NONE && (centre == 2u || centre == 3u);
+    if (split) {
+        let cvv = vec4<u32>(m13_plain[cws.x + 6u * p], m13_plain[cws.y + 6u * p], m13_plain[cws.z + 6u * p], m13_plain[cws.w + 6u * p]);
+        let m_lit = m_bg * select(vec4<f32>(0.0), vec4<f32>(1.0), cvv != vec4<u32>(0u));
+        let m_dark = m_bg - m_lit;
+        let nl = dot(m_lit, vec4<f32>(1.0));
+        let nd = dot(m_dark, vec4<f32>(1.0));
+        split = nl > 0.5 && nd > 0.5;
+        lit_c = vec3<f32>(dot(m_lit, cr), dot(m_lit, cg), dot(m_lit, cbl)) / max(nl, 1.0);
+        dark_c = vec3<f32>(dot(m_dark, cr), dot(m_dark, cg), dot(m_dark, cbl)) / max(nd, 1.0);
+        vc = select(0.0, 1.0, centre == 3u);
+        for (var k = 0u; k < 4u; k++) {
+            bits |= select(0u, 1u << k, m_bg[k] > 0.5) | select(0u, 16u << k, m_lit[k] > 0.5);
+        }
+    }
     for (var row = 0u; row < 4u; row++) {
         let word = packed[row];
         let fy = (f32(row) + 0.5) * 0.25;
@@ -2878,7 +2933,21 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
                 m = m_bg;
             }
             let fx = (f32(col) + 0.5) * 0.25;
-            let wk = vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy) * m;
+            let wb = vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy);
+            if (split && ((g9_l | g9_l2) & (1u << b)) == 0u) {
+                // The nearest corner: by the bin's quarter.
+                let kc = select(0u, 1u, col >= 2u) + select(0u, 2u, row >= 2u);
+                let inner_x = col == 1u || col == 2u;
+                let inner_y = row == 1u || row == 2u;
+                var vb = vc;
+                if (((bits >> kc) & 1u) != 0u && !(inner_x && inner_y)) {
+                    let vk = f32((bits >> (4u + kc)) & 1u);
+                    vb = select(0.5 * (vk + vc), vk, !inner_x && !inner_y);
+                }
+                g9_c += t * mix(dark_c, lit_c, vb) / 16.0;
+                continue;
+            }
+            let wk = wb * m;
             let wsum = wk.x + wk.y + wk.z + wk.w;
             if (wsum > 1e-3 && G9_CORNERS) { back = vec3<f32>(dot(wk, cr), dot(wk, cg), dot(wk, cbl)) / wsum; }
             g9_c += t * back / 16.0;
@@ -2931,6 +3000,9 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
 // buckets, per object the visibility from its sphere's sunward point.
 @group(0) @binding(104) var<storage, read_write> g11_sun: array<atomic<u32>>;
 const G11_BUCKETS: u32 = 1048576u;
+// Development: bin rays shade every bin hitting a large object (else only
+// objects the corners do not suffice for).
+const G10_BIN_RAYS_ALL: bool = true;
 // Development: the cache on.
 const G11_CACHE: bool = true;
 
@@ -2945,7 +3017,7 @@ fn g11_hash(a: u32) -> u32 {
 }
 
 // A point's bucket and its cell's fingerprint (30 bits, not zero).
-fn g11_key(p: vec3<f32>, dist: f32) -> vec2<u32> {
+fn g11_key(p: vec3<f32>, dist: f32) -> vec3<u32> {
     // A bin's width at the point: the pixel's over four.
     let f = dist * camera.params.z * 0.5 / camera.params.y;
     let lvl = clamp(round(log2(max(f, 1e-9))) + 12.0, 0.0, 30.0);
@@ -2955,7 +3027,10 @@ fn g11_key(p: vec3<f32>, dist: f32) -> vec2<u32> {
     let c = clamp(ic - 4 * ib, vec3<i32>(0), vec3<i32>(3));
     let idx = u32(c.x + 4 * c.y + 16 * c.z);
     let h = g11_hash(u32(lvl) ^ g11_hash(bitcast<u32>(ib.x) ^ g11_hash(bitcast<u32>(ib.y) ^ g11_hash(bitcast<u32>(ib.z) + 0x632be5abu))));
-    return vec2<u32>(h & (G11_BUCKETS - 1u), (g11_hash(h ^ (idx * 0x9e3779b9u)) >> 2u) | 1u);
+    // A cell's first word in the bucket: its place in a layer of the brick
+    // (a plane's cells along two axes land in separate words).
+    let s0 = (u32(c.x + 4 * c.y) + 5u * u32(c.z)) % 16u;
+    return vec3<u32>(h & (G11_BUCKETS - 1u), (g11_hash(h ^ (idx * 0x9e3779b9u)) >> 2u) | 1u, s0);
 }
 
 // The cache's two bits for surface point `p` (`dist` from the eye): 0 if
@@ -2964,8 +3039,8 @@ fn g11_lookup(p: vec3<f32>, dist: f32) -> u32 {
     let key = g11_key(p, dist);
     for (var j = 0u; j < 2u; j++) {
         let base = 16u * ((key.x + j) & (G11_BUCKETS - 1u));
-        for (var k = 0u; k < 16u; k++) {
-            let word = atomicLoad(&g11_sun[base + k]);
+        for (var i = 0u; i < 16u; i++) {
+            let word = atomicLoad(&g11_sun[base + ((key.z + i) & 15u)]);
             if (word == 0u) { return 0u; }
             if ((word >> 2u) == key.y) { return word & 3u; }
         }
@@ -2982,15 +3057,15 @@ fn g11_sun_open(p: vec3<f32>, ng: vec3<f32>, dist: f32, sun: G9Sun, cached: bool
     let key = g11_key(p, dist);
     for (var j = 0u; j < 2u; j++) {
         let base = 16u * ((key.x + j) & (G11_BUCKETS - 1u));
-        for (var k = 0u; k < 16u; k++) {
-            let word = atomicLoad(&g11_sun[base + k]);
+        for (var i = 0u; i < 16u; i++) {
+            let word = atomicLoad(&g11_sun[base + ((key.z + i) & 15u)]);
             if (word == 0u) {
                 let open = hw_segment_open(origin, sun.l, sun.dist);
                 let mine = (key.y << 2u) | select(2u, 3u, open);
                 // Into the first empty word from here (another thread's
                 // cell may take this one first).
-                for (var m = k; m < 16u; m++) {
-                    let r = atomicCompareExchangeWeak(&g11_sun[base + m], 0u, mine);
+                for (var m = i; m < 16u; m++) {
+                    let r = atomicCompareExchangeWeak(&g11_sun[base + ((key.z + m) & 15u)], 0u, mine);
                     if (r.exchanged || (r.old_value >> 2u) == key.y) { break; }
                 }
                 return open;
