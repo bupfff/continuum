@@ -300,7 +300,8 @@ fn main() -> std::io::Result<()> {
     // views' heading, 3 s each; frame times against the settled start's,
     // and the sun cache's misses a frame.
     if dev && std::env::var_os("M13_FLY").is_some() {
-        let paths: [(&str, Box<dyn Fn(usize) -> Camera>); 2] = [
+        type Path<'a> = (&'a str, Box<dyn Fn(usize) -> Camera + 'a>);
+        let paths: [Path; 2] = [
             (
                 "walk standing, 1.5 m/s",
                 Box::new(|f: usize| {
