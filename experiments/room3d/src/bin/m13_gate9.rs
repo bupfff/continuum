@@ -311,7 +311,6 @@ fn main() -> std::io::Result<()> {
             "shade args",
             "shade rays",
             "pixels",
-            "resolve",
             "page args",
             "bakes",
         ];
@@ -362,6 +361,11 @@ fn main() -> std::io::Result<()> {
             r.set_m13_state_word(28, 1);
             let class = frame(&mut r, camera, &view_target);
             drop(r);
+            {
+                let slug = name.replace(' ', "_").replace(['(', ')'], "");
+                let px: Vec<[f32; 3]> = class.iter().map(|c| [c[0], c[1], c[2] / 3.0]).collect();
+                save(&format!("{slug}_class"), &px, 1.0)?;
+            }
             let (reference, one) =
                 reference(&kernel, &field, origin, &lights, camera, &view_target);
             let norm: f64 = reference

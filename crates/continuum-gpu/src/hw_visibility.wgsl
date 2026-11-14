@@ -1646,14 +1646,13 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
         if (mine && !walking) { on = false; }
     }
     if (inside && g9_on) {
-        // M13 gate 10: what bins leave is coloured in its own pass, from
-        // the bins' transmittance (bytes) and whether pages were read.
-        colors[pixel] = vec4<f32>(g9_c, select(0.0, 1.0, g9_pages_read > 0u));
+        // M13 gate 10: what bins leave, coloured from the bins'
+        // transmittance (as bytes: fewer registers).
         var t = vec4<u32>(0u);
         for (var b = 0u; b < 16u; b++) {
             t[b / 4u] |= u32(round(clamp(1.0 - pbin[b], 0.0, 1.0) * 255.0)) << (8u * (b % 4u));
         }
-        vis[pixel] = t;
+        g10_resolve(gid, g9_c, g9_pages_read > 0u, t);
     } else if (inside) {
         var sum = 0.0;
         for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }
@@ -2438,6 +2437,8 @@ const G10_SHADE_BINS: bool = true;
 const G10_RESOLVED: bool = true;
 // Development: their rays start just before their corners' nearest hit.
 const G10_NEAR_START: bool = true;
+// Development: those only where their corners disagree on the sun.
+const G10_RESOLVED_V_ONLY: bool = false;
 
 // A pixel's corners' flags for object `x` (k = 0 the background, 1 and 2
 // the large objects A and B): sun visibility traced where the corners
@@ -2493,7 +2494,7 @@ fn g10_entry(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
     }
     var flags = g10_corner_flags(1u, a, co, cr, cg, cb, cv) | g10_corner_flags(2u, b, co, cr, cg, cb, cv);
     var need = traced;
-    if (G10_RESOLVED && resolved && (flags & (1u << (G10_SHADE + 1u))) != 0u) { need = true; }
+    if (G10_RESOLVED && resolved && (flags & (1u << (G10_SHADE + 1u))) != 0u && (!G10_RESOLVED_V_ONLY || (flags & (1u << (G10_TRACE + 1u))) != 0u)) { need = true; }
     if (!traced && !resolved) { flags &= ~(3u << (G10_SHADE + 1u)); }
     if (G10_BG_SHADOWS && all(cbg == vec4<u32>(cbg.x)) && cbg.x != NONE) {
         let fb = g10_corner_flags(0u, cbg.x, co, cr, cg, cb, cv);
@@ -2523,7 +2524,7 @@ fn g10_entry(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
 // The shaded bins' dispatch arguments: 16 a listed pixel, 64 a workgroup.
 @compute @workgroup_size(1)
 fn hw_m13_shade_args() {
-    let groups = (min(atomicLoad(&g6_state[31]), G10_SHADED) * 16u + 63u) / 64u;
+    let groups = (min(atomicLoad(&g6_state[31]), G10_SHADED) * G10_SAMPLES + 63u) / 64u;
     let x = min(groups, 65535u);
     m13_args[0] = x;
     m13_args[1] = select(1u, (groups + x - 1u) / x, x > 0u);
@@ -2546,9 +2547,12 @@ fn g10_shade(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f
 @compute @workgroup_size(64)
 fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let t = (wg.y * nwg.x + wg.x) * 64u + li;
-    if (t >= min(atomicLoad(&g6_state[31]), G10_SHADED) * 16u) { return; }
-    let entry = m13_shaded[G10_LIST + t / 16u];
-    let b = t % 16u;
+    if (t >= min(atomicLoad(&g6_state[31]), G10_SHADED) * G10_SAMPLES) { return; }
+    let entry = m13_shaded[G10_LIST + t / G10_SAMPLES];
+    // With 4 samples a pixel, each shades a quarter's 2×2 bins from its
+    // centre (bin b its first).
+    var b = t % G10_SAMPLES;
+    if (G10_SAMPLES == 4u) { b = 2u * (b % 2u) + 8u * (b / 2u); }
     let base = g10_shaded_word(entry);
     let head = m13_shaded[base + 16u];
     let pixel = head & 0xfffffu;
@@ -2570,7 +2574,8 @@ fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgrou
         let aspect = camera.params.x / camera.params.y;
         let gx = pixel % w;
         let gy = pixel / w;
-        let q = vec2<f32>(f32(gx), f32(gy)) + (vec2<f32>(f32(b % 4u), f32(b / 4u)) + vec2<f32>(0.5)) * 0.25;
+        var q = vec2<f32>(f32(gx), f32(gy)) + (vec2<f32>(f32(b % 4u), f32(b / 4u)) + vec2<f32>(0.5)) * 0.25;
+        if (G10_SAMPLES == 4u) { q += vec2<f32>(0.125); }
         let qx = (q.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
         let qy = (1.0 - q.y / camera.params.y * 2.0) * tz;
         let dir = normalize(camera.forward.xyz + camera.right.xyz * qx + camera.up.xyz * qy);
@@ -2600,7 +2605,16 @@ fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgrou
         }
     }
     m13_shaded[base + b] = word;
+    if (G10_SAMPLES == 4u) {
+        m13_shaded[base + b + 1u] = word;
+        m13_shaded[base + b + 4u] = word;
+        m13_shaded[base + b + 5u] = word;
+    }
 }
+
+// Samples a pixel the shading pass takes: 16 (a bin each) or 4 (a 2×2
+// quarter each; development).
+const G10_SAMPLES: u32 = 4u;
 
 // The nearest hit among instances in `mask` (M13 gate 10: one query of any
 // facing; the shading pass's rays meet front faces of closed objects).
@@ -2614,19 +2628,13 @@ fn g10_hit(o: vec3<f32>, dir: vec3<f32>, mask: u32) -> vec3<u32> {
     return vec3<u32>(ob.x, cam_tri(ob.x, ob.y, hit.primitive_index), bitcast<u32>(hit.t));
 }
 
-// M13 gate 10, after the pixels' pass (colour): what each bin leaves shows
-// its large object, else the background, else the sky. Reads the pixels'
-// pass's colour (and whether it read pages) and the bins' transmittance.
-@compute @workgroup_size(8, 8)
-fn hw_m13_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+// What each bin leaves, coloured (`c` the entries' colour, `packed` the
+// bins' transmittance as bytes), into the pixel's colour.
+fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>) {
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
-    if (gid.x >= w || gid.y >= h || !g9_colour_on()) { return; }
     let pixel = gid.y * w + gid.x;
-    let mine = colors[pixel];
-    var g9_c = mine.xyz;
-    let pages_read = mine.w > 0.5;
-    let packed = vis[pixel];
+    var g9_c = c;
     let masks = atomicLoad(&m13_work[g9_claims(g9_large_word(pixel)) + 2u * g9_p()]);
     let g9_l = masks & 0xffffu;
     let g9_l2 = (masks >> 16u) & ~g9_l;
@@ -2704,14 +2712,20 @@ fn hw_m13_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // z + 2: its shaded corners disagree on the sun's visibility.
         var lit = 0u;
-        var shaded = 0u;
+        var dark = 0u;
         for (var k = 0u; k < 4u; k++) {
             if (co[k] == NONE) { continue; }
             let cx = min(gid.x + (k & 1u), w - 1u);
             let cy = min(gid.y + (k >> 1u), h - 1u);
-            if (m13_plain[g9_corner_word(cy * w + cx) + 6u * g9_p()] != 0u) { lit++; } else { shaded++; }
+            if (m13_plain[g9_corner_word(cy * w + cx) + 6u * g9_p()] != 0u) { lit++; } else { dark++; }
         }
-        let edge = lit > 0u && shaded > 0u;
-        colors[pixel] = vec4<f32>(select(0.0, 1.0, large_obj), select(0.0, 1.0, pages_read), select(0.0, 1.0, horizon) + select(0.0, 2.0, edge), 1.0);
+        let edge = lit > 0u && dark > 0u;
+        var py = select(0.0, 1.0, pages_read);
+        // Development: y marks pixels with entries the shading pass shades.
+        if ((G10_PROBE & 131072u) != 0u) {
+            py = 0.0;
+            if (shaded != NONE && (m13_shaded[g10_shaded_word(shaded) + 16u] & (1u << G10_TRACED)) == 0u) { py = 1.0; }
+        }
+        colors[pixel] = vec4<f32>(select(0.0, 1.0, large_obj), py, select(0.0, 1.0, horizon) + select(0.0, 2.0, edge), 1.0);
     }
 }

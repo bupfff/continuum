@@ -607,7 +607,6 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_bin_rays",
     "hw_m13_shade_args",
     "hw_m13_shade_rays",
-    "hw_m13_resolve",
     "hw_m13_tiles",
     "hw_m13_reference",
     "hw_m13_page_args",
@@ -637,7 +636,7 @@ pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29,
 /// M13 gate 5: the tile pass after the corner rays, with the maps' texture
 /// (85) and sampler (86).
 pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
-    0, 6, 7, 8, 9, 10, 29, 31, 52, 85, 86, 87, 88, 91, 92, 94, 95, 96, 97, 98, 100, 102,
+    0, 6, 7, 8, 9, 10, 29, 52, 85, 86, 87, 88, 90, 91, 92, 94, 95, 96, 97, 98, 100, 102, 103,
 ];
 /// M13 gate 6: the coverage pages' bakes after the pixels' pass, and their
 /// dispatch.
@@ -673,10 +672,6 @@ pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
 /// M13 gate 10 (development): bins shaded one by one where a pixel's
 /// corners do not suffice: the list of pixels, its arguments, the bins.
 pub(crate) const M13_SHADE_ARGS_BINDINGS: &[u32] = &[89, 92];
-/// M13 gate 10: what the bins leave, coloured after the pixels' pass.
-pub(crate) const M13_RESOLVE_BINDINGS: &[u32] = &[
-    6, 7, 31, 52, 88, 90, 92, 102, 103,
-];
 pub(crate) const M13_SHADE_RAYS_BINDINGS: &[u32] = &[
     2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 102, 103,
 ];

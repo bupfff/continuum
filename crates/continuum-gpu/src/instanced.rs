@@ -20,7 +20,7 @@ use crate::{
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
     M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS,
     M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS,
-    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_RESOLVE_BINDINGS,
+    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS,
     M13_ROOTS_BINDINGS, M13_SHADE_ARGS_BINDINGS, M13_SHADE_RAYS_BINDINGS,
     M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
     VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
@@ -1086,10 +1086,6 @@ impl InstancedRenderer {
                         M13_SHADE_RAYS_BINDINGS.to_vec(),
                     ),
                     (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
-                    (
-                        kernel.entry("hw_m13_resolve"),
-                        M13_RESOLVE_BINDINGS.to_vec(),
-                    ),
                     (
                         kernel.entry("hw_m13_page_args"),
                         M13_PAGE_ARGS_BINDINGS.to_vec(),
