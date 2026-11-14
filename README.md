@@ -239,10 +239,12 @@ nothing). Four landmarks, in order:
    boulders hold small images of their own coverage, re-made as the
    viewpoint moves, so a pixel at the horizon reads one image instead of
    hundreds of boulders. They keep up with walking and with a 10 m/s
-   flight. Colour through the same path is the open part: the structure
-   works, but lighting that varies inside a pixel (bumpy rock, sharp sun
-   shadows) and its speed are not there yet. It is not in the renderer
-   yet.
+   flight. Colour through the same path is now within half of
+   one-ray-per-pixel's error from both views: where a pixel's corners
+   disagree (a sun shadow's edge, a fold of rock), its 16 sub-pixel samples
+   are shaded one by one. Its speed is the open part: 16–18 ms a frame
+   against a 15 ms target, most of it shadow rays on the ground and work
+   per sample. It is not in the renderer yet.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
