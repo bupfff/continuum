@@ -445,7 +445,12 @@ sample at the pixel's centre. Lever 2 gave a branch-free buried test. The
 rest was memory and passes (`docs/results/m13-gate11-development.md`).
 Left: flights with colour (cache misses where the view is new),
 invalidation for moving lights and objects, and the path into the
-renderer behind its API.
+renderer behind its API. In development after the run (gate 11's
+results): a 1.5 m/s walk ran 17.0 ms median (1.23× settled) and a 10 m/s
+flight 150 m up 20.1 ms median, 26.1 ms 95th percentile (1.37×), because
+the cache's bin-wide cells are filled only where corners land, so a moving
+view misses. The cache is now emptied when a light moves and every frame
+with movers.
 
 ## 3.5 What the 2D phase (M0) taught us
 

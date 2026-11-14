@@ -74,3 +74,22 @@ in the repository); its lines are the numbers above.
   bakes) with colour; invalidation for moving lights and objects; bringing
   the path into the renderer behind its API (it is still a diagnostic
   profile stage).
+
+## After the run (development): colour in motion
+
+`m13_gate11`'s `M13_DEV=1M M13_FLY=1`, from a settled start, 3 s each, 56
+page bakes a frame:
+
+| Path | Settled start | Median | 95th percentile | Worst |
+|---|---|---|---|---|
+| Walk standing, 1.5 m/s | 13.83 ms | 17.01 ms | 18.05 ms | 18.48 ms |
+| Flight 150 m up, 10 m/s | 14.69 ms | 20.06 ms | 26.05 ms | 29.22 ms |
+
+In motion the sun cache mostly misses: its cells are about a bin wide and
+filled only where corners and centres land (one point in sixteen cells),
+so a moving view lands in new cells and traces again. Coarser cells (about
+a pixel) would be filled densely by the corners' lattice and reused in
+motion, at some cost to shadow edges when settled. Next for motion: that
+trade measured, then a flight gate with colour (gate 7's, with colour's
+bars).
+

@@ -295,6 +295,71 @@ fn main() -> std::io::Result<()> {
         let c = r.m13_page_counters();
         (ms(times[5]), out, frames, baked, c)
     };
+    // `M13_FLY=1` in development: motion with colour, from a settled start:
+    // a walk standing (1.5 m/s) and a flight 150 m up (10 m/s) along the
+    // views' heading, 3 s each; frame times against the settled start's,
+    // and the sun cache's misses a frame.
+    if dev && std::env::var_os("M13_FLY").is_some() {
+        let paths: [(&str, Box<dyn Fn(usize) -> Camera>); 2] = [
+            ("walk standing, 1.5 m/s", Box::new(|f: usize| {
+                let mut c = view(1.7, 0.0, 0.0);
+                let step = (c.target - c.eye).normalize() * (1.5 * f as f32 / 60.0);
+                c.eye += Vec3::new(step.x, step.y, 0.0);
+                c.target += Vec3::new(step.x, step.y, 0.0);
+                c
+            })),
+            ("flight 150 m up, 10 m/s", Box::new(|f: usize| {
+                let mut c = view(150.0, 45.0, 0.0);
+                let fwd = c.target - c.eye;
+                let step = Vec3::new(fwd.x, fwd.y, 0.0).normalize() * (10.0 * f as f32 / 60.0);
+                c.eye += step;
+                c.target += step;
+                c
+            })),
+        ];
+        for (name, path) in paths.iter() {
+            kernel.set_prefilter(8.0);
+            kernel.set_hardware_rays(true);
+            kernel.set_profile_stage(OURS);
+            let mut r = renderer(&kernel, &field, origin, &lights);
+            r.set_m13_page_budget(SETTLE_BUDGET);
+            settle(&mut r, path(0), &view_target, 200, false);
+            let mut base: Vec<f64> = (0..10)
+                .map(|_| {
+                    let start = Instant::now();
+                    r.frame(path(0), &view_target);
+                    r.wait();
+                    ms(start.elapsed())
+                })
+                .collect();
+            base.sort_by(f64::total_cmp);
+            r.set_m13_page_budget(56);
+            let mut times = Vec::new();
+            let mut misses = Vec::new();
+            for f in 0..180 {
+                let start = Instant::now();
+                r.frame(path(f), &view_target);
+                r.wait();
+                times.push(ms(start.elapsed()));
+                misses.push(r.m13_work_counters()[1]);
+            }
+            let mut sorted = times.clone();
+            sorted.sort_by(f64::total_cmp);
+            println!(
+                "{name}: settled start {:.2} ms; flight median {:.2}, 95th percentile {:.2}, worst {:.2} ms; frames 0, 60, 120, 179: {:.2}, {:.2}, {:.2}, {:.2}",
+                base[5],
+                sorted[90],
+                sorted[170],
+                sorted[179],
+                times[0],
+                times[60],
+                times[120],
+                times[179]
+            );
+            let _ = misses;
+        }
+        return Ok(());
+    }
     // `M13_PROFILE=1` in development: each pass's time alone at the views,
     // settled.
     if dev && std::env::var_os("M13_PROFILE").is_some() {
