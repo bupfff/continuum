@@ -6194,12 +6194,14 @@ const MAP_PER_DIR: u32 = 341u;
 const MAP_LIMIT_PX: f32 = 8.0;
 
 // The pixel's bins, and the bins of the object being walked.
-var<private> pbin: array<f32, 16>;
+var<private> pbin_private: array<f32, 16>;
+fn pb_get(b: u32) -> f32 { return pbin_private[b]; }
+fn pb_set(b: u32, v: f32) { pbin_private[b] = v; }
 var<private> mbin: array<f32, 16>;
 
 fn bins_full(m: bool) -> bool {
     for (var b = 0u; b < 16u; b++) {
-        if (select(pbin[b], mbin[b], m) < 0.9999) { return false; }
+        if (select(pb_get(b), mbin[b], m) < 0.9999) { return false; }
     }
     return true;
 }
@@ -6207,7 +6209,7 @@ fn bins_full(m: bool) -> bool {
 // Whether the box's projected rectangle overlaps a bin not yet full.
 fn touches_open_bin(sb: ScreenBox, pix: vec2<f32>) -> bool {
     for (var b = 0u; b < 16u; b++) {
-        if (pbin[b] >= 0.9999) { continue; }
+        if (pb_get(b) >= 0.9999) { continue; }
         let lo = bin_lo(pix, b);
         if (sb.hi.x > lo.x && sb.hi.y > lo.y && sb.lo.x < lo.x + 0.25 && sb.lo.y < lo.y + 0.25) { return true; }
     }
@@ -6231,7 +6233,7 @@ fn splat_bins(sb: ScreenBox, pix: vec2<f32>, alpha: f32, sil: f32, into_mesh: bo
         let o = d.x * d.y;
         if (o <= 0.0) { continue; }
         let c = clamp(k * o, 0.0, 1.0);
-        if (into_mesh) { mbin[b] = min(mbin[b] + c, 1.0); } else { pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - c); }
+        if (into_mesh) { mbin[b] = min(mbin[b] + c, 1.0); } else { pb_set(b, 1.0 - (1.0 - pb_get(b)) * (1.0 - c)); }
     }
 }
 
@@ -6310,7 +6312,7 @@ fn mesh_bins(m: u32, pix: vec2<f32>, base: u32) {
             }
         }
     }
-    for (var b = 0u; b < 16u; b++) { pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - mbin[b]); }
+    for (var b = 0u; b < 16u; b++) { pb_set(b, 1.0 - (1.0 - pb_get(b)) * (1.0 - mbin[b])); }
 }
 
 // The header of the maps for triangle-hierarchy root `root`, or NONE.
@@ -6427,13 +6429,13 @@ fn instance_map_bins(m: u32, hdr: u32, pix: vec2<f32>) -> bool {
             if (weights[k] <= 0.0) { continue; }
             cov += weights[k] * map_sample(dirs[k], side, vec2<f32>(dot(q, us[k]), dot(q, vs[k])));
         }
-        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - clamp(cov, 0.0, 1.0));
+        pb_set(b, 1.0 - (1.0 - pb_get(b)) * (1.0 - clamp(cov, 0.0, 1.0)));
     }
     return true;
 }
 
 fn map_coverage(gid: vec3<u32>) -> vec3<f32> {
-    for (var b = 0u; b < 16u; b++) { pbin[b] = 0.0; }
+    for (var b = 0u; b < 16u; b++) { pb_set(b, 0.0); }
     return map_coverage_from(gid, false);
 }
 
@@ -6511,7 +6513,7 @@ fn map_coverage_from(gid: vec3<u32>, rays_did_large: bool) -> vec3<f32> {
         sp += 2u;
     }
     var sum = 0.0;
-    for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }
+    for (var b = 0u; b < 16u; b++) { sum += pb_get(b); }
     return vec3<f32>(sum / 16.0, f32(object_nodes), f32(sc_tri_nodes));
 }
 

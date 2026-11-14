@@ -429,7 +429,7 @@ fn hw_m13_near(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
         let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
         let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
         let hit = hw_trace(camera.eye.xyz, dir, 0.0);
-        pbin[k] = select(0.0, 1.0, hit.x != NONE && m13_large(hit.x));
+        pb_set(k, select(0.0, 1.0, hit.x != NONE && m13_large(hit.x)));
     }
     colors[pixel] = vec4<f32>(map_coverage_from(gid, true), 1.0);
 }
@@ -638,7 +638,7 @@ var<private> g5_open: u32 = 0xffffu;
 fn g5_refresh_open() {
     var m = 0u;
     for (var b = 0u; b < 16u; b++) {
-        if (pbin[b] < 0.9999) { m |= 1u << b; }
+        if (pb_get(b) < 0.9999) { m |= 1u << b; }
     }
     g5_open = m;
 }
@@ -796,7 +796,7 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
         if (G9_FLAT) { k_lit = vec3<f32>(0.0); }
         if (G9_CONST_SMALL) { k_lit = vec3<f32>(0.0); k_amb = albedo.xyz * g9_e * (0.5 + G9_AMBIENT) / (16.0 * 3.14159265); }
         if (g9_dbg < 3.0e38) { bg_bins = ~(g9_l | g9_l2) & 0xffffu; }
-        c4 = g10_inv_wg[lane];
+        c4 = g10_inv;
     }
     let bits = bitcast<u32>(r0.w);
     let cp = r0.xy;
@@ -832,10 +832,10 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
                 cov = select(cov, 0.0, behind && ((bg_bins >> b) & 1u) != 0u);
             }
             let n = oct_decode(texel.yz * 2.0 - vec2<f32>(1.0));
-            let t = (1.0 - pbin[b]) * cov;
+            let t = (1.0 - pb_get(b)) * cov;
             g9_c += t * (k_lit * max(dot(n, l_obj), 0.0) + k_amb);
         }
-        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - cov);
+        pb_set(b, 1.0 - (1.0 - pb_get(b)) * (1.0 - cov));
     }
 }
 
@@ -1034,10 +1034,10 @@ const G8_LIST_ON: bool = true;
 
 // The tile's list of leaf roots' instances (M13 gate 8): their records'
 // two words, the count, and which roots it holds.
-const G8_LIST: u32 = 128u;
-var<workgroup> g8_list_a: array<vec4<f32>, 128>;
-var<workgroup> g8_list_b: array<vec4<f32>, 128>;
-var<workgroup> g8_list_c: array<vec4<f32>, 128>;
+const G8_LIST: u32 = 64u;
+var<workgroup> g8_list_a: array<vec4<f32>, 64>;
+var<workgroup> g8_list_b: array<vec4<f32>, 64>;
+var<workgroup> g8_list_c: array<vec4<f32>, 64>;
 var<workgroup> g8_list_n: atomic<u32>;
 var<workgroup> g8_listed: array<atomic<u32>, 2>;
 
@@ -1137,13 +1137,13 @@ fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>, root_box:
                     let sil = box_silhouette(node.lo.xyz, node.hi.xyz, dir);
                     if (sil > 1e-30) {
                         var before = 0.0;
-                        if (g9_on) { for (var b = 0u; b < 16u; b++) { before += pbin[b]; } }
+                        if (g9_on) { for (var b = 0u; b < 16u; b++) { before += pb_get(b); } }
                         splat_bins(sb, pix, 1.0 - exp(-node_front_area(light.objects.x + n, dir) / sil), sil, false);
                         if (g9_on) {
                             // A splat's colour: its first instance's albedo
                             // by the model, facing up, unshadowed.
                             var after = 0.0;
-                            for (var b = 0u; b < 16u; b++) { after += pbin[b]; }
+                            for (var b = 0u; b < 16u; b++) { after += pb_get(b); }
                             let a = albedo[items[g6_range(n).x]].xyz;
                             let c = g9_colour(a, vec3<f32>(0.0, 0.0, 1.0), g9_sun(camera.eye.xyz), 1.0);
                             g9_c += (after - before) * c / 16.0;
@@ -1252,9 +1252,9 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
     let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
     let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
     let at = g9_large_word(pixel);
-    for (var k = 3u; k < 15u; k += 5u) {
-        m13_plain[at + k * g9_p()] = bitcast<u32>(3.4e38);
-    }
+    // (The large objects' distances are written when claimed: unread
+    // before.)
+    m13_plain[at + 3u * g9_p()] = bitcast<u32>(3.4e38);
     m13_plain[at + 4u * g9_p()] = NONE;
     let claims = g9_claims(at);
     // The claims start cleared to zero each frame (a buffer clear: objects
@@ -1286,10 +1286,12 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
     if (G10_CORNER_BG && agree && cb.x != NONE && shown_bg) {
         // The farthest corner's distance: entries nearer may lie in front
         // somewhere in the pixel.
-        g9_store_large(at, 0u, vec3<f32>(0.0), far, cb.x);
-        m13_plain[at + 16u * g9_p()] = 0u;
-        m13_plain[at + 17u * g9_p()] = 0u;
-        m13_plain[at + 18u * g9_p()] = 0u;
+        // Only what is read here: the centre's visibility tag (word 0), the
+        // distance and the object (the plane's normal is read only where
+        // the corners disagree; the colour comes from the corners).
+        m13_plain[at] = 0xffffffffu;
+        m13_plain[at + 3u * g9_p()] = bitcast<u32>(far);
+        m13_plain[at + 4u * g9_p()] = cb.x;
         // M13 appearance, third: where the corners showing the background
         // disagree on the sun, its visibility at the pixel's centre too
         // (from the sun's cache), in word 0 (2 shadowed, 3 lit; its colour
@@ -1302,8 +1304,26 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
             if (lit != 0u && lit != n && all(cbd < vec4<f32>(3.0e38))) {
                 let tc = 4.0 / dot(vec4<f32>(1.0), vec4<f32>(1.0) / cbd);
                 let pc = e + dir * tc;
-                let open = g11_sun_open(pc, -dir, tc, g9_sun(pc), true);
-                m13_plain[at] = select(2u, 3u, open);
+                let vc = select(0u, 2u, g11_sun_open(pc, -dir, tc, g9_sun(pc), true));
+                // Each bin's visibility (2 bits: 0 shadowed, 1 half, 2 lit)
+                // from its nearest sample among the centre and the corners
+                // showing the background; the corners' lit ones in word 1.
+                var pattern = 0u;
+                for (var b = 0u; b < 16u; b++) {
+                    let col = b % 4u;
+                    let row = b / 4u;
+                    let kc = select(0u, 1u, col >= 2u) + select(0u, 2u, row >= 2u);
+                    let inner_x = col == 1u || col == 2u;
+                    let inner_y = row == 1u || row == 2u;
+                    var vb = vc;
+                    if (showing[kc] && !(inner_x && inner_y)) {
+                        let vk = select(0u, 2u, cv[kc] != 0u);
+                        vb = select((vk + vc) / 2u, vk, !inner_x && !inner_y);
+                    }
+                    pattern |= vb << (2u * b);
+                }
+                m13_plain[at] = pattern;
+                m13_plain[at + 1u * g9_p()] = dot(select(vec4<u32>(0u), vec4<u32>(1u, 2u, 4u, 8u), showing & (cv != vec4<u32>(0u))), vec4<u32>(1u));
             }
         }
         return;
@@ -1391,6 +1411,9 @@ fn g9_corners_large(at: u32, obj: u32, cws: vec4<u32>) {
     g9_store_large(at, 5u, vec3<f32>(0.0), far, obj);
     atomicStore(&m13_work[g9_claims(at) + 2u * g9_p()], 0xffffu);
 }
+
+// Development (M13 appearance, third): the resolve's common case at once.
+const G12_FAST: bool = true;
 
 // Development (M13 appearance, third): the background's sun visibility at
 // a pixel's centre where its corners disagree.
@@ -1510,7 +1533,7 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
                 let v0 = tris[3u * hit.y].xyz;
                 var ng = normalize(normal_to_world(hit.x, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
                 if (dot(ng, dir) > 0.0) { ng = -ng; }
-                let c = g10_shade(hit.x, hit.y, ph, dist, dir, ng, shading_normal(hit.x, hit.y, ph, -dir), v);
+                let c = g10_shade(hit.x, hit.y, ph, dist, dir, ng, g12_shading_normal(hit.x, hit.y, ph, -dir), v);
                 m13_shaded[base + k] = g10_pack(c, g9_scale()) | G10_SHADED_BIT;
             }
         }
@@ -1558,7 +1581,7 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     let pix = vec2<f32>(f32(gid.x), f32(gid.y));
     var word = 0u;
     if (inside) { word = atomicLoad(&m13_work[m13_mask_word(pixel)]); }
-    for (var b = 0u; b < 16u; b++) { pbin[b] = select(0.0, 1.0, (word & (1u << b)) != 0u); }
+    for (var b = 0u; b < 16u; b++) { pb_set(b, select(0.0, 1.0, (word & (1u << b)) != 0u)); }
     let resolved = (word & (1u << 17u)) != 0u;
     let traced = (word & (1u << 16u)) != 0u;
     g5_open = ~word & 0xffffu;
@@ -1567,14 +1590,14 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     g9_on = g9_colour_on();
     if (g9_on) {
         g9_l = word & 0xffffu;
-        for (var b = 0u; b < 16u; b++) { pbin[b] = 0.0; }
+        for (var b = 0u; b < 16u; b++) { pb_set(b, 0.0); }
         g5_open = 0xffffu;
         g9_e = g9_sun(camera.eye.xyz).e;
         if (inside) {
             let at = g9_large_word(pixel);
             g9_dbg = bitcast<f32>(m13_plain[at + 3u * g9_p()]);
             g10_set_inv(gid, w, h, at);
-            g10_inv_wg[lane] = select(vec4<f32>(select(1.0 / g9_dbg, 0.0, g9_dbg >= 3.0e38), 0.0, 0.0, 0.0), g10_inv, g10_inv_ok);
+            g10_inv = select(vec4<f32>(select(1.0 / g9_dbg, 0.0, g9_dbg >= 3.0e38), 0.0, 0.0, 0.0), g10_inv, g10_inv_ok);
             g9_dl = bitcast<f32>(m13_plain[at + 8u * g9_p()]);
             g9_d2 = bitcast<f32>(m13_plain[at + 13u * g9_p()]);
             let masks = atomicLoad(&m13_work[g9_claims(at) + 2u * g9_p()]);
@@ -1676,13 +1699,13 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
         // transmittance (as bytes: fewer registers).
         var t = vec4<u32>(0u);
         for (var b = 0u; b < 16u; b++) {
-            t[b / 4u] |= u32(round(clamp(1.0 - pbin[b], 0.0, 1.0) * 255.0)) << (8u * (b % 4u));
+            t[b / 4u] |= u32(round(clamp(1.0 - pb_get(b), 0.0, 1.0) * 255.0)) << (8u * (b % 4u));
         }
         g10_resolve(gid, g9_c, g9_pages_read > 0u, t);
         if ((G10_PROBE & 1048576u) != 0u) { atomicAdd(&g6_state[28], g10_samples); }
     } else if (inside) {
         var sum = 0.0;
-        for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }
+        for (var b = 0u; b < 16u; b++) { sum += pb_get(b); }
         colors[pixel] = vec4<f32>(sum / 16.0 + g8_dummy * 1e-30, select(f32(visits), 0.0, resolved), f32(2u * count + select(0u, 1u, traced)), 1.0);
     }
 }
@@ -2157,9 +2180,9 @@ fn g8_read_page(page: u32, pix: vec2<f32>, bx: vec4<f32>) {
         let t = mix(top, bottom, fr.y);
         let cov = clamp(t.w, 0.0, 1.0);
         if (g9_on && cov > 0.0) {
-            g9_c += (1.0 - pbin[b]) * t.xyz * scale / 16.0;
+            g9_c += (1.0 - pb_get(b)) * t.xyz * scale / 16.0;
         }
-        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - cov);
+        pb_set(b, 1.0 - (1.0 - pb_get(b)) * (1.0 - cov));
     }
 }
 
@@ -2297,14 +2320,14 @@ fn g10_bin_space(c: vec4<f32>) -> vec4<f32> {
 // Whether a point `surface` away along bin `b`'s ray lies beyond the
 // background there.
 fn g10_beyond(surface: f32, fb: vec2<f32>) -> bool {
-    let c = g10_inv_wg[lane];
+    let c = g10_inv;
     return surface * (c.x + c.y * fb.x + (c.z + c.w * fb.x) * fb.y) > 1.0;
 }
 
 // Each lane's coefficients (the pixels' pass: in workgroup memory, not
 // registers held through the walk); without any, 1/t of the centre's
 // distance (0: none).
-var<workgroup> g10_inv_wg: array<vec4<f32>, 64>;
+
 
 // Development: map samples a pixel took.
 var<private> g10_samples: u32 = 0u;
@@ -2392,7 +2415,7 @@ fn g9_shade_hit(m: u32, t: u32, dist: f32, e: vec3<f32>, dir: vec3<f32>) -> vec3
     let v0 = tris[3u * t].xyz;
     var ng = normalize(normal_to_world(m, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0)));
     if (dot(ng, dir) > 0.0) { ng = -ng; }
-    let n = shading_normal(m, t, p, -dir);
+    let n = g12_shading_normal(m, t, p, -dir);
     let albedo = surface_albedo(m, t, p, dist, dir, ng);
     let sun = g9_sun(p);
     var v = 1.0;
@@ -2672,7 +2695,7 @@ fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgrou
                         let v0 = tris[3u * hit.y].xyz;
                         var ng = normalize(normal_to_world(obj, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
                         if (dot(ng, dir) > 0.0) { ng = -ng; }
-                        large_word = g10_pack(g10_shade(obj, hit.y, ph, dist, dir, ng, shading_normal(obj, hit.y, ph, -dir), v), scale) | G10_SHADED_BIT;
+                        large_word = g10_pack(g10_shade(obj, hit.y, ph, dist, dir, ng, g12_shading_normal(obj, hit.y, ph, -dir), v), scale) | G10_SHADED_BIT;
                     }
                 }
                 word = large_word;
@@ -2844,6 +2867,10 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     let pixel = gid.y * w + gid.x;
+    if ((G10_PROBE & 8388608u) != 0u) {
+        colors[pixel] = vec4<f32>(c + vec3<f32>(f32(packed.x & 1u) * 1e-9), 1.0);
+        return;
+    }
     var g9_c = c;
     let masks = atomicLoad(&m13_work[g9_claims(g9_large_word(pixel)) + 2u * g9_p()]);
     let g9_l = masks & 0xffffu;
@@ -2853,14 +2880,10 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
     // colours where they show it, bilinearly at the bin's centre (its own
     // shading where none does). Corners as vectors (no arrays indexed in
     // loops: M13 gate 10).
-    var sky = g9_sky();
-    if (G9_RED_SKY) { sky = vec3<f32>(sky.x * 20.0, 0.0, 0.0); }
     let at = g9_large_word(pixel);
     let p = g9_p();
-    let objs = vec3<u32>(m13_plain[at + 4u * p], ~atomicLoad(&m13_work[g9_claims(at)]), ~atomicLoad(&m13_work[g9_claims(at) + p]));
-    let bg_colour = vec3<f32>(bitcast<f32>(m13_plain[at]), bitcast<f32>(m13_plain[at + 1u * p]), bitcast<f32>(m13_plain[at + 2u * p]));
-    let large_colour = vec3<f32>(bitcast<f32>(m13_plain[at + 5u * p]), bitcast<f32>(m13_plain[at + 6u * p]), bitcast<f32>(m13_plain[at + 7u * p]));
-    let second_colour = vec3<f32>(bitcast<f32>(m13_plain[at + 10u * p]), bitcast<f32>(m13_plain[at + 11u * p]), bitcast<f32>(m13_plain[at + 12u * p]));
+    var objs = vec3<u32>(m13_plain[at + 4u * p], NONE, NONE);
+    if (masks != 0u) { objs = vec3<u32>(objs.x, ~atomicLoad(&m13_work[g9_claims(at)]), ~atomicLoad(&m13_work[g9_claims(at) + p])); }
     let x1 = min(gid.x + 1u, w - 1u);
     let y1 = min(gid.y + 1u, h - 1u);
     let cws = vec4<u32>(g9_corner_word(gid.y * w + gid.x), g9_corner_word(gid.y * w + x1), g9_corner_word(y1 * w + gid.x), g9_corner_word(y1 * w + x1));
@@ -2874,32 +2897,76 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
     let m_l1 = select(vec4<f32>(0.0), vec4<f32>(1.0), co == vec4<u32>(objs.y));
     let m_l2 = select(vec4<f32>(0.0), vec4<f32>(1.0), co == vec4<u32>(objs.z));
     let shaded = m13_plain[at + 19u * p];
+    let centre0 = m13_plain[at];
+    let plain_bg = !G12_CENTRE || centre0 == 0xffffffffu;
+    // The common case (M13 appearance, third): every bin shows the
+    // background, all four corners show it, nothing shaded bin by bin: the
+    // bins' bilinear weights summed by their transmittance, once.
+    // Split by the sun (M13 appearance, third): Σ t (dark + v (lit −
+    // dark)) over the bins, from two sums.
+    if (G12_FAST && masks == 0u && shaded == NONE && objs.x != NONE && all(m_bg > vec4<f32>(0.5)) && !plain_bg) {
+        let lm = m13_plain[at + 1u * p];
+        let m_lit = select(vec4<f32>(0.0), vec4<f32>(1.0), (vec4<u32>(lm) & vec4<u32>(1u, 2u, 4u, 8u)) != vec4<u32>(0u));
+        let m_dark = vec4<f32>(1.0) - m_lit;
+        let nl = dot(m_lit, vec4<f32>(1.0));
+        let nd = dot(m_dark, vec4<f32>(1.0));
+        if (nl > 0.5 && nd > 0.5) {
+            let lit = vec3<f32>(dot(m_lit, cr), dot(m_lit, cg), dot(m_lit, cbl)) / nl;
+            let dark = vec3<f32>(dot(m_dark, cr), dot(m_dark, cg), dot(m_dark, cbl)) / nd;
+            var tsum = 0.0;
+            var vsum = 0.0;
+            for (var row = 0u; row < 4u; row++) {
+                let word = packed[row];
+                for (var col = 0u; col < 4u; col++) {
+                    let t = f32((word >> (8u * col)) & 0xffu) / 255.0;
+                    tsum += t;
+                    vsum += t * 0.5 * f32((centre0 >> (8u * row + 2u * col)) & 3u);
+                }
+            }
+            g9_c += (dark * tsum + (lit - dark) * vsum) / 16.0;
+            colors[pixel] = vec4<f32>(g9_c, 1.0);
+            if (atomicLoad(&g6_state[28]) != 1u) { return; }
+        }
+    }
+    if (G12_FAST && masks == 0u && shaded == NONE && objs.x != NONE && all(m_bg > vec4<f32>(0.5)) && plain_bg) {
+        var wsum = vec4<f32>(0.0);
+        for (var row = 0u; row < 4u; row++) {
+            let word = packed[row];
+            let fy = (f32(row) + 0.5) * 0.25;
+            for (var col = 0u; col < 4u; col++) {
+                let t = f32((word >> (8u * col)) & 0xffu) / 255.0;
+                let fx = (f32(col) + 0.5) * 0.25;
+                wsum += t * vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy);
+            }
+        }
+        g9_c += vec3<f32>(dot(wsum, cr), dot(wsum, cg), dot(wsum, cbl)) / 16.0;
+        colors[pixel] = vec4<f32>(g9_c, 1.0);
+        if (atomicLoad(&g6_state[28]) != 1u) { return; }
+    }
+    var sky = g9_sky();
+    if (G9_RED_SKY) { sky = vec3<f32>(sky.x * 20.0, 0.0, 0.0); }
+    let bg_colour = vec3<f32>(bitcast<f32>(m13_plain[at]), bitcast<f32>(m13_plain[at + 1u * p]), bitcast<f32>(m13_plain[at + 2u * p]));
+    let large_colour = vec3<f32>(bitcast<f32>(m13_plain[at + 5u * p]), bitcast<f32>(m13_plain[at + 6u * p]), bitcast<f32>(m13_plain[at + 7u * p]));
+    let second_colour = vec3<f32>(bitcast<f32>(m13_plain[at + 10u * p]), bitcast<f32>(m13_plain[at + 11u * p]), bitcast<f32>(m13_plain[at + 12u * p]));
     let scale = g9_scale();
     // M13 appearance, third: the background's sun visibility at the centre
     // where its corners disagree (word 0: 2 or 3): each background bin takes
     // the visibility of its nearest sample among the centre and the
     // corners (half each where equally near), and the colour of the corners
     // with that visibility.
-    let centre = m13_plain[at];
-    var vc = 0.0;
+    let pattern = m13_plain[at];
     var lit_c = vec3<f32>(0.0);
     var dark_c = vec3<f32>(0.0);
-    // Per corner: bit k if it shows the background, bit 4 + k if lit too.
-    var bits = 0u;
-    var split = G12_CENTRE && objs.x != NONE && (centre == 2u || centre == 3u);
+    var split = G12_CENTRE && objs.x != NONE && pattern != 0xffffffffu;
     if (split) {
-        let cvv = vec4<u32>(m13_plain[cws.x + 6u * p], m13_plain[cws.y + 6u * p], m13_plain[cws.z + 6u * p], m13_plain[cws.w + 6u * p]);
-        let m_lit = m_bg * select(vec4<f32>(0.0), vec4<f32>(1.0), cvv != vec4<u32>(0u));
+        let lm = m13_plain[at + 1u * p];
+        let m_lit = select(vec4<f32>(0.0), vec4<f32>(1.0), (vec4<u32>(lm) & vec4<u32>(1u, 2u, 4u, 8u)) != vec4<u32>(0u));
         let m_dark = m_bg - m_lit;
         let nl = dot(m_lit, vec4<f32>(1.0));
         let nd = dot(m_dark, vec4<f32>(1.0));
         split = nl > 0.5 && nd > 0.5;
         lit_c = vec3<f32>(dot(m_lit, cr), dot(m_lit, cg), dot(m_lit, cbl)) / max(nl, 1.0);
         dark_c = vec3<f32>(dot(m_dark, cr), dot(m_dark, cg), dot(m_dark, cbl)) / max(nd, 1.0);
-        vc = select(0.0, 1.0, centre == 3u);
-        for (var k = 0u; k < 4u; k++) {
-            bits |= select(0u, 1u << k, m_bg[k] > 0.5) | select(0u, 16u << k, m_lit[k] > 0.5);
-        }
     }
     for (var row = 0u; row < 4u; row++) {
         let word = packed[row];
@@ -2929,16 +2996,7 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
             let fx = (f32(col) + 0.5) * 0.25;
             let wb = vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy);
             if (split && ((g9_l | g9_l2) & (1u << b)) == 0u) {
-                // The nearest corner: by the bin's quarter.
-                let kc = select(0u, 1u, col >= 2u) + select(0u, 2u, row >= 2u);
-                let inner_x = col == 1u || col == 2u;
-                let inner_y = row == 1u || row == 2u;
-                var vb = vc;
-                if (((bits >> kc) & 1u) != 0u && !(inner_x && inner_y)) {
-                    let vk = f32((bits >> (4u + kc)) & 1u);
-                    vb = select(0.5 * (vk + vc), vk, !inner_x && !inner_y);
-                }
-                g9_c += t * mix(dark_c, lit_c, vb) / 16.0;
+                g9_c += t * mix(dark_c, lit_c, 0.5 * f32((pattern >> (2u * b)) & 3u)) / 16.0;
                 continue;
             }
             let wk = wb * m;
@@ -3097,4 +3155,18 @@ fn g12_corner_colours(cws: vec4<u32>) -> array<vec4<f32>, 3> {
     let c = g10_unpack(m13_plain[cws.z], s);
     let d = g10_unpack(m13_plain[cws.w], s);
     return array<vec4<f32>, 3>(vec4<f32>(a.x, b.x, c.x, d.x), vec4<f32>(a.y, b.y, c.y, d.y), vec4<f32>(a.z, b.z, c.z, d.z));
+}
+
+// `shading_normal` without barycentrics where the triangle's three vertex
+// normals are equal (a flat face: the ground; M13 appearance, third).
+fn g12_shading_normal(m: u32, t: u32, p: vec3<f32>, toward: vec3<f32>) -> vec3<f32> {
+    let n0 = normals[3u * t].xyz;
+    if (all(normals[3u * t + 1u].xyz == n0) && all(normals[3u * t + 2u].xyz == n0) && dot(n0, n0) > 1e-20) {
+        var n = normalize(normal_to_world(m, n0));
+        let v0 = tris[3u * t].xyz;
+        let geometric = normal_to_world(m, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0));
+        if (dot(geometric, toward) < 0.0) { n = -n; }
+        return n;
+    }
+    return shading_normal(m, t, p, toward);
 }
