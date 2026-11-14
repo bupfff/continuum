@@ -239,7 +239,10 @@ nothing). Four landmarks, in order:
    boulders hold small images of their own coverage, re-made as the
    viewpoint moves, so a pixel at the horizon reads one image instead of
    hundreds of boulders. They keep up with walking and with a 10 m/s
-   flight. It is not in the renderer yet.
+   flight. Colour through the same path is the open part: the structure
+   works, but lighting that varies inside a pixel (bumpy rock, sharp sun
+   shadows) and its speed are not there yet. It is not in the renderer
+   yet.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
