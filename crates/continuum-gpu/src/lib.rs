@@ -74,6 +74,9 @@ pub struct MaskConeKernel {
     /// that module, built when first needed.
     ray_queries: bool,
     hw_module: std::cell::OnceCell<wgpu::ShaderModule>,
+    /// The hardware-ray module with the sub-pixel pass's large hits lit by
+    /// the lighting cache (M13 gate 12), built when first needed.
+    hw_vc_module: std::cell::OnceCell<wgpu::ShaderModule>,
     /// Pipeline-overridable constants: workgroup stacks, work counters.
     workgroup_stacks: bool,
     count_work: bool,
@@ -905,6 +908,7 @@ impl MaskConeKernel {
             source,
             ray_queries,
             hw_module: std::cell::OnceCell::new(),
+            hw_vc_module: std::cell::OnceCell::new(),
             workgroup_stacks: options.workgroup_stacks,
             count_work: options.count_work,
             pipelines: Default::default(),
@@ -982,6 +986,118 @@ impl MaskConeKernel {
         }
         self.pipelines.borrow_mut().insert(name, pipeline.clone());
         pipeline
+    }
+
+    /// The hardware-ray source with the sub-pixel pass (M13) lit by the
+    /// lighting cache (M13 gate 12): its shading of large hits, its sky and
+    /// its colour scale replaced by the cache's (`vc_hit_color`), and the
+    /// corners asking the cache for pages.
+    #[doc(hidden)]
+    pub fn hw_vc_source(&self) -> String {
+        let mut kernel = self.source.clone();
+        let head = "fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {\n    let surface = camera.eye.xyz + dir * hit.distance;";
+        assert!(kernel.contains(head), "vc_hit_color not found");
+        kernel = kernel.replace(
+            head,
+            "fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {\n    let surface = g12_eye + dir * hit.distance;",
+        );
+        let mut hw = include_str!("hw_visibility.wgsl").replace("\r\n", "\n");
+        for (from, to) in [
+            ("fn g9_shade_hit(", "fn g9_shade_hit_model("),
+            ("fn g10_shade(", "fn g10_shade_model("),
+            ("fn g9_sky() ->", "fn g9_sky_model() ->"),
+            ("fn g9_scale() ->", "fn g9_scale_model() ->"),
+            ("fn g12_corner_request(", "fn g12_corner_request_model("),
+            ("fn g12_corner_done(", "fn g12_corner_done_model("),
+            (
+                "fn g9_colour_on() -> bool {",
+                "fn g9_colour_on_model() -> bool {",
+            ),
+            ("fn g8_stamp() -> u32 {", "fn g8_stamp_model() -> u32 {"),
+            ("fn g12_stamp_advanced(", "fn g12_stamp_advanced_model("),
+        ] {
+            assert!(hw.contains(from), "{from} not found");
+            hw = hw.replacen(from, to, 1);
+        }
+        format!(
+            "enable wgpu_ray_query;\n{kernel}\n{hw}\n{}",
+            include_str!("hw_vc.wgsl")
+        )
+    }
+
+    /// The pipeline of entry point `name` from the hardware-ray module lit by
+    /// the lighting cache (M13 gate 12).
+    pub(crate) fn entry_vc(&self, name: &'static str) -> wgpu::ComputePipeline {
+        let key: &'static str = Box::leak(format!("vc:{name}").into_boxed_str());
+        if let Some(p) = self.pipelines.borrow().get(key) {
+            return p.clone();
+        }
+        assert!(self.ray_queries, "no ray queries on this device");
+        let module = self.hw_vc_module.get_or_init(|| {
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("hw_vc"),
+                    source: wgpu::ShaderSource::Wgsl(self.hw_vc_source().into()),
+                })
+        });
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        let constants = [
+            ("WORKGROUP_STACKS", flag(self.workgroup_stacks)),
+            ("COUNT_WORK", flag(self.count_work)),
+            ("PACKETS", 1.0),
+        ];
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(key),
+                layout: None,
+                module,
+                entry_point: Some(name),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
+                cache: None,
+            });
+        self.pipelines.borrow_mut().insert(key, pipeline.clone());
+        pipeline
+    }
+
+    /// The bindings (group 0) entry point `name` uses in the hardware-ray
+    /// module, or in its variant lit by the cache (`vc`): from naga's
+    /// analysis of the source, so lists need not be kept by hand.
+    #[doc(hidden)]
+    pub fn entry_bindings(&self, name: &str, vc: bool) -> Vec<u32> {
+        let source = if vc {
+            self.hw_vc_source()
+        } else {
+            format!(
+                "enable wgpu_ray_query;\n{}\n{}",
+                self.source,
+                include_str!("hw_visibility.wgsl")
+            )
+        };
+        let module = naga::front::wgsl::parse_str(&source).expect("parse");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("validate");
+        let index = module
+            .entry_points
+            .iter()
+            .position(|e| e.name == name)
+            .expect("entry point");
+        let used = info.get_entry_point(index);
+        let mut out: Vec<u32> = module
+            .global_variables
+            .iter()
+            .filter(|(handle, _)| !used[*handle].is_empty())
+            .filter_map(|(_, var)| var.binding.as_ref().map(|b| b.binding))
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     /// Builds every pipeline now (they are otherwise built on first use):

@@ -328,6 +328,7 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
     if (!inside) {
         vis[gid.y * w + gid.x] = vec4<u32>(NONE, 0u, bitcast<u32>(3.4e38), 0u);
         if (g9_colour_on()) {
+            g12_corner_request(gid);
             let at = g9_corner_word(gid.y * w + gid.x);
             m13_plain[at + 3u * g9_p()] = NONE;
             // What lies behind at the corner (a ray seeing only background
@@ -338,6 +339,7 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
             let sy = (1.0 - f32(gid.y) / camera.params.y * 2.0) * tz;
             let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
             g9_corner_background(at, dir, G10_CORNER_BG);
+            g12_corner_done();
         }
         return;
     }
@@ -351,6 +353,7 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
         // large bins.
         let full = hw_trace(camera.eye.xyz, dir, 0.0);
         var large = 0u;
+        g12_corner_request(gid);
         let at = g9_corner_word(gid.y * w + gid.x);
         m13_plain[at + 3u * g9_p()] = NONE;
         // What lies behind at the corner: the background object a ray seeing
@@ -377,6 +380,7 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
             m13_plain[at + 6u * g9_p()] = u32(g9_last_v);
         }
         vis[gid.y * w + gid.x] = vec4<u32>(full.x, large, 0u, 0u);
+        g12_corner_done();
         return;
     }
     let hit = g8_first_object(camera.eye.xyz, dir);
@@ -1897,6 +1901,7 @@ fn hw_m13_page_args(@builtin(local_invocation_index) li: u32) {
     atomicStore(&g6_state[14], atomicLoad(&g6_state[13]));
     atomicStore(&g6_state[13], 0u);
     atomicAdd(&g6_state[3], 1u);
+    g12_stamp_advanced();
     // The eye's step since the last frame, for the bakes' lead.
     let e = camera.eye.xyz;
     var step = vec3<f32>(0.0);
@@ -3183,3 +3188,10 @@ fn g12_shading_normal(m: u32, t: u32, p: vec3<f32>, toward: vec3<f32>) -> vec3<f
     }
     return shading_normal(m, t, p, toward);
 }
+
+// Hooks for the variant lit by the lighting cache (M13 gate 12, which
+// replaces them): a corner may ask the cache for pages.
+fn g12_corner_request(gid: vec3<u32>) {}
+fn g12_corner_done() {}
+// The frames' stamp advanced (the variant lit by the cache mirrors it).
+fn g12_stamp_advanced() {}

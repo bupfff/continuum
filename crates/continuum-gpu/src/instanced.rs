@@ -1136,6 +1136,30 @@ impl InstancedRenderer {
             (false, _) if pixel_cones => {
                 vec![(kernel.entry("render_cones"), RECT_LIGHT_BINDINGS.to_vec())]
             }
+            // M13 gate 12 (development): the sub-pixel pass lit by the cache:
+            // the passes that shade from the variant module, every binding
+            // list from naga's analysis.
+            (true, _) if pixel_cones && kernel.profile_stage.get() == 20 => {
+                // (Every pass that reads the frames' stamp from the variant,
+                // which mirrors it.)
+                let plain =
+                    |name: &'static str| (kernel.entry(name), kernel.entry_bindings(name, false));
+                let lit =
+                    |name: &'static str| (kernel.entry_vc(name), kernel.entry_bindings(name, true));
+                vec![
+                    lit("hw_m13_prep"),
+                    lit("hw_m13_tile_roots"),
+                    lit("hw_m13_corners_tiles"),
+                    lit("hw_m13_bins"),
+                    plain("hw_m13_bin_args"),
+                    lit("hw_m13_bin_rays"),
+                    plain("hw_m13_shade_args"),
+                    lit("hw_m13_shade_rays"),
+                    lit("hw_m13_tiles"),
+                    lit("hw_m13_page_args"),
+                    lit("hw_m13_page_bake"),
+                ]
+            }
             (true, _) if pixel_cones => vec![(
                 kernel.entry("vc_shade_cones"),
                 VC_SHADE_CONES_BINDINGS.to_vec(),
@@ -1197,27 +1221,49 @@ impl InstancedRenderer {
                 VC_ERROR_PROBES_BINDINGS.to_vec(),
             ));
         }
-        let camera_dispatch: Vec<CameraDispatch> = passes
-            .iter()
-            .map(|(_, bindings)| match bindings.as_slice() {
-                b if b == HW_VC_ERROR_SHARES_BINDINGS => CameraDispatch::ProbeGroups,
-                b if b == VC_ERROR_PROBES_BINDINGS => CameraDispatch::Probes,
-                b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
-                b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
-                b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
-                b if b == M13_BIN_ARGS_BINDINGS => CameraDispatch::One,
-                b if b == M13_BIN_RAYS_BINDINGS => CameraDispatch::M13Rays,
-                b if b == M13_SHADE_ARGS_BINDINGS => CameraDispatch::One,
-                b if b == M13_SHADE_RAYS_BINDINGS => CameraDispatch::M13Rays,
-                b if b == M13_SHADE_BACKGROUND_BINDINGS => CameraDispatch::M13Args(16),
-                b if b == M13_MISS_ARGS_BINDINGS => CameraDispatch::One,
-                b if b == M13_SHADE_MISSES_BINDINGS => CameraDispatch::M13Args(32),
-                b if b == M13_PAGE_ARGS_BINDINGS => CameraDispatch::One,
-                b if b == M13_PAGE_BAKE_BINDINGS => CameraDispatch::M13Pages,
-                b if b == M13_PREP_BINDINGS => CameraDispatch::Prep,
-                _ => CameraDispatch::Screen,
-            })
-            .collect();
+        let m13_lit = cache.is_some() && pixel_cones && kernel.profile_stage.get() == 20;
+        let camera_dispatch: Vec<CameraDispatch> = if m13_lit {
+            // Gate 12's passes in order (prep, roots, corners, bins, bin
+            // arguments, bin rays, shading arguments, shading, pixels, page
+            // arguments, bakes), then the cache's own camera passes if any.
+            let mut d = vec![
+                CameraDispatch::Prep,
+                CameraDispatch::Tiles,
+                CameraDispatch::Screen,
+                CameraDispatch::Screen,
+                CameraDispatch::One,
+                CameraDispatch::M13Rays,
+                CameraDispatch::One,
+                CameraDispatch::M13Rays,
+                CameraDispatch::Screen,
+                CameraDispatch::One,
+                CameraDispatch::M13Pages,
+            ];
+            d.resize(passes.len(), CameraDispatch::Screen);
+            d
+        } else {
+            passes
+                .iter()
+                .map(|(_, bindings)| match bindings.as_slice() {
+                    b if b == HW_VC_ERROR_SHARES_BINDINGS => CameraDispatch::ProbeGroups,
+                    b if b == VC_ERROR_PROBES_BINDINGS => CameraDispatch::Probes,
+                    b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
+                    b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
+                    b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
+                    b if b == M13_BIN_ARGS_BINDINGS => CameraDispatch::One,
+                    b if b == M13_BIN_RAYS_BINDINGS => CameraDispatch::M13Rays,
+                    b if b == M13_SHADE_ARGS_BINDINGS => CameraDispatch::One,
+                    b if b == M13_SHADE_RAYS_BINDINGS => CameraDispatch::M13Rays,
+                    b if b == M13_SHADE_BACKGROUND_BINDINGS => CameraDispatch::M13Args(16),
+                    b if b == M13_MISS_ARGS_BINDINGS => CameraDispatch::One,
+                    b if b == M13_SHADE_MISSES_BINDINGS => CameraDispatch::M13Args(32),
+                    b if b == M13_PAGE_ARGS_BINDINGS => CameraDispatch::One,
+                    b if b == M13_PAGE_BAKE_BINDINGS => CameraDispatch::M13Pages,
+                    b if b == M13_PREP_BINDINGS => CameraDispatch::Prep,
+                    _ => CameraDispatch::Screen,
+                })
+                .collect()
+        };
         let cache = cache.map(|options| Cache {
             state: VirtualCache::new(
                 &device,
@@ -1600,7 +1646,7 @@ impl InstancedRenderer {
                     // 8, each field an array.
                     buffer(
                         "m13 colour",
-                        if colour { 28 * pixels * 4 } else { 16 },
+                        if colour { (28 * pixels + 16) * 4 } else { 16 },
                         wgpu::BufferUsages::empty(),
                     ),
                     // The shaded bins' list (M13 gate 10): 20 words an entry, then
@@ -1987,24 +2033,26 @@ impl InstancedRenderer {
                 per_meter,
             );
         }
+        // M13's colour pass (profile stage 20): the claims (three words a
+        // pixel after the header, the list and the masks) start at zero.
+        if let Some((work, _, plain, _)) = &self.m13_work
+            && plain.size() > 16
+        {
+            let pixels = self.width as u64 * self.height as u64;
+            encoder.clear_buffer(work, (8 + 2 * pixels) * 4, Some(3 * pixels * 4));
+        }
+        // The sun's cache holds only while the lights and the objects are
+        // still: emptied after a light moved, and every frame with movers.
+        let movers = self.hw.as_ref().is_some_and(|hw| hw.movers.is_some());
+        if let Some(sun) = &self.m13_sun
+            && (self.m13_sun_stale || movers)
+        {
+            encoder.clear_buffer(sun, 0, None);
+        }
+        self.m13_sun_stale = false;
         if self.one_pass {
-            // M13's colour pass (profile stage 20): the claims (three words a
-            // pixel after the header, the list and the masks) start at zero;
-            // every pass's dispatch in one compute pass (wgpu orders the
+            // Every pass's dispatch in one compute pass (wgpu orders the
             // dispatches' storage).
-            if let Some((work, _, _, _)) = &self.m13_work {
-                let pixels = self.width as u64 * self.height as u64;
-                encoder.clear_buffer(work, (8 + 2 * pixels) * 4, Some(3 * pixels * 4));
-            }
-            // The sun's cache holds only while the lights and the objects are
-            // still: emptied after a light moved, and every frame with movers.
-            let movers = self.hw.as_ref().is_some_and(|hw| hw.movers.is_some());
-            if let Some(sun) = &self.m13_sun
-                && (self.m13_sun_stale || movers)
-            {
-                encoder.clear_buffer(sun, 0, None);
-            }
-            self.m13_sun_stale = false;
             let mut pass = encoder.begin_compute_pass(&Default::default());
             for k in 0..self.passes.len() {
                 self.dispatch_camera(&mut pass, k);
