@@ -642,17 +642,21 @@ pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
 /// dispatch.
 pub(crate) const M13_PAGE_ARGS_BINDINGS: &[u32] = &[6, 91, 92, 93, 94];
 /// M13 gate 9: the reference, one shaded ray a pixel at its sample offset.
-pub(crate) const M13_REFERENCE_BINDINGS: &[u32] = &[2, 3, 6, 7, 8, 24, 30, 32, 52, 55, 56, 57, 58];
+pub(crate) const M13_REFERENCE_BINDINGS: &[u32] = &[
+    2, 3, 6, 7, 8, 24, 30, 32, 52, 55, 56, 57, 58, 104,
+];
 /// M13 gate 8: the corner rays after the roots pass, in tiles that may hold
 /// a large instance.
 pub(crate) const M13_CORNERS_TILES_BINDINGS: &[u32] = &[
-    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 87, 90, 92, 96, 101, 102,
+    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 87, 90, 92, 96, 101, 102, 104,
 ];
 /// M13 gate 8: the once-a-frame pass: page records, the nodes' projections
 /// and instance records, one invocation per page, node and object.
-pub(crate) const M13_PREP_BINDINGS: &[u32] = &[6, 8, 9, 32, 52, 90, 91, 92, 94, 96, 97, 98];
+pub(crate) const M13_PREP_BINDINGS: &[u32] = &[
+    6, 8, 9, 32, 52, 90, 91, 92, 94, 96, 97, 98, 104,
+];
 pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[
-    2, 3, 6, 8, 9, 24, 30, 32, 52, 55, 56, 57, 58, 91, 92, 94, 95, 101,
+    2, 3, 6, 8, 9, 24, 30, 32, 52, 55, 56, 57, 58, 91, 92, 94, 95, 101, 104,
 ];
 /// M13 gate 6's coverage pages: the pool, the requests' list, the state's
 /// counters, and the pages baked a frame by default.
@@ -666,16 +670,17 @@ pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88, 91, 92, 97, 98, 99
 /// M13 gate 5: the pixels covered by their corners, and the list of those
 /// tracing bin rays (88); the list's dispatch arguments; the rays.
 pub(crate) const M13_BINS_BINDINGS: &[u32] = &[
-    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 88, 92, 96, 101, 102, 103,
+    2, 3, 6, 8, 24, 30, 31, 32, 52, 55, 56, 57, 58, 88, 92, 96, 101, 102, 103, 104,
 ];
 pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
 /// M13 gate 10 (development): bins shaded one by one where a pixel's
 /// corners do not suffice: the list of pixels, its arguments, the bins.
 pub(crate) const M13_SHADE_ARGS_BINDINGS: &[u32] = &[89, 92];
-pub(crate) const M13_SHADE_RAYS_BINDINGS: &[u32] =
-    &[2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 102, 103];
+pub(crate) const M13_SHADE_RAYS_BINDINGS: &[u32] = &[
+    2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 102, 103, 104,
+];
 pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[
-    2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 96, 102, 103,
+    2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 96, 102, 103, 104,
 ];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.

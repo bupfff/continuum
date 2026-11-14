@@ -1560,6 +1560,28 @@ impl InstancedRenderer {
                     ),
                 )
             });
+        // The sun's cache (M13 appearance, third): 2^21 slots of five words,
+        // then a word per object (the albedo buffer's entries).
+        let sun_cache = self
+            .passes
+            .iter()
+            .any(|(_, keep)| keep.contains(&104))
+            .then(|| {
+                let objects = self
+                    .scene
+                    .iter()
+                    .find(|(b, _)| *b == 8)
+                    .map_or(0, |(_, buf)| buf.size() / 16);
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("m13 sun cache"),
+                    size: (5 * 2_097_152 + objects + 16) * 4,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                })
+            });
+        if let Some(buf) = &sun_cache {
+            all.push((104, buf));
+        }
         if let Some((work, args, plain, shaded)) = &self.m13_work {
             all.push((88, work));
             all.push((89, args));

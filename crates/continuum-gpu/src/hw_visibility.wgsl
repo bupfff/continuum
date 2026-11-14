@@ -751,7 +751,7 @@ fn g8_instance(m: u32) {
         let sun = g9_sun(centre);
         let lo = oct_encode(normalize(g8_rotate(q, sun.l))) * 0.5 + vec2<f32>(0.5);
         var vis = 1.0;
-        if (G9_SHADOWS) { vis = select(0.0, 1.0, hw_segment_open(centre + sun.l * (radius * 1.05), sun.l, sun.dist)); }
+        if (G9_SHADOWS) { vis = g11_object_open(m, centre + sun.l * (radius * 1.05), sun); }
         // The light's irradiance where the instance is over the eye's (the
         // light is near enough to vary across the scene), carried in the
         // albedo, so pixels light it by the eye's.
@@ -788,6 +788,7 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
     var k_amb = vec3<f32>(0.0);
     // Bins showing the background (the buried test applies there).
     var bg_bins = 0u;
+    var c4 = vec4<f32>(0.0);
     if (g9_on) {
         todo &= g9_in_front(r2.x);
         l_obj = oct_decode(unpack2x16unorm(bitcast<u32>(r2.y)) * 2.0 - vec2<f32>(1.0));
@@ -797,6 +798,7 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
         if (G9_FLAT) { k_lit = vec3<f32>(0.0); }
         if (G9_CONST_SMALL) { k_lit = vec3<f32>(0.0); k_amb = albedo.xyz * g9_e * (0.5 + G9_AMBIENT) / (16.0 * 3.14159265); }
         if (g9_dbg < 3.0e38) { bg_bins = ~(g9_l | g9_l2) & 0xffffu; }
+        c4 = g10_inv_wg[lane];
     }
     let bits = bitcast<u32>(r0.w);
     let cp = r0.xy;
@@ -828,7 +830,6 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
             // depth (M13 gate 10: without a branch).
             if (G9_BURIED && (G10_PROBE & 1u) == 0u) {
                 let surface = r2.x + r2.w * (texel.w * (510.0 / 254.0));
-                let c4 = g10_inv_wg[lane];
                 let behind = surface * (c4.x + c4.y * fb.x + (c4.z + c4.w * fb.x) * fb.y) > 1.0;
                 cov = select(cov, 0.0, behind && ((bg_bins >> b) & 1u) != 0u);
             }
@@ -2372,10 +2373,14 @@ fn g9_shade_hit(m: u32, t: u32, dist: f32, e: vec3<f32>, dir: vec3<f32>) -> vec3
     let albedo = surface_albedo(m, t, p, dist, dir, ng);
     let sun = g9_sun(p);
     var v = 1.0;
-    if (G9_SHADOWS) { v = select(0.0, 1.0, hw_segment_open(p + ng * surface_offset(dist), sun.l, sun.dist)); }
+    if (G9_SHADOWS) { v = select(0.0, 1.0, g11_sun_open(p, ng, dist, sun, g9_cached)); }
     g9_last_v = v;
     return g9_colour(albedo, n, sun, v);
 }
+
+// Whether `g9_shade_hit` reads and fills the sun's cache (off for the
+// reference, M13 appearance, third).
+var<private> g9_cached: bool = true;
 
 // The sun visibility `g9_shade_hit` last found (development).
 var<private> g9_last_v: f32 = 1.0;
@@ -2390,6 +2395,7 @@ fn hw_m13_reference(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= w || gid.y >= h) { return; }
     let dir = camera_dir(gid);
     let e = camera.eye.xyz;
+    g9_cached = false;
     let hit = hw_trace(e, dir, 0.0);
     var c = g9_sky();
     if (hit.x != NONE) { c = g9_shade_hit(hit.x, hit.y, bitcast<f32>(hit.z), e, dir); }
@@ -2544,7 +2550,7 @@ fn g10_shade(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f
     let albedo = surface_albedo(m, t, p, dist, dir, ng);
     let sun = g9_sun(p);
     var v = v_in;
-    if (v < 0.0) { v = select(0.0, 1.0, hw_segment_open(p + ng * surface_offset(dist), sun.l, sun.dist)); }
+    if (v < 0.0) { v = select(0.0, 1.0, g11_sun_open(p, ng, dist, sun, true)); }
     return g9_colour(albedo, n, sun, v);
 }
 
@@ -2734,4 +2740,76 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
         }
         colors[pixel] = vec4<f32>(select(0.0, 1.0, large_obj), py, select(0.0, 1.0, horizon) + select(0.0, 2.0, edge), 1.0);
     }
+}
+
+
+// --- M13 appearance, third (development): the sun's visibility cached. ---
+
+// The light's visibility from points of still surfaces, cached in world
+// space while the light and the scene are still: bricks of 4×4×4 cells,
+// a cell about a bin at its distance from the eye (a power of two of
+// 2^-12 m), each cell two bits (0 unknown, 2 shadowed, 3 lit), found by a
+// hash of the brick's level and place; per slot a fingerprint and four
+// words. After the slots, per object the visibility from its sphere's
+// sunward point (the records' one ray).
+@group(0) @binding(104) var<storage, read_write> g11_sun: array<atomic<u32>>;
+const G11_SLOTS: u32 = 2097152u;
+// Development: the cache on.
+const G11_CACHE: bool = true;
+
+fn g11_hash(a: u32) -> u32 {
+    var x = a;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+// Whether the light's centre is visible from surface point `p` (geometric
+// normal `ng`, `dist` from the eye), from the cache where `cached`, a
+// shadow ray filling it on a miss.
+fn g11_sun_open(p: vec3<f32>, ng: vec3<f32>, dist: f32, sun: G9Sun, cached: bool) -> bool {
+    let origin = p + ng * surface_offset(dist);
+    if (!G11_CACHE || !cached) { return hw_segment_open(origin, sun.l, sun.dist); }
+    // A bin's width at the point: the pixel's over four.
+    let f = dist * camera.params.z * 0.5 / camera.params.y;
+    let lvl = clamp(round(log2(max(f, 1e-9))) + 12.0, 0.0, 30.0);
+    let size = exp2(lvl - 12.0);
+    let ic = vec3<i32>(floor(p / size));
+    let ib = vec3<i32>(floor(p / (4.0 * size)));
+    let c = clamp(ic - 4 * ib, vec3<i32>(0), vec3<i32>(3));
+    let idx = u32(c.x + 4 * c.y + 16 * c.z);
+    let h = g11_hash(u32(lvl) ^ g11_hash(bitcast<u32>(ib.x) ^ g11_hash(bitcast<u32>(ib.y) ^ g11_hash(bitcast<u32>(ib.z) + 0x632be5abu))));
+    let fp = g11_hash(h ^ 0x9e3779b9u) | 1u;
+    let word = 1u + idx / 16u;
+    let shift = 2u * (idx % 16u);
+    for (var k = 0u; k < 8u; k++) {
+        let base = 5u * ((h + k) & (G11_SLOTS - 1u));
+        var f0 = atomicLoad(&g11_sun[base]);
+        if (f0 == 0u) {
+            let r = atomicCompareExchangeWeak(&g11_sun[base], 0u, fp);
+            f0 = select(r.old_value, fp, r.exchanged);
+        }
+        if (f0 != fp) { continue; }
+        let bits = (atomicLoad(&g11_sun[base + word]) >> shift) & 3u;
+        if (bits != 0u) { return bits == 3u; }
+        let open = hw_segment_open(origin, sun.l, sun.dist);
+        atomicOr(&g11_sun[base + word], select(2u, 3u, open) << shift);
+        return open;
+    }
+    return hw_segment_open(origin, sun.l, sun.dist);
+}
+
+// The visibility from object `m`'s sunward point `q` (its record's), cached
+// per object.
+fn g11_object_open(m: u32, q: vec3<f32>, sun: G9Sun) -> f32 {
+    if (!G11_CACHE) { return select(0.0, 1.0, hw_segment_open(q, sun.l, sun.dist)); }
+    let at = 5u * G11_SLOTS + m;
+    let bits = atomicLoad(&g11_sun[at]);
+    if (bits != 0u) { return select(0.0, 1.0, bits == 3u); }
+    let open = hw_segment_open(q, sun.l, sun.dist);
+    atomicStore(&g11_sun[at], select(2u, 3u, open));
+    return select(0.0, 1.0, open);
 }
