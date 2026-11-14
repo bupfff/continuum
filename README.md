@@ -233,8 +233,8 @@ nothing). Four landmarks, in order:
    gets a small precomputed map of how it looks from every direction, and
    pixels read those instead of tracing every tiny surface. Accuracy is
    answered (a fifth to an eighth of one-ray-per-pixel's error on the
-   million-boulder field), and speed is getting there: 16–17 ms a frame
-   standing and from 150 m up (from 105–135 ms). Rays go only near large
+   million-boulder field), and the coverage pass now takes about 9 ms a
+   frame standing and from 150 m up (from 105–135 ms). Rays go only near large
    objects, a tile of pixels shares the top of its walk, and far groups of
    boulders hold small images of their own coverage, re-made as the
    viewpoint moves, so a pixel at the horizon reads one image instead of
