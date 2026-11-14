@@ -1001,6 +1001,22 @@ impl MaskConeKernel {
             head,
             "fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {\n    let surface = g12_eye + dir * hit.distance;",
         );
+        // The cache's shares at the hit kept for the corners (the light's
+        // shadowed share, the sky's cached value), so bins can be lit from
+        // their corners' shares with their own normals (gate 12).
+        for (from, to) in [
+            (
+                "                    share = vc_bilinear(f.slot, f.r, l);\n",
+                "                    share = vc_bilinear(f.slot, f.r, l);\n                    if (l == 0u) { g12_share0 = share; }\n",
+            ),
+            (
+                "            e += sky_scale(normal) * vc_bilinear(f.slot, f.r, count);\n",
+                "            g12_sky_value = vc_bilinear(f.slot, f.r, count);\n            e += sky_scale(normal) * g12_sky_value;\n",
+            ),
+        ] {
+            assert!(kernel.contains(from), "{from} not found");
+            kernel = kernel.replacen(from, to, 1);
+        }
         let mut hw = include_str!("hw_visibility.wgsl").replace("\r\n", "\n");
         for (from, to) in [
             ("fn g9_shade_hit(", "fn g9_shade_hit_model("),
@@ -1017,12 +1033,6 @@ impl MaskConeKernel {
             ("fn g12_stamp_advanced(", "fn g12_stamp_advanced_model("),
             ("fn g12_target(", "fn g12_target_model("),
             ("fn g12_ambient(", "fn g12_ambient_model("),
-            // Bin rays light only objects their corners do not suffice for:
-            // each lit hit costs the cache's full shading (gate 12, development).
-            (
-                "const G10_BIN_RAYS_ALL: bool = true;",
-                "const G10_BIN_RAYS_ALL: bool = false;",
-            ),
             // A small instance's sun visibility as the cosine-weighted share
             // of five points (the model's reference is a hard shadow per
             // sample: one point matches it better).
@@ -1030,6 +1040,8 @@ impl MaskConeKernel {
                 "const G12_OBJECT_RAYS: u32 = 1u;",
                 "const G12_OBJECT_RAYS: u32 = 5u;",
             ),
+            ("fn g12_lean_bin(", "fn g12_lean_bin_model("),
+            ("fn g12_untarget(", "fn g12_untarget_model("),
         ] {
             assert!(hw.contains(from), "{from} not found");
             hw = hw.replacen(from, to, 1);

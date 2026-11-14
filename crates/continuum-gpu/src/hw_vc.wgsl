@@ -156,11 +156,15 @@ fn g12_shade_record(i: u32) {
     g12_eye = camera.eye.xyz;
     let sample = ((pos >> 28u) & 1u) != 0u;
     vc_request_priority = 0u;
+    g12_share0 = 1.0;
+    g12_sky_value = -1.0;
     let c = vc_hit_color(dir, hit_from(vec3<u32>(m, t, bitcast<u32>(dist)), dir), sample);
     if (sample && vc_request_priority > 0u) { vc_request(vc_request_key, vc_request_priority); }
-    // The colour into the record (its distance is spent), for the scatter
-    // pass: the lighting pass has no buffer to spare for the targets.
+    // The colour into the record (its distance is spent), and the cache's
+    // shares at the hit (its object is spent), for the scatter pass: the
+    // lighting pass has no buffer to spare for the targets.
     atomicStore(&g12_hits[r + 2u], g10_pack(c, g9_scale()));
+    atomicStore(&g12_hits[r], pack2x16float(vec2<f32>(g12_share0, g12_sky_value)));
 }
 
 // The records' colours to their targets (after each lighting pass).
@@ -188,6 +192,8 @@ fn g12_scatter_record(i: u32) {
     let c = g10_unpack(packed, g9_scale());
     if (to == G12_TO_CORNER) {
         m13_plain[word] = g12_cpack(c);
+        // The corner's shares, in its spare word.
+        m13_plain[word + g9_p()] = atomicLoad(&g12_hits[r]);
     } else if (to == G12_TO_BIN) {
         m13_shaded[word] = packed | G10_SHADED_BIT;
     } else if (to == G12_TO_QUAD) {
@@ -212,3 +218,50 @@ const G12_SKY_OPEN: f32 = 0.5;
 fn g12_ambient(albedo: vec3<f32>) -> vec3<f32> {
     return albedo * light.sky.xyz * G12_SKY_OPEN;
 }
+
+fn g12_untarget() {
+    g12_to = 0xffffffffu;
+}
+
+// The cache's shares at the last hit lit (`vc_light_terms`): the first
+// light's shadowed share and the sky's cached value (-1: none, a guess).
+var<private> g12_share0: f32 = 1.0;
+var<private> g12_sky_value: f32 = -1.0;
+
+// A bin of object `m` lit from its pixel's corners that show it: their
+// cached shares (the first light's, the sky's) bilinearly at the bin, with
+// the bin's own point, normal and albedo, as the cache's shading does with
+// its texels' shares (one light; otherwise w 0: lit in full).
+fn g12_lean_bin(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, b: u32) -> vec4<f32> {
+    if (arrayLength(&lights) != 1u || !G12_LEAN) { return vec4<f32>(0.0); }
+    let cws = g12_cws(pixel);
+    let pp = g9_p();
+    let co = vec4<u32>(m13_plain[cws.x + 3u * pp], m13_plain[cws.y + 3u * pp], m13_plain[cws.z + 3u * pp], m13_plain[cws.w + 3u * pp]);
+    let mine = co == vec4<u32>(m);
+    if (!any(mine)) { return vec4<f32>(0.0); }
+    let fx = (f32(b % 4u) + 0.5) * 0.25;
+    let fy = (f32(b / 4u) + 0.5) * 0.25;
+    let wk = vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy) * select(vec4<f32>(0.0), vec4<f32>(1.0), mine);
+    let wsum = wk.x + wk.y + wk.z + wk.w;
+    if (wsum < 1e-6) { return vec4<f32>(0.0); }
+    var share = 0.0;
+    var sky = 0.0;
+    var guess = false;
+    for (var k = 0u; k < 4u; k++) {
+        if (wk[k] <= 0.0) { continue; }
+        let sv = unpack2x16float(m13_plain[cws[k] + pp]);
+        share += wk[k] * sv.x;
+        if (sv.y < 0.0) { guess = true; }
+        sky += wk[k] * sv.y;
+    }
+    share /= wsum;
+    sky /= wsum;
+    let point = p + ng * surface_offset(dist);
+    let base = surface_albedo(m, t, p, dist, dir, ng);
+    var e = lights[0].radiance.xyz * share * unshadowed_rect(point, n, lights[0]);
+    if (guess) { e += sky_open(n); } else { e += sky_scale(n) * sky; }
+    return vec4<f32>(base * e / 3.14159265, 1.0);
+}
+
+// Development: bins lit from their corners' shares.
+const G12_LEAN: bool = true;

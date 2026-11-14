@@ -1553,7 +1553,12 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
                 var ng = normalize(normal_to_world(hit.x, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
                 if (dot(ng, dir) > 0.0) { ng = -ng; }
                 g12_target(G12_TO_BIN, base + k, G12_AT_BIN, pixel, k);
-                let c = g10_shade(hit.x, hit.y, ph, dist, dir, ng, g12_shading_normal(hit.x, hit.y, ph, -dir), v);
+                let nb = g12_shading_normal(hit.x, hit.y, ph, -dir);
+                // Lit from the corners' cached shares with its own normal
+                // where they show the object (the variant lit by the cache).
+                let lean = g12_lean_bin(hit.x, hit.y, ph, dist, dir, ng, nb, pixel, k);
+                var c = lean.xyz;
+                if (lean.w == 0.0) { c = g10_shade(hit.x, hit.y, ph, dist, dir, ng, nb, v); } else { g12_untarget(); }
                 m13_shaded[base + k] = g10_pack(c, g9_scale()) | G10_SHADED_BIT;
             }
         }
@@ -3264,3 +3269,12 @@ fn g12_object_fraction(m: u32, centre: vec3<f32>, radius: f32, sun: G9Sun) -> f3
     if (G11_CACHE) { atomicStore(&g11_sun[at], 1u + u32(round(share * 254.0))); }
     return share;
 }
+
+// A bin's colour from its pixel's corners (the variant lit by the cache
+// replaces this; here none: w 0).
+fn g12_lean_bin(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, b: u32) -> vec4<f32> {
+    return vec4<f32>(0.0);
+}
+
+// The next shading's target dropped (shaded otherwise).
+fn g12_untarget() {}
