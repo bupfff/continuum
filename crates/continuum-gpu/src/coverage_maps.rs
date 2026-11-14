@@ -18,8 +18,9 @@
 use continuum::glam::Vec3;
 use continuum::mesh::Tri;
 
-/// Directions per side of the octahedral grid.
-pub(crate) const DIRS: u32 = 16;
+/// Directions per side of the octahedral grid (32 since M13 gate 8, which
+/// reads the nearest alone; 16 before).
+pub(crate) const DIRS: u32 = 32;
 /// Texels per side of a map's finest level.
 pub(crate) const TEXELS: u32 = 16;
 /// Samples per side of a texel.

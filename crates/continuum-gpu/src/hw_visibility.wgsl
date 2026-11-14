@@ -288,6 +288,11 @@ fn hw_m13_corners(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
     if (gid.x >= w || gid.y >= h) { return; }
+    hw_m13_corner(gid);
+}
+
+fn hw_m13_corner(gid: vec3<u32>) {
+    let w = u32(camera.params.x);
     let tz = camera.params.z;
     let aspect = camera.params.x / camera.params.y;
     let sx = (f32(gid.x) / camera.params.x * 2.0 - 1.0) * tz * aspect;
@@ -297,6 +302,60 @@ fn hw_m13_corners(@builtin(global_invocation_id) gid: vec3<u32>) {
     var large = 0u;
     if (hit.x != NONE && m13_large(hit.x)) { large = 1u; }
     vis[gid.y * w + gid.x] = vec4<u32>(hit.x, large, hit.z, 0u);
+}
+
+// `hw_m13_corners` after the roots pass (M13 gate 8): in a tile whose roots
+// are all at most MAP_LIMIT_PX across, no instance is large, so its pixels'
+// corners record no large hit without a ray.
+@compute @workgroup_size(8, 8)
+fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let base = (wid.y * ((w + 7u) / 8u) + wid.x) * G5_TILE_WORDS;
+    // The corner (the pixel's top-left) is traced only inside a box of a
+    // root that may hold a large instance (half a pixel's margin).
+    let n_large = m13_roots[base + G5_TILE_WORDS - 1u];
+    var inside = n_large == 9u && (G5_SKIP & 256u) == 0u;
+    let pt = vec2<f32>(f32(gid.x), f32(gid.y));
+    for (var k = 0u; k < min(n_large, 8u); k++) {
+        let at = base + 380u + 4u * k;
+        let lo = vec2<f32>(bitcast<f32>(m13_roots[at]), bitcast<f32>(m13_roots[at + 1u])) - vec2<f32>(0.5);
+        let hi = vec2<f32>(bitcast<f32>(m13_roots[at + 2u]), bitcast<f32>(m13_roots[at + 3u])) + vec2<f32>(0.5);
+        if (all(pt >= lo) && all(pt <= hi) && (G5_SKIP & 256u) == 0u) { inside = true; }
+    }
+    if (!inside) {
+        vis[gid.y * w + gid.x] = vec4<u32>(NONE, 0u, bitcast<u32>(3.4e38), 0u);
+        return;
+    }
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    let sx = (f32(gid.x) / camera.params.x * 2.0 - 1.0) * tz * aspect;
+    let sy = (1.0 - f32(gid.y) / camera.params.y * 2.0) * tz;
+    let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+    let hit = g8_first_object(camera.eye.xyz, dir);
+    var large = 0u;
+    if (hit != NONE && g8_large(hit)) { large = 1u; }
+    vis[gid.y * w + gid.x] = vec4<u32>(hit, large, 0u, 0u);
+}
+
+// The object a ray from `e` along `dir` meets first, any face (coverage asks
+// only whether a ray is blocked; M13 gate 8), or NONE.
+fn g8_first_object(e: vec3<f32>, dir: vec3<f32>) -> u32 {
+    var rq: ray_query;
+    // FORCE_OPAQUE.
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x1u, 0xffu, 0.0, 3.4e38, e, dir));
+    rayQueryProceed(&rq);
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind == 0u) { return NONE; }
+    return hw_object(hit.instance_custom_data, hit.geometry_index).x;
+}
+
+// Whether object `m`, met by a ray this frame, is large (M13 gate 8): it
+// has no current record (too large or near for its maps, or mapless; a
+// met object lies in the view).
+fn g8_large(m: u32) -> bool {
+    return ((bitcast<u32>(m13_records[2u * m].w) >> 3u) & 0x1fffu) != g8_stamp();
 }
 
 // After `hw_m13_corners` (M13 gate 4): a pixel whose four corners hit the
@@ -534,12 +593,6 @@ fn hw_vc_error_shares(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
 @group(0) @binding(85) var cov_tex: texture_2d_array<f32>;
 @group(0) @binding(86) var cov_sampler: sampler;
 
-// Directions' maps read per bin: 4 (the four nearest, blended
-// bilinearly), 2 (the nearest along one axis of the directions' grid, the
-// two nearest along the axis whose fraction is nearer a half, blended), or
-// 1 (the nearest).
-const G5_DIRS: u32 = 2u;
-
 // The pixel's bins not yet full (bit b: bin b), kept by the walk.
 var<private> g5_open: u32 = 0xffffu;
 
@@ -562,61 +615,72 @@ fn g5_rect_bins(lo: vec2<f32>, hi: vec2<f32>, pix: vec2<f32>) -> u32 {
     return rows & (row * 0x1111u);
 }
 
-// `instance_map_bins` reading the maps' texture (8 bits, filtered by the
-// hardware): object `m`, at most MAP_LIMIT_PX across, into the pixel's
-// bins. False if it is too large or too near. Where a bin's ray passes the
-// object's centre (its closest approach, in the object's frame over its
-// radius) is taken affine in the bin's screen position about the centre's
-// ray: the ray turns by `(I - c cᵀ) dD` (`c` the centre's direction, `D`
-// the ray's unnormalized direction) and its closest approach moves by
-// the distance times that; the next term is about rad / 2f of the radius
-// (under 0.3% at 8 pixels across). Each bin's coordinates in a direction's
-// map then cost two multiply-adds.
-fn instance_map_tex(m: u32, pix: vec2<f32>) -> bool {
-    let sph = m13_spheres[m];
+// --- M13 gate 8: instance records, once a frame. ---
+
+// Development: a sink for timing tests (G5_SKIP bit 6).
+var<private> g8_dummy: f32 = 0.0;
+
+// Development: whether the once-a-frame pass projects the nodes' boxes.
+const G8_NODE_BOXES: bool = true;
+
+// Development: bin rays only where one of the pixel's own corners hits a
+// large object.
+const G8_OWN_CORNERS: bool = true;
+
+// This frame's stamp for records (the pages' frame counter, which turns at
+// the frame's end, modulo 2^13).
+fn g8_stamp() -> u32 {
+    return atomicLoad(&g6_state[3]) & 0x1fffu;
+}
+
+// `v` rotated by unit quaternion `q`.
+fn g8_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+// Per object two words: (projected centre, radius in pixels, bits: the
+// maps' level (3 bits), the frame's stamp (13 bits), the nearest
+// direction's layer (16 bits)) and the change of that direction's map
+// coordinates per pixel across and down. Only objects read this frame are
+// written (small, in front of the eye, inside the view); a stale stamp
+// means not read (outside the view, behind the eye, too large or near for
+// its maps, or mapless).
+@group(0) @binding(96) var<storage, read_write> m13_records: array<vec4<f32>>;
+
+// One invocation per object (M13 gate 8): object `m`'s record, as
+// `instance_map_bins` would set it up for any pixel: where a bin's ray
+// passes the object's centre is affine in the bin's screen position about
+// the centre's ray (the ray turns by `(I - c cᵀ) dD`, the closest approach
+// moves by the distance times that; the next term is about rad / 2f of the
+// radius, under 0.3% at 8 pixels across), and the two directions read are
+// the nearest along the axis of the directions' grid whose fraction is
+// nearer a half.
+fn g8_instance(m: u32) {
+    let sph = m13_spheres[2u * m];
     let radius = sph.w;
-    if (radius <= 0.0) { return false; }
+    if (radius <= 0.0) { return; }
     let centre = sph.xyz;
     let rel = centre - camera.eye.xyz;
     let depth = dot(rel, camera.forward.xyz);
-    if (depth - radius <= 1e-2) { return false; }
+    if (depth - radius <= 1e-2) { return; }
     let f = camera.params.y / (2.0 * camera.params.z);
     let rad = radius * f / depth;
-    if (2.0 * rad > MAP_LIMIT_PX) { return false; }
+    if (2.0 * rad > MAP_LIMIT_PX) { return; }
     let cp = cam_to_pixels(to_camera(view_world(), centre));
-    // Its square's open bins (by their squares; a bin is read where its
-    // centre lies in the object's square).
-    var todo = g5_rect_bins(cp - vec2<f32>(rad), cp + vec2<f32>(rad), pix) & g5_open;
-    if (todo == 0u) { return true; }
-    let mesh = meshes[m];
-    let hdr = map_header(mesh.z);
-    let x = mesh.w;
-    if ((G5_SKIP & 16u) != 0u) {
-        for (var b = 0u; b < 16u; b++) {
-            let p = pix + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25 + vec2<f32>(0.125);
-            if (abs(p.x - cp.x) > rad || abs(p.y - cp.y) > rad) { continue; }
-            pbin[b] = 1.0 - (1.0 - pbin[b]) * 0.5;
-        }
-        return true;
+    if (cp.x + rad <= 0.0 || cp.y + rad <= 0.0 || cp.x - rad >= camera.params.x || cp.y - rad >= camera.params.y) {
+        return;
     }
-    // The object's rotation (world to object), loaded once.
-    var r0 = vec3<f32>(1.0, 0.0, 0.0);
-    var r1 = vec3<f32>(0.0, 1.0, 0.0);
-    var r2 = vec3<f32>(0.0, 0.0, 1.0);
-    if (x != NONE) {
-        r0 = xforms[4u * x].xyz;
-        r1 = xforms[4u * x + 1u].xyz;
-        r2 = xforms[4u * x + 2u].xyz;
-    }
+    // The rotation from world to object, and the maps' first layer.
+    let rot = m13_spheres[2u * m + 1u];
+    let q = vec4<f32>(rot.xyz, sqrt(max(0.0, 1.0 - dot(rot.xyz, rot.xyz))));
+    let first = bitcast<u32>(rot.w);
     let len = length(rel);
     let c = rel / len;
-    let d = normalize(r0 * c.x + r1 * c.y + r2 * c.z);
+    let d = normalize(g8_rotate(q, c));
     let g = (oct_encode(d) + vec2<f32>(1.0)) * 0.5 * f32(MAP_DIRS) - vec2<f32>(0.5);
-    let i0 = floor(g);
-    let fr = g - i0;
     let texels_per_bin = 0.25 * depth / f / (2.0 * radius / f32(MAP_TEXELS));
     let level = clamp(round(log2(max(texels_per_bin, 1e-6))), 0.0, 4.0);
-    let first = (hdr - 1u) / 8u * MAP_DIRS * MAP_DIRS;
     // The closest approach's change per pixel across and down, world then
     // object frame, over the radius.
     let tz = camera.params.z;
@@ -625,58 +689,63 @@ fn instance_map_tex(m: u32, pix: vec2<f32>) -> bool {
     let ey = camera.up.xyz * (-2.0 * tz / camera.params.y);
     let wx = (ex - c * dot(c, ex)) * k;
     let wy = (ey - c * dot(c, ey)) * k;
-    let qx = r0 * wx.x + r1 * wx.y + r2 * wx.z;
-    let qy = r0 * wy.x + r1 * wy.y + r2 * wy.z;
-    var layers: array<u32, 4>;
-    var weights: array<f32, 4>;
-    var uvx: array<vec2<f32>, 4>;
-    var uvy: array<vec2<f32>, 4>;
-    let dirs = G5_DIRS;
-    let along_x = abs(fr.x - 0.5) <= abs(fr.y - 0.5);
-    for (var k = 0u; k < dirs; k++) {
-        var ix = u32(clamp(i32(i0.x) + i32(k & 1u), 0, i32(MAP_DIRS) - 1));
-        var iy = u32(clamp(i32(i0.y) + i32(k >> 1u), 0, i32(MAP_DIRS) - 1));
-        weights[k] = select(1.0 - fr.x, fr.x, (k & 1u) == 1u) * select(1.0 - fr.y, fr.y, (k >> 1u) == 1u);
-        if (dirs == 1u) {
-            ix = u32(clamp(round(g.x), 0.0, f32(MAP_DIRS) - 1.0));
-            iy = u32(clamp(round(g.y), 0.0, f32(MAP_DIRS) - 1.0));
-            weights[k] = 1.0;
-        } else if (dirs == 2u) {
-            if (along_x) {
-                ix = u32(clamp(i32(i0.x) + i32(k), 0, i32(MAP_DIRS) - 1));
-                iy = u32(clamp(round(g.y), 0.0, f32(MAP_DIRS) - 1.0));
-                weights[k] = select(1.0 - fr.x, fr.x, k == 1u);
-            } else {
-                ix = u32(clamp(round(g.x), 0.0, f32(MAP_DIRS) - 1.0));
-                iy = u32(clamp(i32(i0.y) + i32(k), 0, i32(MAP_DIRS) - 1));
-                weights[k] = select(1.0 - fr.y, fr.y, k == 1u);
-            }
-        }
-        layers[k] = first + iy * MAP_DIRS + ix;
-        let dk = oct_decode((vec2<f32>(f32(ix), f32(iy)) + vec2<f32>(0.5)) / f32(MAP_DIRS) * 2.0 - vec2<f32>(1.0));
-        let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(dk.z) < 0.999);
-        let u = normalize(cross(helper, dk));
-        let v = cross(dk, u);
-        uvx[k] = vec2<f32>(dot(qx, u), dot(qx, v)) * 0.5;
-        uvy[k] = vec2<f32>(dot(qy, u), dot(qy, v)) * 0.5;
-    }
+    let qx = g8_rotate(q, wx);
+    let qy = g8_rotate(q, wy);
+    // The nearest direction (32×32 of them: as accurate as two of 16×16
+    // blended, development).
+    let ix = u32(clamp(round(g.x), 0.0, f32(MAP_DIRS) - 1.0));
+    let iy = u32(clamp(round(g.y), 0.0, f32(MAP_DIRS) - 1.0));
+    let layer = first + iy * MAP_DIRS + ix;
+    let dk = oct_decode((vec2<f32>(f32(ix), f32(iy)) + vec2<f32>(0.5)) / f32(MAP_DIRS) * 2.0 - vec2<f32>(1.0));
+    let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(dk.z) < 0.999);
+    let u = normalize(cross(helper, dk));
+    let v = cross(dk, u);
+    let bits = u32(level) | (g8_stamp() << 3u) | (layer << 16u);
+    m13_records[2u * m] = vec4<f32>(cp, rad, bitcast<f32>(bits));
+    m13_records[2u * m + 1u] = vec4<f32>(dot(qx, u), dot(qx, v), dot(qy, u), dot(qy, v)) * 0.5;
+}
+
+// Object `m`'s map into the pixel's open bins, from its record (M13 gate
+// 8): a bin is read where its coordinates fall in the map, sampled there
+// (filtered by the hardware).
+fn instance_map_rec(m: u32, pix: vec2<f32>, stamp: u32) {
+    let r0 = m13_records[2u * m];
+    let bits = bitcast<u32>(r0.w);
+    if (((bits >> 3u) & 0x1fffu) != stamp) { return; }
+    let rad = r0.z;
+    let cp = r0.xy;
+    let todo = g5_rect_bins(cp - vec2<f32>(rad), cp + vec2<f32>(rad), pix) & g5_open;
+    if (todo == 0u) { return; }
+    g8_sample_record(r0, m13_records[2u * m + 1u], todo, pix);
+}
+
+// A record's map (`r0`, `uv`: the record's two words) into the pixel's bins
+// `todo`.
+fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, bins: u32, pix: vec2<f32>) {
+    var todo = bins;
+    let bits = bitcast<u32>(r0.w);
+    let cp = r0.xy;
+    if ((G5_SKIP & 16u) != 0u) { return; }
+    let level = f32(bits & 7u);
+    let layer = bits >> 16u;
+    // Where the map can read other than zero: its rectangle of texels not
+    // zero, widened for the level's coarser texels and bilinear reads
+    // (1.5 × 2^level − 1 finest texels).
+    let rect = g8_rects[layer];
+    let margin = (1.5 * exp2(level) - 1.0) / f32(MAP_TEXELS);
+    let rlo = max(vec2<f32>(f32(rect & 0xffu), f32((rect >> 8u) & 0xffu)) / f32(MAP_TEXELS) - vec2<f32>(margin), vec2<f32>(0.0));
+    let rhi = min(vec2<f32>(f32((rect >> 16u) & 0xffu), f32(rect >> 24u)) / f32(MAP_TEXELS) + vec2<f32>(margin), vec2<f32>(1.0));
     let p0 = pix + vec2<f32>(0.125) - cp;
     while (todo != 0u) {
         let b = countTrailingZeros(todo);
         todo &= todo - 1u;
         let o = p0 + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25;
-        if (abs(o.x) > rad || abs(o.y) > rad) { continue; }
-        var cov = 0.0;
-        for (var k = 0u; k < dirs; k++) {
-            if (weights[k] <= 0.0) { continue; }
-            let uv = vec2<f32>(0.5) + uvx[k] * o.x + uvy[k] * o.y;
-            if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { continue; }
-            if ((G5_SKIP & 8u) != 0u) { cov += weights[k] * 0.5; continue; }
-            cov += weights[k] * textureSampleLevel(cov_tex, cov_sampler, uv, layers[k], level).x;
-        }
-        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - clamp(cov, 0.0, 1.0));
+        let a = vec2<f32>(0.5) + uv.xy * o.x + uv.zw * o.y;
+        if (any(a < rlo) || any(a > rhi)) { continue; }
+        let cov = textureSampleLevel(cov_tex, cov_sampler, a, layer, level).x;
+        if ((G5_SKIP & 64u) != 0u) { g8_dummy += cov; continue; }
+        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - cov);
     }
-    return true;
 }
 
 // --- The tiles' subtree roots (development after the first tile walk). ---
@@ -688,8 +757,9 @@ fn instance_map_tex(m: u32, pix: vec2<f32>) -> bool {
 @group(0) @binding(88) var<storage, read_write> m13_work: array<atomic<u32>>;
 // The bin rays' dispatch arguments.
 @group(0) @binding(89) var<storage, read_write> m13_args: array<u32>;
-// Each object's world bounding sphere about its coverage map's centre
-// (radius 0: no map).
+// Per object two words: its world bounding sphere about its coverage map's
+// centre (radius 0: no map), and its rotation from world to object as a
+// quaternion's x, y, z (w at least 0) with its maps' first layer's bits.
 @group(0) @binding(90) var<storage, read> m13_spheres: array<vec4<f32>>;
 
 fn m13_mask_word(pixel: u32) -> u32 {
@@ -701,9 +771,11 @@ fn m13_mask_word(pixel: u32) -> u32 {
 // read from its coverage page, bit 29 if it lies below a node waiting for
 // its page), its projected box in pixels as f32 bits (lo,
 // hi; unless it straddles), so its pixels test it without loading or
-// projecting the node, and its page.
+// projecting the node, and its page; then (M13 gate 8, from word 380) up
+// to 8 boxes of roots that may hold a large instance (4 words each), and in
+// the last word their count, or 9 for the whole tile.
 const G5_ROOTS: u32 = 63u;
-const G5_TILE_WORDS: u32 = 384u;
+const G5_TILE_WORDS: u32 = 416u;
 // A node is listed once its projected box is at most this many pixels
 // across: the pixels walk below it.
 const G5_CUT_PX: f32 = 8.0;
@@ -732,6 +804,7 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
     stack_set(0u, 0u);
     let pages = atomicLoad(&g6_state[9]) != 0u;
     let frame = atomicLoad(&g6_state[3]) + 1u;
+    var n_large = 0u;
     // At each pop, n + sp is at most G5_ROOTS. A stack entry's bit 31: below
     // a node that wants a page (no page is wanted under it).
     while (sp > 0u) {
@@ -740,18 +813,24 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
         let id = raw & 0x7fffffffu;
         var below = (raw & 0x80000000u) != 0u;
         let node = nodes[id];
-        let sb = screen_box(node.lo.xyz, node.hi.xyz, v);
-        if (sb.behind == 2u || frustum_misses_box(node.lo.xyz, node.hi.xyz)) { continue; }
+        let stored = g8_boxes[id];
+        var sb: ScreenBox;
+        if (stored.x < 3.0e38) {
+            sb = ScreenBox(stored.xy, stored.zw, 0.0, 0u);
+        } else {
+            sb = screen_box(node.lo.xyz, node.hi.xyz, v);
+            if (sb.behind == 2u || frustum_misses_box(node.lo.xyz, node.hi.xyz)) { continue; }
+        }
         if (sb.behind == 0u && (sb.hi.x <= lo.x || sb.hi.y <= lo.y || sb.lo.x >= hi.x || sb.lo.y >= hi.y)) { continue; }
         let extent = sb.hi - sb.lo;
         // M13 gate 6: the highest node on the path that fits a page at one
         // texel per bin and holds enough instances is read from its page if
         // it is resident and valid from here; otherwise it is requested and
         // walked as before.
-        if (pages && !below && sb.behind == 0u && node.info.z == 0u && node.info.w == 0u
+        if (pages && !below && sb.behind == 0u && node.info.y == 0u && node.info.z == 0u && node.info.w == 0u
             && g6_range(id).y >= G6_MIN_ITEMS && g6_shape(extent * 4.0).x != 0u) {
             let page = atomicLoad(&g6_state[g6_table(id)]);
-            if (page < G6_POOL && g6_valid(page, (node.lo.xyz + node.hi.xyz) * 0.5, id)) {
+            if (page < G6_POOL && g8_page_valid(page)) {
                 let at = base + 1u + 6u * n;
                 m13_roots[at] = id | 0x40000000u;
                 m13_roots[at + 1u] = bitcast<u32>(sb.lo.x);
@@ -771,6 +850,21 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
         }
         if (node.info.y > 0u || (sb.behind == 0u && max(extent.x, extent.y) <= G5_CUT_PX)
             || n + sp + 2u > G5_ROOTS || sp + 2u > STACK) {
+            // An instance over MAP_LIMIT_PX across (or seen across the eye's
+            // plane) can lie only under a root at least that wide (M13 gate
+            // 8: the tile's corner rays are needed only then).
+            if (g8_may_hold_large(id, node, sb.behind != 0u)) {
+                if (sb.behind != 0u || n_large >= 8u) {
+                    n_large = 9u;
+                } else {
+                    let at = base + 380u + 4u * n_large;
+                    m13_roots[at] = bitcast<u32>(sb.lo.x);
+                    m13_roots[at + 1u] = bitcast<u32>(sb.lo.y);
+                    m13_roots[at + 2u] = bitcast<u32>(sb.hi.x);
+                    m13_roots[at + 3u] = bitcast<u32>(sb.hi.y);
+                    n_large++;
+                }
+            }
             let at = base + 1u + 6u * n;
             m13_roots[at] = id | select(0u, 0x80000000u, sb.behind != 0u) | select(0u, 0x20000000u, below);
             m13_roots[at + 1u] = bitcast<u32>(sb.lo.x);
@@ -794,10 +888,23 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
         sp += 2u;
     }
     m13_roots[base] = n;
+    m13_roots[base + G5_TILE_WORDS - 1u] = n_large;
 }
 
+// Per map (layer) the bounding rectangle of its finest texels not zero
+// (bytes: u0, v0, u1, v1 past the last), M13 gate 8.
+@group(0) @binding(100) var<storage, read> g8_rects: array<u32>;
+
+// The tile's list of leaf roots' instances (M13 gate 8): their records'
+// two words, the count, and which roots it holds.
+const G8_LIST: u32 = 128u;
+var<workgroup> g8_list_a: array<vec4<f32>, 128>;
+var<workgroup> g8_list_b: array<vec4<f32>, 128>;
+var<workgroup> g8_list_n: atomic<u32>;
+var<workgroup> g8_listed: array<atomic<u32>, 2>;
+
 // Development switches (bit 0: no bin rays, 1: no walks, 2: no map reads,
-// 3: no texture samples in them, 4: no set-up or samples either).
+// 4: the maps' records tested but not read, 5: pages not read).
 const G5_SKIP: u32 = 0u;
 // Whether the pixels' walks go as packets (a subgroup walking the union of
 // its pixels' walks) or each on its own.
@@ -820,6 +927,7 @@ fn g5_first(x: bool) -> bool {
 // the object nodes it visited.
 fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>, root_box: vec4<f32>, root_known: bool, pages: bool) -> u32 {
     let v = view_world();
+    let stamp = g8_stamp();
     var visits = 0u;
     var sp = 1u;
     stack_set(0u, root);
@@ -844,8 +952,13 @@ fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>, root_box:
             // the eye, inside the tile's frustum).
             var sb: ScreenBox;
             var live = true;
+            let stored = g8_boxes[n];
             if (known) {
                 sb = ScreenBox(root_box.xy, root_box.zw, to_camera(v, (node.lo.xyz + node.hi.xyz) * 0.5).z, 0u);
+            } else if (stored.x < 3.0e38) {
+                // In front of the eye: its projection, stored this frame (M13
+                // gate 8); the pixel's side planes cut it as its rectangle does.
+                sb = ScreenBox(stored.xy, stored.zw, to_camera(v, (node.lo.xyz + node.hi.xyz) * 0.5).z, 0u);
             } else {
                 sb = screen_box(node.lo.xyz, node.hi.xyz, v);
                 live = sb.behind != 2u && !frustum_misses_box(node.lo.xyz, node.hi.xyz);
@@ -857,12 +970,12 @@ fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>, root_box:
             // holds enough instances is read from its page if resident and
             // valid; otherwise it is asked for and walked as before.
             var paged = false;
-            if (live && pages && !below && sb.behind == 0u && node.info.z == 0u && node.info.w == 0u
+            if (live && pages && !below && sb.behind == 0u && node.info.y == 0u && node.info.z == 0u && node.info.w == 0u
                 && g6_shape((sb.hi - sb.lo) * 4.0).x != 0u && g6_range(n).y >= G6_MIN_ITEMS) {
                 let page = atomicLoad(&g6_state[g6_table(n)]);
-                if (page < G6_POOL && g6_valid(page, (node.lo.xyz + node.hi.xyz) * 0.5, n)) {
+                if (page < G6_POOL && g8_page_valid(page)) {
                     g6_mark_used(page, atomicLoad(&g6_state[3]) + 1u);
-                    g6_read_page(page, pix, vec4<f32>(sb.lo, sb.hi));
+                    g8_read_page(page, pix, vec4<f32>(sb.lo, sb.hi));
                     g5_refresh_open();
                     if (g5_open == 0u) { *on = false; }
                     paged = true;
@@ -888,7 +1001,7 @@ fn g5_walk_subtree(root: u32, pix: vec2<f32>, on: ptr<function, bool>, root_box:
                         // Large instances (too large or near for their maps,
                         // which `instance_map_tex` skips) the bins' rays covered.
                         if ((G5_SKIP & 4u) != 0u) { continue; }
-                        instance_map_tex(m, pix);
+                        instance_map_rec(m, pix, stamp);
                     }
                     g5_refresh_open();
                     if (g5_open == 0u) { *on = false; }
@@ -936,8 +1049,11 @@ fn hw_m13_bins(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     var near_large = false;
-    for (var dy = -1; dy <= 2; dy++) {
-        for (var dx = -1; dx <= 2; dx++) {
+    // B's neighbourhood: the 16 corners of the pixel's 3×3 block, or with
+    // G8_OWN_CORNERS its own four.
+    let reach = select(1, 0, G8_OWN_CORNERS);
+    for (var dy = -reach; dy <= 1 + reach; dy++) {
+        for (var dx = -reach; dx <= 1 + reach; dx++) {
             let cx = u32(clamp(i32(gid.x) + dx, 0, i32(w) - 1));
             let cy = u32(clamp(i32(gid.y) + dy, 0, i32(h) - 1));
             if (vis[cy * w + cx].y == 1u) { near_large = true; }
@@ -976,8 +1092,8 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
     let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * camera.params.x / camera.params.y;
     let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
     let dir = normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
-    let hit = hw_trace(camera.eye.xyz, dir, 0.0);
-    if (hit.x != NONE && m13_large(hit.x)) { atomicOr(&m13_work[m13_mask_word(pixel)], 1u << k); }
+    let hit = g8_first_object(camera.eye.xyz, dir);
+    if (hit != NONE && g8_large(hit)) { atomicOr(&m13_work[m13_mask_word(pixel)], 1u << k); }
 }
 
 // M13 gate 5 (profile stage 17), one workgroup per 8×8 tile after
@@ -1006,8 +1122,64 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     let pages = atomicLoad(&g6_state[9]) != 0u;
     set_pixel_frustum(pix);
     var visits = 0u;
+    // M13 gate 8: the tile's leaf roots' instances, their records loaded
+    // once by the tile's lanes (a root each) into a list its pixels read;
+    // a leaf whose instances do not fit is walked as before.
+    if (li == 0u) {
+        atomicStore(&g8_list_n, 0u);
+        for (var k = 0u; k < 2u; k++) { atomicStore(&g8_listed[k], 0u); }
+    }
+    workgroupBarrier();
+    let stamp = g8_stamp();
+    let tile_lo = vec2<f32>(f32(wid.x * 8u), f32(wid.y * 8u));
+    for (var r = li; r < count; r += 64u) {
+        let rw = m13_roots[base + 1u + 6u * r];
+        if ((rw & 0xc0000000u) != 0u) { continue; }
+        let leaf = nodes[rw & 0x1fffffffu].info;
+        if (leaf.y == 0u) { continue; }
+        // The leaf's instances read this frame and over the tile.
+        var take = 0u;
+        for (var k = 0u; k < leaf.y; k++) {
+            let r0 = m13_records[2u * items[leaf.x + k]];
+            let b = bitcast<u32>(r0.w);
+            if (((b >> 3u) & 0x1fffu) != stamp) { continue; }
+            if (r0.x + r0.z <= tile_lo.x || r0.y + r0.z <= tile_lo.y || r0.x - r0.z >= tile_lo.x + 8.0 || r0.y - r0.z >= tile_lo.y + 8.0) { continue; }
+            take |= 1u << k;
+        }
+        let n_take = countOneBits(take);
+        let at = atomicAdd(&g8_list_n, n_take);
+        var i = 0u;
+        for (var k = 0u; k < leaf.y; k++) {
+            if ((take & (1u << k)) == 0u) { continue; }
+            if (at + n_take <= G8_LIST) {
+                let m = items[leaf.x + k];
+                g8_list_a[at + i] = m13_records[2u * m];
+                g8_list_b[at + i] = m13_records[2u * m + 1u];
+            } else if (at + i < G8_LIST) {
+                // Reserved but not used: a leaf that did not fit is walked.
+                g8_list_a[at + i] = vec4<f32>(0.0, 0.0, -1.0, 0.0);
+            }
+            i++;
+        }
+        if (at + n_take <= G8_LIST) { atomicOr(&g8_listed[r / 32u], 1u << (r % 32u)); }
+    }
+    workgroupBarrier();
+    let listed = min(atomicLoad(&g8_list_n), G8_LIST);
+    if (on && (G5_SKIP & 4u) == 0u) {
+        for (var i = 0u; i < listed; i++) {
+            let r0 = g8_list_a[i];
+            if (r0.z <= 0.0) { continue; }
+            let todo = g5_rect_bins(r0.xy - vec2<f32>(r0.z), r0.xy + vec2<f32>(r0.z), pix) & g5_open;
+            if (todo == 0u) { continue; }
+            g8_sample_record(r0, g8_list_b[i], todo, pix);
+        }
+        g5_refresh_open();
+        if (g5_open == 0u) { on = false; }
+    }
+    let listed_roots = vec2<u32>(atomicLoad(&g8_listed[0]), atomicLoad(&g8_listed[1]));
     for (var r = 0u; r < count; r++) {
         if (!g5_any(on)) { break; }
+        if ((listed_roots[r / 32u] & (1u << (r % 32u))) != 0u) { continue; }
         let at = base + 1u + 6u * r;
         let word = m13_roots[at];
         let id = word & 0x1fffffffu;
@@ -1021,7 +1193,7 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
         // M13 gate 6: a node read from its coverage page.
         if ((word & 0x40000000u) != 0u) {
             if (mine) {
-                g6_read_page(m13_roots[at + 5u], pix, rb);
+                g8_read_page(m13_roots[at + 5u], pix, rb);
                 g5_refresh_open();
                 if (g5_open == 0u) { on = false; }
             }
@@ -1035,7 +1207,7 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
     if (inside) {
         var sum = 0.0;
         for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }
-        colors[pixel] = vec4<f32>(sum / 16.0, select(f32(visits), 0.0, resolved), f32(2u * count + select(0u, 1u, traced)), 1.0);
+        colors[pixel] = vec4<f32>(sum / 16.0 + g8_dummy * 1e-30, select(f32(visits), 0.0, resolved), f32(2u * count + select(0u, 1u, traced)), 1.0);
     }
 }
 
@@ -1067,7 +1239,9 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
 // the node's contents.
 @group(0) @binding(95) var<storage, read_write> g6_texels: array<u32>;
 
-const G6_POOL: u32 = 32768u;
+const G6_POOL: u32 = 16384u;
+// Texels a page (M13 gate 6: 512; gate 8: 1,024, shapes 4×256 to 256×4).
+const G6_TEXELS: u32 = 2048u;
 const G6_REQUESTS: u32 = 4096u;
 const G6_META: u32 = 32u;
 // Nodes with fewer instances read the instances' shared maps instead.
@@ -1089,10 +1263,10 @@ fn g6_shape(extent: vec2<f32>) -> vec2<u32> {
     let w = max(ceil(extent.x), 1.0);
     var sw = 4u;
     loop {
-        if (f32(sw) >= w || sw >= 128u) { break; }
+        if (f32(sw) >= w || sw >= G6_TEXELS / 4u) { break; }
         sw *= 2u;
     }
-    let sh = 512u / sw;
+    let sh = G6_TEXELS / sw;
     if (f32(sw) < w || ceil(extent.y) > f32(sh)) { return vec2<u32>(0u); }
     return vec2<u32>(sw, sh);
 }
@@ -1114,19 +1288,9 @@ fn g6_shift(page: u32, centre: vec3<f32>) -> f32 {
     return shift;
 }
 
-// Whether `page` may be read: its shift at most a quarter of a bin. Past
-// G6_REFRESH it is asked again on the refreshes' list (M13 gate 7), baked
-// with the budget the frame's other requests leave.
+// A page read past this shift (bins) is asked again on the refreshes'
+// list (M13 gate 7), baked with the budget the frame's requests leave.
 const G6_REFRESH: f32 = 0.2;
-fn g6_valid(page: u32, centre: vec3<f32>, n: u32) -> bool {
-    let shift = g6_shift(page, centre);
-    if (shift > 0.25) { return false; }
-    // The largest shift read this frame, in ten-thousandths of a bin.
-    let q = u32(shift * 1e4);
-    if (q > atomicLoad(&g6_state[13])) { atomicMax(&g6_state[13], q); }
-    if (shift > G6_REFRESH) { g6_request_on(n, 25u, 2u * G6_REQUESTS); }
-    return true;
-}
 
 // Counts `page` among the pages read this frame (`frame`: the frame
 // counter plus one), once.
@@ -1153,52 +1317,10 @@ fn g6_request_on(n: u32, counter: u32, offset: u32) {
     }
 }
 
-// Where the ray through screen point `p` crosses the plane through `o`
-// with normal `nrm`, in texels along `u` and `v` (axes over the texel).
-fn g6_plane_texels(p: vec2<f32>, o: vec3<f32>, u: vec3<f32>, v: vec3<f32>, nrm: vec3<f32>) -> vec2<f32> {
-    let tz = camera.params.z;
-    let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * camera.params.x / camera.params.y;
-    let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
-    let dir = camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy;
-    let e = camera.eye.xyz;
-    let q = e + dir * (dot(o - e, nrm) / dot(dir, nrm)) - o;
-    return vec2<f32>(dot(q, u), dot(q, v));
-}
-
 fn g6_texel(page: u32, i: i32, j: i32, sw: i32, sh: i32) -> f32 {
     if (i < 0 || j < 0 || i >= sw || j >= sh) { return 0.0; }
     let k = u32(j * sw + i);
-    return f32((g6_texels[128u * page + k / 4u] >> (8u * (k % 4u))) & 0xffu) / 255.0;
-}
-
-// Adds `page` (its node projected over `bx`) to the pixel's open bins:
-// per bin, bilinearly where the bin's centre ray crosses the page's plane
-// (affine across the pixel), combined as an independent occluder.
-fn g6_read_page(page: u32, pix: vec2<f32>, bx: vec4<f32>) {
-    var todo = g5_rect_bins(bx.xy, bx.zw, pix) & g5_open;
-    if (todo == 0u) { return; }
-    let o = g6_hdr[5u * page].xyz;
-    let u = g6_hdr[5u * page + 1u].xyz;
-    let h2 = g6_hdr[5u * page + 2u];
-    let nrm = g6_hdr[5u * page + 3u].xyz;
-    let shape = bitcast<u32>(h2.w);
-    let sw = i32(shape & 0xffffu);
-    let sh = i32(shape >> 16u);
-    let p0 = pix + vec2<f32>(0.125);
-    let c0 = g6_plane_texels(p0, o, u, h2.xyz, nrm) - vec2<f32>(0.5);
-    let cx = (g6_plane_texels(p0 + vec2<f32>(0.75, 0.0), o, u, h2.xyz, nrm) - vec2<f32>(0.5) - c0) / 3.0;
-    let cy = (g6_plane_texels(p0 + vec2<f32>(0.0, 0.75), o, u, h2.xyz, nrm) - vec2<f32>(0.5) - c0) / 3.0;
-    while (todo != 0u) {
-        let b = countTrailingZeros(todo);
-        todo &= todo - 1u;
-        let c = c0 + cx * f32(b % 4u) + cy * f32(b / 4u);
-        let f0 = floor(c);
-        let fr = c - f0;
-        let i = vec2<i32>(f0);
-        let top = mix(g6_texel(page, i.x, i.y, sw, sh), g6_texel(page, i.x + 1, i.y, sw, sh), fr.x);
-        let bottom = mix(g6_texel(page, i.x, i.y + 1, sw, sh), g6_texel(page, i.x + 1, i.y + 1, sw, sh), fr.x);
-        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - clamp(mix(top, bottom, fr.y), 0.0, 1.0));
-    }
+    return f32((g6_texels[G6_TEXELS / 4u * page + k / 4u] >> (8u * (k % 4u))) & 0xffu) / 255.0;
 }
 
 // After the pixels' pass, one workgroup: the bakes this frame (at most the
@@ -1268,7 +1390,7 @@ fn hw_m13_page_args(@builtin(local_invocation_index) li: u32) {
     atomicStore(&g6_state[24], 1u);
     // A workgroup per page and 4 texels (64 rays).
     g6_args[0] = nb;
-    g6_args[1] = 128u;
+    g6_args[1] = G6_TEXELS / 4u;
     g6_args[2] = 1u;
 }
 
@@ -1425,6 +1547,142 @@ fn hw_m13_page_bake(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         for (var q = 0u; q < 4u; q++) {
             word |= u32(round(f32(atomicLoad(&g6_hits[q])) / 16.0 * 255.0)) << (8u * q);
         }
-        g6_texels[128u * page + part] = word;
+        g6_texels[G6_TEXELS / 4u * page + part] = word;
+    }
+}
+
+// --- M13 gate 8: page records, once a frame. ---
+
+// Per page three words: the homography from screen position (x, y, 1) to
+// its texels (across, down, and the denominator, each a row of three), the
+// first two rows' fourth word its shape (width, height), the third's 1 if
+// the page may be read this frame.
+@group(0) @binding(97) var<storage, read_write> g8_pages: array<vec4<f32>>;
+
+fn g8_page_valid(page: u32) -> bool {
+    return g8_pages[3u * page + 2u].w > 0.5;
+}
+
+// One invocation per page of the pool, before the roots pass (M13 gate 8):
+// whether the page, if it is its node's, may be read from the eye
+// (`g6_shift`); a page read last frame past G6_REFRESH is asked again on
+// the refreshes' list; and the homography from screen position to texels:
+// a texel coordinate along axis `A` is `(α n + β A)·D / n·D` for the ray
+// `D(p)`, affine in the pixel `p` (`α = (e − O)·A`, `β = (O − e)·n`).
+fn g8_page(page: u32) {
+    g8_pages[3u * page + 2u].w = 0.0;
+    let n = bitcast<u32>(g6_hdr[5u * page + 3u].w);
+    if (n >= g6_nodes() || atomicLoad(&g6_state[g6_table(n)]) != page) { return; }
+    let node = nodes[n];
+    let shift = g6_shift(page, (node.lo.xyz + node.hi.xyz) * 0.5);
+    if (shift > 0.25) { return; }
+    // Read last frame (its use mark is the frame counter now).
+    if (atomicLoad(&g6_state[g6_used(page)]) == atomicLoad(&g6_state[3])) {
+        let q = u32(shift * 1e4);
+        if (q > atomicLoad(&g6_state[13])) { atomicMax(&g6_state[13], q); }
+        if (shift > G6_REFRESH) { g6_request_on(n, 25u, 2u * G6_REQUESTS); }
+    }
+    let o = g6_hdr[5u * page].xyz;
+    let ua = g6_hdr[5u * page + 1u].xyz;
+    let h2 = g6_hdr[5u * page + 2u];
+    let va = h2.xyz;
+    let nrm = g6_hdr[5u * page + 3u].xyz;
+    let e = camera.eye.xyz;
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    // D(p) = d0 + dx p.x + dy p.y.
+    let dx = camera.right.xyz * (2.0 * tz * aspect / camera.params.x);
+    let dy = camera.up.xyz * (-2.0 * tz / camera.params.y);
+    let d0 = camera.forward.xyz - camera.right.xyz * (tz * aspect) + camera.up.xyz * tz;
+    let beta = dot(o - e, nrm);
+    let au = dot(e - o, ua) * nrm + beta * ua;
+    let av = dot(e - o, va) * nrm + beta * va;
+    let shape = bitcast<u32>(h2.w);
+    g8_pages[3u * page] = vec4<f32>(dot(au, dx), dot(au, dy), dot(au, d0), f32(shape & 0xffffu));
+    g8_pages[3u * page + 1u] = vec4<f32>(dot(av, dx), dot(av, dy), dot(av, d0), f32(shape >> 16u));
+    g8_pages[3u * page + 2u] = vec4<f32>(dot(nrm, dx), dot(nrm, dy), dot(nrm, d0), 1.0);
+}
+
+// `g6_read_page` from the page's record: per open bin, its texel
+// coordinates through the homography, bilinearly.
+fn g8_read_page(page: u32, pix: vec2<f32>, bx: vec4<f32>) {
+    var todo = g5_rect_bins(bx.xy, bx.zw, pix) & g5_open;
+    if (todo == 0u || (G5_SKIP & 32u) != 0u) { return; }
+    let ha = g8_pages[3u * page];
+    let hb = g8_pages[3u * page + 1u];
+    let hw = g8_pages[3u * page + 2u];
+    let sw = i32(ha.w);
+    let sh = i32(hb.w);
+    while (todo != 0u) {
+        let b = countTrailingZeros(todo);
+        todo &= todo - 1u;
+        let p = vec3<f32>(pix + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25 + vec2<f32>(0.125), 1.0);
+        let c = vec2<f32>(dot(ha.xyz, p), dot(hb.xyz, p)) / dot(hw.xyz, p) - vec2<f32>(0.5);
+        let f0 = floor(c);
+        let fr = c - f0;
+        let i = vec2<i32>(f0);
+        let top = mix(g6_texel(page, i.x, i.y, sw, sh), g6_texel(page, i.x + 1, i.y, sw, sh), fr.x);
+        let bottom = mix(g6_texel(page, i.x, i.y + 1, sw, sh), g6_texel(page, i.x + 1, i.y + 1, sw, sh), fr.x);
+        pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - clamp(mix(top, bottom, fr.y), 0.0, 1.0));
+    }
+}
+
+// --- M13 gate 8: the hierarchy's projected boxes, once a frame. ---
+
+// Per object-hierarchy node the radius of its largest instance (1e30 if it
+// holds one without a map, always large).
+@group(0) @binding(99) var<storage, read> g8_largest: array<f32>;
+
+// Whether node `n` (its box's projection straddling the eye's plane if
+// `straddles`) may hold an instance over MAP_LIMIT_PX across: its largest
+// instance at the box's nearest depth.
+fn g8_may_hold_large(n: u32, node: Node, straddles: bool) -> bool {
+    if (straddles) { return true; }
+    let c = (node.lo.xyz + node.hi.xyz) * 0.5 - camera.eye.xyz;
+    let h = (node.hi.xyz - node.lo.xyz) * 0.5;
+    let near = dot(c, camera.forward.xyz) - dot(h, abs(camera.forward.xyz));
+    if (near <= 1e-2) { return true; }
+    let f = camera.params.y / (2.0 * camera.params.z);
+    return 2.0 * g8_largest[n] * f / near > MAP_LIMIT_PX;
+}
+
+// Per object-hierarchy node its box's projection in pixels (lo, hi), or lo.x
+// 3.4e38 if a corner lies behind the eye (walks then project it themselves,
+// with the pixel's or tile's frustum).
+@group(0) @binding(98) var<storage, read_write> g8_boxes: array<vec4<f32>>;
+
+// Node `n`'s projection (M13 gate 8).
+fn g8_node_box(n: u32) {
+    let node = nodes[n];
+    let v = view_world();
+    var lo = vec2<f32>(3.4e38);
+    var hi = vec2<f32>(-3.4e38);
+    for (var k = 0u; k < 8u; k++) {
+        let c = vec3<f32>(select(node.lo.x, node.hi.x, (k & 1u) != 0u), select(node.lo.y, node.hi.y, (k & 2u) != 0u), select(node.lo.z, node.hi.z, (k & 4u) != 0u));
+        let q = to_camera(v, c);
+        if (q.z <= 1e-3) {
+            g8_boxes[n] = vec4<f32>(3.4e38);
+            return;
+        }
+        let p = cam_to_pixels(q);
+        lo = min(lo, p);
+        hi = max(hi, p);
+    }
+    g8_boxes[n] = vec4<f32>(lo, hi);
+}
+
+// M13 gate 8's once-a-frame pass, one invocation per page of the pool, then
+// per node of the object hierarchy, then per object: page records, the
+// nodes' projections, instance records.
+@compute @workgroup_size(64)
+fn hw_m13_prep(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let t = (wg.y * nwg.x + wg.x) * 64u + li;
+    let nodes_count = arrayLength(&g8_boxes);
+    if (t < G6_POOL) {
+        g8_page(t);
+    } else if (t < G6_POOL + nodes_count) {
+        if (G8_NODE_BOXES) { g8_node_box(t - G6_POOL); } else { g8_boxes[t - G6_POOL] = vec4<f32>(3.4e38); }
+    } else if (t < G6_POOL + nodes_count + arrayLength(&m13_spheres) / 2u) {
+        g8_instance(t - G6_POOL - nodes_count);
     }
 }

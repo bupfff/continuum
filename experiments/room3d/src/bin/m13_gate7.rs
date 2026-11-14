@@ -404,8 +404,9 @@ fn main() -> std::io::Result<()> {
             }
         };
         let names = [
-            "corners",
+            "prep",
             "roots",
+            "corners",
             "bins",
             "bin args",
             "bin rays",
@@ -498,7 +499,9 @@ fn main() -> std::io::Result<()> {
         let budget = if k % 2 == 0 { 0 } else { FLIGHT_BUDGET };
         r.set_m13_page_budget(budget);
         let p = r.frame_profiled(flight(0), &view_target);
-        let t = ms(p.passes[6]) + ms(p.passes[7]);
+        // The page passes: the last two (passes 6 and 7 before M13 gate 8,
+        // now 7 and 8).
+        let t = ms(p.passes[7]) + ms(p.passes[8]);
         if budget == 0 {
             without.push(t)
         } else {

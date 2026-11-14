@@ -6187,7 +6187,7 @@ fn m13_to_world(x: u32, p: vec3<f32>) -> vec3<f32> {
     return rotate_to_world(x, p * xforms[4u * x + 3u].x) + translation(x);
 }
 
-const MAP_DIRS: u32 = 16u;
+const MAP_DIRS: u32 = 32u;
 const MAP_TEXELS: u32 = 16u;
 const MAP_PER_DIR: u32 = 341u;
 // Instances at most this many pixels across read their map.

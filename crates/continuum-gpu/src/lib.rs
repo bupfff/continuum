@@ -598,7 +598,9 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_visibility_blend",
     "hw_edges",
     "hw_m13_corners",
+    "hw_m13_corners_tiles",
     "hw_m13_near",
+    "hw_m13_prep",
     "hw_m13_tile_roots",
     "hw_m13_bins",
     "hw_m13_bin_args",
@@ -631,26 +633,32 @@ pub(crate) const M13_NEAR_BINDINGS: &[u32] = &[0, 2, 3, 6, 7, 9, 10, 25, 26, 29,
 /// M13 gate 5: the tile pass after the corner rays, with the maps' texture
 /// (85) and sampler (86).
 pub(crate) const M13_TILES_BINDINGS: &[u32] = &[
-    0, 3, 6, 7, 9, 10, 29, 30, 82, 85, 86, 87, 88, 90, 91, 92, 94, 95,
+    0, 6, 7, 9, 10, 29, 85, 86, 87, 88, 91, 92, 95, 96, 97, 98, 100,
 ];
 /// M13 gate 6: the coverage pages' bakes after the pixels' pass, and their
 /// dispatch.
 pub(crate) const M13_PAGE_ARGS_BINDINGS: &[u32] = &[6, 91, 92, 93, 94];
+/// M13 gate 8: the corner rays after the roots pass, in tiles that may hold
+/// a large instance.
+pub(crate) const M13_CORNERS_TILES_BINDINGS: &[u32] = &[3, 6, 31, 32, 87, 92, 96];
+/// M13 gate 8: the once-a-frame pass: page records, the nodes' projections
+/// and instance records, one invocation per page, node and object.
+pub(crate) const M13_PREP_BINDINGS: &[u32] = &[6, 9, 90, 91, 92, 94, 96, 97, 98];
 pub(crate) const M13_PAGE_BAKE_BINDINGS: &[u32] = &[3, 6, 9, 32, 91, 92, 94, 95];
 /// M13 gate 6's coverage pages: the pool, the requests' list, the state's
 /// counters, and the pages baked a frame by default.
-pub(crate) const M13_PAGE_POOL: usize = 32_768;
+pub(crate) const M13_PAGE_POOL: usize = 16_384;
 pub(crate) const M13_PAGE_REQUESTS: usize = 4_096;
 pub(crate) const M13_PAGE_META: usize = 32;
 pub(crate) const M13_PAGE_BUDGET: u32 = 64;
 /// M13 gate 5: the roots pass, one invocation per tile listing the subtree
 /// roots its pixels walk (87); it also restarts the bin rays' list (88).
-pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88, 91, 92, 94];
+pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88, 91, 92, 97, 98, 99];
 /// M13 gate 5: the pixels covered by their corners, and the list of those
 /// tracing bin rays (88); the list's dispatch arguments; the rays.
 pub(crate) const M13_BINS_BINDINGS: &[u32] = &[6, 31, 88];
 pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
-pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[2, 3, 6, 30, 32, 82, 88];
+pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[3, 6, 32, 88, 92, 96];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
@@ -1801,39 +1809,117 @@ impl MaskConeKernel {
             *self.m13_maps_info.borrow_mut() = (start.elapsed(), maps.len() * 4);
             if matches!(self.profile_stage.get(), 17 | 18) {
                 *self.m13_coverage.borrow_mut() = Some(self.coverage_texture(&maps));
+                // M13 gate 8: per map (a layer per geometry and direction)
+                // the bounding rectangle of its finest level's texels that
+                // are not zero (texels u0, v0, then u1, v1 past the last, a
+                // byte each), so reads skip the bins that can only read zero.
+                let (dirs, texels, per) = coverage_maps::layout();
+                let mut rects = Vec::new();
+                for k in 0..maps[0] as usize {
+                    let base = maps[1 + 8 * k + 1] as usize;
+                    for d in 0..(dirs * dirs) as usize {
+                        let (mut lo, mut hi) = ([texels; 2], [0u32; 2]);
+                        for t in 0..(texels * texels) as usize {
+                            let v = f32::from_bits(maps[base + d * per as usize + t]);
+                            if (v.clamp(0.0, 1.0) * 255.0).round() > 0.0 {
+                                let (u, w) = (t as u32 % texels, t as u32 / texels);
+                                lo = [lo[0].min(u), lo[1].min(w)];
+                                hi = [hi[0].max(u + 1), hi[1].max(w + 1)];
+                            }
+                        }
+                        rects.push(lo[0] | lo[1] << 8 | hi[0] << 16 | hi[1] << 24);
+                    }
+                }
+                rects.push(0);
+                buffers.push((100, storage("map rectangles", bytemuck::cast_slice(&rects))));
                 // Each object's world bounding sphere about its map's centre
                 // (radius 0 without a map), so the walk tests and sets up an
                 // instance without its map's header and transform.
+                // Per object (M13 gates 5 and 8): its world bounding sphere
+                // about its map's centre (radius 0 without a map), then its
+                // rotation from world to object as a quaternion (w at least
+                // 0, left out) and its maps' first layer.
+                let dirs = coverage_maps::DIRS * coverage_maps::DIRS;
                 let spheres: Vec<[f32; 4]> = flat
                     .ranges
                     .iter()
-                    .map(|range| {
+                    .flat_map(|range| {
                         let Some(k) = (0..maps[0] as usize).find(|&k| maps[1 + 8 * k] == range[2])
                         else {
-                            return [0.0; 4];
+                            return [[0.0; 4]; 2];
                         };
                         let word = |i: usize| f32::from_bits(maps[1 + 8 * k + i]);
                         let c = Vec3::new(word(2), word(3), word(4));
+                        let first = f32::from_bits(k as u32 * dirs);
                         let x = range[3];
                         if x == hierarchy::NONE {
-                            return [c.x, c.y, c.z, word(5)];
+                            return [[c.x, c.y, c.z, word(5)], [0.0, 0.0, 0.0, first]];
                         }
                         let row = |j: usize| xforms[4 * x as usize + j];
                         let s = row(3)[0];
-                        let w = Vec3::new(
-                            row(0)[0] * c.x + row(0)[1] * c.y + row(0)[2] * c.z,
-                            row(1)[0] * c.x + row(1)[1] * c.y + row(1)[2] * c.z,
-                            row(2)[0] * c.x + row(2)[1] * c.y + row(2)[2] * c.z,
-                        ) * s
+                        let rows = [0, 1, 2].map(|j| Vec3::new(row(j)[0], row(j)[1], row(j)[2]));
+                        let w = Vec3::new(rows[0].dot(c), rows[1].dot(c), rows[2].dot(c)) * s
                             + Vec3::new(row(0)[3], row(1)[3], row(2)[3]);
-                        [w.x, w.y, w.z, word(5) * s]
+                        // World to object: the rows as columns.
+                        let mut q = continuum::glam::Quat::from_mat3(&Mat3::from_cols(
+                            rows[0], rows[1], rows[2],
+                        ));
+                        if q.w < 0.0 {
+                            q = -q;
+                        }
+                        [[w.x, w.y, w.z, word(5) * s], [q.x, q.y, q.z, first]]
                     })
                     .collect();
+                // Per node the radius of its largest instance (unbounded for
+                // instances without maps, always large).
+                let mut largest = vec![0.0f32; nodes.len()];
+                for k in (0..nodes.len()).rev() {
+                    let info = nodes[k].info;
+                    largest[k] = if info[1] > 0 {
+                        (info[0]..info[0] + info[1])
+                            .map(|i| {
+                                let r = spheres
+                                    .get(2 * items[i as usize] as usize)
+                                    .map_or(0.0, |s| s[3]);
+                                if r > 0.0 { r } else { 1e30 }
+                            })
+                            .fold(0.0, f32::max)
+                    } else if info[3] != 0 {
+                        1e30
+                    } else {
+                        largest[info[0] as usize].max(largest[info[0] as usize + 1])
+                    };
+                }
                 buffers.push((
                     90,
                     storage("object spheres", bytemuck::cast_slice(&spheres)),
                 ));
+                buffers.push((
+                    99,
+                    storage("node largest radii", bytemuck::cast_slice(&largest)),
+                ));
                 buffers.extend(self.m13_page_buffers(&nodes, &items, flat.ranges.len()));
+                // M13 gate 8: each object-hierarchy node's projection, written
+                // once a frame.
+                buffers.push((
+                    98,
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("node boxes"),
+                        size: nodes.len().max(1) as u64 * 16,
+                        usage: wgpu::BufferUsages::STORAGE,
+                        mapped_at_creation: false,
+                    }),
+                ));
+                // M13 gate 8: each object's record, written once a frame.
+                buffers.push((
+                    96,
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("instance records"),
+                        size: flat.ranges.len().max(1) as u64 * 32,
+                        usage: wgpu::BufferUsages::STORAGE,
+                        mapped_at_creation: false,
+                    }),
+                ));
             }
             buffers.push((82, storage("coverage maps", bytemuck::cast_slice(&maps))));
         }
@@ -1912,7 +1998,11 @@ impl MaskConeKernel {
                 94,
                 init("page headers", bytemuck::cast_slice(&headers), none),
             ),
-            (95, init("page texels", &vec![0; M13_PAGE_POOL * 512], none)),
+            (
+                95,
+                init("page texels", &vec![0; M13_PAGE_POOL * 2048], none),
+            ),
+            (97, init("page records", &vec![0; M13_PAGE_POOL * 48], none)),
         ]
     }
 
