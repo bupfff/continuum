@@ -925,7 +925,11 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
     let th = (u32(camera.params.y) + 7u) / 8u;
     if (gid.x >= tw || gid.y >= th) { return; }
     // The bin rays' list starts empty (it fills in `hw_m13_bins`).
-    if (gid.x == 0u && gid.y == 0u) { atomicStore(&m13_work[0], 0u);}
+    if (gid.x == 0u && gid.y == 0u) {
+        atomicStore(&m13_work[0], 0u);
+        atomicStore(&m13_work[1], 0u);
+        atomicStore(&m13_work[2], 0u);
+    }
     let base = (gid.y * tw + gid.x) * G5_TILE_WORDS;
     let lo = vec2<f32>(f32(gid.x * 8u), f32(gid.y * 8u));
     let hi = lo + vec2<f32>(8.0);
@@ -2414,6 +2418,12 @@ const G10_SHADED: u32 = 524288u;
 const G10_ENTRY: u32 = 20u;
 // After the entries: the list of those the shading pass shades.
 const G10_LIST: u32 = 20u * 524288u;
+// Then the entries whose background's bins are shaded one by one, then the
+// sun cache's misses of those bins (G10_MISSES at most, six words each:
+// entry, bin, the point, its distance; count in the work buffer's word 1).
+const G10_BGLIST: u32 = 21u * 524288u;
+const G10_MISS: u32 = 22u * 524288u;
+const G10_MISSES: u32 = 1048576u;
 fn g10_shaded_word(entry: u32) -> u32 {
     return G10_ENTRY * entry;
 }
@@ -2527,20 +2537,39 @@ fn g10_entry(pixel: u32, resolved: bool, traced: bool, cws: vec4<u32>, co: vec4<
     m13_plain[g9_large_word(pixel) + 19u * p] = entry;
     // Entries whose bins no bin ray shades, listed for the shading pass
     // (their count in state word 31).
-    if (!traced) {
+    if (!traced && (flags & (6u << G10_SHADE)) != 0u) {
         let i = atomicAdd(&g6_state[31], 1u);
         m13_shaded[G10_LIST + i] = entry;
     }
+    // Entries whose background's bins are shaded one by one (count in the
+    // work buffer's word 2).
+    if ((flags & (1u << G10_SHADE)) != 0u) {
+        let i = atomicAdd(&m13_work[2], 1u);
+        m13_shaded[G10_BGLIST + i] = entry;
+    }
 }
 
-// The shaded bins' dispatch arguments: 16 a listed pixel, 64 a workgroup.
+// Dispatch arguments at word `at` for `n` invocations, 64 a workgroup.
+fn g10_args(at: u32, n: u32) {
+    let groups = (n + 63u) / 64u;
+    let x = min(groups, 65535u);
+    m13_args[at] = x;
+    m13_args[at + 1u] = select(1u, (groups + x - 1u) / x, x > 0u);
+    m13_args[at + 2u] = 1u;
+}
+
+// The misses' dispatch arguments (M13 appearance, third).
+@compute @workgroup_size(1)
+fn hw_m13_miss_args() {
+    g10_args(8u, min(atomicLoad(&m13_work[1]), G10_MISSES));
+}
+
+// The shaded bins' dispatch arguments: the large objects' samples, then the
+// backgrounds' bins.
 @compute @workgroup_size(1)
 fn hw_m13_shade_args() {
-    let groups = (min(atomicLoad(&g6_state[31]), G10_SHADED) * G10_SAMPLES + 63u) / 64u;
-    let x = min(groups, 65535u);
-    m13_args[0] = x;
-    m13_args[1] = select(1u, (groups + x - 1u) / x, x > 0u);
-    m13_args[2] = 1u;
+    g10_args(0u, min(atomicLoad(&g6_state[31]), G10_SHADED) * 4u);
+    g10_args(4u, min(atomicLoad(&m13_work[2]), G10_SHADED) * 4u);
 }
 
 // The model at a point `p` seen along `dir` from distance `dist`, with
@@ -2559,12 +2588,11 @@ fn g10_shade(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f
 @compute @workgroup_size(64)
 fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let t = (wg.y * nwg.x + wg.x) * 64u + li;
-    if (t >= min(atomicLoad(&g6_state[31]), G10_SHADED) * G10_SAMPLES) { return; }
-    let entry = m13_shaded[G10_LIST + t / G10_SAMPLES];
-    // With 4 samples a pixel, each shades a quarter's 2×2 bins from its
-    // centre (bin b its first).
-    var b = t % G10_SAMPLES;
-    if (G10_SAMPLES == 4u) { b = 2u * (b % 2u) + 8u * (b / 2u); }
+    if (t >= min(atomicLoad(&g6_state[31]), G10_SHADED) * 4u) { return; }
+    let entry = m13_shaded[G10_LIST + t / 4u];
+    // Each invocation a quarter's 2×2 bins (b0 its first).
+    let qk = t % 4u;
+    let b0 = 2u * (qk % 2u) + 8u * (qk / 2u);
     let base = g10_shaded_word(entry);
     let head = m13_shaded[base + 16u];
     let pixel = head & 0xfffffu;
@@ -2573,60 +2601,208 @@ fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgrou
     let masks = atomicLoad(&m13_work[g9_claims(at) + 2u * p]);
     let l1 = masks & 0xffffu;
     let l2 = (masks >> 16u) & ~l1;
-    let bit = 1u << b;
-    var k = 0u;
-    if ((l1 & bit) != 0u) { k = 1u; } else if ((l2 & bit) != 0u) { k = 2u; }
-    var obj = m13_plain[at + 4u * p];
-    if (k > 0u) { obj = atomicLoad(&m13_work[g9_claims(at) + (k - 1u) * p]); }
-    var word = 0u;
-    if (((head >> (G10_SHADE + k)) & 1u) != 0u && obj != NONE && obj != G9_SKY) {
-        let w = u32(camera.params.x);
-        let e = camera.eye.xyz;
-        let tz = camera.params.z;
-        let aspect = camera.params.x / camera.params.y;
-        let gx = pixel % w;
-        let gy = pixel / w;
-        var q = vec2<f32>(f32(gx), f32(gy)) + (vec2<f32>(f32(b % 4u), f32(b / 4u)) + vec2<f32>(0.5)) * 0.25;
-        if (G10_SAMPLES == 4u) { q += vec2<f32>(0.125); }
-        let qx = (q.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
-        let qy = (1.0 - q.y / camera.params.y * 2.0) * tz;
-        let dir = normalize(camera.forward.xyz + camera.right.xyz * qx + camera.up.xyz * qy);
-        var v = -1.0;
-        if (((head >> (G10_TRACE + k)) & 1u) == 0u) { v = select(0.0, 1.0, ((head >> (G10_LIT + k)) & 1u) != 0u); }
-        // One query: background objects alone (mask bit 0) for the
-        // background, else everything from just before the corners'
-        // nearest hit (the pixel's corners all show the object).
-        var t0 = 0.0;
-        var mask = 0x01u;
-        if (k > 0u) {
-            mask = 0xffu;
-            let x1 = min(gx + 1u, w - 1u);
-            let y1 = min(gy + 1u, u32(camera.params.y) - 1u);
-            let near = min(min(bitcast<f32>(m13_plain[g9_corner_word(gy * w + gx) + 4u * p]), bitcast<f32>(m13_plain[g9_corner_word(gy * w + x1) + 4u * p])),
-                min(bitcast<f32>(m13_plain[g9_corner_word(y1 * w + gx) + 4u * p]), bitcast<f32>(m13_plain[g9_corner_word(y1 * w + x1) + 4u * p])));
-            if (G10_NEAR_START && near < 3.0e38) { t0 = 0.9 * near; }
+    let w = u32(camera.params.x);
+    let e = camera.eye.xyz;
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    let gx = pixel % w;
+    let gy = pixel / w;
+    let x1 = min(gx + 1u, w - 1u);
+    let y1 = min(gy + 1u, u32(camera.params.y) - 1u);
+    let cws = vec4<u32>(g9_corner_word(gy * w + gx), g9_corner_word(gy * w + x1), g9_corner_word(y1 * w + gx), g9_corner_word(y1 * w + x1));
+    let scale = g9_scale();
+    let bg = m13_plain[at + 4u * p];
+    // The large object's sample at the quarter's centre, once (pixels the
+    // corners resolved: their bins all show it).
+    var large_word = 0u;
+    var large_done = false;
+    for (var j = 0u; j < 4u; j++) {
+        let b = b0 + (j % 2u) + 4u * (j / 2u);
+        let bit = 1u << b;
+        var k = 0u;
+        if ((l1 & bit) != 0u) { k = 1u; } else if ((l2 & bit) != 0u) { k = 2u; }
+        var obj = bg;
+        if (k > 0u) { obj = atomicLoad(&m13_work[g9_claims(at) + (k - 1u) * p]); }
+        var word = 0u;
+        if (((head >> (G10_SHADE + k)) & 1u) != 0u && obj != NONE && obj != G9_SKY) {
+            if (k == 0u) {
+                continue;
+            } else {
+                if (!large_done) {
+                    large_done = true;
+                    let q = vec2<f32>(f32(gx), f32(gy)) + (vec2<f32>(f32(b0 % 4u), f32(b0 / 4u)) + vec2<f32>(1.0)) * 0.25;
+                    let qx = (q.x / camera.params.x * 2.0 - 1.0) * tz * aspect;
+                    let qy = (1.0 - q.y / camera.params.y * 2.0) * tz;
+                    let dir = normalize(camera.forward.xyz + camera.right.xyz * qx + camera.up.xyz * qy);
+                    var v = -1.0;
+                    if (((head >> (G10_TRACE + k)) & 1u) == 0u) { v = select(0.0, 1.0, ((head >> (G10_LIT + k)) & 1u) != 0u); }
+                    // From just before the corners' nearest hit (they all
+                    // show the object).
+                    let d = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 4u * p], m13_plain[cws.y + 4u * p], m13_plain[cws.z + 4u * p], m13_plain[cws.w + 4u * p]));
+                    let near = min(min(d.x, d.y), min(d.z, d.w));
+                    var t0 = 0.0;
+                    if (G10_NEAR_START && near < 3.0e38) { t0 = 0.9 * near; }
+                    let hit = g10_hit(e + dir * t0, dir, 0xffu);
+                    if (hit.x == obj) {
+                        let dist = bitcast<f32>(hit.z) + t0;
+                        let ph = e + dir * dist;
+                        let v0 = tris[3u * hit.y].xyz;
+                        var ng = normalize(normal_to_world(obj, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
+                        if (dot(ng, dir) > 0.0) { ng = -ng; }
+                        large_word = g10_pack(g10_shade(obj, hit.y, ph, dist, dir, ng, shading_normal(obj, hit.y, ph, -dir), v), scale) | G10_SHADED_BIT;
+                    }
+                }
+                word = large_word;
+            }
         }
-        let hit = g10_hit(e + dir * t0, dir, mask);
-        if (hit.x == obj) {
-            let dist = bitcast<f32>(hit.z) + t0;
-            let ph = e + dir * dist;
-            let v0 = tris[3u * hit.y].xyz;
-            var ng = normalize(normal_to_world(obj, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
-            if (dot(ng, dir) > 0.0) { ng = -ng; }
-            word = g10_pack(g10_shade(obj, hit.y, ph, dist, dir, ng, shading_normal(obj, hit.y, ph, -dir), v), g9_scale()) | G10_SHADED_BIT;
-        }
-    }
-    m13_shaded[base + b] = word;
-    if (G10_SAMPLES == 4u) {
-        m13_shaded[base + b + 1u] = word;
-        m13_shaded[base + b + 4u] = word;
-        m13_shaded[base + b + 5u] = word;
+        m13_shaded[base + b] = word;
     }
 }
 
-// Samples a pixel the shading pass takes: 16 (a bin each) or 4 (a 2×2
-// quarter each; development).
-const G10_SAMPLES: u32 = 4u;
+// A background bin's colour where its corners disagree on the sun (M13
+// appearance, third): its point on the background by its corners' 1/t,
+// bilinearly (exact for a plane); the sun's visibility there from the
+// cache; the colour of its corners that agree with that, bilinearly.
+struct G12Corners {
+    co: vec4<u32>,
+    cb: vec4<u32>,
+    cv: vec4<u32>,
+    cd: vec4<f32>,
+    cr: vec4<f32>,
+    cg: vec4<f32>,
+    cbl: vec4<f32>,
+};
+
+fn g12_corners(cws: vec4<u32>) -> G12Corners {
+    let p = g9_p();
+    return G12Corners(
+        vec4<u32>(m13_plain[cws.x + 3u * p], m13_plain[cws.y + 3u * p], m13_plain[cws.z + 3u * p], m13_plain[cws.w + 3u * p]),
+        vec4<u32>(m13_plain[cws.x + 5u * p], m13_plain[cws.y + 5u * p], m13_plain[cws.z + 5u * p], m13_plain[cws.w + 5u * p]),
+        vec4<u32>(m13_plain[cws.x + 6u * p], m13_plain[cws.y + 6u * p], m13_plain[cws.z + 6u * p], m13_plain[cws.w + 6u * p]),
+        bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 7u * p], m13_plain[cws.y + 7u * p], m13_plain[cws.z + 7u * p], m13_plain[cws.w + 7u * p])),
+        bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x], m13_plain[cws.y], m13_plain[cws.z], m13_plain[cws.w])),
+        bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + p], m13_plain[cws.y + p], m13_plain[cws.z + p], m13_plain[cws.w + p])),
+        bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 2u * p], m13_plain[cws.y + 2u * p], m13_plain[cws.z + 2u * p], m13_plain[cws.w + 2u * p])));
+}
+
+// A background bin's point on the background (by its corners' 1/t,
+// bilinearly: exact for a plane) and the ray's direction; w of the point
+// its distance (0: none).
+fn g12_bin_point(b: u32, gx: u32, gy: u32, c: G12Corners, obj: u32) -> array<vec4<f32>, 2> {
+    var out: array<vec4<f32>, 2>;
+    if (any(c.cb != vec4<u32>(obj)) || any(c.cd >= vec4<f32>(3.0e38))) { return out; }
+    let fx = (f32(b % 4u) + 0.5) * 0.25;
+    let fy = (f32(b / 4u) + 0.5) * 0.25;
+    let wb = vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy);
+    let dist = 1.0 / dot(wb, vec4<f32>(1.0) / c.cd);
+    let tz = camera.params.z;
+    let aspect = camera.params.x / camera.params.y;
+    let q = vec2<f32>(f32(gx) + fx, f32(gy) + fy);
+    let dir = normalize(camera.forward.xyz + camera.right.xyz * ((q.x / camera.params.x * 2.0 - 1.0) * tz * aspect) + camera.up.xyz * ((1.0 - q.y / camera.params.y * 2.0) * tz));
+    out[0] = vec4<f32>(camera.eye.xyz + dir * dist, dist);
+    out[1] = vec4<f32>(dir, 0.0);
+    return out;
+}
+
+// A background bin's colour with the sun's visibility `open` there: the
+// colour of its corners that show the background with the same
+// visibility, bilinearly.
+fn g12_bin_colour(b: u32, c: G12Corners, obj: u32, open: bool, scale: f32) -> u32 {
+    let fx = (f32(b % 4u) + 0.5) * 0.25;
+    let fy = (f32(b / 4u) + 0.5) * 0.25;
+    let wb = vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy);
+    let mine = (c.co == vec4<u32>(obj)) & ((c.cv != vec4<u32>(0u)) == vec4<bool>(open));
+    let wk = wb * select(vec4<f32>(0.0), vec4<f32>(1.0), mine);
+    let sum = wk.x + wk.y + wk.z + wk.w;
+    if (sum < 1e-6) { return 0u; }
+    return g10_pack(vec3<f32>(dot(wk, c.cr), dot(wk, c.cg), dot(wk, c.cbl)) / sum, scale) | G10_SHADED_BIT;
+}
+
+// The pixel corner words of `pixel`.
+fn g12_cws(pixel: u32) -> vec4<u32> {
+    let w = u32(camera.params.x);
+    let gx = pixel % w;
+    let gy = pixel / w;
+    let x1 = min(gx + 1u, w - 1u);
+    let y1 = min(gy + 1u, u32(camera.params.y) - 1u);
+    return vec4<u32>(g9_corner_word(gy * w + gx), g9_corner_word(gy * w + x1), g9_corner_word(y1 * w + gx), g9_corner_word(y1 * w + x1));
+}
+
+// Development: one sun visibility per quarter of a background's bins.
+const G12_QUARTERS: bool = true;
+
+// Backgrounds' bins where their corners disagree on the sun (M13
+// appearance, third), a quarter of a pixel an invocation, without rays:
+// the sun's visibility from the cache; misses listed for the next pass.
+@compute @workgroup_size(64)
+fn hw_m13_shade_background(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let t = (wg.y * nwg.x + wg.x) * 64u + li;
+    if (t >= min(atomicLoad(&m13_work[2]), G10_SHADED) * 4u) { return; }
+    let entry = m13_shaded[G10_BGLIST + t / 4u];
+    let qk = t % 4u;
+    let b0 = 2u * (qk % 2u) + 8u * (qk / 2u);
+    let base = g10_shaded_word(entry);
+    let pixel = m13_shaded[base + 16u] & 0xfffffu;
+    let at = g9_large_word(pixel);
+    let p = g9_p();
+    let masks = atomicLoad(&m13_work[g9_claims(at) + 2u * p]);
+    let bg = m13_plain[at + 4u * p];
+    if (bg == NONE) { return; }
+    let c = g12_corners(g12_cws(pixel));
+    let w = u32(camera.params.x);
+    let scale = g9_scale();
+    // With G12_QUARTERS one visibility a quarter, at its first bin's point.
+    var qbits = 0u;
+    if (G12_QUARTERS) {
+        let pq = g12_bin_point(b0 + 5u * 0u, pixel % w, pixel / w, c, bg);
+        if (pq[0].w > 0.0) { qbits = g11_lookup(pq[0].xyz, pq[0].w); }
+    }
+    for (var j = 0u; j < 4u; j++) {
+        let b = b0 + (j % 2u) + 4u * (j / 2u);
+        if (((masks | (masks >> 16u)) & (1u << b)) != 0u) { continue; }
+        if (G12_QUARTERS && qbits != 0u) {
+            m13_shaded[base + b] = g12_bin_colour(b, c, bg, qbits == 3u, scale);
+            continue;
+        }
+        let pd = g12_bin_point(b, pixel % w, pixel / w, c, bg);
+        if (pd[0].w <= 0.0) { continue; }
+        var bits = 0u;
+        if (!G12_QUARTERS) { bits = g11_lookup(pd[0].xyz, pd[0].w); }
+        if (bits != 0u) {
+            m13_shaded[base + b] = g12_bin_colour(b, c, bg, bits == 3u, scale);
+            continue;
+        }
+        if (G12_QUARTERS && j > 0u) { continue; }
+        let i = atomicAdd(&m13_work[1], 1u);
+        if (i >= G10_MISSES) { continue; }
+        let r = G10_MISS + 6u * i;
+        m13_shaded[r] = entry;
+        m13_shaded[r + 1u] = b;
+        m13_shaded[r + 2u] = bitcast<u32>(pd[0].x);
+        m13_shaded[r + 3u] = bitcast<u32>(pd[0].y);
+        m13_shaded[r + 4u] = bitcast<u32>(pd[0].z);
+        m13_shaded[r + 5u] = bitcast<u32>(pd[0].w);
+    }
+}
+
+// The misses: a shadow ray each, into the cache and the bin's colour.
+@compute @workgroup_size(64)
+fn hw_m13_shade_misses(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let t = (wg.y * nwg.x + wg.x) * 64u + li;
+    if (t >= min(atomicLoad(&m13_work[1]), G10_MISSES)) { return; }
+    let r = G10_MISS + 6u * t;
+    let entry = m13_shaded[r];
+    let b = m13_shaded[r + 1u];
+    let pt = vec3<f32>(bitcast<f32>(m13_shaded[r + 2u]), bitcast<f32>(m13_shaded[r + 3u]), bitcast<f32>(m13_shaded[r + 4u]));
+    let dist = bitcast<f32>(m13_shaded[r + 5u]);
+    let base = g10_shaded_word(entry);
+    let pixel = m13_shaded[base + 16u] & 0xfffffu;
+    let bg = m13_plain[g9_large_word(pixel) + 4u * g9_p()];
+    let c = g12_corners(g12_cws(pixel));
+    let dir = normalize(pt - camera.eye.xyz);
+    let open = g11_sun_open(pt, -dir, dist, g9_sun(pt), true);
+    m13_shaded[base + b] = g12_bin_colour(b, c, bg, open, g9_scale());
+}
 
 // The nearest hit among instances in `mask` (M13 gate 10: one query of any
 // facing; the shading pass's rays meet front faces of closed objects).
@@ -2746,14 +2922,15 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
 // --- M13 appearance, third (development): the sun's visibility cached. ---
 
 // The light's visibility from points of still surfaces, cached in world
-// space while the light and the scene are still: bricks of 4×4×4 cells,
-// a cell about a bin at its distance from the eye (a power of two of
-// 2^-12 m), each cell two bits (0 unknown, 2 shadowed, 3 lit), found by a
-// hash of the brick's level and place; per slot a fingerprint and four
-// words. After the slots, per object the visibility from its sphere's
-// sunward point (the records' one ray).
+// space while the light and the scene are still. Cells are cubes about a
+// bin wide at their distance from the eye (a power of two of 2^-12 m); a
+// cell's word holds 30 bits of its key's fingerprint and two of
+// visibility (2 shadowed, 3 lit; 0 an empty word). The cells of a 4×4×4
+// brick share a bucket of 16 words (one cache line, filled in order, the
+// next bucket on overflow), so a pixel's bins read few lines. After the
+// buckets, per object the visibility from its sphere's sunward point.
 @group(0) @binding(104) var<storage, read_write> g11_sun: array<atomic<u32>>;
-const G11_SLOTS: u32 = 2097152u;
+const G11_BUCKETS: u32 = 1048576u;
 // Development: the cache on.
 const G11_CACHE: bool = true;
 
@@ -2767,12 +2944,8 @@ fn g11_hash(a: u32) -> u32 {
     return x;
 }
 
-// Whether the light's centre is visible from surface point `p` (geometric
-// normal `ng`, `dist` from the eye), from the cache where `cached`, a
-// shadow ray filling it on a miss.
-fn g11_sun_open(p: vec3<f32>, ng: vec3<f32>, dist: f32, sun: G9Sun, cached: bool) -> bool {
-    let origin = p + ng * surface_offset(dist);
-    if (!G11_CACHE || !cached) { return hw_segment_open(origin, sun.l, sun.dist); }
+// A point's bucket and its cell's fingerprint (30 bits, not zero).
+fn g11_key(p: vec3<f32>, dist: f32) -> vec2<u32> {
     // A bin's width at the point: the pixel's over four.
     let f = dist * camera.params.z * 0.5 / camera.params.y;
     let lvl = clamp(round(log2(max(f, 1e-9))) + 12.0, 0.0, 30.0);
@@ -2782,22 +2955,48 @@ fn g11_sun_open(p: vec3<f32>, ng: vec3<f32>, dist: f32, sun: G9Sun, cached: bool
     let c = clamp(ic - 4 * ib, vec3<i32>(0), vec3<i32>(3));
     let idx = u32(c.x + 4 * c.y + 16 * c.z);
     let h = g11_hash(u32(lvl) ^ g11_hash(bitcast<u32>(ib.x) ^ g11_hash(bitcast<u32>(ib.y) ^ g11_hash(bitcast<u32>(ib.z) + 0x632be5abu))));
-    let fp = g11_hash(h ^ 0x9e3779b9u) | 1u;
-    let word = 1u + idx / 16u;
-    let shift = 2u * (idx % 16u);
-    for (var k = 0u; k < 8u; k++) {
-        let base = 5u * ((h + k) & (G11_SLOTS - 1u));
-        var f0 = atomicLoad(&g11_sun[base]);
-        if (f0 == 0u) {
-            let r = atomicCompareExchangeWeak(&g11_sun[base], 0u, fp);
-            f0 = select(r.old_value, fp, r.exchanged);
+    return vec2<u32>(h & (G11_BUCKETS - 1u), (g11_hash(h ^ (idx * 0x9e3779b9u)) >> 2u) | 1u);
+}
+
+// The cache's two bits for surface point `p` (`dist` from the eye): 0 if
+// unknown (no ray here: lean passes).
+fn g11_lookup(p: vec3<f32>, dist: f32) -> u32 {
+    let key = g11_key(p, dist);
+    for (var j = 0u; j < 2u; j++) {
+        let base = 16u * ((key.x + j) & (G11_BUCKETS - 1u));
+        for (var k = 0u; k < 16u; k++) {
+            let word = atomicLoad(&g11_sun[base + k]);
+            if (word == 0u) { return 0u; }
+            if ((word >> 2u) == key.y) { return word & 3u; }
         }
-        if (f0 != fp) { continue; }
-        let bits = (atomicLoad(&g11_sun[base + word]) >> shift) & 3u;
-        if (bits != 0u) { return bits == 3u; }
-        let open = hw_segment_open(origin, sun.l, sun.dist);
-        atomicOr(&g11_sun[base + word], select(2u, 3u, open) << shift);
-        return open;
+    }
+    return 0u;
+}
+
+// Whether the light's centre is visible from surface point `p` (geometric
+// normal `ng`, `dist` from the eye), from the cache where `cached`, a
+// shadow ray filling it on a miss.
+fn g11_sun_open(p: vec3<f32>, ng: vec3<f32>, dist: f32, sun: G9Sun, cached: bool) -> bool {
+    let origin = p + ng * surface_offset(dist);
+    if (!G11_CACHE || !cached) { return hw_segment_open(origin, sun.l, sun.dist); }
+    let key = g11_key(p, dist);
+    for (var j = 0u; j < 2u; j++) {
+        let base = 16u * ((key.x + j) & (G11_BUCKETS - 1u));
+        for (var k = 0u; k < 16u; k++) {
+            let word = atomicLoad(&g11_sun[base + k]);
+            if (word == 0u) {
+                let open = hw_segment_open(origin, sun.l, sun.dist);
+                let mine = (key.y << 2u) | select(2u, 3u, open);
+                // Into the first empty word from here (another thread's
+                // cell may take this one first).
+                for (var m = k; m < 16u; m++) {
+                    let r = atomicCompareExchangeWeak(&g11_sun[base + m], 0u, mine);
+                    if (r.exchanged || (r.old_value >> 2u) == key.y) { break; }
+                }
+                return open;
+            }
+            if ((word >> 2u) == key.y) { return (word & 3u) == 3u; }
+        }
     }
     return hw_segment_open(origin, sun.l, sun.dist);
 }
@@ -2806,7 +3005,7 @@ fn g11_sun_open(p: vec3<f32>, ng: vec3<f32>, dist: f32, sun: G9Sun, cached: bool
 // per object.
 fn g11_object_open(m: u32, q: vec3<f32>, sun: G9Sun) -> f32 {
     if (!G11_CACHE) { return select(0.0, 1.0, hw_segment_open(q, sun.l, sun.dist)); }
-    let at = 5u * G11_SLOTS + m;
+    let at = 16u * G11_BUCKETS + m;
     let bits = atomicLoad(&g11_sun[at]);
     if (bits != 0u) { return select(0.0, 1.0, bits == 3u); }
     let open = hw_segment_open(q, sun.l, sun.dist);

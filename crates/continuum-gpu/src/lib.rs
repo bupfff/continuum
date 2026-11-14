@@ -607,6 +607,9 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_bin_rays",
     "hw_m13_shade_args",
     "hw_m13_shade_rays",
+    "hw_m13_shade_background",
+    "hw_m13_miss_args",
+    "hw_m13_shade_misses",
     "hw_m13_tiles",
     "hw_m13_reference",
     "hw_m13_page_args",
@@ -675,7 +678,12 @@ pub(crate) const M13_BINS_BINDINGS: &[u32] = &[
 pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
 /// M13 gate 10 (development): bins shaded one by one where a pixel's
 /// corners do not suffice: the list of pixels, its arguments, the bins.
-pub(crate) const M13_SHADE_ARGS_BINDINGS: &[u32] = &[89, 92];
+pub(crate) const M13_SHADE_ARGS_BINDINGS: &[u32] = &[88, 89, 92];
+/// M13 appearance, third: backgrounds' bins from the sun's cache (no rays),
+/// the misses' arguments, the misses.
+pub(crate) const M13_SHADE_BACKGROUND_BINDINGS: &[u32] = &[6, 52, 88, 102, 103, 104];
+pub(crate) const M13_MISS_ARGS_BINDINGS: &[u32] = &[89, 88];
+pub(crate) const M13_SHADE_MISSES_BINDINGS: &[u32] = &[6, 32, 52, 88, 102, 103, 104];
 pub(crate) const M13_SHADE_RAYS_BINDINGS: &[u32] = &[
     2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 102, 103, 104,
 ];

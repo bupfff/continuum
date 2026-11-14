@@ -21,7 +21,7 @@ use crate::{
     M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS,
     M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS,
     M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS,
-    M13_SHADE_ARGS_BINDINGS, M13_SHADE_RAYS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel,
+    M13_SHADE_ARGS_BINDINGS, M13_SHADE_RAYS_BINDINGS, M13_SHADE_BACKGROUND_BINDINGS, M13_MISS_ARGS_BINDINGS, M13_SHADE_MISSES_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel,
     RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
     VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
     VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
@@ -69,6 +69,9 @@ enum CameraDispatch {
     M13Rays,
     /// From the arguments the page requests wrote (M13 gate 6).
     M13Pages,
+    /// From the colour passes' arguments at a byte offset (M13 appearance,
+    /// third).
+    M13Args(u64),
     /// One invocation per page of the pool, per object-hierarchy node and
     /// per object (M13 gate 8's once-a-frame pass).
     Prep,
@@ -1085,6 +1088,10 @@ impl InstancedRenderer {
                         kernel.entry("hw_m13_shade_rays"),
                         M13_SHADE_RAYS_BINDINGS.to_vec(),
                     ),
+                    // M13 appearance, third (development, off): backgrounds'
+                    // bins from the sun's cache where their corners disagree
+                    // (`hw_m13_shade_background`, `hw_m13_miss_args`,
+                    // `hw_m13_shade_misses`; G10_BG_SHADOWS in the shader).
                     (kernel.entry("hw_m13_tiles"), M13_TILES_BINDINGS.to_vec()),
                     (
                         kernel.entry("hw_m13_page_args"),
@@ -1192,6 +1199,9 @@ impl InstancedRenderer {
                 b if b == M13_BIN_RAYS_BINDINGS => CameraDispatch::M13Rays,
                 b if b == M13_SHADE_ARGS_BINDINGS => CameraDispatch::One,
                 b if b == M13_SHADE_RAYS_BINDINGS => CameraDispatch::M13Rays,
+                b if b == M13_SHADE_BACKGROUND_BINDINGS => CameraDispatch::M13Args(16),
+                b if b == M13_MISS_ARGS_BINDINGS => CameraDispatch::One,
+                b if b == M13_SHADE_MISSES_BINDINGS => CameraDispatch::M13Args(32),
                 b if b == M13_PAGE_ARGS_BINDINGS => CameraDispatch::One,
                 b if b == M13_PAGE_BAKE_BINDINGS => CameraDispatch::M13Pages,
                 b if b == M13_PREP_BINDINGS => CameraDispatch::Prep,
@@ -1442,6 +1452,35 @@ impl InstancedRenderer {
         Some(span(ticks[0], ticks[1]) + span(ticks[2], ticks[3]))
     }
 
+    #[doc(hidden)]
+    /// The M13 colour pass's work counters (development): word 0 the pixels
+    /// tracing bin rays, 1 the sun cache's misses, 2 the backgrounds shaded
+    /// bin by bin, this frame.
+    pub fn m13_work_counters(&self) -> [u32; 8] {
+        let Some((work, _, _, _)) = &self.m13_work else {
+            return [0; 8];
+        };
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("work counters"),
+            size: 32,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(work, 0, &readback, 0, 32);
+        self.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let words: Vec<u32> =
+            bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped counters")).to_vec();
+        let mut out = [0; 8];
+        out.copy_from_slice(&words);
+        out
+    }
+
     /// M13 gate 6: the coverage pages' counters after the last frame (see
     /// `g6_state` in `hw_visibility.wgsl`: 2 bakes, 6 requests, 8 pages
     /// used, 10 baked in all, 11 nodes fitting no page, 12 page roots, 14
@@ -1541,9 +1580,9 @@ impl InstancedRenderer {
                     buffer(
                         "m13 work",
                         (8 + 5 * pixels) * 4,
-                        wgpu::BufferUsages::empty(),
+                        wgpu::BufferUsages::COPY_SRC,
                     ),
-                    buffer("m13 rays args", 16, wgpu::BufferUsages::INDIRECT),
+                    buffer("m13 rays args", 48, wgpu::BufferUsages::INDIRECT),
                     // Colour (M13 gates 9–10): per pixel 20 words, per corner
                     // 8, each field an array.
                     buffer(
@@ -1555,12 +1594,12 @@ impl InstancedRenderer {
                     // the list of entries the shading pass shades.
                     buffer(
                         "m13 shaded bins",
-                        if colour { 21 * 524_288 * 4 } else { 16 },
+                        if colour { (22 * 524_288 + 6 * 1_048_576) * 4 } else { 16 },
                         wgpu::BufferUsages::empty(),
                     ),
                 )
             });
-        // The sun's cache (M13 appearance, third): 2^21 slots of five words,
+        // The sun's cache (M13 appearance, third): 2^20 buckets of 16 words,
         // then a word per object (the albedo buffer's entries).
         let sun_cache = self
             .passes
@@ -1574,7 +1613,7 @@ impl InstancedRenderer {
                     .map_or(0, |(_, buf)| buf.size() / 16);
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("m13 sun cache"),
-                    size: (5 * 2_097_152 + objects + 16) * 4,
+                    size: (16 * 1_048_576 + objects + 16) * 4,
                     usage: wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 })
@@ -1769,6 +1808,11 @@ impl InstancedRenderer {
             (CameraDispatch::M13Rays, _) => {
                 if let Some((_, args, _, _)) = &self.m13_work {
                     pass.dispatch_workgroups_indirect(args, 0);
+                }
+            }
+            (CameraDispatch::M13Args(offset), _) => {
+                if let Some((_, args, _, _)) = &self.m13_work {
+                    pass.dispatch_workgroups_indirect(args, offset);
                 }
             }
             (CameraDispatch::Prep, _) => {
