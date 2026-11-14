@@ -328,6 +328,48 @@ Expected from the profile: about 5 ms off the pixels' pass from 150 m and
 corner projections) if needed, measured in development. Gate **M13 G8**:
 gate 6's accuracy held, at most 10 ms settled standing and from 150 m.
 
+**Appearance: colour in the same structures (design, 2026-11-13, after
+G8).** Coverage is about 9 ms; Landmark 3 asks for coverage and colour.
+Two things change at once:
+- **A shading model a bin can afford.** The regular renderer lights a hit
+  with a mask cone per light and the sky's cones, far too heavy per bin,
+  per instance and per page texel. The first appearance gate uses one
+  model everywhere, the reference included: colour = albedo × (E_sun ·
+  max(0, n·l) · V + E_amb) / π, with l and E_sun from the light's
+  rectangle (its centre, its solid angle), V a hard shadow (one hardware
+  ray toward the light's centre), E_amb a constant (a fifth of the sun's
+  normal irradiance), shading normals; rays that miss see a constant sky.
+  The gate then measures sub-pixel aggregation, not the lighting model;
+  soft shadows and the lighting cache come with the move into the
+  renderer.
+- **The ground (large objects as a background with depth).** Without the
+  ground, a pixel whose corners hit one large object skipped its walk. With
+  it, most pixels' corners hit the ground behind the boulders. So a large
+  object no longer fills bins: a pixel with large bins (corner and bin
+  rays) shades one large hit by the model (its centre's, else its first
+  large bin's) and keeps its depth; walks cull nodes behind that depth;
+  small entries in front composite over the large bins; what is left of
+  each bin shows the large colour or the sky.
+
+Per bin, entries composite in walk order (nearest first) as before, with
+colour: the pixel's colour accumulates `T_b · α · c / 16` per entry and bin
+(T_b the bin's transmittance before it), so bins keep no colour of their
+own.
+- **Small instances:** maps become RGBA8: coverage and the texels'
+  coverage-weighted mean normal (object space, octahedral); records (48
+  bytes) add the light's direction in the object's frame, the instance's
+  sun visibility (one hardware ray from its sphere's sunward point, a frame)
+  and its albedo; each bin lights its sample's normal.
+- **Pages:** texels add the mean colour of their rays' hits, each shaded by
+  the model at bake (a shadow ray a hit): 4 bytes a texel (coverage and
+  colour), a pool of 8,192 pages of 2,048 texels (64 MB).
+- **Splats** (rare since pages): their node's first instance's albedo under
+  the ambient and half the sun.
+
+Gate **M13 G9**: the field with its ground, the model above; colour within
+0.5× one ray's error of the 16×16 reference in both views; settled at most
+15 ms; the 20 m view reported.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -733,7 +775,8 @@ settled 0.212× / 0.135× one ray's coverage error in 16.12 / 17.11 ms,
 flight: 1.191× the settled frame against 1.2×, `docs/results/m13-gate7.md`)
 and **gate 8** (the coverage pass in about 9 ms settled in both views,
 `docs/results/m13-gate8.md`). The next task is item 3's remainder:
-**colour (appearance) in the same structures**, then the showcase (item 4).
+**colour (appearance) in the same structures**: designed (§3.4,
+"Appearance"), stub `m13_gate9`; then the showcase (item 4).
 
 - **The user's direction.** Core first (2026-11-08), sharpened 2026-11-12:
   be excellent at three things (**scale, detail, lighting**) and adequate
