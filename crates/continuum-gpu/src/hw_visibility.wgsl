@@ -373,6 +373,7 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
             // background ray finds them), but their corners are shaded.
             large = select(1u, 0u, g9_is_background(full.x) && G9_BG_NOT_LARGE);
             var c = vec3<f32>(0.5);
+            g12_target(G12_TO_CORNER, at, G12_AT_CORNER, gid.y * w + gid.x, 0u);
             if ((G10_PROBE & 512u) == 0u) { c = g9_shade_hit(full.x, full.y, bitcast<f32>(full.z), camera.eye.xyz, dir); }
             m13_plain[at] = g12_cpack(c);
             m13_plain[at + 3u * g9_p()] = full.x;
@@ -803,7 +804,7 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
         l_obj = oct_decode(unpack2x16unorm(bitcast<u32>(r2.y)) * 2.0 - vec2<f32>(1.0));
         albedo = unpack4x8unorm(bitcast<u32>(r2.z));
         k_lit = albedo.xyz * g9_e * albedo.w / (16.0 * 3.14159265);
-        k_amb = albedo.xyz * g9_e * G9_AMBIENT / (16.0 * 3.14159265);
+        k_amb = g12_ambient(albedo.xyz) / 16.0;
         if (G9_FLAT) { k_lit = vec3<f32>(0.0); }
         if (G9_CONST_SMALL) { k_lit = vec3<f32>(0.0); k_amb = albedo.xyz * g9_e * (0.5 + G9_AMBIENT) / (16.0 * 3.14159265); }
         if (g9_dbg < 3.0e38) { bg_bins = ~(g9_l | g9_l2) & 0xffffu; }
@@ -1357,6 +1358,7 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
             if (m13_plain[g9_corner_word(cy * w + cx) + 3u * g9_p()] == bg.x) { shown = true; }
         }
         var c = vec3<f32>(0.0);
+        g12_target(G12_TO_REGION, at, G12_AT_CENTRE, pixel, 0u);
         if (!shown && (G10_PROBE & 8u) == 0u) { c = g9_shade_hit(bg.x, bg.y, dist, e, dir); }
         g9_store_large(at, 0u, c, dist, bg.x);
         // Its face's plane, for each bin's distance to it.
@@ -1393,6 +1395,7 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
                         var dist = 3.4e38;
                         if (claimed != G9_SKY) {
                             dist = bitcast<f32>(bb.z);
+                            g12_target(G12_TO_REGION, at + slot * g9_p(), G12_AT_BIN, pixel, b);
                             c = g9_shade_hit(bb.x, bb.y, dist, e, bdir);
                         }
                         g9_store_large(at, slot, c, dist, claimed);
@@ -1409,6 +1412,7 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
         let hit = hw_trace(e, dir, 0.0);
         if (hit.x != NONE && hit.x != bg.x && g8_large(hit.x)) {
             let dist = bitcast<f32>(hit.z);
+            g12_target(G12_TO_REGION, at + 5u * g9_p(), G12_AT_CENTRE, pixel, 0u);
             g9_store_large(at, 5u, g9_shade_hit(hit.x, hit.y, dist, e, dir), dist, hit.x);
             atomicStore(&m13_work[claims + 2u * g9_p()], 0xffffu);
         }
@@ -1462,6 +1466,7 @@ fn g9_corner_background(at: u32, dir: vec3<f32>, shade: bool) {
     m13_plain[at + 7u * g9_p()] = bg.z;
     if (!shade || bg.x == NONE) { return; }
     var c = vec3<f32>(0.5);
+    g12_target(G12_TO_CORNER, at, G12_AT_CORNER, at - g9_corner_word(0u), 0u);
     if ((G10_PROBE & 512u) == 0u) { c = g9_shade_hit(bg.x, bg.y, bitcast<f32>(bg.z), e, dir); }
     m13_plain[at] = g12_cpack(c);
     m13_plain[at + 3u * g9_p()] = bg.x;
@@ -1547,6 +1552,7 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
                 let v0 = tris[3u * hit.y].xyz;
                 var ng = normalize(normal_to_world(hit.x, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
                 if (dot(ng, dir) > 0.0) { ng = -ng; }
+                g12_target(G12_TO_BIN, base + k, G12_AT_BIN, pixel, k);
                 let c = g10_shade(hit.x, hit.y, ph, dist, dir, ng, g12_shading_normal(hit.x, hit.y, ph, -dir), v);
                 m13_shaded[base + k] = g10_pack(c, g9_scale()) | G10_SHADED_BIT;
             }
@@ -1559,7 +1565,10 @@ fn hw_m13_bin_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups
                 if (claimed != G9_SKY) {
                     dist = bitcast<f32>(hit.z);
                     // With an entry its bins carry their own colours.
-                    if (entry == NONE) { c = g9_shade_hit(hit.x, hit.y, dist, camera.eye.xyz, dir); }
+                    if (entry == NONE) {
+                        g12_target(G12_TO_REGION, at + slot * g9_p(), G12_AT_BIN, pixel, k);
+                        c = g9_shade_hit(hit.x, hit.y, dist, camera.eye.xyz, dir);
+                    }
                 }
                 m13_plain[at + slot * g9_p()] = bitcast<u32>(c.x);
                 m13_plain[at + (slot + 1u) * g9_p()] = bitcast<u32>(c.y);
@@ -2710,6 +2719,7 @@ fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgrou
                         let v0 = tris[3u * hit.y].xyz;
                         var ng = normalize(normal_to_world(obj, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
                         if (dot(ng, dir) > 0.0) { ng = -ng; }
+                        g12_target(G12_TO_QUAD, base + b0, G12_AT_QUARTER, pixel, b0);
                         large_word = g10_pack(g10_shade(obj, hit.y, ph, dist, dir, ng, g12_shading_normal(obj, hit.y, ph, -dir), v), scale) | G10_SHADED_BIT;
                     }
                 }
@@ -3195,3 +3205,24 @@ fn g12_corner_request(gid: vec3<u32>) {}
 fn g12_corner_done() {}
 // The frames' stamp advanced (the variant lit by the cache mirrors it).
 fn g12_stamp_advanced() {}
+
+// Where the next shading's colour goes and where its ray went (the variant
+// lit by the cache defers it: M13 gate 12). Targets: a corner's packed
+// colour, an entry's bin, an entry's quarter (four bins), a pixel's region
+// colour (three words a pixel apart). Rays: through a corner, a bin, a
+// quarter's centre, the pixel's centre.
+const G12_TO_CORNER: u32 = 0u;
+const G12_TO_BIN: u32 = 1u;
+const G12_TO_QUAD: u32 = 2u;
+const G12_TO_REGION: u32 = 3u;
+const G12_AT_CORNER: u32 = 0u;
+const G12_AT_BIN: u32 = 1u;
+const G12_AT_QUARTER: u32 = 2u;
+const G12_AT_CENTRE: u32 = 3u;
+fn g12_target(to: u32, word: u32, kind: u32, index: u32, sub: u32) {}
+
+// A small instance's ambient light (the model: a fifth of the sun's normal
+// irradiance; the variant lit by the cache: the sky's).
+fn g12_ambient(albedo: vec3<f32>) -> vec3<f32> {
+    return albedo * g9_e * G9_AMBIENT / 3.14159265;
+}

@@ -171,6 +171,7 @@ fn main() {
         let origin = field.origin_near_camera();
         let (ground, light) = field.relative(origin);
         let lights = [Light::white(light, field.radiance)];
+        kernel.set_sky(field.sky());
         let view_target = target(&kernel);
         let forward = (ground.target - ground.eye).normalize();
         let flat0 = Vec3::new(forward.x, forward.y, 0.0).normalize();
@@ -203,6 +204,24 @@ fn main() {
             let mut one = cached(&kernel, &field, origin, &lights, false);
             let n1 = settle(&mut one, camera, &view_target, 8, 3000);
             let a = frame(&mut one, camera, &view_target);
+            // `M13_ACC=1`: the reference, 16×16 samples a pixel shaded by the
+            // renderer (its cache settled first), and the colour error.
+            let reference = std::env::var_os("M13_ACC").is_some().then(|| {
+                let mut sum = vec![[0.0f32; 3]; (W * H) as usize];
+                for k in 0..256 {
+                    let (dx, dy) = (
+                        ((k % 16) as f32 + 0.5) / 16.0 - 0.5,
+                        ((k / 16) as f32 + 0.5) / 16.0 - 0.5,
+                    );
+                    one.set_pixel_offset(dx, dy);
+                    for (s, p) in sum.iter_mut().zip(frame(&mut one, camera, &view_target)) {
+                        for (v, c) in s.iter_mut().zip(p) {
+                            *v += c / 256.0;
+                        }
+                    }
+                }
+                sum
+            });
             drop(one);
             let mut sub = cached(&kernel, &field, origin, &lights, true);
             sub.set_m13_page_budget(512);
@@ -227,6 +246,18 @@ fn main() {
             let scale = l[l.len() * 99 / 100].max(1e-6);
             save(&format!("{name}_one_ray"), &a, scale);
             save(&format!("{name}_sub"), &b, scale);
+            if let Some(reference) = &reference {
+                let e_ours = relative_rmse(&b, reference);
+                let e_one = relative_rmse(&a, reference);
+                println!(
+                    "{name}: colour {:.2}% from the reference, one ray {:.2}% ({:.3}x); means reference {:?}",
+                    100.0 * e_ours,
+                    100.0 * e_one,
+                    e_ours / e_one,
+                    mean(reference)
+                );
+                save(&format!("{name}_reference"), reference, scale);
+            }
             println!(
                 "{name}: one ray settled in {n1} frames, sub-pixel in {n2} ({:.2} ms settled); means one ray {:?}, sub-pixel {:?}; relative difference {:.2}%",
                 times[5],

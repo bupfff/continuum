@@ -382,6 +382,8 @@ pub struct InstancedRenderer {
     /// and whether it must be emptied before the next frame (a light moved).
     m13_sun: Option<wgpu::Buffer>,
     m13_sun_stale: bool,
+    /// The large hits' records lit by the cache (M13 gate 12, binding 105).
+    m13_hits: Option<wgpu::Buffer>,
     /// M13 gate 7: GPU timestamps around the page arguments' pass (0, 1)
     /// and the page bakes (2, 3) (a query set, its resolve buffer, a
     /// readback buffer, nanoseconds a tick), where the device has them.
@@ -1150,11 +1152,17 @@ impl InstancedRenderer {
                     lit("hw_m13_prep"),
                     lit("hw_m13_tile_roots"),
                     lit("hw_m13_corners_tiles"),
+                    lit("hw_m13_hits_args_a"),
+                    lit("hw_m13_shade_hits_a"),
+                    lit("hw_m13_scatter_hits_a"),
                     lit("hw_m13_bins"),
                     plain("hw_m13_bin_args"),
                     lit("hw_m13_bin_rays"),
                     plain("hw_m13_shade_args"),
                     lit("hw_m13_shade_rays"),
+                    lit("hw_m13_hits_args_b"),
+                    lit("hw_m13_shade_hits_b"),
+                    lit("hw_m13_scatter_hits_b"),
                     lit("hw_m13_tiles"),
                     lit("hw_m13_page_args"),
                     lit("hw_m13_page_bake"),
@@ -1223,18 +1231,25 @@ impl InstancedRenderer {
         }
         let m13_lit = cache.is_some() && pixel_cones && kernel.profile_stage.get() == 20;
         let camera_dispatch: Vec<CameraDispatch> = if m13_lit {
-            // Gate 12's passes in order (prep, roots, corners, bins, bin
-            // arguments, bin rays, shading arguments, shading, pixels, page
-            // arguments, bakes), then the cache's own camera passes if any.
+            // Gate 12's passes in order (prep, roots, corners, the first
+            // records' arguments, lighting and scatter, bins, bin arguments, bin rays,
+            // shading arguments, shading, the other records' arguments,
+            // lighting and scatter, pixels, page arguments, bakes).
             let mut d = vec![
                 CameraDispatch::Prep,
                 CameraDispatch::Tiles,
                 CameraDispatch::Screen,
+                CameraDispatch::One,
+                CameraDispatch::M13Args(16),
+                CameraDispatch::M13Args(16),
                 CameraDispatch::Screen,
                 CameraDispatch::One,
                 CameraDispatch::M13Rays,
                 CameraDispatch::One,
                 CameraDispatch::M13Rays,
+                CameraDispatch::One,
+                CameraDispatch::M13Args(32),
+                CameraDispatch::M13Args(32),
                 CameraDispatch::Screen,
                 CameraDispatch::One,
                 CameraDispatch::M13Pages,
@@ -1348,6 +1363,7 @@ impl InstancedRenderer {
             one_pass: cache.is_none() && pixel_cones && kernel.profile_stage.get() == 20,
             m13_sun: None,
             m13_sun_stale: false,
+            m13_hits: None,
             cache,
             width,
             height,
@@ -1685,6 +1701,23 @@ impl InstancedRenderer {
             all.push((104, buf));
         }
         self.m13_sun = sun_cache.clone();
+        // The large hits' records lit by the cache (M13 gate 12): a header
+        // of eight words, then five words a record.
+        self.m13_hits = self
+            .passes
+            .iter()
+            .any(|(_, keep)| keep.contains(&105))
+            .then(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("m13 hits"),
+                    size: (8 + 5 * 3_000_000) * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+        if let Some(buf) = &self.m13_hits {
+            all.push((105, buf));
+        }
         if let Some((work, args, plain, shaded)) = &self.m13_work {
             all.push((88, work));
             all.push((89, args));
@@ -2050,6 +2083,9 @@ impl InstancedRenderer {
             encoder.clear_buffer(sun, 0, None);
         }
         self.m13_sun_stale = false;
+        if let Some(hits) = &self.m13_hits {
+            encoder.clear_buffer(hits, 0, Some(32));
+        }
         if self.one_pass {
             // Every pass's dispatch in one compute pass (wgpu orders the
             // dispatches' storage).

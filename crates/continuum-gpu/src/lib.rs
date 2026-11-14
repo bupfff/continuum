@@ -1015,6 +1015,8 @@ impl MaskConeKernel {
             ),
             ("fn g8_stamp() -> u32 {", "fn g8_stamp_model() -> u32 {"),
             ("fn g12_stamp_advanced(", "fn g12_stamp_advanced_model("),
+            ("fn g12_target(", "fn g12_target_model("),
+            ("fn g12_ambient(", "fn g12_ambient_model("),
         ] {
             assert!(hw.contains(from), "{from} not found");
             hw = hw.replacen(from, to, 1);
