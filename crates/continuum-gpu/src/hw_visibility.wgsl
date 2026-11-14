@@ -356,8 +356,15 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
         // What lies behind at the corner: the background object a ray seeing
         // only those meets (NONE: the sky), shaded where the corner's own
         // hit is not large (M13 gate 10).
-        let small = !(full.x != NONE && g8_large(full.x));
-        g9_corner_background(at, dir, small && G10_CORNER_BG);
+        // A corner whose own hit is a background object takes it as its
+        // background too (no ray of its own; M13 appearance, third).
+        if (full.x != NONE && g9_is_background(full.x) && G10_CORNER_BG) {
+            m13_plain[at + 5u * g9_p()] = full.x;
+            m13_plain[at + 7u * g9_p()] = full.z;
+        } else {
+            let small = !(full.x != NONE && g8_large(full.x));
+            g9_corner_background(at, dir, small && G10_CORNER_BG);
+        }
         if (full.x != NONE && g8_large(full.x)) {
             // Background objects are not large for bin rays (the pixels'
             // background ray finds them), but their corners are shaded.
