@@ -80,6 +80,31 @@ Mean colours agree within 0.5% standing and 2.8% from 120 m.
 | Spread 0.15, cosine-weighted share, sky a half | 0.461× / 0.451× | 15.9–16.2 / 16.1–16.4 ms |
 | Spread 0.05, the same | 0.440× / 0.438× | 17.4 / 16.6 ms |
 
+## Bins lit from their corners' shares
+
+The cache keeps, per texel, each light's shadowed share and the sky's
+value; its shading multiplies them by the light's unshadowed irradiance at
+the point's own normal. A corner lit by the cache now also keeps its two
+shares (one word), and a bin of an object its corners show is lit from
+their shares bilinearly with its own point, normal and albedo, in the bin
+rays' pass (no cache lookup). Bins of objects no corner shows are still
+lit in full.
+
+| Lit variant | Colour (standing / 120 m) | Settled (standing / 120 m) |
+|---|---|---|
+| Bins from corners' shares, every bin | **0.420× / 0.426×** | 16.15 / 16.64 ms |
+| The same, resolved pixels' samples too | 0.450× / 0.430× | 15.90 / 16.50 ms |
+| Every bin, one compute pass | 0.420× / 0.426× | 15.99 / 17.37 ms (the machine warming) |
+
+Pixels the corners resolved are listed for their shadow edges, which the
+corners' shares smooth; they stay lit in full. The large-object class fell
+to 0.36× and 0.32× of one ray's error there; small instances are most of
+what is left from 120 m (0.455×).
+
+Timing became unreliable at the end of this stretch: the control (gate 4's
+path) read 113.1 and 105.4 ms against 111 and 91, with an external display
+(DisplayLink) newly running beside the window server.
+
 ## Next
 
 Both criteria are within about 10% of their bars and pull against each

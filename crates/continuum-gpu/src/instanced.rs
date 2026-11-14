@@ -1360,7 +1360,7 @@ impl InstancedRenderer {
             colors,
             m13_work: None,
             m13_timer: None,
-            one_pass: cache.is_none() && pixel_cones && kernel.profile_stage.get() == 20,
+            one_pass: pixel_cones && kernel.profile_stage.get() == 20,
             m13_sun: None,
             m13_sun_stale: false,
             m13_hits: None,
@@ -2088,8 +2088,21 @@ impl InstancedRenderer {
         }
         if self.one_pass {
             // Every pass's dispatch in one compute pass (wgpu orders the
-            // dispatches' storage).
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            // dispatches' storage); with the cache's timer, the pass's start
+            // is the camera passes' (query 2), as the first pass's is.
+            let set = self
+                .cache
+                .as_ref()
+                .and_then(|c| c.state.timer.as_ref())
+                .map(|t| &t.set);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: set.map(|query_set| wgpu::ComputePassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(2),
+                    end_of_pass_write_index: None,
+                }),
+            });
             for k in 0..self.passes.len() {
                 self.dispatch_camera(&mut pass, k);
             }
