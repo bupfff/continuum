@@ -1042,6 +1042,7 @@ impl MaskConeKernel {
             ),
             ("fn g12_lean_bin(", "fn g12_lean_bin_model("),
             ("fn g12_untarget(", "fn g12_untarget_model("),
+            ("fn g12_lean_at(", "fn g12_lean_at_model("),
         ] {
             assert!(hw.contains(from), "{from} not found");
             hw = hw.replacen(from, to, 1);

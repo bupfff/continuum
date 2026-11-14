@@ -233,14 +233,17 @@ var<private> g12_sky_value: f32 = -1.0;
 // the bin's own point, normal and albedo, as the cache's shading does with
 // its texels' shares (one light; otherwise w 0: lit in full).
 fn g12_lean_bin(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, b: u32) -> vec4<f32> {
+    return g12_lean_at(m, t, p, dist, dir, ng, n, pixel, (f32(b % 4u) + 0.5) * 0.25, (f32(b / 4u) + 0.5) * 0.25);
+}
+
+// The same at (fx, fy) within the pixel.
+fn g12_lean_at(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, fx: f32, fy: f32) -> vec4<f32> {
     if (arrayLength(&lights) != 1u || !G12_LEAN) { return vec4<f32>(0.0); }
     let cws = g12_cws(pixel);
     let pp = g9_p();
     let co = vec4<u32>(m13_plain[cws.x + 3u * pp], m13_plain[cws.y + 3u * pp], m13_plain[cws.z + 3u * pp], m13_plain[cws.w + 3u * pp]);
     let mine = co == vec4<u32>(m);
     if (!any(mine)) { return vec4<f32>(0.0); }
-    let fx = (f32(b % 4u) + 0.5) * 0.25;
-    let fy = (f32(b / 4u) + 0.5) * 0.25;
     let wk = vec4<f32>((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy) * select(vec4<f32>(0.0), vec4<f32>(1.0), mine);
     let wsum = wk.x + wk.y + wk.z + wk.w;
     if (wsum < 1e-6) { return vec4<f32>(0.0); }
