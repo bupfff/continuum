@@ -783,10 +783,20 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
     // M13 gate 9: behind the pixel's large object only its other bins.
     var l_obj = vec3<f32>(0.0);
     var albedo = vec4<f32>(0.0);
+    // The model's two parts per record, over 16 bins (M13 gate 10).
+    var k_lit = vec3<f32>(0.0);
+    var k_amb = vec3<f32>(0.0);
+    // Bins showing the background (the buried test applies there).
+    var bg_bins = 0u;
     if (g9_on) {
         todo &= g9_in_front(r2.x);
         l_obj = oct_decode(unpack2x16unorm(bitcast<u32>(r2.y)) * 2.0 - vec2<f32>(1.0));
         albedo = unpack4x8unorm(bitcast<u32>(r2.z));
+        k_lit = albedo.xyz * g9_e * albedo.w / (16.0 * 3.14159265);
+        k_amb = albedo.xyz * g9_e * G9_AMBIENT / (16.0 * 3.14159265);
+        if (G9_FLAT) { k_lit = vec3<f32>(0.0); }
+        if (G9_CONST_SMALL) { k_lit = vec3<f32>(0.0); k_amb = albedo.xyz * g9_e * (0.5 + G9_AMBIENT) / (16.0 * 3.14159265); }
+        if (g9_dbg < 3.0e38) { bg_bins = ~(g9_l | g9_l2) & 0xffffu; }
     }
     let bits = bitcast<u32>(r0.w);
     let cp = r0.xy;
@@ -809,23 +819,22 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
         let a = vec2<f32>(0.5) + uv.xy * o.x + uv.zw * o.y;
         if (any(a < rlo) || any(a > rhi)) { continue; }
         let texel = textureSampleLevel(cov_tex, cov_sampler, a, layer, level);
-        let cov = texel.x;
-        g10_samples += 1u;
+        var cov = texel.x;
+        if ((G10_PROBE & 1048576u) != 0u) { g10_samples += 1u; }
         if ((G5_SKIP & 64u) != 0u) { g8_dummy += cov; continue; }
-        // M13 gate 9: a bin showing the background skips the part of the
-        // instance behind it (a boulder's buried part), by the map's depth.
-        if (G9_BURIED && (G10_PROBE & 1u) == 0u && g9_on && g9_dbg < 3.0e38 && (((g9_l | g9_l2) >> b) & 1u) == 0u && cov > 0.0) {
-            let surface = r2.x + r2.w * (1.0 + (texel.w * 255.0 / 254.0 * 2.0 - 1.0));
-            if (g10_beyond(surface, fb) || G9_PROBE) { continue; }
-        }
-        if (g9_on && (G10_PROBE & 2u) != 0u) {
-            g9_c += vec3<f32>((1.0 - pbin[b]) * cov / 16.0);
-        } else if (g9_on) {
+        if (g9_on) {
+            // M13 gate 9: a bin showing the background drops the part of the
+            // instance behind it (a boulder's buried part), by the map's
+            // depth (M13 gate 10: without a branch).
+            if (G9_BURIED && (G10_PROBE & 1u) == 0u) {
+                let surface = r2.x + r2.w * (texel.w * (510.0 / 254.0));
+                let c4 = g10_inv_wg[lane];
+                let behind = surface * (c4.x + c4.y * fb.x + (c4.z + c4.w * fb.x) * fb.y) > 1.0;
+                cov = select(cov, 0.0, behind && ((bg_bins >> b) & 1u) != 0u);
+            }
             let n = oct_decode(texel.yz * 2.0 - vec2<f32>(1.0));
-            var c = albedo.xyz * (g9_e * (max(dot(n, l_obj), 0.0) * albedo.w + G9_AMBIENT)) / 3.14159265;
-            if (G9_FLAT) { c = albedo.xyz * g9_e * G9_AMBIENT / 3.14159265; }
-            if (G9_CONST_SMALL) { c = albedo.xyz * g9_e * (0.5 + G9_AMBIENT) / 3.14159265; }
-            g9_c += (1.0 - pbin[b]) * cov * c / 16.0;
+            let t = (1.0 - pbin[b]) * cov;
+            g9_c += t * (k_lit * max(dot(n, l_obj), 0.0) + k_amb);
         }
         pbin[b] = 1.0 - (1.0 - pbin[b]) * (1.0 - cov);
     }
