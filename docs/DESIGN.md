@@ -291,6 +291,42 @@ comments):
   walk standing with pages re-baked within a budget, every frame checked
   within 0.3× one ray's error.
 - Later: the 10 ms bar, flights, then appearance in the same pages.
+  (G5–G7 passed in the eleventh session; G7 kept pages valid in flight.)
+
+**The 10 ms bar (design, 2026-11-13, after G7).** Profiled at full size
+(`docs/results/m13-10ms-profile.md`): settled, standing 16.1 ms, 150 m up
+17.2, 20 m up 25.4; the pixels' pass is 72–76% of each. From 150 m it
+splits into the walk 2.4 ms, the instances' tests 2.7, their maps' set-up
+5.0, texture samples 2.2, the rest 0.9. Standing and 20 m up, the set-up is
+about 4 ms and the walk with page reads 7–9. The waste is shared: an
+instance's set-up (where it lies on screen, which directions' maps, the
+maps' coordinates across the pixel) is the same for every pixel, yet each
+subgroup touching it computes it again, as each pixel reading a page
+re-tests the page's validity and re-derives its plane.
+
+- **Instance records, once a frame.** A pass with one invocation per object
+  writes, for each small instance in front of the eye and inside the view,
+  a record: its projected centre and radius, its maps' level, its two
+  directions' layers and weights, and the affine map from screen position
+  to each map's coordinates (2×2 and offset per direction; exact to under
+  0.3% of the map, as G5's linearization). Others are marked out (outside
+  the view, behind, large or mapless). The walk's items then cost a record
+  load and the bins' samples. 64 bytes an object (64 MB for the million
+  boulders; a pool bounded by the screen is left for later).
+- **Page records, once a frame.** A pass over the pool's pages in use
+  decides each page's validity from the eye (one bit, and the refresh
+  request) and the homography from screen position to its texels (3×3);
+  a pixel reading a page then costs a record load and per bin three dot
+  products, a division and the bilinear read.
+- **The other passes** (corners, roots, bins, bin rays, page passes: 4–5 ms
+  as profiled, each with about 0.15 ms of submission in the profile)
+  trimmed where it is free: skipping the bakes' dispatch when nothing is
+  asked, the roots pass sharing its projections.
+
+Expected from the profile: about 5 ms off the pixels' pass from 150 m and
+4–5 standing, so 11–12 ms; the rest from the walk (each node's eight
+corner projections) if needed, measured in development. Gate **M13 G8**:
+gate 6's accuracy held, at most 10 ms settled standing and from 150 m.
 
 ## 3.5 What the 2D phase (M0) taught us
 
@@ -692,9 +728,9 @@ settled 0.212× / 0.135× one ray's coverage error in 16.12 / 17.11 ms,
 `docs/results/m13-gate6.md`) and **gate 7** (pages keep up with a 10 m/s
 flight: 1.191× the settled frame against 1.2×, `docs/results/m13-gate7.md`).
 The next task is item 3's remainder: the 10 ms bar (the flight's view
-settles at 21.6–29.3 ms, standing 16, 150 m up 17), starting from a design
-step on the profile in `docs/results/m13-10ms-profile.md` (the pixels' pass
-is 72–76% of every view); then colour in the same pages; see item 3 below.
+settles at 21.6–29.3 ms, standing 16, 150 m up 17): designed (§3.4, "The
+10 ms bar": instance and page records once a frame), stub `m13_gate8`;
+then colour in the same pages; see item 3 below.
 
 - **The user's direction.** Core first (2026-11-08), sharpened 2026-11-12:
   be excellent at three things (**scale, detail, lighting**) and adequate
