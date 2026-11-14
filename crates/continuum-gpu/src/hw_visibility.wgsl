@@ -317,9 +317,9 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
     // root that may hold a large instance (half a pixel's margin).
     var n_large = m13_roots[base + G5_TILE_WORDS - 1u];
     if ((G10_PROBE & 524288u) != 0u) { n_large = 0u; }
-    var inside = n_large == 9u && (G5_SKIP & 256u) == 0u;
+    var inside = n_large == G8_BOXES + 1u && (G5_SKIP & 256u) == 0u;
     let pt = vec2<f32>(f32(gid.x), f32(gid.y));
-    for (var k = 0u; k < min(n_large, 8u); k++) {
+    for (var k = 0u; k < min(n_large, G8_BOXES); k++) {
         let at = base + 380u + 4u * k;
         let lo = vec2<f32>(bitcast<f32>(m13_roots[at]), bitcast<f32>(m13_roots[at + 1u])) - vec2<f32>(0.5);
         let hi = vec2<f32>(bitcast<f32>(m13_roots[at + 2u]), bitcast<f32>(m13_roots[at + 3u])) + vec2<f32>(0.5);
@@ -913,6 +913,9 @@ fn g9_corner_word(pixel: u32) -> u32 {
 // the last word their count, or 9 for the whole tile.
 const G5_ROOTS: u32 = 63u;
 const G5_TILE_WORDS: u32 = 416u;
+// Boxes of roots that may hold a large instance a tile lists (M13 gate 8),
+// from word 380, four words each.
+const G8_BOXES: u32 = 8u;
 // A node is listed once its projected box is at most this many pixels
 // across: the pixels walk below it.
 const G5_CUT_PX: f32 = 8.0;
@@ -995,8 +998,8 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
             // plane) can lie only under a root at least that wide (M13 gate
             // 8: the tile's corner rays are needed only then).
             if (g8_may_hold_large(id, node, sb.behind != 0u)) {
-                if (sb.behind != 0u || n_large >= 8u) {
-                    n_large = 9u;
+                if (sb.behind != 0u || n_large >= G8_BOXES) {
+                    n_large = G8_BOXES + 1u;
                 } else {
                     let at = base + 380u + 4u * n_large;
                     m13_roots[at] = bitcast<u32>(sb.lo.x);
@@ -2504,7 +2507,7 @@ fn g10_unpack(w: u32, scale: f32) -> vec3<f32> {
     return q * q * scale;
 }
 
-const G10_SPREAD: f32 = 0.1;
+const G10_SPREAD: f32 = 0.15;
 // Development: the background's bins shaded one by one where its corners
 // disagree on the sun's visibility (else the corners' colours, bilinearly).
 const G10_BG_SHADOWS: bool = false;
