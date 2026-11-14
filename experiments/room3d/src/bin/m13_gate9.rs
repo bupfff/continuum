@@ -343,7 +343,10 @@ fn main() -> std::io::Result<()> {
                 .collect();
             println!("{name}: {}", parts.join(", "));
             let c = r.m13_page_counters();
-            println!("  shaded pixels {}, counters 31: {}", c[30], c[31]);
+            println!(
+                "  shaded pixels {}, list {}, word 28 (map samples / 16 with the probe): {}",
+                c[30], c[31], c[28]
+            );
         }
         return Ok(());
     }

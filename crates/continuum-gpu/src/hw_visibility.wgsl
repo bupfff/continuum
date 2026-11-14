@@ -315,7 +315,8 @@ fn hw_m13_corners_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
     let base = (wid.y * ((w + 7u) / 8u) + wid.x) * G5_TILE_WORDS;
     // The corner (the pixel's top-left) is traced only inside a box of a
     // root that may hold a large instance (half a pixel's margin).
-    let n_large = m13_roots[base + G5_TILE_WORDS - 1u];
+    var n_large = m13_roots[base + G5_TILE_WORDS - 1u];
+    if ((G10_PROBE & 524288u) != 0u) { n_large = 0u; }
     var inside = n_large == 9u && (G5_SKIP & 256u) == 0u;
     let pt = vec2<f32>(f32(gid.x), f32(gid.y));
     for (var k = 0u; k < min(n_large, 8u); k++) {
@@ -803,17 +804,19 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
     while (todo != 0u) {
         let b = countTrailingZeros(todo);
         todo &= todo - 1u;
-        let o = p0 + vec2<f32>(f32(b % 4u), f32(b / 4u)) * 0.25;
+        let fb = vec2<f32>(f32(b % 4u), f32(b / 4u));
+        let o = p0 + fb * 0.25;
         let a = vec2<f32>(0.5) + uv.xy * o.x + uv.zw * o.y;
         if (any(a < rlo) || any(a > rhi)) { continue; }
         let texel = textureSampleLevel(cov_tex, cov_sampler, a, layer, level);
         let cov = texel.x;
+        g10_samples += 1u;
         if ((G5_SKIP & 64u) != 0u) { g8_dummy += cov; continue; }
         // M13 gate 9: a bin showing the background skips the part of the
         // instance behind it (a boulder's buried part), by the map's depth.
         if (G9_BURIED && (G10_PROBE & 1u) == 0u && g9_on && g9_dbg < 3.0e38 && (((g9_l | g9_l2) >> b) & 1u) == 0u && cov > 0.0) {
             let surface = r2.x + r2.w * (1.0 + (texel.w * 255.0 / 254.0 * 2.0 - 1.0));
-            if (g10_beyond(surface, b) || G9_PROBE) { continue; }
+            if (g10_beyond(surface, fb) || G9_PROBE) { continue; }
         }
         if (g9_on && (G10_PROBE & 2u) != 0u) {
             g9_c += vec3<f32>((1.0 - pbin[b]) * cov / 16.0);
@@ -1249,46 +1252,38 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
     }
     m13_plain[at + 19u * g9_p()] = NONE;
     if ((G10_PROBE & 128u) != 0u) { return; }
-    if (G10_SHADE_BINS) { g10_entry(gid, pixel, resolved, traced); }
+    // The pixel's corners, as vectors (M13 gate 10: loaded once).
+    let pw = g9_p();
+    let x1 = min(gid.x + 1u, w - 1u);
+    let y1 = min(gid.y + 1u, h - 1u);
+    let cws = vec4<u32>(g9_corner_word(gid.y * w + gid.x), g9_corner_word(gid.y * w + x1), g9_corner_word(y1 * w + gid.x), g9_corner_word(y1 * w + x1));
+    let co = vec4<u32>(m13_plain[cws.x + 3u * pw], m13_plain[cws.y + 3u * pw], m13_plain[cws.z + 3u * pw], m13_plain[cws.w + 3u * pw]);
+    let cb = vec4<u32>(m13_plain[cws.x + 5u * pw], m13_plain[cws.y + 5u * pw], m13_plain[cws.z + 5u * pw], m13_plain[cws.w + 5u * pw]);
+    if (G10_SHADE_BINS) { g10_entry(pixel, resolved, traced, cws, co, cb); }
     // M13 gate 10: where the four corners' background rays met the same
     // object, it is the pixel's background without a ray of its own: its
-    // distance the corners' (as 1/t, the mean), its colour theirs.
-    var co: array<u32, 4>;
-    var cb: array<u32, 4>;
-    var far = 0.0;
-    var agree = true;
-    for (var k = 0u; k < 4u; k++) {
-        let cx = min(gid.x + (k & 1u), w - 1u);
-        let cy = min(gid.y + (k >> 1u), h - 1u);
-        let cw = g9_corner_word(cy * w + cx);
-        co[k] = m13_plain[cw + 3u * g9_p()];
-        cb[k] = m13_plain[cw + 5u * g9_p()];
-        far = max(far, bitcast<f32>(m13_plain[cw + 7u * g9_p()]));
-        if (cb[k] != cb[0]) { agree = false; }
-    }
-    let shown_bg = co[0] == cb[0] || co[1] == cb[0] || co[2] == cb[0] || co[3] == cb[0];
+    // distance the corners' (the farthest), its colour theirs.
+    let cbd = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 7u * pw], m13_plain[cws.y + 7u * pw], m13_plain[cws.z + 7u * pw], m13_plain[cws.w + 7u * pw]));
+    let far = max(max(cbd.x, cbd.y), max(cbd.z, cbd.w));
+    let agree = all(cb == vec4<u32>(cb.x));
+    let shown_bg = any(co == vec4<u32>(cb.x));
+    let one = co.x != NONE && all(co == vec4<u32>(co.x));
     // A pixel its corners resolved to one large object shows nothing behind
     // it: that object from its corners, no ray (M13 gate 10).
-    if (G10_CORNER_BG && resolved && co[0] != NONE && co[0] == co[1] && co[0] == co[2] && co[0] == co[3]) {
-        g9_corners_large(at, co, w, h, gid);
+    if (G10_CORNER_BG && resolved && one) {
+        g9_corners_large(at, co.x, cws);
         return;
     }
-    if (G10_CORNER_BG && agree && cb[0] != NONE && shown_bg) {
+    if (G10_CORNER_BG && agree && cb.x != NONE && shown_bg) {
         // The farthest corner's distance: entries nearer may lie in front
         // somewhere in the pixel.
-        g9_store_large(at, 0u, vec3<f32>(0.0), far, cb[0]);
+        g9_store_large(at, 0u, vec3<f32>(0.0), far, cb.x);
         m13_plain[at + 16u * g9_p()] = 0u;
         m13_plain[at + 17u * g9_p()] = 0u;
         m13_plain[at + 18u * g9_p()] = 0u;
-        if (resolved && co[0] != cb[0] && co[0] == co[1] && co[0] == co[2] && co[0] == co[3]) {
-            g9_corners_large(at, co, w, h, gid);
-        }
         return;
     }
-    if (G10_CORNER_BG && agree && cb[0] == NONE) {
-        if (resolved && co[0] == co[1] && co[0] == co[2] && co[0] == co[3] && co[0] != NONE) {
-            g9_corners_large(at, co, w, h, gid);
-        }
+    if (G10_CORNER_BG && agree && cb.x == NONE) {
         return;
     }
     var bg = vec3<u32>(NONE, NONE, bitcast<u32>(3.4e38));
@@ -1361,17 +1356,14 @@ fn g9_large_hit(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
     }
 }
 
-// A pixel all of whose corners show large object `co[0]` (not its
+// A pixel all of whose corners show large object `obj` (not its
 // background): its first large object, with the farthest corner's distance
 // (its colour is the corners').
-fn g9_corners_large(at: u32, co: array<u32, 4>, w: u32, h: u32, gid: vec3<u32>) {
-    var far = 0.0;
-    for (var k = 0u; k < 4u; k++) {
-        let cx = min(gid.x + (k & 1u), w - 1u);
-        let cy = min(gid.y + (k >> 1u), h - 1u);
-        far = max(far, bitcast<f32>(m13_plain[g9_corner_word(cy * w + cx) + 4u * g9_p()]));
-    }
-    g9_store_large(at, 5u, vec3<f32>(0.0), far, co[0]);
+fn g9_corners_large(at: u32, obj: u32, cws: vec4<u32>) {
+    let p = g9_p();
+    let d = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 4u * p], m13_plain[cws.y + 4u * p], m13_plain[cws.z + 4u * p], m13_plain[cws.w + 4u * p]));
+    let far = max(max(d.x, d.y), max(d.z, d.w));
+    g9_store_large(at, 5u, vec3<f32>(0.0), far, obj);
     atomicStore(&m13_work[g9_claims(at) + 2u * g9_p()], 0xffffu);
 }
 
@@ -1549,6 +1541,7 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
             let at = g9_large_word(pixel);
             g9_dbg = bitcast<f32>(m13_plain[at + 3u * g9_p()]);
             g10_set_inv(gid, w, h, at);
+            g10_inv_wg[lane] = select(vec4<f32>(select(1.0 / g9_dbg, 0.0, g9_dbg >= 3.0e38), 0.0, 0.0, 0.0), g10_inv, g10_inv_ok);
             g9_dl = bitcast<f32>(m13_plain[at + 8u * g9_p()]);
             g9_d2 = bitcast<f32>(m13_plain[at + 13u * g9_p()]);
             let masks = atomicLoad(&m13_work[g9_claims(at) + 2u * g9_p()]);
@@ -1653,6 +1646,7 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
             t[b / 4u] |= u32(round(clamp(1.0 - pbin[b], 0.0, 1.0) * 255.0)) << (8u * (b % 4u));
         }
         g10_resolve(gid, g9_c, g9_pages_read > 0u, t);
+        if ((G10_PROBE & 1048576u) != 0u) { atomicAdd(&g6_state[28], g10_samples); }
     } else if (inside) {
         var sum = 0.0;
         for (var b = 0u; b < 16u; b++) { sum += pbin[b]; }
@@ -2187,6 +2181,7 @@ fn g8_node_box(n: u32) {
 fn hw_m13_prep(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let t = (wg.y * nwg.x + wg.x) * 64u + li;
     let nodes_count = arrayLength(&g8_boxes);
+    if (t == 0u && (G10_PROBE & 1048576u) != 0u) { atomicStore(&g6_state[28], 0u); }
     if (t < G6_POOL) {
         g8_page(t);
     } else if (t < G6_POOL + nodes_count) {
@@ -2218,7 +2213,7 @@ var<private> g9_pages_read: u32 = 0u;
 // The pixel's background's distance (3.4e38: the sky).
 var<private> g9_dbg: f32 = 3.4e38;
 // The background's 1/t across the pixel as bilinear coefficients (1, x, y,
-// xy over the pixel; M13 gate 10): from its four corners where they all
+// xy over the bins' indices; M13 gate 10): from its four corners where they all
 // show it (exact for a plane: 1/t is affine across the screen), else from
 // the plane of its hit at the pixel's centre, else none (its centre's
 // distance).
@@ -2237,7 +2232,7 @@ fn g10_set_inv(gid: vec3<u32>, w: u32, h: u32, at: u32) {
     let cd = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + 7u * p], m13_plain[cws.y + 7u * p], m13_plain[cws.z + 7u * p], m13_plain[cws.w + 7u * p]));
     if (all(cb == vec4<u32>(bg_obj)) && all(cd > vec4<f32>(0.0)) && all(cd < vec4<f32>(3.0e38))) {
         let i = vec4<f32>(1.0) / cd;
-        g10_inv = vec4<f32>(i.x, i.y - i.x, i.z - i.x, i.w - i.y - i.z + i.x);
+        g10_inv = g10_bin_space(vec4<f32>(i.x, i.y - i.x, i.z - i.x, i.w - i.y - i.z + i.x));
         g10_inv_ok = true;
         return;
     }
@@ -2256,20 +2251,30 @@ fn g10_set_inv(gid: vec3<u32>, w: u32, h: u32, at: u32) {
     if (abs(k) < 1e-20) { return; }
     let dr = dot(camera.right.xyz, n);
     let du = dot(camera.up.xyz, n);
-    g10_inv = vec4<f32>(dot(camera.forward.xyz, n) + sx0 * dr + sy0 * du, dsx * dr, dsy * du, 0.0) / k;
+    g10_inv = g10_bin_space(vec4<f32>(dot(camera.forward.xyz, n) + sx0 * dr + sy0 * du, dsx * dr, dsy * du, 0.0) / k);
     g10_inv_ok = true;
+}
+
+// Bilinear coefficients over the pixel (x, y in 0..1) as ones over bin
+// indices (x = (i + 0.5) / 4).
+fn g10_bin_space(c: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(c.x + 0.125 * (c.y + c.z) + 0.015625 * c.w, 0.25 * c.y + 0.03125 * c.w, 0.25 * c.z + 0.03125 * c.w, 0.0625 * c.w);
 }
 
 // Whether a point `surface` away along bin `b`'s ray lies beyond the
 // background there.
-fn g10_beyond(surface: f32, b: u32) -> bool {
-    if (g10_inv_ok) {
-        let fx = (f32(b % 4u) + 0.5) * 0.25;
-        let fy = (f32(b / 4u) + 0.5) * 0.25;
-        return surface * (g10_inv.x + g10_inv.y * fx + (g10_inv.z + g10_inv.w * fx) * fy) > 1.0;
-    }
-    return surface > g9_dbg;
+fn g10_beyond(surface: f32, fb: vec2<f32>) -> bool {
+    let c = g10_inv_wg[lane];
+    return surface * (c.x + c.y * fb.x + (c.z + c.w * fb.x) * fb.y) > 1.0;
 }
+
+// Each lane's coefficients (the pixels' pass: in workgroup memory, not
+// registers held through the walk); without any, 1/t of the centre's
+// distance (0: none).
+var<workgroup> g10_inv_wg: array<vec4<f32>, 64>;
+
+// Development: map samples a pixel took.
+var<private> g10_samples: u32 = 0u;
 var<private> g9_e: vec3<f32> = vec3<f32>(0.0);
 
 // The pixel's bins in which something `near` away lies in front of what
@@ -2470,15 +2475,8 @@ fn g10_corner_flags(k: u32, x: u32, co: vec4<u32>, cr: vec4<f32>, cg: vec4<f32>,
 // rays (they shade their own large hits), one its corners resolved whose
 // corners do not suffice for its object, and (G10_BG_SHADOWS) one whose
 // corners disagree on the background's sun visibility.
-fn g10_entry(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
-    let w = u32(camera.params.x);
-    let h = u32(camera.params.y);
+fn g10_entry(pixel: u32, resolved: bool, traced: bool, cws: vec4<u32>, co: vec4<u32>, cbg: vec4<u32>) {
     let p = g9_p();
-    let x1 = min(gid.x + 1u, w - 1u);
-    let y1 = min(gid.y + 1u, h - 1u);
-    let cws = vec4<u32>(g9_corner_word(gid.y * w + gid.x), g9_corner_word(gid.y * w + x1), g9_corner_word(y1 * w + gid.x), g9_corner_word(y1 * w + x1));
-    let co = vec4<u32>(m13_plain[cws.x + 3u * p], m13_plain[cws.y + 3u * p], m13_plain[cws.z + 3u * p], m13_plain[cws.w + 3u * p]);
-    let cbg = vec4<u32>(m13_plain[cws.x + 5u * p], m13_plain[cws.y + 5u * p], m13_plain[cws.z + 5u * p], m13_plain[cws.w + 5u * p]);
     let cv = vec4<u32>(m13_plain[cws.x + 6u * p], m13_plain[cws.y + 6u * p], m13_plain[cws.z + 6u * p], m13_plain[cws.w + 6u * p]);
     let cr = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x], m13_plain[cws.y], m13_plain[cws.z], m13_plain[cws.w]));
     let cg = bitcast<vec4<f32>>(vec4<u32>(m13_plain[cws.x + p], m13_plain[cws.y + p], m13_plain[cws.z + p], m13_plain[cws.w + p]));
@@ -2503,7 +2501,6 @@ fn g10_entry(gid: vec3<u32>, pixel: u32, resolved: bool, traced: bool) {
             need = true;
         }
     }
-    if ((G10_PROBE & 16384u) != 0u && !traced && gid.y < 400u) { need = false; }
     if (!need) { return; }
     let entry = atomicAdd(&g6_state[29], 1u);
     if (entry >= G10_SHADED) { return; }

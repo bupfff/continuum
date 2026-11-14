@@ -672,9 +672,8 @@ pub(crate) const M13_BIN_ARGS_BINDINGS: &[u32] = &[88, 89];
 /// M13 gate 10 (development): bins shaded one by one where a pixel's
 /// corners do not suffice: the list of pixels, its arguments, the bins.
 pub(crate) const M13_SHADE_ARGS_BINDINGS: &[u32] = &[89, 92];
-pub(crate) const M13_SHADE_RAYS_BINDINGS: &[u32] = &[
-    2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 102, 103,
-];
+pub(crate) const M13_SHADE_RAYS_BINDINGS: &[u32] =
+    &[2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 102, 103];
 pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[
     2, 3, 6, 8, 24, 30, 32, 52, 55, 56, 57, 58, 88, 92, 96, 102, 103,
 ];
