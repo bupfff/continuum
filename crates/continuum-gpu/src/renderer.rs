@@ -319,10 +319,19 @@ impl Renderer {
     pub fn is_settled(&self, frames: usize) -> bool {
         let log = self.inner.cache_log();
         let latest = self.stats().map_or(0, |s| s.frame as usize).min(log.len());
+        // (Nor re-baking for movers, nor deforming geometry's lighting
+        // lagging its pose: M12 gate 3.)
         latest >= frames
+            && self.inner.deforming_lag() == 0
             && log[latest - frames..latest]
                 .iter()
-                .all(|s| s.requests == 0 && s.pages_baked == 0)
+                .all(|s| s.requests == 0 && s.pages_baked == 0 && s.rebaked_pages == 0)
+    }
+
+    /// The most frames any light's lighting near deforming geometry lags
+    /// its pose (`CacheOptions::deforming_budget`; 0 when caught up).
+    pub fn deforming_lag(&self) -> u32 {
+        self.inner.deforming_lag()
     }
 
     /// Blocks until the GPU has finished everything submitted so far (the

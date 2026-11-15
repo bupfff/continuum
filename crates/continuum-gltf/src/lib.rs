@@ -51,6 +51,11 @@
 //!   cubic-spline) are kept ([`Imported::animations`]):
 //!   [`Animations::pose`] gives each animated instance's transform at a
 //!   time, for `Renderer::set_transform` on movable instances.
+//! - Skins and morph targets (M12 gate 3): a skinned or morphing mesh
+//!   becomes deforming geometry of its own ([`Imported::deforming`], for
+//!   `RendererOptions::deforming`); [`Animations::deform`] gives its
+//!   triangles at a time (morph weights, then linear blend skinning), for
+//!   `Renderer::set_vertices`. Skinned meshes sit at the world origin.
 //! - Environment images (an equirectangular `.hdr` or `.png` sky for
 //!   `RendererOptions::environment`) load with [`load_environment`].
 
@@ -59,7 +64,7 @@
 mod animation;
 mod environment;
 
-pub use animation::{Animation, Animations};
+pub use animation::{Animation, Animations, Pose};
 pub use environment::{decode_environment, load_environment};
 
 use std::path::Path;
@@ -143,6 +148,8 @@ pub struct ImportStats {
     /// Animation channels skipped: scale and morph weights (movers keep
     /// their scale), or keyframes that do not match their times.
     pub animation_channels_skipped: usize,
+    /// Skinned or morphing meshes placed as deforming geometry (M12 gate 3).
+    pub deforming: usize,
 }
 
 /// An imported scene: geometry, instances (world positions), the file's first
@@ -285,6 +292,7 @@ impl UvSlot {
 }
 
 /// One primitive's geometry before placement.
+#[derive(Clone)]
 struct Primitive {
     triangles: Vec<Tri>,
     normals: Option<Vec<[Vec3; 3]>>,
@@ -306,9 +314,26 @@ struct Primitive {
     alpha_cutoff: Option<f32>,
     /// Its vertex colors per triangle corner (`COLOR_0`, M10 gate 17).
     colors: Option<Vec<[Vec3; 3]>>,
+    /// Its skin weights and morph targets, if any (M12 gate 3), per corner
+    /// as `triangles`.
+    deform: Option<DeformData>,
     key: GeometryKey,
     /// Its geometry's index, once built.
     geometry: usize,
+}
+
+/// A primitive's deformation per triangle corner, in `triangles`' order
+/// (M12 gate 3; glTF's axes, mesh space): rest positions and normals, the
+/// normals' signs (-1 on double-sided back faces), joints and weights
+/// (empty without a skin) and morph targets' deltas.
+#[derive(Clone)]
+struct DeformData {
+    rest: Vec<DVec3>,
+    normals: Option<Vec<DVec3>>,
+    signs: Vec<f64>,
+    joints: Vec<[u16; 4]>,
+    weights: Vec<[f32; 4]>,
+    targets: Vec<(Vec<DVec3>, Option<Vec<DVec3>>)>,
 }
 
 /// A decoded image as RGBA8 (8-bit formats only).
@@ -446,6 +471,58 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             let blend = (material.alpha_mode() == gltf::material::AlphaMode::Blend)
                 .then_some(factor[3].clamp(0.0, 1.0));
             let double_sided = material.double_sided();
+            // Skin weights and morph targets (M12 gate 3), in glTF's axes.
+            let d3 = |v: [f32; 3]| DVec3::from_array(v.map(f64::from));
+            let raw: Vec<DVec3> = reader
+                .read_positions()
+                .map(|p| p.map(d3).collect())
+                .unwrap_or_default();
+            let raw_normals: Option<Vec<DVec3>> =
+                reader.read_normals().map(|n| n.map(d3).collect());
+            let joints: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|j| j.into_u16().collect());
+            let weights: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|w| w.into_f32().collect());
+            let targets: Vec<(Vec<DVec3>, Option<Vec<DVec3>>)> = reader
+                .read_morph_targets()
+                .map(|(dp, dn, _)| {
+                    (
+                        dp.map(|d| d.map(d3).collect())
+                            .unwrap_or_else(|| vec![DVec3::ZERO; raw.len()]),
+                        dn.map(|d| d.map(d3).collect()),
+                    )
+                })
+                .collect();
+            let skinned = joints.is_some() && weights.is_some();
+            let deform = (skinned || !targets.is_empty()).then(|| {
+                let corners: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
+                let mut order: Vec<(usize, f64)> = corners.iter().map(|&i| (i, 1.0)).collect();
+                if double_sided {
+                    for t in corners.as_chunks::<3>().0 {
+                        order.extend([(t[0], -1.0), (t[2], -1.0), (t[1], -1.0)]);
+                    }
+                }
+                let pick = |v: &[DVec3]| order.iter().map(|&(i, _)| v[i]).collect::<Vec<_>>();
+                DeformData {
+                    rest: pick(&raw),
+                    normals: raw_normals.as_deref().map(pick),
+                    signs: order.iter().map(|&(_, s)| s).collect(),
+                    joints: joints
+                        .as_ref()
+                        .filter(|_| skinned)
+                        .map(|j| order.iter().map(|&(i, _)| j[i]).collect())
+                        .unwrap_or_default(),
+                    weights: weights
+                        .as_ref()
+                        .filter(|_| skinned)
+                        .map(|w| order.iter().map(|&(i, _)| w[i]).collect())
+                        .unwrap_or_default(),
+                    targets: targets
+                        .iter()
+                        .map(|(dp, dn)| (pick(dp), dn.as_deref().map(pick)))
+                        .collect(),
+                }
+            });
             let mut triangles = Vec::with_capacity(indices.len() / 3);
             let mut corner_normals = Vec::with_capacity(indices.len() / 3);
             let mut corner_tex = Vec::with_capacity(indices.len() / 3);
@@ -496,6 +573,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 blend,
                 alpha_cutoff,
                 colors: colors.is_some().then_some(corner_colors),
+                deform,
                 key: (
                     accessor(gltf::Semantic::Positions).unwrap_or(usize::MAX),
                     accessor(gltf::Semantic::Normals),
@@ -543,26 +621,32 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 p.geometry = g;
                 continue;
             }
-            p.geometry = scene.geometries.len();
+            p.geometry = push_geometry(&mut scene, p, p.triangles.clone(), p.normals.clone());
             geometry_of.insert(p.key, p.geometry);
-            scene.geometries.push(Surface::from_mesh(
-                p.triangles.clone(),
-                p.normals.clone(),
-                p.tex.clone(),
-            ));
-            scene
-                .geometry_colors
-                .push(kept_colors(&p.triangles, p.colors.as_ref()));
-            scene.geometry_textures.push(p.texture);
-            scene.geometry_materials.push(p.material);
-            scene.geometry_emission.push(p.emission);
-            scene.geometry_normal_maps.push(p.normal_map);
-            scene.geometry_metallic_roughness.push(p.metallic_roughness);
-            scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
-            scene.geometry_emissive_textures.push(p.emissive_texture);
-            scene.geometry_blend.push(p.blend);
         }
     }
+    // Skins (M12 gate 3): joints and inverse bind matrices (identity where
+    // the file gives none).
+    let skins: Vec<animation::Skin> = document
+        .skins()
+        .map(|skin| {
+            let joints: Vec<usize> = skin.joints().map(|j| j.index()).collect();
+            let reader = skin.reader(|b| Some(&buffers[b.index()]));
+            let inverse_bind: Vec<DMat4> = match reader.read_inverse_bind_matrices() {
+                Some(m) => m
+                    .map(|m| DMat4::from_cols_array_2d(&m.map(|c| c.map(f64::from))))
+                    .collect(),
+                None => vec![DMat4::IDENTITY; joints.len()],
+            };
+            animation::Skin {
+                joints,
+                inverse_bind,
+            }
+        })
+        .collect();
+    // Deforming placements, built after the walk: (mesh, primitive, node,
+    // its world matrix in Z-up axes, skin).
+    let mut deforming: Vec<(usize, usize, usize, DMat4, Option<usize>)> = Vec::new();
     // Nodes, with world matrices.
     let (c, c_inv) = axes();
     let mut camera = None;
@@ -639,8 +723,23 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             });
         }
         if let Some(mesh) = node.mesh() {
-            for p in &meshes[mesh.index()] {
+            for (k, p) in meshes[mesh.index()].iter().enumerate() {
                 if p.geometry == usize::MAX {
+                    continue;
+                }
+                // Skinned (by this node's skin) or morphing: a geometry of its
+                // own, posed after the walk (M12 gate 3).
+                let skin = node.skin().map(|s| s.index());
+                if let Some(d) = &p.deform
+                    && ((skin.is_some() && !d.joints.is_empty()) || !d.targets.is_empty())
+                {
+                    deforming.push((
+                        mesh.index(),
+                        k,
+                        node.index(),
+                        m,
+                        skin.filter(|_| !d.joints.is_empty()),
+                    ));
                     continue;
                 }
                 let baked = stats.baked;
@@ -652,6 +751,106 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         for child in node.children() {
             stack.push((child, world));
         }
+    }
+    // Deforming geometry (M12 gate 3): each placement's rest pose (default
+    // morph weights, joints at rest) as a geometry of its own; skinned ones
+    // in world space at the origin, morphing ones where their node is.
+    let mut deformers: Vec<animation::Deformer> = Vec::new();
+    for &(mesh, k, node, _, skin) in &deforming {
+        let d = meshes[mesh][k].deform.clone().expect("deform data");
+        deformers.push(animation::Deformer {
+            geometry: usize::MAX,
+            node,
+            skin,
+            rest: d.rest,
+            normals: d.normals,
+            signs: d.signs,
+            joints: d.joints,
+            weights: d.weights,
+            targets: d.targets,
+            default_weights: document
+                .meshes()
+                .nth(mesh)
+                .and_then(|m| m.weights().map(|w| w.to_vec()))
+                .unwrap_or_default(),
+        });
+    }
+    let rest = Animations {
+        list: Vec::new(),
+        nodes: nodes.clone(),
+        instance_nodes: Vec::new(),
+        skins: skins.clone(),
+        deformers: deformers.clone(),
+    }
+    .deform(&[], 0.0);
+    for ((pose, &(mesh, k, _, m, skin)), d) in rest.into_iter().zip(&deforming).zip(&mut deformers)
+    {
+        let p = &meshes[mesh][k];
+        // The geometry keeps the triangles not degenerate at rest; the
+        // deformer's corners follow the same choice.
+        let keep: Vec<bool> = pose
+            .triangles
+            .iter()
+            .map(|t| !continuum::mesh::degenerate(t))
+            .collect();
+        let corners = |n: usize| (0..n).filter(|&c| keep[c / 3]);
+        let filter = |v: &mut Vec<DVec3>| *v = corners(v.len()).map(|c| v[c]).collect();
+        filter(&mut d.rest);
+        if let Some(n) = d.normals.as_mut() {
+            filter(n);
+        }
+        d.signs = corners(d.signs.len()).map(|c| d.signs[c]).collect();
+        if !d.joints.is_empty() {
+            d.joints = corners(d.joints.len()).map(|c| d.joints[c]).collect();
+            d.weights = corners(d.weights.len()).map(|c| d.weights[c]).collect();
+        }
+        for (dp, dn) in &mut d.targets {
+            filter(dp);
+            if let Some(dn) = dn.as_mut() {
+                filter(dn);
+            }
+        }
+        let mut q = Primitive {
+            tex: p.tex.as_ref().map(|t| {
+                t.iter()
+                    .zip(&keep)
+                    .filter(|(_, k)| **k)
+                    .map(|(t, _)| *t)
+                    .collect()
+            }),
+            colors: p.colors.as_ref().map(|c| {
+                c.iter()
+                    .zip(&keep)
+                    .filter(|(_, k)| **k)
+                    .map(|(c, _)| *c)
+                    .collect()
+            }),
+            deform: None,
+            ..p.clone()
+        };
+        let kept = |v: &[[Vec3; 3]]| -> Vec<[Vec3; 3]> {
+            v.iter()
+                .zip(&keep)
+                .filter(|(_, k)| **k)
+                .map(|(t, _)| *t)
+                .collect()
+        };
+        let (tris, normals) = (kept(&pose.triangles), kept(&pose.normals));
+        q.geometry = push_geometry(&mut scene, &q, tris.clone(), Some(normals));
+        d.geometry = q.geometry;
+        if skin.is_some() {
+            scene.instances.push(Instance {
+                geometry: q.geometry,
+                rotation: Mat3::IDENTITY,
+                scale: 1.0,
+                position: DVec3::ZERO,
+                albedo: q.albedo,
+            });
+        } else {
+            place(&mut scene, &q, m, &mut stats);
+        }
+        instance_nodes.push(None);
+        stats.deforming += 1;
     }
     let mut bounds = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
     for i in &scene.instances {
@@ -702,14 +901,27 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                         .map(|q| continuum::glam::DQuat::from_array(q.map(f64::from)))
                         .collect(),
                 ),
-                _ => {
+                Some(ReadOutputs::Scales(s)) => animation::Values::Scale(s.map(f64s).collect()),
+                Some(ReadOutputs::MorphTargetWeights(w)) => {
+                    animation::Values::Weights(w.into_f32().collect())
+                }
+                None => {
                     stats.animation_channels_skipped += 1;
                     continue;
                 }
             };
+            // (Weights: a value per target per keyframe.)
+            let targets = ch
+                .target()
+                .node()
+                .mesh()
+                .and_then(|m| m.primitives().next())
+                .map_or(1, |p| p.morph_targets().len().max(1));
             let count = match &values {
                 animation::Values::Translation(v) => v.len(),
                 animation::Values::Rotation(v) => v.len(),
+                animation::Values::Scale(v) => v.len(),
+                animation::Values::Weights(v) => v.len() / targets,
             };
             let per = if interpolation == animation::Interpolation::CubicSpline {
                 3
@@ -738,6 +950,8 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
         list,
         nodes,
         instance_nodes,
+        skins,
+        deformers,
     };
     Ok(Imported {
         scene,
@@ -754,6 +968,13 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
 const WATTS_PER_LUMEN: f32 = 1.0 / 683.0;
 
 impl Imported {
+    /// The geometries that deform (skinned or morphing meshes, M12 gate 3),
+    /// for `RendererOptions::deforming`; pose them each frame with
+    /// [`Animations::deform`] and `Renderer::set_vertices`.
+    pub fn deforming(&self) -> Vec<usize> {
+        self.animations.deforming()
+    }
+
     /// The file's lights for rendering about `origin`, in watts at 683 lumens
     /// per watt (as Blender imports them). glTF's lights have no size: point
     /// and spot lights become spheres of `radius`, and directional lights
@@ -805,6 +1026,32 @@ fn wrap_of(mode: gltf::texture::WrappingMode) -> Wrap {
 
 /// Per-corner vertex colors for `Surface::from_mesh(triangles, ..)`: those
 /// of the triangles it keeps.
+/// A geometry from primitive `p`'s attributes with `triangles` and
+/// `normals` (its own, or a deforming placement's rest pose, M12 gate 3):
+/// its index.
+fn push_geometry(
+    scene: &mut InstancedScene,
+    p: &Primitive,
+    triangles: Vec<Tri>,
+    normals: Option<Vec<[Vec3; 3]>>,
+) -> usize {
+    scene
+        .geometry_colors
+        .push(kept_colors(&triangles, p.colors.as_ref()));
+    scene
+        .geometries
+        .push(Surface::from_mesh(triangles, normals, p.tex.clone()));
+    scene.geometry_textures.push(p.texture);
+    scene.geometry_materials.push(p.material);
+    scene.geometry_emission.push(p.emission);
+    scene.geometry_normal_maps.push(p.normal_map);
+    scene.geometry_metallic_roughness.push(p.metallic_roughness);
+    scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
+    scene.geometry_emissive_textures.push(p.emissive_texture);
+    scene.geometry_blend.push(p.blend);
+    scene.geometries.len() - 1
+}
+
 fn kept_colors(triangles: &[Tri], colors: Option<&Vec<[Vec3; 3]>>) -> Option<Vec<[Vec3; 3]>> {
     colors.map(|c| {
         triangles

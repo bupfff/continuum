@@ -23,14 +23,31 @@ name = args[3] if len(args) > 3 else ""
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=glb)
 scene = bpy.context.scene
-if name:
-    for ob in scene.objects:
-        if ob.animation_data and ob.animation_data.nla_tracks:
-            for t in ob.animation_data.nla_tracks:
+# Every animation plays, as glTF means: Blender's importer leaves the first
+# one active on each datablock it animates and some only as muted NLA
+# tracks (a mesh's shape key weights): those become active.
+for ob in scene.objects:
+    ids = [ob]
+    if ob.type == "MESH" and ob.data.shape_keys:
+        ids.append(ob.data.shape_keys)
+    for idb in ids:
+        ad = idb.animation_data
+        if not ad or not ad.nla_tracks:
+            continue
+        if name:
+            for t in ad.nla_tracks:
                 t.mute = t.name != name
+        elif ad.action is None:
+            strips = [s for t in ad.nla_tracks for s in t.strips]
+            if strips:
+                ad.action = strips[0].action
+                # (Blender 4.4 on: an action animates through its slot.)
+                if hasattr(ad, "action_slot") and getattr(strips[0], "action_slot", None):
+                    ad.action_slot = strips[0].action_slot
 fps = scene.render.fps / scene.render.fps_base
-# glTF time 0 is Blender's frame 1 after import (the importer's offset).
-frame = 1.0 + seconds * fps
+# Blender's glTF importer puts time t at frame t × fps (its exporter wrote
+# frame f at f / fps: frame 1 at 1/24 s).
+frame = seconds * fps
 scene.frame_set(int(frame), subframe=frame - int(frame))
 depsgraph = bpy.context.evaluated_depsgraph_get()
 
