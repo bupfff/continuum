@@ -1127,9 +1127,10 @@ design is §3.4 "Deforming geometry". G1 failed on cost only: exact,
 works (exact once stopped, 0.15–4.7% around the object while deforming)
 but development at full size still costs 1.6–1.95× the still frame
 (`docs/results/m12-gate2-development.md`; gate not run).
-**Next:** the rest of the deforming cost (coarser receivers while an
-object deforms, a budget in time, profiling the spikes), then glTF skins
-and morph targets (M12 G3;
+**Next (the user, 2026-11-15):** glTF skins and morph targets, animated
+characters played (M12 G3), then anti-aliasing on the default path and the
+rest of the list in order; the rest of the deforming cost waits (coarser
+receivers while an object deforms, cheaper stale passes) (M12 G3;
 `experiments/room3d/cycles/make_skinned_test.py` makes a test file in
 Blender, `compare_skinned_pose.py` checks a pose against Blender's own
 skinning), then the rest of item 1 (development after gate 11: a 10 m/s
