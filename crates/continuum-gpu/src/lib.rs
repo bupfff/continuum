@@ -1666,7 +1666,9 @@ impl MaskConeKernel {
             (nodes, items, None)
         } else {
             let movable: Vec<u32> = movable.iter().map(|&m| m as u32).collect();
-            let (nodes, items, tree) = hierarchy::object_hierarchy_with_movers(&bounds, &movable);
+            let (nodes, items, mut tree) =
+                hierarchy::object_hierarchy_with_movers(&bounds, &movable);
+            tree.geometry_ranges = geometry_ranges.clone();
             (nodes, items, Some(tree))
         };
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];

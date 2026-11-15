@@ -4,6 +4,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::Tri;
+
 use continuum::glam::{DVec3, Mat3, Vec3};
 
 use crate::hierarchy::{MoverTree, NodeGpu, Placement, mesh_bounds, mover_subtree, union_root};
@@ -310,6 +312,25 @@ pub struct SkyCheck {
     pub largest_charge: f32,
 }
 
+/// The extra mips a deforming object's cache pages take (M12 gate 1): their
+/// texels re-bake every frame it is posed, so a quarter as many.
+const DEFORMING_MIPS: f32 = 1.0;
+
+/// A geometry whose vertices change (M12 gate 1): where its triangles and
+/// triangle hierarchy live, the rest pose's tree to refit, the words its
+/// triangles' and normals' w hold (vertex colors, tangents), and the pose
+/// to take next frame.
+struct Deformer {
+    geometry: usize,
+    first: u32,
+    root: u32,
+    nodes: Vec<NodeGpu>,
+    items: Vec<u32>,
+    tri_w: Vec<f32>,
+    normal_w: Vec<f32>,
+    pose: Option<(Vec<Tri>, Vec<[Vec3; 3]>)>,
+}
+
 /// Objects that may move (M9): where their subtree lives in the object
 /// hierarchy, and their placements and world boxes now.
 struct Movers {
@@ -420,6 +441,9 @@ pub struct InstancedRenderer {
     /// default), or isotropic trilinear (as before).
     texture_box: bool,
     movers: Option<Movers>,
+    /// Geometries whose vertices change (M12), and the pose each takes
+    /// next frame.
+    deformers: Vec<Deformer>,
     /// Lights that may move (`set_light`).
     moving: Vec<usize>,
     /// Camera levels streamed by need (M14 gate 1).
@@ -782,6 +806,174 @@ impl InstancedRenderer {
             p.rotation = rotation;
             p.translation = translation;
             movers.dirty[k] = true;
+        }
+    }
+
+    /// Makes geometries `geometries` of `scene` (the scene this renderer was
+    /// built from) deforming (M12): [`Self::set_vertices`] then poses them.
+    /// Every instance of each must be movable.
+    pub fn set_deforming(&mut self, scene: &InstancedScene, geometries: &[usize]) {
+        let movers = self
+            .movers
+            .as_ref()
+            .expect("deforming geometry needs movers");
+        for &g in geometries {
+            assert!(
+                scene
+                    .instances
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, i)| i.geometry == g)
+                    .all(|(k, _)| movers.index.contains_key(&k)),
+                "every instance of a deforming geometry must be movable"
+            );
+            let [first, count, root, _] = movers.tree.geometry_ranges[g];
+            let surface = &scene.geometries[g];
+            assert_eq!(count as usize, surface.triangles.len());
+            let (nodes, items, _) =
+                crate::hierarchy::triangle_hierarchy(&surface.triangles, root, first);
+            let tri_w = match scene.geometry_colors.get(g) {
+                Some(Some(colors)) if colors.len() == surface.triangles.len() => colors
+                    .iter()
+                    .flat_map(|c| c.map(crate::color_code))
+                    .collect(),
+                _ => vec![0.0; 3 * surface.triangles.len()],
+            };
+            let mapped = scene
+                .geometry_normal_maps
+                .get(g)
+                .copied()
+                .flatten()
+                .is_some()
+                && surface.tex.len() == surface.triangles.len()
+                && surface.normals.len() == surface.triangles.len();
+            let tangents = mapped
+                .then(|| crate::tangents::mikktspace(surface))
+                .flatten();
+            let normal_w = (0..3 * surface.triangles.len())
+                .map(|i| {
+                    tangents
+                        .as_ref()
+                        .map_or(0.0, |ts| crate::tangents::encode(ts[i / 3][i % 3]))
+                })
+                .collect();
+            // Its objects take pages one mip coarser (fewer texels re-baked
+            // each pose; the albedo's w, read by the cache's shading).
+            for (k, i) in scene.instances.iter().enumerate() {
+                if i.geometry == g {
+                    let a = i.albedo;
+                    let buffer = &self
+                        .scene
+                        .iter()
+                        .find(|(b, _)| *b == 8)
+                        .expect("albedo buffer")
+                        .1;
+                    self.queue.write_buffer(
+                        buffer,
+                        16 * k as u64,
+                        bytemuck::cast_slice(&[a.x, a.y, a.z, DEFORMING_MIPS]),
+                    );
+                }
+            }
+            self.deformers.push(Deformer {
+                geometry: g,
+                first,
+                root,
+                nodes,
+                items,
+                tri_w,
+                normal_w,
+                pose: None,
+            });
+        }
+    }
+
+    /// Poses deforming geometry `geometry` (one of [`Self::set_deforming`])
+    /// from the next frame: its triangles and each corner's normal, as many
+    /// as the rest pose's and in its order (its charts and texture
+    /// coordinates stay the rest pose's).
+    pub fn set_vertices(&mut self, geometry: usize, triangles: Vec<Tri>, normals: Vec<[Vec3; 3]>) {
+        let d = self
+            .deformers
+            .iter_mut()
+            .find(|d| d.geometry == geometry)
+            .unwrap_or_else(|| panic!("geometry {geometry} is not deforming"));
+        assert_eq!(
+            triangles.len() * 3,
+            d.tri_w.len(),
+            "a pose keeps the triangle count"
+        );
+        assert_eq!(normals.len(), triangles.len());
+        d.pose = Some((triangles, normals));
+    }
+
+    /// Applies the poses given since the last frame (M12): each deformed
+    /// geometry's triangles, normals, refit hierarchy and hardware
+    /// structure, its new box, and its instances marked moved.
+    fn apply_poses(&mut self) {
+        if self.deformers.iter().all(|d| d.pose.is_none()) {
+            return;
+        }
+        let buffer = |b: u32| {
+            &self
+                .scene
+                .iter()
+                .find(|(k, _)| *k == b)
+                .expect("scene buffer")
+                .1
+        };
+        let node_size = std::mem::size_of::<NodeGpu>() as u64;
+        for d in &mut self.deformers {
+            let Some((tris, normals)) = d.pose.take() else {
+                continue;
+            };
+            let words: Vec<[f32; 4]> = tris
+                .iter()
+                .flatten()
+                .zip(&d.tri_w)
+                .map(|(v, &w)| [v.x, v.y, v.z, w])
+                .collect();
+            self.queue
+                .write_buffer(buffer(2), 48 * d.first as u64, bytemuck::cast_slice(&words));
+            let words: Vec<[f32; 4]> = normals
+                .iter()
+                .flatten()
+                .zip(&d.normal_w)
+                .map(|(n, &w)| [n.x, n.y, n.z, w])
+                .collect();
+            self.queue.write_buffer(
+                buffer(24),
+                48 * d.first as u64,
+                bytemuck::cast_slice(&words),
+            );
+            let cov = crate::hierarchy::refit_triangle_hierarchy(
+                &tris,
+                &mut d.nodes,
+                &d.items,
+                d.root,
+                d.first,
+            );
+            self.queue.write_buffer(
+                buffer(25),
+                d.root as u64 * node_size,
+                bytemuck::cast_slice(&d.nodes),
+            );
+            self.queue.write_buffer(
+                buffer(29),
+                4 * d.root as u64 * crate::hierarchy::COVERAGE_SAMPLES as u64,
+                bytemuck::cast_slice(&cov),
+            );
+            if let Some(hw) = &mut self.hw {
+                hw.rebuild_geometry(&self.device, &self.queue, d.geometry, &tris);
+            }
+            if let Some(movers) = &mut self.movers {
+                movers.local[d.geometry] = mesh_bounds(&tris);
+                for (k, p) in movers.placements.iter().enumerate() {
+                    if p.geometry == d.geometry {
+                        movers.dirty[k] = true;
+                    }
+                }
+            }
         }
     }
 
@@ -1400,6 +1592,7 @@ impl InstancedRenderer {
             waited: std::cell::Cell::new(Duration::ZERO),
             texture_box: true,
             movers,
+            deformers: Vec::new(),
             moving: moving_lights.to_vec(),
             stream: None,
             lighting: None,
@@ -2112,6 +2305,7 @@ impl InstancedRenderer {
             let targets = lit_targets(&self.scene, cache);
             pool.update(&mut encoder, &targets, wanted, pinned);
         }
+        self.apply_poses();
         self.apply_moves(&mut encoder);
         if let Some(cache) = &mut self.cache {
             // Before the bake, which may count its work in the counters.
@@ -2326,6 +2520,7 @@ impl InstancedRenderer {
         profile.planning = start.elapsed();
         let start = Instant::now();
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.apply_poses();
         self.apply_moves(&mut encoder);
         let mut counts = None;
         if let Some(cache) = &mut self.cache {

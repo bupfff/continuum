@@ -126,7 +126,15 @@ pub(crate) struct HwScene {
     /// traverses only those (a mask still visits every box).
     pub background: wgpu::Tlas,
     blas: Vec<Option<wgpu::Blas>>,
-    _vertices: wgpu::Buffer,
+    /// Every built geometry's vertices (three a triangle), each geometry's
+    /// first vertex there and its structure's size (M12: deforming
+    /// geometry rebuilds its own).
+    vertices: wgpu::Buffer,
+    first_vertex: Vec<u32>,
+    sizes: Vec<Option<wgpu::BlasTriangleGeometrySizeDescriptor>>,
+    /// Structures replaced by a deforming geometry's new pose, kept until
+    /// frames that may still read them are done (the last few).
+    retired: std::collections::VecDeque<wgpu::Blas>,
     /// Each object's top-level transform, kept for objects whose geometry
     /// has no structure of its own (M14 gate 4: camera rays see its proxy),
     /// so an instance can be made when a level is pointed at.
@@ -247,6 +255,70 @@ impl HwScene {
             }
             let old = std::mem::replace(&mut c.blas[k as usize], blas);
             c.graveyard.push((frame, c.layout[k as usize], old));
+        }
+    }
+
+    /// Builds geometry `geometry` a new structure from `mesh` (a new pose of
+    /// its triangles, as many as before; M12: deforming geometry), submitted
+    /// at once, in place of its old one (kept a few poses for frames in
+    /// flight). Top-level structures that place it are rebuilt after, in
+    /// the frame's encoder.
+    pub(crate) fn rebuild_geometry(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        geometry: usize,
+        mesh: &[Tri],
+    ) {
+        let (Some(_), Some(size)) = (&self.blas[geometry], &self.sizes[geometry]) else {
+            return;
+        };
+        let blas = device.create_blas(
+            &wgpu::CreateBlasDescriptor {
+                label: Some("deforming geometry"),
+                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+            },
+            wgpu::BlasGeometrySizeDescriptors::Triangles {
+                descriptors: vec![size.clone()],
+            },
+        );
+        assert_eq!(
+            3 * mesh.len() as u32,
+            size.vertex_count,
+            "a pose changes no triangle count"
+        );
+        let vertices: Vec<[f32; 3]> = mesh.iter().flat_map(|t| t.map(|v| v.to_array())).collect();
+        queue.write_buffer(
+            &self.vertices,
+            12 * self.first_vertex[geometry] as u64,
+            bytemuck::cast_slice(&vertices),
+        );
+        let entry = wgpu::BlasBuildEntry {
+            blas: &blas,
+            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
+                size,
+                vertex_buffer: &self.vertices,
+                first_vertex: self.first_vertex[geometry],
+                vertex_stride: 12,
+                index_buffer: None,
+                first_index: None,
+                transform_buffer: None,
+                transform_buffer_offset: None,
+            }]),
+        };
+        // In a submission of its own, before the frame's: built in the
+        // frame's encoder before the top-level build that places it, it
+        // was never hit (development, M12 gate 1).
+        let mut own = device.create_command_encoder(&Default::default());
+        own.build_acceleration_structures(std::iter::once(&entry), std::iter::empty());
+        queue.submit([own.finish()]);
+        drop(entry);
+        if let Some(old) = self.blas[geometry].replace(blas) {
+            self.retired.push_back(old);
+        }
+        while self.retired.len() > 4 {
+            self.retired.pop_front();
         }
     }
 
@@ -378,7 +450,7 @@ pub(crate) fn build(
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("blas vertices"),
         contents: bytemuck::cast_slice(&vertices),
-        usage: wgpu::BufferUsages::BLAS_INPUT,
+        usage: wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST,
     });
     let sizes: Vec<Option<wgpu::BlasTriangleGeometrySizeDescriptor>> = geometries
         .iter()
@@ -395,6 +467,7 @@ pub(crate) fn build(
             })
         })
         .collect();
+    let blas_sizes = sizes.clone();
     let blas: Vec<Option<wgpu::Blas>> = sizes
         .iter()
         .map(|size| {
@@ -696,7 +769,10 @@ pub(crate) fn build(
         movers,
         background,
         blas,
-        _vertices: vertex_buffer,
+        vertices: vertex_buffer,
+        first_vertex: first,
+        sizes: blas_sizes,
+        retired: std::collections::VecDeque::new(),
         transforms,
         slots,
         clusters: cluster_set.map(|(c, _, _)| c),

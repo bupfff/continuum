@@ -5297,7 +5297,9 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     let surface = camera.eye.xyz + dir * hit.distance;
     let c = tri_vchart[hit.tri];
     let uv = chart_uv(hit.mesh, hit.tri, surface);
-    let wanted = min(vc_mip(hit.distance), vc_top_mip(c, hit.mesh));
+    // A deforming object's pages re-bake every frame it is posed: they
+    // take its albedo's w more mips (M12 gate 1).
+    let wanted = min(vc_mip(hit.distance) + u32(albedo[hit.mesh].w), vc_top_mip(c, hit.mesh));
     let f = vc_find_shown(hit.mesh, c, uv, wanted);
     let point = surface + hit.normal * surface_offset(hit.distance);
     let normal = mapped_normal(hit.mesh, hit.tri, surface, shading_normal(hit.mesh, hit.tri, surface, -dir), hit.distance, dir);

@@ -66,6 +66,13 @@ pub struct RendererOptions {
     /// never shows stale light. With the cache, movers and a sky do not mix
     /// yet. Empty (the default): a static scene.
     pub movable: Vec<usize>,
+    /// Geometries whose vertices change ([`Renderer::set_vertices`]: skinned
+    /// characters, morph targets, anything posed each frame; M12). Their
+    /// instances move as movers do (they are made movable): the cache
+    /// re-bakes what a pose changes, their own pages included. Not with
+    /// streaming or the sub-pixel path; under a sky, as movers (slow).
+    /// Empty (the default): none.
+    pub deforming: Vec<usize>,
     /// Lights that may move ([`Renderer::set_light`]; not spots). With the
     /// cache, an error ledger re-bakes only what may be more than
     /// `CacheOptions::ledger_epsilon` off (M9 gate 2). Not yet with movers
@@ -108,6 +115,7 @@ impl Default for RendererOptions {
             cache_options: CacheOptions::default(),
             pixel_cones: false,
             movable: Vec::new(),
+            deforming: Vec::new(),
             moving_lights: Vec::new(),
             streaming: None,
             sub_pixel: false,
@@ -155,6 +163,13 @@ impl Renderer {
         // bins) with a fixed bake budget.
         // (Coverage maps exist for at most 64 placed geometries: a record
         // names its map in 16 bits, 1,024 directions a geometry.)
+        // Deforming geometries' instances move as movers do (M12).
+        let mut movable = options.movable.clone();
+        for (k, i) in scene.instances.iter().enumerate() {
+            if options.deforming.contains(&i.geometry) && !movable.contains(&k) {
+                movable.push(k);
+            }
+        }
         let placed = (0..scene.geometries.len())
             .filter(|&g| scene.instances.iter().any(|i| i.geometry == g))
             .count();
@@ -162,6 +177,7 @@ impl Renderer {
             && options.cache
             && kernel.has_hardware_rays()
             && options.movable.is_empty()
+            && options.deforming.is_empty()
             && options.moving_lights.is_empty()
             && options.streaming.is_none()
             && placed <= 64;
@@ -176,7 +192,7 @@ impl Renderer {
         }
         let cache = options.cache.then_some(cache_options);
         let inner = match options.streaming {
-            Some(stream) if options.movable.is_empty() && options.moving_lights.is_empty() => {
+            Some(stream) if movable.is_empty() && options.moving_lights.is_empty() => {
                 InstancedRenderer::with_streaming(
                     &kernel,
                     format,
@@ -200,12 +216,16 @@ impl Renderer {
                 scene,
                 origin,
                 cache,
-                &options.movable,
+                &movable,
                 &options.moving_lights,
             ),
         };
         if sub_pixel {
             kernel.set_profile_stage(0);
+        }
+        let mut inner = inner;
+        if !options.deforming.is_empty() {
+            inner.set_deforming(scene, &options.deforming);
         }
         Renderer { kernel, inner }
     }
@@ -214,6 +234,20 @@ impl Renderer {
     /// [`RendererOptions::moving_lights`], from the next frame.
     pub fn set_light(&mut self, index: usize, light: Light) {
         self.inner.set_light(index, light);
+    }
+
+    /// Poses geometry `geometry` (one of [`RendererOptions::deforming`]) from
+    /// the next frame: its triangles and each corner's shading normal, as
+    /// many as the scene's and in its order. Its charts and texture
+    /// coordinates stay the scene's (a texel follows its triangle); normal
+    /// maps keep the scene's tangents.
+    pub fn set_vertices(
+        &mut self,
+        geometry: usize,
+        triangles: Vec<[Vec3; 3]>,
+        normals: Vec<[Vec3; 3]>,
+    ) {
+        self.inner.set_vertices(geometry, triangles, normals);
     }
 
     /// Moves instance `instance` (one of [`RendererOptions::movable`]) to

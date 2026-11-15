@@ -319,6 +319,9 @@ pub(crate) struct MoverTree {
     pub first_item: u32,
     /// The movable objects.
     pub objects: Vec<u32>,
+    /// Each geometry's `[first triangle, triangle count, hierarchy root, _]`
+    /// (M12: refitting deforming geometry), set by the scene's upload.
+    pub geometry_ranges: Vec<[u32; 4]>,
 }
 
 /// An object hierarchy whose root's first child roots the static objects
@@ -346,6 +349,7 @@ pub(crate) fn object_hierarchy_with_movers(
         nodes: 0,
         first_item: items.len() as u32,
         objects: movable.to_vec(),
+        geometry_ranges: Vec::new(),
     };
     let mover_bounds: Vec<(Vec3, Vec3)> = movable.iter().map(|&m| bounds[m as usize]).collect();
     let (root, region, mover_items) = mover_subtree(&tree, &mover_bounds);
@@ -555,6 +559,54 @@ pub(crate) fn triangle_hierarchy(
         }
     }
     (nodes, items.iter().map(|&t| first + t).collect(), cov)
+}
+
+/// Refits one mesh's triangle hierarchy to a new pose `mesh` (M12: deforming
+/// geometry): the same tree and leaf order as [`triangle_hierarchy`] built
+/// for the rest pose (`nodes`, numbered from `root`; `items`, the leaves'
+/// triangles as global indices from `first`), with each node's box and
+/// coverage samples recomputed from the new triangles, as that function
+/// computes them. Returns the coverage samples.
+pub(crate) fn refit_triangle_hierarchy(
+    mesh: &[Tri],
+    nodes: &mut [NodeGpu],
+    items: &[u32],
+    root: u32,
+    first: u32,
+) -> Vec<f32> {
+    let dirs = coverage_directions();
+    let mut cov = vec![0.0f32; nodes.len() * COVERAGE_SAMPLES];
+    for n in (0..nodes.len()).rev() {
+        let [x, count, _, _] = nodes[n].info;
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let (head, tail) = cov.split_at_mut((n + 1) * COVERAGE_SAMPLES);
+        let out = &mut head[n * COVERAGE_SAMPLES..];
+        if count > 0 {
+            let start = (x - first) as usize;
+            for &g in &items[start..start + count as usize] {
+                let t = mesh[(g - first) as usize];
+                let (a, b) = padded(mesh_bounds(&[t]));
+                (lo, hi) = (lo.min(a), hi.max(b));
+                let area_normal = (t[1] - t[0]).cross(t[2] - t[0]) * 0.5;
+                for (o, d) in out.iter_mut().zip(&dirs) {
+                    *o += area_normal.dot(*d).max(0.0);
+                }
+            }
+        } else {
+            let left = (x - root) as usize;
+            for c in [left, left + 1] {
+                let (a, b) = nodes[c].bounds();
+                (lo, hi) = (lo.min(a), hi.max(b));
+            }
+            let base = (left - n - 1) * COVERAGE_SAMPLES;
+            for k in 0..COVERAGE_SAMPLES {
+                out[k] = tail[base + k] + tail[base + COVERAGE_SAMPLES + k];
+            }
+        }
+        nodes[n].lo = [lo.x, lo.y, lo.z, 0.0];
+        nodes[n].hi = [hi.x, hi.y, hi.z, 0.0];
+    }
+    cov
 }
 
 /// The projected front area of a node with coverage samples `cov` (one
