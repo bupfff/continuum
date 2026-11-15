@@ -1057,8 +1057,16 @@ the disk free for traces (it filled during gate 13's development). Real-frame pa
    coverage pass in about 9 ms settled (0.159× and 0.128× one ray's
    error); gate 9 (colour) failed (0.65×/0.55× against 0.5×, 22–27 ms);
    gate 10: colour within the bar (0.38×/0.47×), 16–18 ms; gate 11: both
-   (0.34×/0.39×, 13.9/14.7 ms settled). *Left:* flights with colour, the
-   sun cache's invalidation, and the path into the renderer.
+   (0.34×/0.39×, 13.9/14.7 ms settled); gate 12 (lit by the renderer's
+   cache): colour passed (0.435×/0.414×), speed failed (17.80/18.77 ms
+   against 16.7, machine slow); gate 13: the cache-lit path at
+   1.045×/1.014× gate 11's frame (passed narrowly), colour 0.436×/0.414×;
+   the path is `RendererOptions::sub_pixel` (experimental). *Left:* lights
+   seen directly on the path (not drawn), small instances lit by the cache
+   (they take the first light and the sky with a shadow each), colour in
+   motion (the sun cache misses where the view moves; 1.23–1.37× settled
+   after gate 11), the absolute 60 fps bar in this machine's state (17–18
+   ms with external displays), and the landmark's "about 10 ms".
 4. **One showcase scene** with all three, at 60 fps against Cycles, the
    quality dial working. *Not started.*
 
@@ -1145,10 +1153,18 @@ design's gates.
    frame at its place (bar 1.2×; the settled reference itself varies by
    15%), with a wave of 600 requests a frame at 4–5 s. **Gate 8 passed**
    (`docs/results/m13-gate8.md`): about 9 ms settled in both views.
-   **Next:** colour (appearance) in the same structures; then the 10 ms
-   bar's follow-ups
-   (150 m: corner and bin rays about 5 ms), flights, then colour in the
-   same pages (appearance).
+   Colour: gates 9–11 (passed at 11), into the renderer's lighting: gates
+   12–13 (13 passed), then the renderer option (see "Start here").
+   **Next, in order:** (a) lights seen directly on the sub-pixel path
+   (today only one-ray paths draw them; on this path they need to respect
+   small instances in front and partial pixels); (b) small instances lit
+   by the cache (§3.4 "Into the renderer", part C: per light a visibility
+   per instance, sky and bounce from the instance's coarsest page, its
+   error against per-sample lighting measured first); (c) colour in motion
+   (a walk and a 10 m/s flight within 1.2× the settled frame at their place,
+   the sun cache's cells reused across shifts); (d) the absolute frame
+   (Landmark 3's "about 10 ms"; today 17–18 ms in this machine's state, of
+   which one ray a pixel is 2.7–3.4).
 4. **The showcase;** the NVIDIA benchmark when funded.
 
 **Open, not scheduled** (after the above, or when a landmark needs them):
