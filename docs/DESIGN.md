@@ -1017,8 +1017,9 @@ light (§8, "Wide light cones": 12–24 s frames).
 stall is fixed by guards (frames at most 32.8 ms from an empty cache, M5
 G6's scene bit-identical), but receivers centimetres from the large light
 are 4.10% from Cycles against 3% (`docs/results/m5-gate14.md`).
-**Next:** rays for wide light windows (the accuracy fix, a new gate),
-then colour in motion (development after gate 11: a 10 m/s
+**Next:** colour in motion; rays for wide light windows (the accuracy
+fix, a new gate) stay open, since only receivers centimetres from a large
+light need them (development after gate 11: a 10 m/s
 flight 150 m up runs 1.37× settled because the sun cache misses where the
 view moves); then the showcase (item 4). The machine now runs with
 external displays (control 119.7/104.9 ms against 110.8/91.0 in gate 11's
