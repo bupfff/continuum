@@ -91,9 +91,10 @@ pub struct RendererOptions {
     /// geometries with instances; otherwise ignored. The cache then bakes a
     /// fixed amount a frame (`frame_target_ms` and `frame_budget_ms` 0: the
     /// path's own passes take most of a frame target), so views settle in
-    /// hundreds of frames. Not yet: small instances lit by the cache (they
-    /// take the first light and the sky, with a shadow per instance), lights
-    /// seen directly (not drawn).
+    /// hundreds of frames. Lights seen directly are drawn bin by bin behind
+    /// what covers them (M13 gate 14). Not yet: small instances lit by the
+    /// cache (they take the first light and the sky, with a shadow per
+    /// instance).
     pub sub_pixel: bool,
 }
 

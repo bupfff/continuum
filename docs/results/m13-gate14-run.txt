@@ -1,0 +1,8 @@
+low: 2. lights drawn 1.001× drawing off (at most 1.03×): PASS; drawn 9.85 ms, off 9.84 ms (medians of 5 rounds; rounds' ratios [0.998, 1.003, 1.001, 1.002, 1.001]); settled in 514 frames
+standing: 2. lights drawn 0.999× drawing off (at most 1.03×): PASS; drawn 16.97 ms, off 17.05 ms (medians of 5 rounds; rounds' ratios [0.995, 1.0, 1.004, 0.97, 0.999]); settled in 804 frames
+gate 13's standing view (reported): lights drawn 1.000× drawing off, drawn 17.05 ms (medians of 3 rounds); settled in 838 frames
+low: 1. near the lights (1410 px) 5.57% from the reference, one ray 38.46% (0.145×, at most 0.5×): PASS
+low (reported): the whole image 49.69% vs one ray 342.93% (0.145×); the rest 2.00% vs 3.80% (0.525×); near the lights' mean colour: reference (59.561, 37.226, 19.867), ours (59.785, 37.347, 19.916); the one-ray path settled in 204 frames
+standing: 1. near the lights (1261 px) 14.57% from the reference, one ray 71.08% (0.205×, at most 0.5×): PASS
+standing (reported): the whole image 328.16% vs one ray 1600.69% (0.205×); the rest 4.16% vs 10.34% (0.402×); near the lights' mean colour: reference (617.610, 372.215, 215.673), ours (609.299, 367.241, 212.810); the one-ray path settled in 302 frames
+Verdict: PASS

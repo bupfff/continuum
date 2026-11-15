@@ -191,7 +191,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   a static scene, no streaming and at most 64 instanced geometries; views
   settle in hundreds of frames (a fixed bake budget). Small instances take
   the first light and the sky with one shadow each (not the cache's);
-  lights seen directly are not drawn; motion is not measured.
+  motion is not measured. Lights seen directly are drawn by the bins
+  their light covers, behind what lies in front, at 0.15–0.21× one ray's
+  error near them and no measurable cost (M13 G14).
 - **The sky** traces hardware rays where camera rays do
   (`CacheOptions::sky_rays`, the default): views of the boulder field warm
   in 166–400 frames from an empty cache (M5 G13). With movers, streamed

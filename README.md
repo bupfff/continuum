@@ -250,8 +250,9 @@ nothing). Four landmarks, in order:
    and a frame costs 1–5% more than with the simpler lighting (measured
    side by side; 17.1–17.9 ms a frame on this machine with its external
    displays running, where the simpler lighting takes 16.1–17.6). It is a
-   renderer option now (`RendererOptions::sub_pixel`, experimental);
-   flying with colour is not measured.
+   renderer option now (`RendererOptions::sub_pixel`, experimental), and
+   draws lights seen directly by the sub-pixel parts they cover; flying
+   with colour is not measured.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
