@@ -1050,6 +1050,9 @@ fn hw_m13_tile_roots(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(loc
     }
     m13_roots[base] = n;
     m13_roots[base + G5_TILE_WORDS - 1u] = n_large;
+    // M13 gate 14: the lights the tile's cone can meet (word 379, past the
+    // roots), none while state word 23 turns drawing lights off.
+    m13_roots[base + G14_TILE_WORD] = g14_tile_lights(lo);
 }
 
 // Per map (layer) the bounding rectangle of its finest texels not zero
@@ -1643,6 +1646,9 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
             let masks = atomicLoad(&m13_work[g9_claims(at) + 2u * g9_p()]);
             g9_l = masks & 0xffffu;
             g9_l2 = (masks >> 16u) & ~g9_l;
+            // M13 gate 14: the bins that see a light.
+            let tile_lights = m13_roots[(wid.y * ((w + 7u) / 8u) + wid.x) * G5_TILE_WORDS + G14_TILE_WORD];
+            if (tile_lights != 0u) { g14_find(pix, tile_lights); }
         }
     }
     var on = inside && g5_open != 0u && (G5_SKIP & 2u) == 0u;
@@ -2381,7 +2387,112 @@ fn g9_in_front(near: f32) -> u32 {
     if (near > g9_dl) { bins &= ~g9_l; }
     if (near > g9_d2) { bins &= ~g9_l2; }
     if (near > g9_dbg) { bins &= g9_l | g9_l2; }
+    // M13 gate 14: nor behind a light the bin sees.
+    if (near > g14_d) { bins &= ~g14_bins; }
     return bins;
+}
+
+// --- M13 gate 14: lights seen directly on the sub-pixel path. ---
+
+// The pixel's bins whose centres see a light in front of what they show
+// behind small entries, and the nearest such light's distance (small
+// entries beyond it leave those bins: `g9_in_front`).
+var<private> g14_bins: u32 = 0u;
+var<private> g14_d: f32 = 3.4e38;
+
+// Bin `b`'s ray (its centre) in pixel `pix`, as the bin rays take it.
+fn g14_dir(pix: vec2<f32>, b: u32) -> vec3<f32> {
+    return g14_dir_at(pix + (vec2<f32>(f32(b % 4u), f32(b / 4u)) + vec2<f32>(0.5)) * 0.25);
+}
+
+// The ray through point `p` of the screen (pixels).
+fn g14_dir_at(p: vec2<f32>) -> vec3<f32> {
+    let tz = camera.params.z;
+    let sx = (p.x / camera.params.x * 2.0 - 1.0) * tz * camera.params.x / camera.params.y;
+    let sy = (1.0 - p.y / camera.params.y * 2.0) * tz;
+    return normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+}
+
+// The tile's word of lights its cone can meet (bit i: light i), after its
+// roots.
+const G14_TILE_WORD: u32 = 379u;
+
+fn g14_tile_lights(lo: vec2<f32>) -> u32 {
+    if (atomicLoad(&g6_state[23]) != 0u) { return 0u; }
+    let eye = camera.eye.xyz;
+    var mask = 0u;
+    for (var i = 0u; i < min(arrayLength(&lights), 32u); i++) {
+        if (g14_may_see(lights[i], eye, lo + vec2<f32>(4.0), 4.0)) { mask |= 1u << i; }
+    }
+    return mask;
+}
+
+// Whether the cone of a square `2 r` pixels across centred at `c` (from
+// the eye `eye`) can meet light `l`'s bounding sphere.
+fn g14_may_see(l: LightRect, eye: vec3<f32>, c: vec2<f32>, r: f32) -> bool {
+    if (!is_sphere(l) && l.corner.w < 0.5) { return false; }
+    var rad = l.edge_u.x;
+    if (!is_sphere(l)) { rad = 0.5 * max(length(l.edge_u.xyz + l.edge_v.xyz), length(l.edge_u.xyz - l.edge_v.xyz)); }
+    let to = light_center(l) - eye;
+    let d = length(to);
+    if (d <= rad) { return true; }
+    // Within the sphere's angular radius asin(x) plus the square's
+    // half-diagonal h (at most at the screen's centre, with room) of its
+    // centre: cos a ≥ cos(asin x + h), without inverse functions.
+    let h = (1.5 * r + 0.5) * 2.0 * camera.params.z / camera.params.y;
+    let x = rad / d;
+    let cos_a = dot(g14_dir_at(c), to) / d;
+    return cos_a >= sqrt(1.0 - x * x) * (1.0 - 0.5 * h * h) - x * h;
+}
+
+// Whether something `t` along bin `b`'s ray lies in front of what the bin
+// shows behind small entries (its large object, the background, the sky).
+fn g14_before_back(t: f32, b: u32) -> bool {
+    if (((g9_l >> b) & 1u) != 0u) { return t < g9_dl; }
+    if (((g9_l2 >> b) & 1u) != 0u) { return t < g9_d2; }
+    if (g9_dbg >= 3.0e38) { return true; }
+    return !g10_beyond(t, vec2<f32>(f32(b % 4u), f32(b / 4u)));
+}
+
+// The pixel's bins that see a light (after its layers are known: the
+// claims, distances and the background's 1/t), among the lights its tile
+// can meet (`tile`).
+fn g14_find(pix: vec2<f32>, tile: u32) {
+    g14_bins = 0u;
+    g14_d = 3.4e38;
+    let eye = camera.eye.xyz;
+    var todo = tile;
+    while (todo != 0u) {
+        let i = countTrailingZeros(todo);
+        todo &= todo - 1u;
+        let l = lights[i];
+        if (!g14_may_see(l, eye, pix + vec2<f32>(0.5), 0.5)) { continue; }
+        for (var b = 0u; b < 16u; b++) {
+            let t = rect_distance(l, eye, g14_dir(pix, b));
+            if (t < 3.0e38 && g14_before_back(t, b)) {
+                g14_bins |= 1u << b;
+                g14_d = min(g14_d, t);
+            }
+        }
+    }
+}
+
+// The radiance bin `b` of pixel `pix` sees: its nearest light's (with a
+// spot's falloff).
+fn g14_radiance(pix: vec2<f32>, b: u32) -> vec3<f32> {
+    let eye = camera.eye.xyz;
+    let dir = g14_dir(pix, b);
+    var near = 3.4e38;
+    var c = vec3<f32>(0.0);
+    for (var i = 0u; i < arrayLength(&lights); i++) {
+        let l = lights[i];
+        let t = rect_distance(l, eye, dir);
+        if (t < near) {
+            near = t;
+            c = l.radiance.xyz * spot_falloff(l, -dir);
+        }
+    }
+    return c;
 }
 
 // The largest colour a page texel holds (albedo 1 lit fully), for its
@@ -2958,7 +3069,7 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
     // bins' bilinear weights summed by their transmittance, once.
     // Split by the sun (M13 appearance, third): Σ t (dark + v (lit −
     // dark)) over the bins, from two sums.
-    if (G12_FAST && masks == 0u && shaded == NONE && objs.x != NONE && all(m_bg > vec4<f32>(0.5)) && !plain_bg) {
+    if (G12_FAST && g14_bins == 0u && masks == 0u && shaded == NONE && objs.x != NONE && all(m_bg > vec4<f32>(0.5)) && !plain_bg) {
         let lm = m13_plain[at + 1u * p];
         let m_lit = select(vec4<f32>(0.0), vec4<f32>(1.0), (vec4<u32>(lm) & vec4<u32>(1u, 2u, 4u, 8u)) != vec4<u32>(0u));
         let m_dark = vec4<f32>(1.0) - m_lit;
@@ -2982,7 +3093,7 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
             if (atomicLoad(&g6_state[28]) != 1u) { return; }
         }
     }
-    if (G12_FAST && masks == 0u && shaded == NONE && objs.x != NONE && all(m_bg > vec4<f32>(0.5)) && plain_bg) {
+    if (G12_FAST && g14_bins == 0u && masks == 0u && shaded == NONE && objs.x != NONE && all(m_bg > vec4<f32>(0.5)) && plain_bg) {
         var wsum = vec4<f32>(0.0);
         for (var row = 0u; row < 4u; row++) {
             let word = packed[row];
@@ -3028,6 +3139,12 @@ fn g10_resolve(gid: vec3<u32>, c: vec3<f32>, pages_read: bool, packed: vec4<u32>
         for (var col = 0u; col < 4u; col++) {
             let b = 4u * row + col;
             let t = f32((word >> (8u * col)) & 0xffu) / 255.0;
+            // M13 gate 14: a bin that sees a light shows it behind its
+            // small entries.
+            if (((g14_bins >> b) & 1u) != 0u) {
+                g9_c += t * g14_radiance(vec2<f32>(f32(gid.x), f32(gid.y)), b) / 16.0;
+                continue;
+            }
             if (shaded != NONE) {
                 let sw = m13_shaded[g10_shaded_word(shaded) + b];
                 if ((sw & G10_SHADED_BIT) != 0u) {

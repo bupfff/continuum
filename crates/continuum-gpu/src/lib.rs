@@ -669,7 +669,7 @@ pub(crate) const M13_PAGE_META: usize = 32;
 pub(crate) const M13_PAGE_BUDGET: u32 = 64;
 /// M13 gate 5: the roots pass, one invocation per tile listing the subtree
 /// roots its pixels walk (87); it also restarts the bin rays' list (88).
-pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 87, 88, 91, 92, 97, 98, 99];
+pub(crate) const M13_ROOTS_BINDINGS: &[u32] = &[6, 9, 52, 87, 88, 91, 92, 97, 98, 99];
 /// M13 gate 5: the pixels covered by their corners, and the list of those
 /// tracing bin rays (88); the list's dispatch arguments; the rays.
 pub(crate) const M13_BINS_BINDINGS: &[u32] = &[

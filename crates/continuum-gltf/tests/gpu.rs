@@ -1191,10 +1191,9 @@ fn sky_later_settles_to_the_same_image() {
 
 /// Sub-pixel detail (`RendererOptions::sub_pixel`, M13) settles to an image
 /// close to one ray a pixel through the cache over surfaces: the same
-/// lighting, with edges resolved within their pixels. (Lights seen directly
-/// are not drawn on that path yet: pixels showing one in the one-ray image
-/// are left out.) Needs hardware ray queries (else the option is ignored
-/// and the test says so).
+/// lighting, with edges resolved within their pixels; and lights seen
+/// directly are drawn with about one ray's total (M13 gate 14). Needs
+/// hardware ray queries (else the option is ignored and the test says so).
 #[test]
 fn sub_pixel_detail_settles_near_one_ray() {
     let s = scene(DVec3::ZERO);
@@ -1228,21 +1227,45 @@ fn sub_pixel_detail_settles_near_one_ray() {
     dump("sub_pixel_one_ray", &images[1]);
     assert_finite_and_lit(&images[0]);
     // Surfaces only: a lit surface stays well under 1 (the lights' disks
-    // are far brighter).
+    // are far brighter); their neighbours left out too (a light covering a
+    // bin or two of a pixel).
+    let bright = |p: &[f32; 3]| p.iter().any(|&c| c > 4.0);
+    let (w, h) = (WIDTH as usize, HEIGHT as usize);
+    let lit: Vec<bool> = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            (y.saturating_sub(1)..(y + 2).min(h)).any(|yy| {
+                (x.saturating_sub(1)..(x + 2).min(w))
+                    .any(|xx| bright(&images[0][yy * w + xx]) || bright(&images[1][yy * w + xx]))
+            })
+        })
+        .collect();
     let surface = |image: &Image| -> Image {
         image
             .iter()
-            .zip(&images[1])
-            .map(|(p, q)| {
-                if q.iter().any(|&c| c > 4.0) {
-                    [0.0; 3]
-                } else {
-                    *p
-                }
-            })
+            .zip(&lit)
+            .map(|(p, &l)| if l { [0.0; 3] } else { *p })
             .collect()
     };
     let (a, b) = (surface(&images[0]), surface(&images[1]));
+    // The lights seen: their pixels' total against one ray's.
+    let lights = |image: &Image| -> f64 {
+        image
+            .iter()
+            .zip(&lit)
+            .filter(|(_, l)| **l)
+            .map(|(p, _)| p.iter().map(|&c| c as f64).sum::<f64>())
+            .sum()
+    };
+    let seen = lights(&images[0]) / lights(&images[1]);
+    eprintln!(
+        "lights seen: {} pixels, total {seen:.4}× one ray's",
+        lit.iter().filter(|l| **l).count()
+    );
+    assert!(
+        lights(&images[1]) > 0.0 && (seen - 1.0).abs() <= 0.15,
+        "lights seen directly: {seen}× one ray's total"
+    );
     let d = difference(&a, &b);
     let mean = |image: &Image| image.iter().flatten().map(|&c| c as f64).sum::<f64>();
     let ratio = mean(&a) / mean(&b);

@@ -262,7 +262,13 @@ fn gate_lights(field: &Field, origin: DVec3, views: &Views) -> Vec<Light> {
     // The low sun: 0.5° across, centre 0.3° up, 5° right, 5 km from the
     // eye, facing it.
     let distance = 5000.0f32;
-    let e = 0.3f32.to_radians();
+    // (Development, `M13_SUNSET=1`: its centre on the eye's level, so the
+    // ground's far edge cuts it.)
+    let e = if std::env::var_os("M13_SUNSET").is_some() {
+        0.0f32
+    } else {
+        0.3f32.to_radians()
+    };
     let toward = views.flat(-5.0) * e.cos() + Vec3::Z * e.sin();
     let size = 2.0 * distance * 0.25f32.to_radians().tan();
     let w = -toward;
@@ -288,12 +294,26 @@ fn gate_lights(field: &Field, origin: DVec3, views: &Views) -> Vec<Light> {
 /// Pixels within 2 px of a light's projected bounding box (a rectangle's
 /// corners, a sphere's bounding cube), as a mask.
 fn near_lights(lights: &[Light], camera: Camera) -> Vec<bool> {
+    let mut mask = vec![false; (W * H) as usize];
+    for [x0, y0, x1, y1] in light_boxes(lights, camera).into_iter().flatten() {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                mask[(y as u32 * W + x as u32) as usize] = true;
+            }
+        }
+    }
+    mask
+}
+
+/// Each light's projected bounding box widened by 2 px and clipped to the
+/// screen (x0, y0, x1, y1 inclusive; none behind the eye or empty).
+fn light_boxes(lights: &[Light], camera: Camera) -> Vec<Option<[i64; 4]>> {
     let forward = (camera.target - camera.eye).normalize();
     let right = forward.cross(Vec3::Z).normalize();
     let up = right.cross(forward);
     let tz = (camera.vertical_fov_degrees.to_radians() * 0.5).tan();
     let aspect = W as f32 / H as f32;
-    let mut mask = vec![false; (W * H) as usize];
+    let mut boxes = Vec::new();
     for l in lights {
         let points: Vec<Vec3> = match l.emitter {
             Emitter::Rect(r) => vec![
@@ -330,20 +350,82 @@ fn near_lights(lights: &[Light], camera: Camera) -> Vec<bool> {
             lo = [lo[0].min(x), lo[1].min(y)];
             hi = [hi[0].max(x), hi[1].max(y)];
         }
-        if behind {
-            continue;
-        }
         let x0 = (lo[0] - 2.0).floor().max(0.0) as i64;
         let y0 = (lo[1] - 2.0).floor().max(0.0) as i64;
         let x1 = (hi[0] + 2.0).ceil().min(W as f32 - 1.0) as i64;
         let y1 = (hi[1] + 2.0).ceil().min(H as f32 - 1.0) as i64;
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                mask[(y as u32 * W + x as u32) as usize] = true;
+        boxes.push((!behind && x0 <= x1 && y0 <= y1).then_some([x0, y0, x1, y1]));
+    }
+    boxes
+}
+
+/// Development: per light in view, its box's mean colour (reference, ours,
+/// one ray) and errors, and its crop (8× enlarged, scaled to its largest
+/// reference value) saved as `<name>_light<i>_{reference,ours,one_ray}`.
+fn per_light(
+    out_dir: &Path,
+    name: &str,
+    lights: &[Light],
+    camera: Camera,
+    images: [&[[f32; 3]]; 3],
+) {
+    for (i, b) in light_boxes(lights, camera).into_iter().enumerate() {
+        let Some([x0, y0, x1, y1]) = b else { continue };
+        let (bw, bh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+        let crop = |px: &[[f32; 3]]| -> Vec<[f32; 3]> {
+            (0..bw * bh)
+                .map(|k| px[((y0 as usize + k / bw) * W as usize) + x0 as usize + k % bw])
+                .collect()
+        };
+        let [r, o, s] = images.map(crop);
+        let top = r.iter().flatten().fold(0.0f32, |a, &b| a.max(b)).max(1e-6);
+        // Intensity-weighted centroids (pixels in the box).
+        let centroid = |px: &[[f32; 3]]| {
+            let (mut sx, mut sy, mut sw) = (0.0f64, 0.0f64, 0.0f64);
+            for (k, p) in px.iter().enumerate() {
+                let v = (p[0] + p[1] + p[2]) as f64;
+                sx += v * (k % bw) as f64;
+                sy += v * (k / bw) as f64;
+                sw += v;
             }
+            (
+                (sx / sw * 100.0).round() / 100.0,
+                (sy / sw * 100.0).round() / 100.0,
+            )
+        };
+        println!(
+            "{name} light {i}: centroids reference {:?}, ours {:?}, one ray {:?}",
+            centroid(&r),
+            centroid(&o),
+            centroid(&s)
+        );
+        println!(
+            "{name} light {i} ({bw}×{bh} px): means reference {:.3?}, ours {:.3?}, one ray {:.3?}; error ours {:.2}%, one ray {:.2}%",
+            mean(&r),
+            mean(&o),
+            mean(&s),
+            100.0 * relative_rmse(&o, &r),
+            100.0 * relative_rmse(&s, &r)
+        );
+        for (label, px) in [("reference", &r), ("ours", &o), ("one_ray", &s)] {
+            let mut image = flatland::img::Image::new(8 * bw, 8 * bh, [0; 3]);
+            for y in 0..8 * bh {
+                for x in 0..8 * bw {
+                    let p = px[(y / 8) * bw + x / 8];
+                    image.set(
+                        x,
+                        y,
+                        p.map(|v| {
+                            ((v / top).clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8
+                        }),
+                    );
+                }
+            }
+            image
+                .save(&out_dir.join(format!("m13_gate14_{name}_light{i}_{label}.png")))
+                .expect("save");
         }
     }
-    mask
 }
 
 fn pick(px: &[[f32; 3]], mask: &[bool], inside: bool) -> Vec<[f32; 3]> {
@@ -502,8 +584,20 @@ fn main() {
             );
             let scale = scale_of(&reference);
             save(&out_dir, &format!("{name}_dev_ours"), &ours, scale);
-            save(&out_dir, &format!("{name}_dev_reference"), &reference, scale);
+            save(
+                &out_dir,
+                &format!("{name}_dev_reference"),
+                &reference,
+                scale,
+            );
             save(&out_dir, &format!("{name}_dev_one_ray"), &single, scale);
+            per_light(
+                &out_dir,
+                &format!("{name}_dev"),
+                &lights,
+                camera,
+                [&reference, &ours, &single],
+            );
         }
         return;
     }
