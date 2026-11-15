@@ -43,6 +43,38 @@
 //!    bit-identical to the same with no window clipped (WIDE_EXTENT 1e30, a
 //!    second kernel).
 //!
+//! Amended before any run (development after the stub, disclosed):
+//! - **The method grew three parts.** On 10,000 boulders the clip alone
+//!   left frames of 0.1–0.8 s: points just outside the light, near its
+//!   plane, see grazing slivers whose walks are just as long.
+//!   - The clip applies only to windows wider than 30° in angle (corners
+//!     more than 30° from the window's centre). Gate 6's scene changed in
+//!     12 pixels where far receivers near a light's plane saw thin slivers.
+//!   - Each light cone's walk is capped: 4,096 nodes and triangles, 512
+//!     where its window is wider than WIDE_EXTENT in the plane. A long
+//!     walk is one invocation's serial work, so one such cone sets a
+//!     frame's length however few are baked. A sliver stopped at its cap
+//!     counts as blocked, a clipped cone as open.
+//!   - The time the caller waits for the GPU after a frame
+//!     (`InstancedRenderer::wait`) counts toward the frame period the
+//!     cache's bake budget adapts to, as a frame call's own wait does.
+//!     Without it, this harness's frames stayed at the largest budget,
+//!     since this device's pass timestamps mostly read zero.
+//! - **Criterion 3's second kernel turns all of it off**
+//!   (`set_wide_cones(false)`), not only the clip.
+//! - **Development at full size on other views** (near turned 30°; 40 m up):
+//!   - criterion 1: 21.2/17.2 ms worst, 18.8/15.6 ms 99th percentile;
+//!   - criterion 3: no pixel differs;
+//!   - criterion 2 (an earlier variant, the same caps but counted open):
+//!     near 4.72% (failing), 40 m up 1.49%.
+//!
+//!   A probe of the panel alone showed boulders resting on it dark, which
+//!   Cycles shows lit beside it. Their light is densest beneath them, where
+//!   their own body blocks the kept window, while the rest of the panel
+//!   lights them. Some far boulders came out lit where Cycles has them
+//!   shadowed by the field. Accuracy for receivers centimetres from a large
+//!   light is expected to fail here; rays are the planned fix (DESIGN §8).
+//!
 //! Disclosed before the stub: the 20 m view is where the stall was found
 //! (development, M13 gate 14's binary with `M13_FLOOR=1`); on 10,000
 //! boulders the fix took its frames from 12–24 s to 9–17 ms.
@@ -91,9 +123,9 @@ fn target(kernel: &MaskConeKernel) -> wgpu::TextureView {
         .create_view(&Default::default())
 }
 
-fn kernel_with(extent: f32) -> Option<MaskConeKernel> {
+fn kernel_with(guards: bool) -> Option<MaskConeKernel> {
     let kernel = MaskConeKernel::new()?;
-    kernel.set_wide_extent(extent);
+    kernel.set_wide_cones(guards);
     kernel.set_prefilter(1.0);
     kernel.set_sky_prefilter(8.0);
     kernel.set_hardware_rays(true);
@@ -180,12 +212,30 @@ fn frame_times(
     target: &wgpu::TextureView,
     n: usize,
 ) -> Vec<f64> {
+    let trace = std::env::var_os("M5_TRACE").is_some();
     (0..n)
-        .map(|_| {
+        .map(|k| {
             let s = Instant::now();
             r.frame(camera, target);
             r.wait();
-            s.elapsed().as_secs_f64() * 1000.0
+            let t = s.elapsed().as_secs_f64() * 1000.0;
+            if trace && (k < 30 || k % 50 == 0 || t > 100.0) {
+                let c = r.cache_stats();
+                eprintln!(
+                    "frame {k}: {t:.1} ms; {:?}",
+                    c.map(|c| (
+                        c.pages_baked,
+                        c.texels_baked,
+                        c.budget,
+                        c.spent,
+                        c.gpu_bake_ms,
+                        c.gpu_render_ms,
+                        c.planning.as_secs_f64() * 1e3,
+                        c.waiting.as_secs_f64() * 1e3
+                    ))
+                );
+            }
+            t
         })
         .collect()
 }
@@ -284,7 +334,7 @@ fn percentile(v: &[f64], p: f64) -> f64 {
 fn main() -> std::io::Result<()> {
     let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("out");
     std::fs::create_dir_all(&out_dir)?;
-    let Some(kernel) = kernel_with(8.0) else {
+    let Some(kernel) = kernel_with(true) else {
         println!("No GPU adapter available.");
         return Ok(());
     };
@@ -302,6 +352,49 @@ fn main() -> std::io::Result<()> {
     let views = Views::new(ground);
     let lights = [Light::white(sun, field.radiance), panel(&views)];
     let view_target = target(&kernel);
+    // Development (`M5_PROBE=1`): the panel alone at the first development
+    // view, per-pixel cones (4×4 a pixel at 320×180) beside Cycles, saved.
+    if std::env::var_os("M5_PROBE").is_some() {
+        let camera = views.at(110.0, 8.0, 15.0, 30.0);
+        let alone = [lights[1]];
+        let small = (320, 180);
+        let (ours, apart) = supersampled(&kernel, camera, small, 4, &alone, &field, origin);
+        let c = render_instanced_lights(
+            &field.scene,
+            origin,
+            &alone,
+            Vec3::ZERO,
+            camera,
+            small,
+            4096,
+            0,
+            1,
+            &out_dir.join("m5_gate14_cycles_neardevelopment_panel"),
+        )?;
+        let keep = |img: &[[f32; 3]]| -> f64 {
+            img.iter()
+                .zip(&apart)
+                .filter(|(_, a)| !**a)
+                .map(|(p, _)| (p[0] + p[1] + p[2]) as f64)
+                .sum::<f64>()
+        };
+        println!(
+            "probe: surfaces' sum ours {:.1}, Cycles {:.1}; error {:.2}%",
+            keep(&ours),
+            keep(&c.pixels),
+            100.0 * surfaces_rmse(&ours, &c.pixels, &apart)
+        );
+        for (name, px) in [("ours", &ours), ("cycles", &c.pixels)] {
+            let mut image = flatland::img::Image::new(320, 180, [0; 3]);
+            for (i, p) in px.iter().enumerate() {
+                let v =
+                    p.map(|v| ((v / 0.1).clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8);
+                image.set(i % 320, i / 320, v);
+            }
+            image.save(&out_dir.join(format!("m5_gate14_probe_{name}.png")))?;
+        }
+        return Ok(());
+    }
     let views_run = if dev.as_deref() == Some("1M") {
         [
             ("near (development)", views.at(110.0, 8.0, 15.0, 30.0)),
@@ -326,6 +419,12 @@ fn main() -> std::io::Result<()> {
     for (name, camera) in views_run {
         let mut r = cached(&kernel, &field, origin, &lights);
         let t = frame_times(&mut r, camera, &view_target, FRAMES);
+        if std::env::var_os("M5_TRACE").is_some() {
+            // Development: the slowest frames and where they fell.
+            let mut worst: Vec<(usize, f64)> = t.iter().cloned().enumerate().collect();
+            worst.sort_by(|a, b| b.1.total_cmp(&a.1));
+            eprintln!("{name}: slowest frames {:?}", &worst[..8.min(worst.len())]);
+        }
         let late = &t[10..];
         let max = late.iter().cloned().fold(0.0, f64::max);
         let p99 = percentile(late, 0.99);
@@ -349,7 +448,7 @@ fn main() -> std::io::Result<()> {
         let colored = field.colored_lights(origin, 1000.0);
         let (a, _, _) =
             kernel.render_instanced_lights(ground, W, H, &colored, &field.scene, origin, 1);
-        let whole = kernel_with(1e30).expect("a second kernel");
+        let whole = kernel_with(false).expect("a second kernel");
         let (b, _, _) =
             whole.render_instanced_lights(ground, W, H, &colored, &field.scene, origin, 1);
         let differing = a.iter().zip(&b).filter(|(p, q)| p != q).count();

@@ -2235,6 +2235,14 @@ impl VirtualCache {
         self.last_frame = Some(took);
     }
 
+    /// The caller waited `waited` for the GPU after the last frame call (M5
+    /// gate 14): it counts toward that frame's period.
+    pub(crate) fn add_wait(&mut self, waited: Duration) {
+        if let Some(t) = &mut self.last_frame {
+            *t += waited;
+        }
+    }
+
     /// After the frame's submission (`index`): starts its readbacks, without
     /// waiting.
     pub(crate) fn after_submit(&mut self, index: wgpu::SubmissionIndex) {

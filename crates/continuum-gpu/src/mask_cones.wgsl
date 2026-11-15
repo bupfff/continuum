@@ -674,7 +674,8 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
             while (sp > base) {
                 sp--;
                 let n = stack_get(sp);
-                let mine = need_get(sp);
+                let mine = need_get(sp) && cone_work < cone_cap;
+                if (mine) { cone_work++; }
                 if (!packet_any(mine)) { continue; }
                 if (COUNT_WORK) { work_c.y++; }
                 let node = blas[n];
@@ -696,6 +697,7 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
                 }
                 if (node.info.y > 0u) {
                     if (descend) {
+                        cone_work += node.info.y;
                         for (var k = node.info.x; k < node.info.x + node.info.y; k++) {
                             let drawn = cover_triangle(c, &acc, &span, blas_items[k]);
                             if (COUNT_WORK) {
@@ -825,7 +827,13 @@ fn light_cone_sphere(apex: vec3<f32>, r: LightRect) -> LightCone {
     if (d <= radius * 1.0001) { return out; }
     let forward = to_center / d;
     let s = radius / d;
-    let t = s / sqrt(max(1.0 - s * s, 1e-12));
+    var t = s / sqrt(max(1.0 - s * s, 1e-12));
+    // Wide cones (DESIGN §8): a point nearly touching the sphere keeps the
+    // window WIDE_EXTENT across around the centre's direction, all of it
+    // the disk (`sphere_open_share`).
+    wide_clipped = 2.0 * t > WIDE_EXTENT;
+    wide_window = wide_clipped;
+    t = min(t, 0.5 * WIDE_EXTENT);
     let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(forward.x) > 0.9);
     let right = normalize(cross(helper, forward));
     out.c.apex = apex;
@@ -869,7 +877,7 @@ fn sphere_open_share(c: Cone, normal: vec3<f32>, cov: ptr<function, array<f32, 6
     var open = 0.0;
     let g = f32(GRID);
     for (var b = 0u; b < BINS; b++) {
-        let m = DISK[b];
+        let m = select(DISK[b], 1.0, wide_clipped);
         if (m <= 0.0) { continue; }
         let d = direction(c, (f32(b % GRID) + 0.5) / g, (f32(b / GRID) + 0.5) / g);
         let l2 = dot(d, d);
@@ -907,6 +915,34 @@ fn light_cone_rect(apex: vec3<f32>, r: LightRect) -> LightCone {
         lo = min(lo, uv);
         hi = max(hi, uv);
     }
+    // Wide cones (DESIGN §8): a point near the light's plane sees a window
+    // about the light's size over its distance across, whose bins no
+    // longer prefilter anything (seconds a cone). A window wider than
+    // WIDE_EXTENT keeps the square that wide nearest the light's axis (the
+    // foot point clamped into it), where a facing-agnostic receiver's light
+    // is densest (it falls as the cube of the distance there); the light's
+    // share there stands for the rest (`cone_irradiance_rect`).
+    // Only a window wide in angle (a corner more than 30° from its
+    // centre's direction) is clipped: one far off the axis (a point near the
+    // light's plane but far from the light) is a grazing sliver, however
+    // wide in the plane.
+    let extent = hi - lo;
+    let foot = clamp(vec2<f32>(0.0), lo, hi);
+    let mid = normalize(vec3<f32>(0.5 * (lo + hi), 1.0));
+    var cos_wide = 1.0;
+    for (var k = 0u; k < 4u; k++) {
+        let q = vec3<f32>(select(lo.x, hi.x, (k & 1u) != 0u), select(lo.y, hi.y, (k & 2u) != 0u), 1.0);
+        cos_wide = min(cos_wide, dot(mid, normalize(q)));
+    }
+    let size = WIDE_EXTENT;
+    wide_window = any(extent > vec2<f32>(size));
+    wide_clipped = wide_window && cos_wide < 0.8660254;
+    if (wide_clipped) {
+        let wide = extent > vec2<f32>(size);
+        let keep = clamp(foot - vec2<f32>(0.5 * size), lo, hi - vec2<f32>(size));
+        lo = select(lo, keep, wide);
+        hi = select(hi, keep + vec2<f32>(size), wide);
+    }
     out.c.apex = apex;
     out.c.right = right;
     out.c.up = up;
@@ -914,10 +950,59 @@ fn light_cone_rect(apex: vec3<f32>, r: LightRect) -> LightCone {
     out.c.window = vec4<f32>(lo, hi);
     out.c.far_normal = forward;
     out.c.far_offset = dot(forward, apex) + dist * (1.0 - 1e-5);
-    // Around the direction to the light's center.
-    out.c = bound_cone(out.c, normalize(rel + (edge_u + edge_v) * 0.5));
+    // Around the direction to the light's center (a clipped window's own
+    // centre).
+    var axis = normalize(rel + (edge_u + edge_v) * 0.5);
+    if (wide_clipped) { axis = normalize(direction(out.c, 0.5, 0.5)); }
+    out.c = bound_cone(out.c, axis);
     out.ok = true;
     return out;
+}
+
+// The widest window a light cone keeps (DESIGN §8, "Wide light cones"), in
+// units of its distance to the light's plane: about 86° from the axis at
+// most for a window around it, past the footprint of the object a receiver
+// lies on (a boulder resting on a light shadows the light beneath it).
+override WIDE_EXTENT: f32 = 8.0;
+// The most nodes and triangles a light cone's walk visits (DESIGN §8, "Wide
+// light cones"): past it the cone stops, and its light counts as blocked. A guard against cones that would take milliseconds (receivers
+// near a large light's plane), far above what other cones walk.
+override LIGHT_CONE_CAP: u32 = 4096u;
+// The same for a cone whose window is wider than WIDE_EXTENT in the light's
+// plane: a long walk is one invocation's serial work, so a few such cones
+// set a frame's length however few are baked.
+override WIDE_CONE_CAP: u32 = 512u;
+// The walk's visits so far, and its cap (none but for light cones).
+var<private> cone_work: u32 = 0u;
+var<private> cone_cap: u32 = 0xffffffffu;
+// Whether the last light cone built was clipped to WIDE_EXTENT, and whether
+// its window was wider than that in the light's plane (clipped, or a
+// grazing sliver).
+var<private> wide_clipped: bool = false;
+var<private> wide_window: bool = false;
+
+// What a rect light's cone `c` sees (`visible`, through its window) as the
+// whole light's: unchanged unless the window was clipped, where the kept
+// window's share of its own light stands for the whole light's (where the
+// kept part lies below the horizon, unshadowed).
+fn wide_visible(c: Cone, apex: vec3<f32>, normal: vec3<f32>, r: LightRect, visible: f32) -> f32 {
+    if (!wide_clipped) { return visible; }
+    let kept = window_open(c, normal);
+    return select(1.0, visible / kept, kept > 1e-9) * rect_open(apex, normal, r);
+}
+
+// The unshadowed projected solid angle of cone `c`'s window above the
+// horizon of `normal`.
+fn window_open(c: Cone, normal: vec3<f32>) -> f32 {
+    let d00 = direction(c, 0.0, 0.0);
+    let d10 = direction(c, 1.0, 0.0);
+    let d11 = direction(c, 1.0, 1.0);
+    let d01 = direction(c, 0.0, 1.0);
+    if (dot(normal, d00) > 0.0 && dot(normal, d10) > 0.0 && dot(normal, d11) > 0.0 && dot(normal, d01) > 0.0) {
+        return abs(0.5 * (lambert_edge(normal, d00, d10) + lambert_edge(normal, d10, d11)
+            + lambert_edge(normal, d11, d01) + lambert_edge(normal, d01, d00)));
+    }
+    return clipped_window_weight(c, normal);
 }
 
 // Object-level prefiltering (M5 gate 3): if object-hierarchy node `n` (box
@@ -992,6 +1077,7 @@ fn scene_coverage(c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr
 // every bin is fully covered, as nothing further can change its result.
 fn scene_coverage_if(on: bool, c: Cone, i: u32, cov: ptr<function, array<f32, 64>>, full: ptr<function, u32>) {
     if (COUNT_WORK && on) { work_b.w++; }
+    cone_work = 0u;
     if (light.counts.z >= 1u) {
         var sp = 1u;
         stack_set(0, 0u);
@@ -999,7 +1085,8 @@ fn scene_coverage_if(on: bool, c: Cone, i: u32, cov: ptr<function, array<f32, 64
         while (sp > 0u) {
             sp--;
             let n = stack_get(sp);
-            let mine = need_get(sp) && *full < BINS;
+            let mine = need_get(sp) && *full < BINS && cone_work < cone_cap;
+            if (mine) { cone_work++; }
             if (!packet_any(mine)) { continue; }
             if (COUNT_WORK) { work_c.x++; }
             let node = nodes[n];
@@ -1123,7 +1210,17 @@ fn cone_irradiance_rect(on: bool, i: u32, apex: vec3<f32>, normal: vec3<f32>, r:
     var cov: array<f32, 64>;
     for (var b = 0u; b < BINS; b++) { cov[b] = 0.0; }
     var full = 0u;
+    // Light cones' walks are capped (DESIGN §8, "Wide light cones").
+    cone_cap = select(LIGHT_CONE_CAP, WIDE_CONE_CAP, wide_window);
     if (stage != 2u) { scene_coverage_if(traced, lc.c, i, &cov, &full); }
+    // A grazing sliver's walk stopped at its cap meets that much geometry
+    // on its way: its light counts as blocked (through a field of objects
+    // it mostly is). A clipped cone's counts as open (near the light).
+    if (cone_work >= cone_cap && wide_window && !wide_clipped) {
+        for (var b = 0u; b < BINS; b++) { cov[b] = 1.0; }
+        full = BINS;
+    }
+    cone_cap = 0xffffffffu;
     last_empty = true;
     last_full = true;
     for (var b = 0u; b < BINS; b++) {
@@ -1134,7 +1231,7 @@ fn cone_irradiance_rect(on: bool, i: u32, apex: vec3<f32>, normal: vec3<f32>, r:
     if (is_sphere(r)) {
         return sphere_unshadowed(apex, normal, r) * sphere_open_share(lc.c, normal, &cov);
     }
-    let visible = cone_visible(lc.c, normal, &cov);
+    let visible = wide_visible(lc.c, apex, normal, r, cone_visible(lc.c, normal, &cov));
     if (light.counts.y == 1u) {
         for (var b = 0u; b < BINS; b++) { debug[i * BINS + b] = cov[b]; }
     }
@@ -2327,7 +2424,7 @@ fn cached_irradiance(i: u32, apex: vec3<f32>, normal: vec3<f32>, slot: u32, li: 
         if (!may_touch_box(lc.c, probe_params.bounds[2u * k].xyz, probe_params.bounds[2u * k + 1u].xyz)) { continue; }
         add_mesh_coverage(lc.c, probe_params.moving[k].x, &cov, &full, i, 0u);
     }
-    return cone_visible(lc.c, normal, &cov);
+    return wide_visible(lc.c, apex, normal, uniform_light(), cone_visible(lc.c, normal, &cov));
 }
 
 // One workgroup per marked block, one invocation per texel; `result` is the

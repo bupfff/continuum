@@ -80,6 +80,11 @@ pub struct MaskConeKernel {
     /// Pipeline-overridable constants: workgroup stacks, work counters.
     workgroup_stacks: bool,
     count_work: bool,
+    /// The widest light-cone window kept (DESIGN §8, "Wide light cones"),
+    /// for pipelines built after it is set.
+    wide_extent: std::cell::Cell<f32>,
+    light_cone_cap: std::cell::Cell<u32>,
+    wide_cone_cap: std::cell::Cell<u32>,
     pipelines: std::cell::RefCell<std::collections::HashMap<&'static str, wgpu::ComputePipeline>>,
     hardware_rays: std::cell::Cell<bool>,
     /// MikkTSpace tangents for normal maps (M10 gate 13; else each
@@ -911,6 +916,9 @@ impl MaskConeKernel {
             hw_vc_module: std::cell::OnceCell::new(),
             workgroup_stacks: options.workgroup_stacks,
             count_work: options.count_work,
+            wide_extent: std::cell::Cell::new(8.0),
+            light_cone_cap: std::cell::Cell::new(4096),
+            wide_cone_cap: std::cell::Cell::new(512),
             pipelines: Default::default(),
             hardware_rays: std::cell::Cell::new(ray_queries),
             mikktspace: std::cell::Cell::new(true),
@@ -947,6 +955,9 @@ impl MaskConeKernel {
             ("WORKGROUP_STACKS", flag(self.workgroup_stacks)),
             ("COUNT_WORK", flag(self.count_work)),
             ("PACKETS", flag(!solo)),
+            ("WIDE_EXTENT", self.wide_extent.get() as f64),
+            ("LIGHT_CONE_CAP", self.light_cone_cap.get() as f64),
+            ("WIDE_CONE_CAP", self.wide_cone_cap.get() as f64),
         ];
         let module = if name.starts_with("hw_") {
             assert!(self.ray_queries, "no ray queries on this device");
@@ -1080,6 +1091,9 @@ impl MaskConeKernel {
             ("WORKGROUP_STACKS", flag(self.workgroup_stacks)),
             ("COUNT_WORK", flag(self.count_work)),
             ("PACKETS", 1.0),
+            ("WIDE_EXTENT", self.wide_extent.get() as f64),
+            ("LIGHT_CONE_CAP", self.light_cone_cap.get() as f64),
+            ("WIDE_CONE_CAP", self.wide_cone_cap.get() as f64),
         ];
         let pipeline = self
             .device
@@ -1163,6 +1177,19 @@ impl MaskConeKernel {
     /// nodes that project to at most `bins` bins and splats their precomputed
     /// coverage instead. 0 (the default) is exact. Applies to work set up after
     /// the call, including [`LiveRenderer`]s created after it.
+    /// Development (M5 gate 14): the guards against wide light cones, on
+    /// by default: windows wider than 8 units of the receiver's distance to
+    /// the light's plane clipped, and each light cone's walk capped at 4,096
+    /// nodes and triangles (512 where its window is wider than that). Off, a receiver centimetres from a large
+    /// light can take seconds a cone. For pipelines built after the call:
+    /// set it before the first render.
+    #[doc(hidden)]
+    pub fn set_wide_cones(&self, on: bool) {
+        self.wide_extent.set(if on { 8.0 } else { 1e30 });
+        self.light_cone_cap.set(if on { 4096 } else { u32::MAX });
+        self.wide_cone_cap.set(if on { 512 } else { u32::MAX });
+    }
+
     #[doc(hidden)]
     pub fn set_prefilter(&self, bins: f32) {
         self.prefilter.set(bins.max(0.0));

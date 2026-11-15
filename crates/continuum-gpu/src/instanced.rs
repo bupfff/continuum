@@ -412,6 +412,10 @@ pub struct InstancedRenderer {
     footprint: f32,
     /// The display's exposure (see `set_exposure`).
     exposure: f32,
+    /// Time the caller waited for the GPU since the last frame
+    /// ([`Self::wait`]): the cache's frame period counts it (M5 gate 14), as
+    /// a frame call counts its own wait.
+    waited: std::cell::Cell<Duration>,
     /// Textures box-filtered over the pixel's footprint (M7 gate 2; the
     /// default), or isotropic trilinear (as before).
     texture_box: bool,
@@ -1393,6 +1397,7 @@ impl InstancedRenderer {
             pixel_offset: [0.0; 2],
             footprint: 1.0,
             exposure: 1.0,
+            waited: std::cell::Cell::new(Duration::ZERO),
             texture_box: true,
             movers,
             moving: moving_lights.to_vec(),
@@ -2096,6 +2101,7 @@ impl InstancedRenderer {
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
         if let Some(cache) = &mut self.cache {
+            cache.state.add_wait(self.waited.take());
             cache
                 .state
                 .begin_frame(&self.device, self.lighting.as_ref().map(|l| l.resident()));
@@ -2716,10 +2722,14 @@ impl InstancedRenderer {
             .collect()
     }
 
-    /// Blocks until submitted GPU work is done.
+    /// Blocks until submitted GPU work is done. The time it blocks counts
+    /// toward the frame period the lighting cache's bake budget adapts to
+    /// (as a frame call's own wait for the GPU does).
     pub fn wait(&self) {
+        let start = Instant::now();
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("GPU poll failed");
+        self.waited.set(self.waited.get() + start.elapsed());
     }
 }
