@@ -15,8 +15,20 @@
 //! model's cost, and measures that against gate 11's path in the same
 //! process, so the machine's state (external displays, heat) divides out.
 //!
-//! Method: gate 12's, with the levers developed before the run stated here
-//! before it (`docs/results/m13-gate13-development.md`).
+//! Method as developed (gate 12's, changed before the first run;
+//! `docs/results/m13-gate13-development.md`):
+//! - The corners' records lit by the cache write their colours and shares
+//!   to the corners' words in the lighting pass (its 29th buffer); the
+//!   others keep a scatter pass (their targets need two buffers). Records
+//!   are plain words with their count apart.
+//! - A resolved pixel's quarter sample is lit from its corners' cached
+//!   shares (bilinearly, with its own point, normal and albedo, as bins
+//!   are) where the corners showing its object agree on the light's share
+//!   within 0.02; else lit in full by the cache (shadow edges).
+//! - The rect light's unshadowed light (the renderer's own shading, every
+//!   path): its unclipped case (the whole light above the point's horizon)
+//!   summed unrolled with each corner's direction normalized once, without
+//!   arrays indexed at run time; the same sums in the same order.
 //!
 //! Scene: the million-boulder field with its ground, its light and a sky,
 //! 1280×720; gate 12's views (standing at 1.7 m, 150 m up looking 45°
@@ -31,8 +43,20 @@
 //! 2. **Cost:** the cache-lit path's settled frame at most 1.05× gate 11's
 //!    path's (the same passes lit by its model, no cache) in both views,
 //!    both settled in one process and timed in five interleaved rounds
-//!    (each round the median of 11 frames each waited for, lit then model);
-//!    the criterion on the median of the rounds' ratios. Timed first.
+//!    (each round, lit then model: 20 frames to warm up, then the median of
+//!    21 frames each waited for); the criterion on the median of the
+//!    rounds' ratios. Timed first.
+//!
+//! Amended before any run: the stub's rounds were the median of 11 frames
+//! with no warm-up; development found the GPU's clock takes about nine
+//! frames to step after a switch between the renderers, so 11 frames
+//! measured the switch.
+//!
+//! Disclosed before the run: developed at full size on the gate's scene,
+//! speed on the gate's views, accuracy on other views (0.422× and 0.426×).
+//! The ratio in development varied from run to run by about ±0.02 (the
+//! machine with external displays, warm): standing 1.04–1.07×, from 150 m
+//! 1.00–1.04×; criterion 2 standing is near its bar.
 //!
 //! Reported: both paths' frame times (medians over rounds) with the
 //! machine's control taken just before (gate 4's path); the 20 m view
@@ -57,6 +81,10 @@ const W: u32 = 1280;
 const H: u32 = 720;
 /// Coverage pages baked a frame while settling (gates 11–12's).
 const PAGE_BUDGET: u32 = 512;
+/// A round of the interleaved timing: frames run to warm up, then frames
+/// timed (their median).
+const WARM: usize = 20;
+const ROUND: usize = 21;
 
 fn target(kernel: &MaskConeKernel) -> wgpu::TextureView {
     kernel
@@ -224,8 +252,8 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 /// The two paths settled at `camera`, then `rounds` interleaved rounds (lit
-/// then model, the median of 11 frames each): the rounds' lit and model
-/// medians and ratios, and the frames each took to settle.
+/// then model: WARM frames, then the median of ROUND frames each): the
+/// rounds' lit and model medians, and the frames each took to settle.
 #[allow(clippy::type_complexity)]
 fn interleaved(
     lit: &mut InstancedRenderer,
@@ -238,8 +266,18 @@ fn interleaved(
     let n_model = settle_model(model, camera, target, 200);
     let times = (0..rounds)
         .map(|_| {
-            let a = median_ms(lit, camera, target, 11);
-            let b = median_ms(model, camera, target, 11);
+            // (Frames to warm up first: after a switch the GPU's clock takes
+            // about nine frames to step, development.)
+            for _ in 0..WARM {
+                lit.frame(camera, target);
+                lit.wait();
+            }
+            let a = median_ms(lit, camera, target, ROUND);
+            for _ in 0..WARM {
+                model.frame(camera, target);
+                model.wait();
+            }
+            let b = median_ms(model, camera, target, ROUND);
             (a, b)
         })
         .collect();
@@ -400,6 +438,69 @@ fn main() {
                         median(g2)
                     );
                 }
+                // `M13_ALT=1`: the paths alternating frame by frame (100
+                // pairs): the median ratio of adjacent frames.
+                if std::env::var_os("M13_ALT").is_some() {
+                    let mut ratios = Vec::new();
+                    let mut a = Vec::new();
+                    let mut b = Vec::new();
+                    for _ in 0..100 {
+                        let s = Instant::now();
+                        lit.frame(camera, &view_target);
+                        lit.wait();
+                        let tl = s.elapsed().as_secs_f64() * 1000.0;
+                        let s = Instant::now();
+                        m.frame(camera, &view_target);
+                        m.wait();
+                        let tm = s.elapsed().as_secs_f64() * 1000.0;
+                        ratios.push(tl / tm);
+                        a.push(tl);
+                        b.push(tm);
+                    }
+                    println!(
+                        "{name}: alternating: lit {:.2} ms, model {:.2} ms, median ratio {:.3}×",
+                        median(a),
+                        median(b),
+                        median(ratios)
+                    );
+                }
+                // `M13_SEQ=1`: 60 frames of each in order.
+                if std::env::var_os("M13_SEQ").is_some() {
+                    // Lit after lit, after a pause, then after the model.
+                    let seq = |r: &mut InstancedRenderer, n: usize| -> Vec<f64> {
+                        (0..n)
+                            .map(|_| {
+                                let s = Instant::now();
+                                r.frame(camera, &view_target);
+                                r.wait();
+                                (s.elapsed().as_secs_f64() * 10000.0).round() / 10.0
+                            })
+                            .collect()
+                    };
+                    println!("{name}: lit after lit {:?}", seq(&mut lit, 20));
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    println!("{name}: lit after a pause {:?}", seq(&mut lit, 20));
+                    seq(&mut m, 30);
+                    println!("{name}: lit after the model {:?}", seq(&mut lit, 20));
+                    for (label, r) in [("lit", &mut lit), ("model", &mut m)] {
+                        let t: Vec<f64> = (0..60)
+                            .map(|_| {
+                                let s = Instant::now();
+                                r.frame(camera, &view_target);
+                                r.wait();
+                                (s.elapsed().as_secs_f64() * 10000.0).round() / 10.0
+                            })
+                            .collect();
+                        println!("{name}: {label} frames {t:?}");
+                    }
+                }
+                println!(
+                    "{name}: pixels listed for samples: lit {}, model {}; pixels tracing bin rays: lit {}, model {}",
+                    lit.m13_page_counters()[31],
+                    m.m13_page_counters()[31],
+                    lit.m13_work_counters()[0],
+                    m.m13_work_counters()[0]
+                );
                 let hits = lit.m13_hit_counts();
                 // The records by pass, target and where their rays went.
                 {

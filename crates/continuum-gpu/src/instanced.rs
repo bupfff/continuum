@@ -384,6 +384,8 @@ pub struct InstancedRenderer {
     m13_sun_stale: bool,
     /// The large hits' records lit by the cache (M13 gate 12, binding 105).
     m13_hits: Option<wgpu::Buffer>,
+    /// The records' count (M13 gate 13: the records themselves plain words).
+    m13_hits_count: Option<wgpu::Buffer>,
     /// M13 gate 7: GPU timestamps around the page arguments' pass (0, 1)
     /// and the page bakes (2, 3) (a query set, its resolve buffer, a
     /// readback buffer, nanoseconds a tick), where the device has them.
@@ -1366,6 +1368,7 @@ impl InstancedRenderer {
             m13_sun: None,
             m13_sun_stale: false,
             m13_hits: None,
+            m13_hits_count: None,
             cache,
             width,
             height,
@@ -1766,6 +1769,21 @@ impl InstancedRenderer {
         if let Some(buf) = &self.m13_hits {
             all.push((105, buf));
         }
+        self.m13_hits_count = self
+            .passes
+            .iter()
+            .any(|(_, keep)| keep.contains(&106))
+            .then(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("m13 hits count"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+        if let Some(buf) = &self.m13_hits_count {
+            all.push((106, buf));
+        }
         if let Some((work, args, plain, shaded)) = &self.m13_work {
             all.push((88, work));
             all.push((89, args));
@@ -2133,6 +2151,9 @@ impl InstancedRenderer {
         self.m13_sun_stale = false;
         if let Some(hits) = &self.m13_hits {
             encoder.clear_buffer(hits, 0, Some(32));
+        }
+        if let Some(count) = &self.m13_hits_count {
+            encoder.clear_buffer(count, 0, None);
         }
         if self.one_pass {
             // Every pass's dispatch in one compute pass (wgpu orders the

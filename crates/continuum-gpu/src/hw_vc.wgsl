@@ -9,11 +9,14 @@
 // the cache and writes their colours: the cache's shading needs most of the
 // device's 29 storage buffers a stage, too many beside a pass's own.
 
-// The records: word 0 their count, word 1 the first shading pass's share;
-// from word 8, five words each: object, triangle, distance, the ray (index
-// in bits 0–23, bin in 24–27, a page request in 28, its kind in 30–31), the
-// colour's word (bits 0–27) and target (28–29).
-@group(0) @binding(105) var<storage, read_write> g12_hits: array<atomic<u32>>;
+// The records: word 0 their count (from the second lighting pass's
+// arguments), word 1 the first lighting pass's share; from word 8, five
+// words each: object, triangle, distance, the ray (index in bits 0–23, bin
+// in 24–27, a page request in 28, its kind in 30–31), the colour's word
+// (bits 0–27) and target (28–29). Plain words (read through the caches);
+// the count kept apart while they are written.
+@group(0) @binding(105) var<storage, read_write> g12_hits: array<u32>;
+@group(0) @binding(106) var<storage, read_write> g12_count: array<atomic<u32>>;
 const G12_HITS: u32 = 3000000u;
 
 // The eye a hit's distance is measured from.
@@ -33,14 +36,14 @@ fn g12_target(to: u32, word: u32, kind: u32, index: u32, sub: u32) {
 }
 
 fn g12_defer(m: u32, t: u32, dist: f32) {
-    let i = atomicAdd(&g12_hits[0], 1u);
+    let i = atomicAdd(&g12_count[0], 1u);
     if (i < G12_HITS) {
         let r = 8u + 5u * i;
-        atomicStore(&g12_hits[r], m);
-        atomicStore(&g12_hits[r + 1u], t);
-        atomicStore(&g12_hits[r + 2u], bitcast<u32>(dist));
-        atomicStore(&g12_hits[r + 3u], g12_pos | select(0u, 1u << 28u, g12_request));
-        atomicStore(&g12_hits[r + 4u], g12_word | (g12_to << 28u));
+        g12_hits[r] = m;
+        g12_hits[r + 1u] = t;
+        g12_hits[r + 2u] = bitcast<u32>(dist);
+        g12_hits[r + 3u] = g12_pos | select(0u, 1u << 28u, g12_request);
+        g12_hits[r + 4u] = g12_word | (g12_to << 28u);
     }
     g12_to = 0xffffffffu;
 }
@@ -103,21 +106,22 @@ fn g12_stamp_advanced() {
 // (after the corners), the second the rest (after the shading of bins).
 @compute @workgroup_size(1)
 fn hw_m13_hits_args_a() {
-    let n = min(atomicLoad(&g12_hits[0]), G12_HITS);
-    atomicStore(&g12_hits[1], n);
+    let n = min(atomicLoad(&g12_count[0]), G12_HITS);
+    g12_hits[1] = n;
     g10_args(4u, n);
 }
 
 @compute @workgroup_size(1)
 fn hw_m13_hits_args_b() {
-    let n = min(atomicLoad(&g12_hits[0]), G12_HITS);
-    g10_args(8u, n - min(atomicLoad(&g12_hits[1]), n));
+    let n = min(atomicLoad(&g12_count[0]), G12_HITS);
+    g12_hits[0] = n;
+    g10_args(8u, n - min(g12_hits[1], n));
 }
 
 @compute @workgroup_size(64)
 fn hw_m13_shade_hits_a(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let t = (wg.y * nwg.x + wg.x) * 64u + li;
-    if (t >= atomicLoad(&g12_hits[1])) { return; }
+    if (t >= g12_hits[1]) { return; }
     // The corners' records: their colours and shares straight to the
     // corners' words (the pass's 29th buffer).
     let x = g12_light_record(t);
@@ -126,27 +130,27 @@ fn hw_m13_shade_hits_a(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgr
 
 @compute @workgroup_size(64)
 fn hw_m13_shade_hits_b(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    let first = atomicLoad(&g12_hits[1]);
+    let first = g12_hits[1];
     let t = first + (wg.y * nwg.x + wg.x) * 64u + li;
-    if (t >= min(atomicLoad(&g12_hits[0]), G12_HITS)) { return; }
+    if (t >= g12_hits[0]) { return; }
     // The others' targets are in two buffers, one too many for the pass:
     // the colour into the record (its distance is spent) and the shares
     // (its object is spent), for the scatter pass.
     let x = g12_light_record(t);
     let r = 8u + 5u * t;
-    atomicStore(&g12_hits[r + 2u], x.x);
-    atomicStore(&g12_hits[r], x.z);
+    g12_hits[r + 2u] = x.x;
+    g12_hits[r] = x.z;
 }
 
 // Record `i` lit by the cache: its packed colour, target and the cache's
 // shares at the hit.
 fn g12_light_record(i: u32) -> vec3<u32> {
     let r = 8u + 5u * i;
-    let m = atomicLoad(&g12_hits[r]);
-    let t = atomicLoad(&g12_hits[r + 1u]);
-    let dist = bitcast<f32>(atomicLoad(&g12_hits[r + 2u]));
-    let pos = atomicLoad(&g12_hits[r + 3u]);
-    let dest = atomicLoad(&g12_hits[r + 4u]);
+    let m = g12_hits[r];
+    let t = g12_hits[r + 1u];
+    let dist = bitcast<f32>(g12_hits[r + 2u]);
+    let pos = g12_hits[r + 3u];
+    let dest = g12_hits[r + 4u];
     let w = u32(camera.params.x);
     let index = pos & 0xffffffu;
     let sub = (pos >> 24u) & 15u;
@@ -176,11 +180,11 @@ fn g12_light_record(i: u32) -> vec3<u32> {
 // The others' colours to their targets (after the second lighting pass).
 @compute @workgroup_size(64)
 fn hw_m13_scatter_hits_b(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    let first = atomicLoad(&g12_hits[1]);
+    let first = g12_hits[1];
     let t = first + (wg.y * nwg.x + wg.x) * 64u + li;
-    if (t >= min(atomicLoad(&g12_hits[0]), G12_HITS)) { return; }
+    if (t >= g12_hits[0]) { return; }
     let r = 8u + 5u * t;
-    g12_write(atomicLoad(&g12_hits[r + 2u]), atomicLoad(&g12_hits[r + 4u]), atomicLoad(&g12_hits[r]));
+    g12_write(g12_hits[r + 2u], g12_hits[r + 4u], g12_hits[r]);
 }
 
 // Colour `packed` (shares `shares`) to a target in the plain words: a
