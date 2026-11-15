@@ -1188,3 +1188,72 @@ fn sky_later_settles_to_the_same_image() {
         assert!(d.relative_rmse < bound, "bounce {indirect}: {d:?}");
     }
 }
+
+/// Sub-pixel detail (`RendererOptions::sub_pixel`, M13) settles to an image
+/// close to one ray a pixel through the cache over surfaces: the same
+/// lighting, with edges resolved within their pixels. (Lights seen directly
+/// are not drawn on that path yet: pixels showing one in the one-ray image
+/// are left out.) Needs hardware ray queries (else the option is ignored
+/// and the test says so).
+#[test]
+fn sub_pixel_detail_settles_near_one_ray() {
+    let s = scene(DVec3::ZERO);
+    let options = |sub_pixel| RendererOptions {
+        cache_options: CacheOptions {
+            frame_target_ms: 0.0,
+            pages: 1 << 15,
+            ..Default::default()
+        },
+        sub_pixel,
+        ..Default::default()
+    };
+    let kernel = kernel();
+    if !kernel.has_hardware_rays() {
+        eprintln!("no hardware ray queries: sub-pixel detail is not taken");
+        return;
+    }
+    let mut images = Vec::new();
+    for (k, sub_pixel) in [(kernel, true), (self::kernel(), false)] {
+        let mut r = renderer(k, &s, DVec3::ZERO, options(sub_pixel));
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 3_000 && !r.is_settled(8) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        assert!(r.is_settled(8), "not settled after {frames} frames");
+        images.push(r.read_colors());
+    }
+    dump("sub_pixel", &images[0]);
+    dump("sub_pixel_one_ray", &images[1]);
+    assert_finite_and_lit(&images[0]);
+    // Surfaces only: a lit surface stays well under 1 (the lights' disks
+    // are far brighter).
+    let surface = |image: &Image| -> Image {
+        image
+            .iter()
+            .zip(&images[1])
+            .map(|(p, q)| {
+                if q.iter().any(|&c| c > 4.0) {
+                    [0.0; 3]
+                } else {
+                    *p
+                }
+            })
+            .collect()
+    };
+    let (a, b) = (surface(&images[0]), surface(&images[1]));
+    let d = difference(&a, &b);
+    let mean = |image: &Image| image.iter().flatten().map(|&c| c as f64).sum::<f64>();
+    let ratio = mean(&a) / mean(&b);
+    eprintln!("sub-pixel detail against one ray a pixel: {d:?}, mean {ratio:.4}×");
+    // One ray a pixel aliases every edge at this size; the means agree.
+    assert!(
+        d.relative_rmse <= 0.2,
+        "sub-pixel detail far from one ray: {d:?}"
+    );
+    assert!(
+        (ratio - 1.0).abs() <= 0.03,
+        "sub-pixel detail's mean {ratio}× one ray's"
+    );
+}

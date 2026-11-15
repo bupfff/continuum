@@ -77,6 +77,24 @@ pub struct RendererOptions {
     /// lighting keeps each geometry itself. With hardware camera rays and
     /// no movers. None (the default): only the geometries themselves.
     pub streaming: Option<StreamOptions>,
+    /// Sub-pixel detail (experimental, M13 gates 5–13): each pixel resolves
+    /// what is smaller than it from precomputed coverage maps of instanced
+    /// geometries and coverage pages of far hierarchy nodes, with rays at
+    /// its corners and bins near large objects, and colours each part from
+    /// the lighting cache. Thin and distant geometry keeps its coverage
+    /// instead of shimmering. On a million instanced boulders at 1280×720 a
+    /// settled frame costs about 15 ms more than one ray a pixel on an Apple
+    /// M4 (`docs/results/m13-gate13.md`).
+    ///
+    /// Taken only with the cache, hardware ray queries, a static scene (no
+    /// `movable`, no `moving_lights`), no `streaming` and at most 64
+    /// geometries with instances; otherwise ignored. The cache then bakes a
+    /// fixed amount a frame (`frame_target_ms` and `frame_budget_ms` 0: the
+    /// path's own passes take most of a frame target), so views settle in
+    /// hundreds of frames. Not yet: small instances lit by the cache (they
+    /// take the first light and the sky, with a shadow per instance), lights
+    /// seen directly (not drawn).
+    pub sub_pixel: bool,
 }
 
 impl Default for RendererOptions {
@@ -91,6 +109,7 @@ impl Default for RendererOptions {
             movable: Vec::new(),
             moving_lights: Vec::new(),
             streaming: None,
+            sub_pixel: false,
         }
     }
 }
@@ -130,7 +149,31 @@ impl Renderer {
         kernel.set_sky(options.sky.unwrap_or(Vec3::ZERO));
         kernel.set_environment(options.environment.as_ref());
         kernel.set_pixel_cones(options.pixel_cones);
-        let cache = options.cache.then_some(options.cache_options);
+        // Sub-pixel detail (M13): the path the gates measured (profile stage
+        // 20 with pixel cones, hardware rays, prefiltered coverage at eight
+        // bins) with a fixed bake budget.
+        // (Coverage maps exist for at most 64 placed geometries: a record
+        // names its map in 16 bits, 1,024 directions a geometry.)
+        let placed = (0..scene.geometries.len())
+            .filter(|&g| scene.instances.iter().any(|i| i.geometry == g))
+            .count();
+        let sub_pixel = options.sub_pixel
+            && options.cache
+            && kernel.has_hardware_rays()
+            && options.movable.is_empty()
+            && options.moving_lights.is_empty()
+            && options.streaming.is_none()
+            && placed <= 64;
+        let mut cache_options = options.cache_options;
+        if sub_pixel {
+            kernel.set_prefilter(8.0);
+            kernel.set_hardware_rays(true);
+            kernel.set_pixel_cones(true);
+            kernel.set_profile_stage(20);
+            cache_options.frame_target_ms = 0.0;
+            cache_options.frame_budget_ms = 0.0;
+        }
+        let cache = options.cache.then_some(cache_options);
         let inner = match options.streaming {
             Some(stream) if options.movable.is_empty() && options.moving_lights.is_empty() => {
                 InstancedRenderer::with_streaming(
@@ -160,6 +203,9 @@ impl Renderer {
                 &options.moving_lights,
             ),
         };
+        if sub_pixel {
+            kernel.set_profile_stage(0);
+        }
         Renderer { kernel, inner }
     }
 

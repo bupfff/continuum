@@ -786,6 +786,18 @@ fn instance_map_rec(m: u32, pix: vec2<f32>, stamp: u32) {
     g8_sample_record(r0, m13_records[3u * m + 1u], m13_records[3u * m + 2u], todo, pix);
 }
 
+// Where map `layer` (a placed geometry's index × MAP_DIRS² + its
+// direction) reads at `a` in its own [0, 1]² at mip `level`, in its
+// geometry's atlas layer: clamped to the tile's edge texels' centres, as
+// a texture of its own clamps at its edge (M13 gate 13: an atlas a
+// geometry, not a layer a direction).
+fn g13_atlas(a: vec2<f32>, layer: u32, level: f32) -> vec2<f32> {
+    let d = layer % (MAP_DIRS * MAP_DIRS);
+    let lo = 0.5 / (f32(MAP_TEXELS) * exp2(-level));
+    let c = clamp(a, vec2<f32>(lo), vec2<f32>(1.0 - lo));
+    return (vec2<f32>(f32(d % MAP_DIRS), f32(d / MAP_DIRS)) + c) / f32(MAP_DIRS);
+}
+
 // A record's map (`r0`, `uv`: the record's two words) into the pixel's bins
 // `todo`.
 fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix: vec2<f32>) {
@@ -830,7 +842,7 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
         let o = p0 + fb * 0.25;
         let a = vec2<f32>(0.5) + uv.xy * o.x + uv.zw * o.y;
         if (any(a < rlo) || any(a > rhi)) { continue; }
-        let texel = textureSampleLevel(cov_tex, cov_sampler, a, layer, level);
+        let texel = textureSampleLevel(cov_tex, cov_sampler, g13_atlas(a, layer, level), layer / (MAP_DIRS * MAP_DIRS), level);
         var cov = texel.x;
         if ((G10_PROBE & 1048576u) != 0u) { g10_samples += 1u; }
         if ((G5_SKIP & 64u) != 0u) { g8_dummy += cov; continue; }

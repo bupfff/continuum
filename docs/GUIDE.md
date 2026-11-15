@@ -179,6 +179,19 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   half the pixels are edges (M7 gate 4; compute rays 24×).
   `CacheOptions::edge_samples` 2 traces one diagonal pair instead of four
   quarters: about 0.8× the cost for less of the gain (development only).
+- **Sub-pixel detail, experimental** (`RendererOptions::sub_pixel`, off;
+  M13 gates 5–13): each pixel resolves what is smaller than it from
+  coverage maps of instanced geometries and coverage pages of far groups,
+  with rays at its corners and bins near large objects, coloured from the
+  cache. On a million boulders at 1280×720 colour is within 0.41–0.44× one
+  ray a pixel's error against a 16×16 supersampled image, and a settled
+  frame takes 17.1–17.9 ms on an M4 with external displays running
+  (1.01–1.05× the path with a simple sun model, M13 G13), against
+  2.7–3.4 ms for one ray a pixel. Only with the cache, hardware ray queries,
+  a static scene, no streaming and at most 64 instanced geometries; views
+  settle in hundreds of frames (a fixed bake budget). Small instances take
+  the first light and the sky with one shadow each (not the cache's);
+  lights seen directly are not drawn; motion is not measured.
 - **The sky** traces hardware rays where camera rays do
   (`CacheOptions::sky_rays`, the default): views of the boulder field warm
   in 166–400 frames from an empty cache (M5 G13). With movers, streamed

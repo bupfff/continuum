@@ -2240,8 +2240,12 @@ impl MaskConeKernel {
     }
 
     /// The coverage maps buffer's maps as an 8-bit texture array (M13 gate
-    /// 5): layer `256 k + d` holds placed geometry `k`'s direction `d`, its
-    /// mip levels the map's levels; sampled bilinearly, clamped at the edge.
+    /// 5): layer `k` an atlas of placed geometry `k`'s directions (`DIRS ×
+    /// DIRS` tiles of `TEXELS` texels, direction `d` at tile `(d % DIRS, d /
+    /// DIRS)`), its mip levels the maps' levels (tiles stay aligned);
+    /// sampled bilinearly with coordinates clamped to the tile (as at an
+    /// edge). M13 gate 13's renderer option: a layer per direction ran past
+    /// the device's 2,048 layers at three geometries.
     fn coverage_texture(
         &self,
         maps: &[u32],
@@ -2249,13 +2253,13 @@ impl MaskConeKernel {
     ) -> (wgpu::TextureView, wgpu::Sampler) {
         let (dirs, texels, per) = coverage_maps::layout();
         let placed = (maps[0] as usize).max(1);
-        let layers = placed as u32 * dirs * dirs;
+        let layers = placed as u32;
         let levels = texels.ilog2() + 1;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("coverage maps"),
             size: wgpu::Extent3d {
-                width: texels,
-                height: texels,
+                width: texels * dirs,
+                height: texels * dirs,
                 depth_or_array_layers: layers,
             },
             mip_level_count: levels,
@@ -2269,16 +2273,20 @@ impl MaskConeKernel {
         });
         for level in 0..levels {
             let side = texels >> level;
+            let atlas = (side * dirs) as usize;
             let offset: u32 = (0..level).map(|l| (texels >> l) * (texels >> l)).sum();
-            let mut bytes = vec![0u8; 4 * (side * side * layers) as usize];
+            let mut bytes = vec![0u8; 4 * atlas * atlas * layers as usize];
             for k in 0..maps[0] as usize {
                 let base = maps[1 + 8 * k + 1] as usize;
                 for d in 0..(dirs * dirs) as usize {
                     let at = base + d * per as usize + offset as usize;
-                    let layer = k * (dirs * dirs) as usize + d;
+                    let (tx, ty) = (d % dirs as usize, d / dirs as usize);
                     for t in 0..(side * side) as usize {
                         let v = f32::from_bits(maps[at + t]);
-                        let o = 4 * (layer * (side * side) as usize + t);
+                        let (u, w) = (t % side as usize, t / side as usize);
+                        let x = tx * side as usize + u;
+                        let y = ty * side as usize + w;
+                        let o = 4 * (k * atlas * atlas + y * atlas + x);
                         bytes[o] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         let n = normals
                             .get(k)
@@ -2301,12 +2309,12 @@ impl MaskConeKernel {
                 &bytes,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * side),
-                    rows_per_image: Some(side),
+                    bytes_per_row: Some(4 * atlas as u32),
+                    rows_per_image: Some(atlas as u32),
                 },
                 wgpu::Extent3d {
-                    width: side,
-                    height: side,
+                    width: atlas as u32,
+                    height: atlas as u32,
                     depth_or_array_layers: layers,
                 },
             );

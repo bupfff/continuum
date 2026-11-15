@@ -518,6 +518,19 @@ displays): 17.07 and 17.87 ms, gate 11's path 16.11 and 17.62. Next: the
 path as a `RendererOptions` field, small instances lit from the cache,
 then colour in motion.
 
+**The option (2026-11-14, after gate 13):** `RendererOptions::sub_pixel`
+takes the path (profile stage 20, pixel cones, hardware rays, prefilter 8,
+a fixed bake budget) with the cache, hardware ray queries, a static scene,
+no streaming and at most 64 instanced geometries (a record names its map
+in 16 bits). Coverage maps became one atlas layer a geometry (32×32 tiles
+of 16×16 texels, coordinates clamped to the tile, the same reads): a layer
+a direction ran past the device's 2,048 layers at three geometries. On the
+field the atlas changed neither speed (1.045×/1.002× in development) nor
+colour (0.422×/0.426×). A GPU test renders the test scene with it: over
+surfaces 0.121 relative RMSE from one ray a pixel (aliased edges at
+160×90), mean 0.9998×. Not yet: lights seen directly (not drawn), small
+instances lit by the cache, motion.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -954,9 +967,9 @@ development in `docs/results/m13-gate12-development.md`). **Gate 13
 passed**, standing narrowly: the cache-lit path at 1.045×/1.014× gate 11's
 frame timed interleaved in one process (bar 1.05×), colour 0.436×/0.414×
 (`docs/results/m13-gate13.md`; the run started by accident, disclosed).
-**Next:** the path as a `RendererOptions` field (it is still taken at
-profile stage 20 with the cache and pixel cones), small instances lit from
-the cache, then colour in motion (development after gate 11: a 10 m/s
+The path is now `RendererOptions::sub_pixel` (§3.4, "The option").
+**Next:** lights seen directly on that path, small instances lit from the
+cache, then colour in motion (development after gate 11: a 10 m/s
 flight 150 m up runs 1.37× settled because the sun cache misses where the
 view moves); then the showcase (item 4). The machine now runs with
 external displays (control 119.7/104.9 ms against 110.8/91.0 in gate 11's
