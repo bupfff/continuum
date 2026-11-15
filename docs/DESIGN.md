@@ -564,6 +564,60 @@ ray's error near it in development, with the one-ray reference not settled
 after 3,000 frames. Its second view found a stall in the lighting cache
 (§8, "Wide light cones").
 
+#### Deforming geometry (M12 design, 2026-11-15)
+
+The first of the user's gaps (2026-11-15): geometry whose vertices change
+every frame. That covers skinned characters, morph targets, animated scale
+and anything an application deforms itself. It runs through the rigid
+movers' path (M9 G1), whose cache is exact. The parts:
+- **A. The API.** `RendererOptions::deforming` lists geometries whose
+  vertices change; their instances move as movers do (made movable).
+  `Renderer::set_vertices(geometry, triangles, normals)` gives a pose
+  from the next frame. Topology, charts and texture coordinates stay the
+  rest pose's, so a texel keeps its triangle and barycentric coordinates
+  and follows the surface: a texel's point is computed from the triangles
+  at bake time already. One geometry, one pose: characters that pose
+  differently are geometries of their own.
+- **B. Per frame, for each deformed geometry:**
+  - **Upload:** its triangles and normals.
+  - **Refit:** its triangle hierarchy on the CPU. The tree is the rest
+    pose's; boxes and the 27 directional coverage samples are recomputed
+    from the new triangles, so the tree's quality falls with large
+    deformations.
+  - **Hardware structure:** rebuilt from its range of the shared vertex
+    buffer.
+  - **Bounds:** its new object-space box gives its instances' world boxes,
+    which update the movers' subtree and top-level structure as a move does.
+- **C. The cache.** A deformed geometry's instances count as moved (old and
+  new boxes) for M9 G1's stale pass. Its own pages are stale (their apexes
+  move with the vertices) and re-bake in the same frame when read. A
+  re-bake of every page still equals the cache bit for bit
+  (`verify_cache`).
+- **D. Not yet:**
+  - the sky (M9 G3's charges: many pages re-bake their sky while
+    anything moves, a cost of its own, item 1's next part);
+  - streaming and the sub-pixel path (both static);
+  - moving lights;
+  - tangents for normal maps (the rest pose's).
+- **Then:**
+  - **glTF skins and morph targets** (M12 G2): joints, weights, inverse
+    bind matrices and target deltas imported; poses computed on the CPU
+    from the animation channels; checked against Cycles at a pose.
+  - **Skinning on the GPU** when many characters need it (M12 G3).
+
+**Gate M12 G1** (stub `m12_gate1`): a deforming blob in the
+million-boulder field, under M5 G6's three coloured lights, no sky. The
+blob is a sphere of 16,384 triangles, 2 m across, 10 m ahead of the
+standing camera, its radius waving ±25% with travelling waves each frame.
+Criteria:
+1. **Exact:** 30 checks of `verify_cache` in the first 300 frames, with
+   no texel differing.
+2. **Accuracy:** at frame 150's pose, per-pixel cones (16×16 at 320×180)
+   within 3% of Cycles over surfaces.
+3. **Cost:** frames with the blob deforming at most 1.25× the same frames
+   with it still (three of each, alternating); 99th percentile at most
+   33.3 ms; fallback at most 10%.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -1028,6 +1082,23 @@ the disk free for traces (it filled during gate 13's development). Real-frame pa
 (`xcrun xctrace record --template 'Metal System Trace'`, table
 `metal-gpu-intervals`); profile mode (`M13_PROFILE=1`) times passes alone.
 
+- **Decided 2026-11-15 (the user): toward a full engine, in the order a
+  user would hit the gaps.**
+  1. **Dynamic scenes:** anything beyond rigid motion (skinned characters,
+     morph targets, animated scale, particles); rigid movers first-class
+     (at frame rate under a sky, with streaming, with the sub-pixel path).
+  2. **Anti-aliasing on the default path,** in motion.
+  3. **Material breadth:** refraction and transmission, subsurface,
+     clearcoat, sheen, a second texture coordinate set; glossy beyond one
+     ray; cheaper blending.
+  4. **Atmosphere and post:** fog and volumetrics, bloom, depth of field,
+     motion blur, auto-exposure, upscaling.
+  5. **Lighting gaps:** bounce by default and quicker to settle, emissive
+     surfaces as lights, receivers next to large lights (M5 G14's rays).
+  6. **Platforms:** NVIDIA and Windows (needs funds).
+
+  The sub-pixel items left (colour in motion, the 10 ms) and the showcase
+  follow these or fold into them.
 - **The user's direction.** Core first (2026-11-08), sharpened 2026-11-12:
   be excellent at three things (**scale, detail, lighting**) and adequate
   at the rest. "Scale and detail" means huge, extremely detailed worlds
