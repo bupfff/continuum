@@ -186,8 +186,11 @@ fn bound_cone(cone: Cone, axis: vec3<f32>) -> Cone {
 }
 
 fn lambert_edge(n: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
-    let an = normalize(a);
-    let bn = normalize(b);
+    return lambert_edge_unit(n, normalize(a), normalize(b));
+}
+
+// The same for unit directions `an`, `bn`.
+fn lambert_edge_unit(n: vec3<f32>, an: vec3<f32>, bn: vec3<f32>) -> f32 {
     let g = cross(an, bn);
     let len = length(g);
     if (len > 1e-12) {
@@ -1969,6 +1972,24 @@ fn rect_open(point: vec3<f32>, normal: vec3<f32>, r: LightRect) -> f32 {
     let c0 = r.corner.xyz - point;
     let facing = dot(normalize(cross(u, v)), c0);
     if ((r.corner.w > 0.5 && facing >= 0.0) || abs(facing) <= 1e-6) { return 0.0; }
+    // The whole light above the horizon (the common case): its corners in
+    // order, the sum below unrolled, without arrays indexed at run time.
+    let d1 = c0 + u;
+    let d2 = c0 + u + v;
+    let d3 = c0 + v;
+    if (dot(normal, c0) >= 0.0 && dot(normal, d1) >= 0.0 && dot(normal, d2) >= 0.0 && dot(normal, d3) >= 0.0) {
+        // (Each corner's direction normalized once.)
+        let a0 = normalize(c0);
+        let a1 = normalize(d1);
+        let a2 = normalize(d2);
+        let a3 = normalize(d3);
+        var sum = 0.0;
+        sum += lambert_edge_unit(normal, a0, a1);
+        sum += lambert_edge_unit(normal, a1, a2);
+        sum += lambert_edge_unit(normal, a2, a3);
+        sum += lambert_edge_unit(normal, a3, a0);
+        return abs(0.5 * sum);
+    }
     var d: array<vec3<f32>, 4>;
     d[0] = c0;
     d[1] = c0 + u;

@@ -196,11 +196,18 @@ fn main() {
             "hw_m13_tiles",
             "hw_m13_page_args",
             "hw_m13_page_bake",
+            "hw_m13_shade_hits_a",
         ] {
+            let vc = kernel.entry_bindings(name, true);
             println!(
-                "{name}: model {:?}; cache {:?}",
-                kernel.entry_bindings(name, false),
-                kernel.entry_bindings(name, true)
+                "{name}: model {:?}; cache ({}) {:?}",
+                if name.contains("hits") {
+                    Vec::new()
+                } else {
+                    kernel.entry_bindings(name, false)
+                },
+                vc.len(),
+                vc
             );
         }
         return;
@@ -249,15 +256,29 @@ fn main() {
                 .expect("save");
         };
         let only = std::env::var("M13_VIEW").ok();
+        // (The gate's own views only when `M13_VIEW` names them, after the
+        // run: `gate_standing`, `gate_150`.)
         for (name, camera) in [
             ("standing_dev", view(1.7, 0.0, 20.0)),
             ("120m_dev", view(120.0, 40.0, -20.0)),
+            ("gate_standing", view(1.7, 0.0, 0.0)),
+            ("gate_150", view(150.0, 45.0, 0.0)),
         ] {
-            if only.as_ref().is_some_and(|v| !name.starts_with(v.as_str())) {
+            let chosen = match &only {
+                Some(v) => name.starts_with(v.as_str()),
+                None => !name.starts_with("gate"),
+            };
+            if !chosen {
                 continue;
             }
+            // `M13_NOONE=1`: the sub-pixel path alone (its speed).
+            let noone = std::env::var_os("M13_NOONE").is_some();
             let mut one = cached(&kernel, &field, origin, &lights, false);
-            let n1 = settle(&mut one, camera, &view_target, 8, 3000);
+            let n1 = if noone {
+                0
+            } else {
+                settle(&mut one, camera, &view_target, 8, 3000)
+            };
             let mut one_times: Vec<f64> = (0..10)
                 .map(|_| {
                     let t = Instant::now();
@@ -294,7 +315,9 @@ fn main() {
             let mut sub = cached(&kernel, &field, origin, &lights, true);
             sub.set_m13_page_budget(512);
             let n2 = settle(&mut sub, camera, &view_target, 8, 3000);
-            let mut times: Vec<f64> = (0..10)
+            // (The median of 41 frames: the median's index 20, read below as
+            // `times[5]` was for 10; kept the same name.)
+            let mut times: Vec<f64> = (0..41)
                 .map(|_| {
                     let t = Instant::now();
                     sub.frame(camera, &view_target);
@@ -303,7 +326,16 @@ fn main() {
                 })
                 .collect();
             times.sort_by(f64::total_cmp);
+            times.drain(..15);
             let b = frame(&mut sub, camera, &view_target);
+            let hits = sub.m13_hit_counts();
+            let work = sub.m13_work_counters();
+            println!(
+                "{name}: records lit by the cache {} ({} after the corners), pixels tracing bin rays {}",
+                hits[0],
+                hits[0].saturating_sub(hits[1]),
+                work[0]
+            );
             // With `M13_ACC`: each pixel's class (large objects, pages,
             // horizon, shadow edge), for the error's split.
             let class = std::env::var_os("M13_ACC").is_some().then(|| {

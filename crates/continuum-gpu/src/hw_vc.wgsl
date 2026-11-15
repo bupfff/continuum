@@ -6,8 +6,8 @@
 //
 // A pass that shades a large hit records it instead (the hit, where its ray
 // went, where its colour goes) and a pass of its own lights the records from
-// the cache: the cache's shading needs most of the device's 29 buffers a
-// stage, too many beside a pass's own.
+// the cache and writes their colours: the cache's shading needs most of the
+// device's 29 storage buffers a stage, too many beside a pass's own.
 
 // The records: word 0 their count, word 1 the first shading pass's share;
 // from word 8, five words each: object, triangle, distance, the ray (index
@@ -118,7 +118,10 @@ fn hw_m13_hits_args_b() {
 fn hw_m13_shade_hits_a(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let t = (wg.y * nwg.x + wg.x) * 64u + li;
     if (t >= atomicLoad(&g12_hits[1])) { return; }
-    g12_shade_record(t);
+    // The corners' records: their colours and shares straight to the
+    // corners' words (the pass's 29th buffer).
+    let x = g12_light_record(t);
+    g12_write_plain(x.x, x.y, x.z);
 }
 
 @compute @workgroup_size(64)
@@ -126,11 +129,18 @@ fn hw_m13_shade_hits_b(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgr
     let first = atomicLoad(&g12_hits[1]);
     let t = first + (wg.y * nwg.x + wg.x) * 64u + li;
     if (t >= min(atomicLoad(&g12_hits[0]), G12_HITS)) { return; }
-    g12_shade_record(t);
+    // The others' targets are in two buffers, one too many for the pass:
+    // the colour into the record (its distance is spent) and the shares
+    // (its object is spent), for the scatter pass.
+    let x = g12_light_record(t);
+    let r = 8u + 5u * t;
+    atomicStore(&g12_hits[r + 2u], x.x);
+    atomicStore(&g12_hits[r], x.z);
 }
 
-// Record `i` lit by the cache into its target.
-fn g12_shade_record(i: u32) {
+// Record `i` lit by the cache: its packed colour, target and the cache's
+// shares at the hit.
+fn g12_light_record(i: u32) -> vec3<u32> {
     let r = 8u + 5u * i;
     let m = atomicLoad(&g12_hits[r]);
     let t = atomicLoad(&g12_hits[r + 1u]);
@@ -160,40 +170,43 @@ fn g12_shade_record(i: u32) {
     g12_sky_value = -1.0;
     let c = vc_hit_color(dir, hit_from(vec3<u32>(m, t, bitcast<u32>(dist)), dir), sample);
     if (sample && vc_request_priority > 0u) { vc_request(vc_request_key, vc_request_priority); }
-    // The colour into the record (its distance is spent), and the cache's
-    // shares at the hit (its object is spent), for the scatter pass: the
-    // lighting pass has no buffer to spare for the targets.
-    atomicStore(&g12_hits[r + 2u], g10_pack(c, g9_scale()));
-    atomicStore(&g12_hits[r], pack2x16float(vec2<f32>(g12_share0, g12_sky_value)));
+    return vec3<u32>(g10_pack(c, g9_scale()), dest, pack2x16float(vec2<f32>(g12_share0, g12_sky_value)));
 }
 
-// The records' colours to their targets (after each lighting pass).
-@compute @workgroup_size(64)
-fn hw_m13_scatter_hits_a(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    let t = (wg.y * nwg.x + wg.x) * 64u + li;
-    if (t >= atomicLoad(&g12_hits[1])) { return; }
-    g12_scatter_record(t);
-}
-
+// The others' colours to their targets (after the second lighting pass).
 @compute @workgroup_size(64)
 fn hw_m13_scatter_hits_b(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let first = atomicLoad(&g12_hits[1]);
     let t = first + (wg.y * nwg.x + wg.x) * 64u + li;
     if (t >= min(atomicLoad(&g12_hits[0]), G12_HITS)) { return; }
-    g12_scatter_record(t);
+    let r = 8u + 5u * t;
+    g12_write(atomicLoad(&g12_hits[r + 2u]), atomicLoad(&g12_hits[r + 4u]), atomicLoad(&g12_hits[r]));
 }
 
-fn g12_scatter_record(i: u32) {
-    let r = 8u + 5u * i;
-    let packed = atomicLoad(&g12_hits[r + 2u]);
-    let dest = atomicLoad(&g12_hits[r + 4u]);
+// Colour `packed` (shares `shares`) to a target in the plain words: a
+// corner's (with the cache's shares at its hit, in its spare word, for its
+// pixels' bins) or a region's.
+fn g12_write_plain(packed: u32, dest: u32, shares: u32) {
     let word = dest & 0xfffffffu;
     let to = dest >> 28u;
     let c = g10_unpack(packed, g9_scale());
     if (to == G12_TO_CORNER) {
         m13_plain[word] = g12_cpack(c);
-        // The corner's shares, in its spare word.
-        m13_plain[word + g9_p()] = atomicLoad(&g12_hits[r]);
+        m13_plain[word + g9_p()] = shares;
+    } else {
+        let p = g9_p();
+        m13_plain[word] = bitcast<u32>(c.x);
+        m13_plain[word + p] = bitcast<u32>(c.y);
+        m13_plain[word + 2u * p] = bitcast<u32>(c.z);
+    }
+}
+
+// Colour `packed` (shares `shares`) to its target `dest`.
+fn g12_write(packed: u32, dest: u32, shares: u32) {
+    let word = dest & 0xfffffffu;
+    let to = dest >> 28u;
+    if (to == G12_TO_CORNER || to == G12_TO_REGION) {
+        g12_write_plain(packed, dest, shares);
     } else if (to == G12_TO_BIN) {
         m13_shaded[word] = packed | G10_SHADED_BIT;
     } else if (to == G12_TO_QUAD) {
@@ -202,11 +215,6 @@ fn g12_scatter_record(i: u32) {
         m13_shaded[word + 1u] = v;
         m13_shaded[word + 4u] = v;
         m13_shaded[word + 5u] = v;
-    } else {
-        let p = g9_p();
-        m13_plain[word] = bitcast<u32>(c.x);
-        m13_plain[word + p] = bitcast<u32>(c.y);
-        m13_plain[word + 2u * p] = bitcast<u32>(c.z);
     }
 }
 
@@ -233,11 +241,26 @@ var<private> g12_sky_value: f32 = -1.0;
 // the bin's own point, normal and albedo, as the cache's shading does with
 // its texels' shares (one light; otherwise w 0: lit in full).
 fn g12_lean_bin(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, b: u32) -> vec4<f32> {
-    return g12_lean_at(m, t, p, dist, dir, ng, n, pixel, (f32(b % 4u) + 0.5) * 0.25, (f32(b / 4u) + 0.5) * 0.25);
+    return g12_lean_from(m, t, p, dist, dir, ng, n, pixel, (f32(b % 4u) + 0.5) * 0.25, (f32(b / 4u) + 0.5) * 0.25, 2.0);
 }
 
 // The same at (fx, fy) within the pixel.
 fn g12_lean_at(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, fx: f32, fy: f32) -> vec4<f32> {
+    return g12_lean_from(m, t, p, dist, dir, ng, n, pixel, fx, fy, 2.0);
+}
+
+// A resolved pixel's quarter sample lit the same way where its corners
+// showing the object agree on the light's share within G13_SHARE_AGREE (no
+// shadow edge between them); else w 0 (lit in full).
+fn g12_lean_quarter(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, fx: f32, fy: f32) -> vec4<f32> {
+    if (!G13_LEAN_QUARTERS) { return vec4<f32>(0.0); }
+    return g12_lean_from(m, t, p, dist, dir, ng, n, pixel, fx, fy, G13_SHARE_AGREE);
+}
+
+// Lit from the corners' shares, the corners read once; w 0 where none
+// shows `m`, or where their shares of the light differ by more than
+// `agree`.
+fn g12_lean_from(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, fx: f32, fy: f32, agree: f32) -> vec4<f32> {
     if (arrayLength(&lights) != 1u || !G12_LEAN) { return vec4<f32>(0.0); }
     let cws = g12_cws(pixel);
     let pp = g9_p();
@@ -250,13 +273,18 @@ fn g12_lean_at(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3
     var share = 0.0;
     var sky = 0.0;
     var guess = false;
+    var lo = 2.0;
+    var hi = -1.0;
     for (var k = 0u; k < 4u; k++) {
-        if (wk[k] <= 0.0) { continue; }
+        if (!mine[k]) { continue; }
         let sv = unpack2x16float(m13_plain[cws[k] + pp]);
+        lo = min(lo, sv.x);
+        hi = max(hi, sv.x);
         share += wk[k] * sv.x;
         if (sv.y < 0.0) { guess = true; }
         sky += wk[k] * sv.y;
     }
+    if (hi - lo > agree) { return vec4<f32>(0.0); }
     share /= wsum;
     sky /= wsum;
     let point = p + ng * surface_offset(dist);
@@ -265,6 +293,9 @@ fn g12_lean_at(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3
     if (guess) { e += sky_open(n); } else { e += sky_scale(n) * sky; }
     return vec4<f32>(base * e / 3.14159265, 1.0);
 }
+
+const G13_LEAN_QUARTERS: bool = true;
+const G13_SHARE_AGREE: f32 = 0.02;
 
 // Development: bins lit from their corners' shares.
 const G12_LEAN: bool = true;

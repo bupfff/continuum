@@ -1154,7 +1154,6 @@ impl InstancedRenderer {
                     lit("hw_m13_corners_tiles"),
                     lit("hw_m13_hits_args_a"),
                     lit("hw_m13_shade_hits_a"),
-                    lit("hw_m13_scatter_hits_a"),
                     lit("hw_m13_bins"),
                     plain("hw_m13_bin_args"),
                     lit("hw_m13_bin_rays"),
@@ -1232,15 +1231,14 @@ impl InstancedRenderer {
         let m13_lit = cache.is_some() && pixel_cones && kernel.profile_stage.get() == 20;
         let camera_dispatch: Vec<CameraDispatch> = if m13_lit {
             // Gate 12's passes in order (prep, roots, corners, the first
-            // records' arguments, lighting and scatter, bins, bin arguments, bin rays,
-            // shading arguments, shading, the other records' arguments,
+            // records' arguments and lighting, bins, bin arguments, bin
+            // rays, shading arguments, shading, the other records' arguments,
             // lighting and scatter, pixels, page arguments, bakes).
             let mut d = vec![
                 CameraDispatch::Prep,
                 CameraDispatch::Tiles,
                 CameraDispatch::Screen,
                 CameraDispatch::One,
-                CameraDispatch::M13Args(16),
                 CameraDispatch::M13Args(16),
                 CameraDispatch::Screen,
                 CameraDispatch::One,
@@ -1360,7 +1358,11 @@ impl InstancedRenderer {
             colors,
             m13_work: None,
             m13_timer: None,
-            one_pass: pixel_cones && kernel.profile_stage.get() == 20,
+            // (`CONTINUUM_M13_PASSES` in development: a compute pass a
+            // dispatch, for per-pass times in a GPU trace.)
+            one_pass: pixel_cones
+                && kernel.profile_stage.get() == 20
+                && std::env::var_os("CONTINUUM_M13_PASSES").is_none(),
             m13_sun: None,
             m13_sun_stale: false,
             m13_hits: None,
@@ -1535,6 +1537,50 @@ impl InstancedRenderer {
         let Some((work, _, _, _)) = &self.m13_work else {
             return [0; 8];
         };
+        self.read_head(work)
+    }
+
+    #[doc(hidden)]
+    /// The large hits' records lit by the cache in the last frame (M13 gate
+    /// 12, development): word 0 all of them, 1 those of the first lighting
+    /// pass (the corners').
+    pub fn m13_hit_counts(&self) -> [u32; 8] {
+        let Some(hits) = &self.m13_hits else {
+            return [0; 8];
+        };
+        self.read_head(hits)
+    }
+
+    #[doc(hidden)]
+    /// The large hits' records of the last frame (M13 gate 13, development):
+    /// five words each after the header (see `g12_hits` in `hw_vc.wgsl`).
+    pub fn m13_hit_records(&self) -> Vec<u32> {
+        let Some(hits) = &self.m13_hits else {
+            return Vec::new();
+        };
+        let n = (self.read_head(hits)[0] as u64).min(3_000_000);
+        let size = (8 + 5 * n) * 4;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hit records"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(hits, 0, &readback, 0, size);
+        self.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let words: Vec<u32> =
+            bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped records")).to_vec();
+        words[8..].to_vec()
+    }
+
+    /// The first eight words of `buffer` (development counters).
+    fn read_head(&self, buffer: &wgpu::Buffer) -> [u32; 8] {
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("work counters"),
             size: 32,
@@ -1542,7 +1588,7 @@ impl InstancedRenderer {
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(work, 0, &readback, 0, 32);
+        encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, 32);
         self.queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -1711,7 +1757,9 @@ impl InstancedRenderer {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("m13 hits"),
                     size: (8 + 5 * 3_000_000) * 4,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
                     mapped_at_creation: false,
                 })
             });

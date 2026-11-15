@@ -2724,11 +2724,20 @@ fn hw_m13_shade_rays(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgrou
                         let v0 = tris[3u * hit.y].xyz;
                         var ng = normalize(normal_to_world(obj, cross(tris[3u * hit.y + 1u].xyz - v0, tris[3u * hit.y + 2u].xyz - v0)));
                         if (dot(ng, dir) > 0.0) { ng = -ng; }
-                        g12_target(G12_TO_QUAD, base + b0, G12_AT_QUARTER, pixel, b0);
-                        // (Lit in full: from the corners' shares smoothed the
-                        // shadow edges these pixels are listed for, 0.450×
-                        // against 0.420× standing in development.)
-                        large_word = g10_pack(g10_shade(obj, hit.y, ph, dist, dir, ng, g12_shading_normal(obj, hit.y, ph, -dir), v), scale) | G10_SHADED_BIT;
+                        let n = g12_shading_normal(obj, hit.y, ph, -dir);
+                        // Lit by the cache from its corners' shares where
+                        // they agree on the light; else in full (the
+                        // corners' shares smooth the shadow edges these
+                        // pixels may be listed for: 0.450× against 0.420×
+                        // standing in gate 12's development).
+                        let fq = (vec2<f32>(f32(b0 % 4u), f32(b0 / 4u)) + vec2<f32>(1.0)) * 0.25;
+                        let lean = g12_lean_quarter(obj, hit.y, ph, dist, dir, ng, n, pixel, fq.x, fq.y);
+                        if (lean.w != 0.0) {
+                            large_word = g10_pack(lean.xyz, scale) | G10_SHADED_BIT;
+                        } else {
+                            g12_target(G12_TO_QUAD, base + b0, G12_AT_QUARTER, pixel, b0);
+                            large_word = g10_pack(g10_shade(obj, hit.y, ph, dist, dir, ng, n, v), scale) | G10_SHADED_BIT;
+                        }
                     }
                 }
                 word = large_word;
@@ -3283,5 +3292,11 @@ fn g12_lean_bin(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec
 fn g12_untarget() {}
 
 fn g12_lean_at(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, fx: f32, fy: f32) -> vec4<f32> {
+    return vec4<f32>(0.0);
+}
+
+// A resolved pixel's quarter sample lit from its corners where they agree
+// on the light (the variant; here none: w 0).
+fn g12_lean_quarter(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, fx: f32, fy: f32) -> vec4<f32> {
     return vec4<f32>(0.0);
 }
