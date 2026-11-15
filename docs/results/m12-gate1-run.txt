@@ -1,0 +1,11 @@
+3. deforming run 1: mean 113.55 ms (10.113× the still runs' 11.23 ms; at most 1.25× and 16.7 ms), 99th percentile 172.37 ms (at most 33.3), fallback 0.33% (at most 10%): FAIL
+3. deforming run 2: mean 110.68 ms (9.856× the still runs' 11.23 ms; at most 1.25× and 16.7 ms), 99th percentile 167.74 ms (at most 33.3), fallback 0.37% (at most 10%): FAIL
+3. deforming run 3: mean 107.59 ms (9.581× the still runs' 11.23 ms; at most 1.25× and 16.7 ms), 99th percentile 180.60 ms (at most 33.3), fallback 0.23% (at most 10%): FAIL
+   still run 1: mean 11.02 ms, 99th percentile 31.33 ms, fallback 0.27%
+   still run 2: mean 11.98 ms, 99th percentile 31.35 ms, fallback 0.26%
+   still run 3: mean 10.68 ms, 99th percentile 32.89 ms, fallback 0.26%
+1. exactness: 30 checks, at most 0 texel values differing (none allowed), largest change 0e0: PASS; pages checked [1640, 3633, 4366, 4885, 5349, 5631, 5732, 5911, 6008, 6082, 6121, 6161, 6137, 6178, 6220, 6267, 6139, 6237, 6337, 6432, 6529, 6621, 6700, 6742, 6781, 6539, 6577, 6616, 6356, 6396]
+2. frame 150's pose, per-pixel cones (16×16, 320×180) vs Cycles (4,096 spp, 6 s), surfaces: 1.08% (at most 3%): PASS; 313 pixels apart
+   (reported) the refit against a hierarchy built for the pose: 0.000% over surfaces
+Verdict: FAIL
+exit 0

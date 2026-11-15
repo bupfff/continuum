@@ -62,6 +62,17 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   (`Animations::pose`, for `set_transform`). Translation and rotation
   channels, step, linear and cubic-spline; scale channels, morph weights
   and baked instances (non-uniform scale) do not move.
+- **Deforming geometry (experimental).** Geometries listed in
+  `RendererOptions::deforming` take a new pose each frame
+  (`Renderer::set_vertices`: triangles and normals, the same count and
+  order; skinned characters or morph targets posed by the application).
+  - The cache stays exact (M12 G1: no stale light in 30 checks), and the
+    geometry is as accurate as a static one (1.08% from Cycles).
+  - It is costly: every texel in the object's shadows re-bakes each frame
+    it moves. A 2 m blob 10 m from the camera made frames about 10× slower
+    (108–114 ms in the million-boulder field).
+  - Not with streaming or the sub-pixel path. Normal maps keep the rest
+    pose's tangents.
 - **Moving lights.** Lights listed in `RendererOptions::moving_lights`
   move (`Renderer::set_light`; not spots). The cache's ledger never shows a
   result further from a fresh one than its certified bound and
