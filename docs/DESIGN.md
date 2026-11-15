@@ -541,8 +541,28 @@ those bins. Near the lights the error was 0.145× and 0.205× one ray's
 (bar 0.5×), and the frame cost 1.001× and 0.999× the same frame with
 drawing off (bar 1.03×; `docs/results/m13-gate14.md`). The gate's low view
 hid its low sun behind a near boulder, so no view put small instances in
-front of a light. Gate 15 checks that case on a view verified to show it
-before its stub is committed.
+front of a light. A development check of that case follows (a light
+panel under the boulders).
+
+**Small instances' lighting, first step (development after gate 14,
+`docs/results/m13-small-instances-development.md`).** Split by the share
+of each pixel small entries cover, most of the colour error from 150 m
+and at the horizon lay in pixels of small instances and pages: 75% of it
+from 150 m, 64% from 20 m. Changes:
+- small instances' samples take the sky by their normal, π L (1 + n·up) /
+  2, instead of half the sky;
+- pages and splats bake the same sky term instead of the old model's
+  ambient.
+
+Whole-image error fell from 0.437×/0.414×/0.428× one ray's to
+0.395×/0.388×/0.351× (standing, 150 m up, 20 m up; the views it was
+developed on). Not kept: visibility as a line in the height, weighting the
+shadow rays toward the eye, 13 rays a boulder. Left of part C: lights after
+the first, the sky's occlusion, bounce. A light seen through small
+instances (a 40 m panel under the boulders, 150 m up) read 0.319× one
+ray's error near it in development, with the one-ray reference not settled
+after 3,000 frames. Its second view found a stall in the lighting cache
+(§8, "Wide light cones").
 
 ## 3.5 What the 2D phase (M0) taught us
 
@@ -987,9 +1007,14 @@ the bins they cover (0.145×/0.205× one ray's error near them, 1.001×/0.999×
 the frame; `docs/results/m13-gate14.md`). Its low view hid the sun behind
 a near boulder, so small instances in front of a light are not yet
 measured.
-**Next:** gate 15 (a view where small instances stand in front of the low
-sun, verified before the stub), small instances lit from the cache, then
-colour in motion (development after gate 11: a 10 m/s
+**Since (thirteenth session, development):** small instances and pages lit
+by the sky by their normal (0.395×/0.388×/0.351× one ray's error from
+0.437×/0.414×/0.428×, `docs/results/m13-small-instances-development.md`);
+a light seen through small instances 0.319× in development. Found: a
+stall in the lighting cache for receivers within centimetres of a large
+light (§8, "Wide light cones": 12–24 s frames).
+**Next:** the wide-cone stall (clip or rays, with a gate against Cycles),
+then colour in motion (development after gate 11: a 10 m/s
 flight 150 m up runs 1.37× settled because the sun cache misses where the
 view moves); then the showcase (item 4). The machine now runs with
 external displays (control 119.7/104.9 ms against 110.8/91.0 in gate 11's
@@ -1083,8 +1108,9 @@ the disk free for traces (it filled during gate 13's development). Real-frame pa
    1.045×/1.014× gate 11's frame (passed narrowly), colour 0.436×/0.414×;
    the path is `RendererOptions::sub_pixel` (experimental); gate 14: lights
    seen directly drawn bin by bin (0.15×/0.21× one ray's error near them).
-   *Left:* small instances in front of a light (gate 15), small instances
-   lit by the cache
+   Small instances take the sky by their normal (development: 0.35–0.40×
+   one ray's error). *Left:* lights after the first and bounce for small
+   instances
    (they take the first light and the sky with a shadow each), colour in
    motion (the sun cache misses where the view moves; 1.23–1.37× settled
    after gate 11), the absolute 60 fps bar in this machine's state (17–18
@@ -1179,8 +1205,7 @@ design's gates.
    12–13 (13 passed), then the renderer option (see "Start here").
    **Next, in order:** (a) lights seen directly on the sub-pixel path
    (**gate 14 passed**: bins tested at their centres, behind small entries;
-   gate 15 measures small instances in front of a light, which gate 14's
-   views missed); (b) small instances lit
+   a light seen through small instances 0.319× in development); (b) small instances lit
    by the cache (§3.4 "Into the renderer", part C: per light a visibility
    per instance, sky and bounce from the instance's coarsest page, its
    error against per-sample lighting measured first); (c) colour in motion
@@ -1728,6 +1753,29 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 
 ## 8. Risks and open questions
 
+- **Wide light cones (found 2026-11-15, development after M13 G14; a
+  stall):** a rectangle light's cone projects the light onto a plane
+  parallel to it at the receiver's distance from that plane, with 8×8 bins
+  uniform in that plane. For a point h from a light of size s the window is
+  about s/h across: a 40 m panel 5 cm above the field's ground, under the
+  boulders, gives windows of ±2,000. Bins then cover almost the whole
+  hemisphere near the axis and slivers at grazing angles. Nodes no longer
+  prefilter, so each cone walks to triangles: about 13 ms a cone, and
+  frames of 12–24 s on 10,000 boulders while pages bake. That holds on
+  both the one-ray and the sub-pixel path; the budget's floor is 1,000
+  cones a frame. At full size a development run waited 12 hours on one.
+  The same panel 3 m above the boulders facing down gives 42–48 ms frames
+  (118 pages a frame), 10 m up 10–15 ms. Candidate fixes:
+  - **Clip** the window to a bounded extent (|uv| ≤ 4, 76° from the
+    light's normal). Take the clipped part's share as the window's, and
+    charge its weight (about 6% for a receiver facing the light, more for
+    tilted ones) to the texel's error bound.
+  - **Rays:** take such texels through hardware rays to points of the
+    light, converging over frames as the sky's samples do (M5 G13). This
+    is the paradigm's "slower path inside it".
+
+  Either needs a gate against Cycles on a near-light scene, with no frame
+  over a stated bound.
 - **Ledger bound tightness** (biggest risk): too-pessimistic charges mean
   everything recomputes and the edge disappears. Flatland: geometric bounds used
   0.2–8% of the certified bound; projected charges about 6% and halved the work.

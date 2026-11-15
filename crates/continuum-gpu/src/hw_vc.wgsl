@@ -65,6 +65,14 @@ fn g9_sky() -> vec3<f32> {
     return light.sky.xyz;
 }
 
+// What the variant still shades by the model (page bakes, splats): the
+// light's direct part as the model's, and the sky's irradiance on a point
+// facing `n` over open ground, π L (1 + n_z) / 2, as small instances take
+// it (after gate 14; the model's ambient was a fifth of the light's).
+fn g9_colour(albedo: vec3<f32>, n: vec3<f32>, sun: G9Sun, v: f32) -> vec3<f32> {
+    return albedo * (sun.e * (max(dot(n, sun.l), 0.0) * v / 3.14159265) + light.sky.xyz * (0.5 + 0.5 * n.z));
+}
+
 // Colours packed as square roots of a share of this: the model's scale with
 // room for several lights, a sky and bounce light.
 fn g9_scale() -> f32 {
@@ -223,9 +231,10 @@ fn g12_write(packed: u32, dest: u32, shares: u32) {
 }
 
 // A small instance's ambient light: the sky's radiance over the open share
-// of its points' hemispheres, as albedo × E / π with E = π L × open. The
-// share is a sphere's resting on a plane, averaged over its surface (each
-// point sees (1 + cos θ) / 2 of the sky): a half (development constant).
+// of its points' hemispheres, as albedo × E / π with E = π L × open. A
+// point facing n over open ground sees (1 + n·up) / 2 of the sky: this
+// half, times (1 + n·up) per sample (`G12_SKY_TILT`, after gate 14; before,
+// the half alone, a sphere's surface averaged).
 const G12_SKY_OPEN: f32 = 0.5;
 fn g12_ambient(albedo: vec3<f32>) -> vec3<f32> {
     return albedo * light.sky.xyz * G12_SKY_OPEN;

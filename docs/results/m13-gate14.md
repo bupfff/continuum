@@ -89,9 +89,13 @@ lights:** pixels within 2 px of a light's projected bounding box.
 
   The development views had the same flaw. The "low turned 3° left" view
   moves that boulder with the sun. Standing, boulders stay below the eye,
-  so no view put small instances in front of a light. Gate 15 picks a view
-  where the low sun is verified to stand behind small instances before
-  its stub is committed.
+  so no view put small instances in front of a light. Checked after the run in
+  development instead (`M13_FLOOR=1`). A 40 m light panel 5 cm above the
+  ground under the boulders, seen from 150 m up, read 0.319× one ray's
+  error near it (5.00% / 15.67%); means: reference (0.388, 0.353, 0.283),
+  ours (0.382, 0.348, 0.279). The one-ray reference had not settled after
+  3,000 frames. That scene's second view (20 m up) found a stall in the
+  lighting cache (DESIGN §8, "Wide light cones").
 - **The near-light numbers equal the development run's on 10,000
   boulders** (5.57%/38.46% low, 14.57%/71.08% standing). The near-light
   pixels are the same there: the sun hidden by the same near boulder (low),

@@ -54,6 +54,19 @@
 //! `M13_DEV=1` runs the checks on a field of 10,000 boulders, `M13_DEV=1M`
 //! at full size on other views (low turned 3° left, standing looking 6°
 //! up); `M13_VIEW=low` or `standing` for one.
+//!
+//! Development after the run (not part of the gate):
+//! - `M13_SUNSET=1`: the low sun's centre on the eye's level.
+//! - `M13_FLOOR=1`: the sun and a 40 m light panel 5 cm above the ground
+//!   under the boulders, facing up (`M13_FLOOR_H`: its height;
+//!   `M13_FLOOR_DOWN=1`: facing down), seen from 150 m and 20 m up.
+//!   `M13_NO_PANEL=1` leaves the panel out.
+//! - `M13_REF_ONLY=1`: only the one-ray path settles.
+//! - `M13_LIGHTS_OFF=1`: drawing lights off.
+//! - `M13_TRACE=1`: frame times while settling.
+//!
+//! The panel 5 cm up makes frames take seconds on both paths: see DESIGN
+//! §8, "Wide light cones".
 
 use std::path::Path;
 use std::time::Instant;
@@ -147,9 +160,20 @@ fn settle(
     max: usize,
 ) -> usize {
     let mut calm = 0;
+    let trace = std::env::var_os("M13_TRACE").is_some();
     for k in 1..=max {
+        let t = Instant::now();
         r.frame(camera, target);
         r.wait();
+        if trace && (k <= 40 || k % 100 == 0) {
+            let s = r.cache_stats();
+            eprintln!(
+                "frame {k}: {:.1} ms, baked {:?}, requests {:?}",
+                t.elapsed().as_secs_f64() * 1000.0,
+                s.map(|s| s.pages_baked),
+                s.map(|s| s.requests)
+            );
+        }
         let s = r.cache_stats();
         let pages = r.m13_page_counters()[6];
         if s.is_some_and(|s| s.requests == 0 && s.pages_baked == 0) && pages == 0 {
@@ -449,6 +473,7 @@ fn reference(
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, usize) {
     let mut one = cached(kernel, field, origin, lights, false);
     let frames = settle(&mut one, camera, target, 8, 3000);
+    eprintln!("reference: the one-ray path settled in {frames} frames");
     let single = frame(&mut one, camera, target);
     let mut sum = vec![[0.0f32; 3]; (W * H) as usize];
     for s in 0..256 {
@@ -539,7 +564,41 @@ fn main() {
     let (ground, _) = field.relative(origin);
     kernel.set_sky(field.sky());
     let views = Views::new(ground);
-    let lights = gate_lights(&field, origin, &views);
+    let mut lights = gate_lights(&field, origin, &views);
+    // Development after the gate (`M13_FLOOR=1`): the field's sun and a
+    // light panel on the ground under the boulders, 40 m square, 5 cm up,
+    // facing up, 150 m ahead, seen from 150 m up (45° down) and from 20 m up
+    // (20° down), so small instances stand in front of a light.
+    let floor = std::env::var_os("M13_FLOOR").is_some();
+    if floor {
+        let f = views.flat(0.0);
+        let left = Vec3::Z.cross(f);
+        // (`M13_FLOOR_H`: its height; `M13_FLOOR_DOWN=1`: facing down.)
+        let height: f32 = std::env::var("M13_FLOOR_H")
+            .ok()
+            .and_then(|h| h.parse().ok())
+            .unwrap_or(0.05);
+        let down = std::env::var_os("M13_FLOOR_DOWN").is_some();
+        let middle = Vec3::new(views.ground.eye.x, views.ground.eye.y, height) + f * 150.0;
+        let (u, v) = (f * 40.0, left * 40.0);
+        let (u, v) = if (u.cross(v).z > 0.0) != down {
+            (u, v)
+        } else {
+            (v, u)
+        };
+        lights.truncate(1);
+        if std::env::var_os("M13_NO_PANEL").is_none() {
+            lights.push(Light::rect(
+                RectLight {
+                    corner: middle - (u + v) * 0.5,
+                    edge_u: u,
+                    edge_v: v,
+                    one_sided: true,
+                },
+                Vec3::new(0.5, 0.45, 0.35),
+            ));
+        }
+    }
     let view_target = target(&kernel);
     let gate_views = [
         ("low", views.at(0.4, -3.0, 0.0)),
@@ -547,7 +606,12 @@ fn main() {
     ];
     if let Some(dev) = dev {
         let only = std::env::var("M13_VIEW").ok();
-        let dev_views = if dev == "1" {
+        let dev_views = if floor {
+            [
+                ("floor_150", views.at(150.0, 45.0, 0.0)),
+                ("floor_20", views.at(20.0, 20.0, 0.0)),
+            ]
+        } else if dev == "1" {
             gate_views
         } else {
             [
@@ -559,13 +623,26 @@ fn main() {
             if only.as_ref().is_some_and(|v| !name.starts_with(v.as_str())) {
                 continue;
             }
+            let t0 = Instant::now();
+            if std::env::var_os("M13_REF_ONLY").is_some() {
+                let mut one = cached(&kernel, &field, origin, &lights, false);
+                let n = settle(&mut one, camera, &view_target, 8, 3000);
+                eprintln!("{name}: the one-ray path settled in {n} frames");
+                continue;
+            }
             let mut lit = cached(&kernel, &field, origin, &lights, true);
+            if std::env::var_os("M13_LIGHTS_OFF").is_some() {
+                lit.set_m13_state_word(LIGHTS_OFF, 1);
+            }
             let n = settle(&mut lit, camera, &view_target, 8, 3000);
+            eprintln!("{name}: settled ({:.0} s)", t0.elapsed().as_secs_f64());
             let rounds = interleaved(&mut lit, camera, &view_target, 3);
+            eprintln!("{name}: timed ({:.0} s)", t0.elapsed().as_secs_f64());
             let ours = frame(&mut lit, camera, &view_target);
             drop(lit);
             let (reference, single, n_one) =
                 reference(&kernel, &field, origin, &lights, camera, &view_target);
+            eprintln!("{name}: reference ({:.0} s)", t0.elapsed().as_secs_f64());
             let mask = near_lights(&lights, camera);
             let (e, mr, mo) = errors(&ours, &single, &reference, &mask);
             println!(

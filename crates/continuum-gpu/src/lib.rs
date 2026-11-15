@@ -1022,6 +1022,7 @@ impl MaskConeKernel {
             ("fn g9_shade_hit(", "fn g9_shade_hit_model("),
             ("fn g10_shade(", "fn g10_shade_model("),
             ("fn g9_sky() ->", "fn g9_sky_model() ->"),
+            ("fn g9_colour(", "fn g9_colour_model("),
             ("fn g9_scale() ->", "fn g9_scale_model() ->"),
             ("fn g12_corner_request(", "fn g12_corner_request_model("),
             ("fn g12_corner_done(", "fn g12_corner_done_model("),
@@ -1044,6 +1045,11 @@ impl MaskConeKernel {
             ("fn g12_untarget(", "fn g12_untarget_model("),
             ("fn g12_lean_at(", "fn g12_lean_at_model("),
             ("fn g12_lean_quarter(", "fn g12_lean_quarter_model("),
+            // Small instances' sky by their samples' normals (development).
+            (
+                "const G12_SKY_TILT: f32 = 0.0;",
+                "const G12_SKY_TILT: f32 = 1.0;",
+            ),
         ] {
             assert!(hw.contains(from), "{from} not found");
             hw = hw.replacen(from, to, 1);

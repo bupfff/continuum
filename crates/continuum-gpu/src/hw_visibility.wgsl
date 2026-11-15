@@ -756,10 +756,14 @@ fn g8_instance(m: u32) {
     m13_records[3u * m + 1u] = vec4<f32>(dot(qx, u), dot(qx, v), dot(qy, u), dot(qy, v)) * 0.5;
     // M13 gate 9: the nearest distance, the light's direction in the
     // object's frame, the albedo and the sun's visibility (one ray from the
-    // sphere's sunward point).
+    // sphere's sunward point). After gate 14: the world's up in the
+    // object's frame too (10 bits a coordinate for the light, 6 for up),
+    // and the visibility weighted toward what the eye sees.
     if (g9_colour_on()) {
         let sun = g9_sun(centre);
         let lo = oct_encode(normalize(g8_rotate(q, sun.l))) * 0.5 + vec2<f32>(0.5);
+        let up = oct_encode(normalize(g8_rotate(q, vec3<f32>(0.0, 0.0, 1.0)))) * 0.5 + vec2<f32>(0.5);
+        let dirs = u32(round(lo.x * 1023.0)) | (u32(round(lo.y * 1023.0)) << 10u) | (u32(round(up.x * 63.0)) << 20u) | (u32(round(up.y * 63.0)) << 26u);
         var vis = 1.0;
         if (G9_SHADOWS) { vis = g12_object_fraction(m, centre, radius, sun); }
         // The light's irradiance where the instance is over the eye's (the
@@ -768,7 +772,7 @@ fn g8_instance(m: u32) {
         let at_eye = g9_sun(camera.eye.xyz).e;
         let k = length(sun.e) / max(length(at_eye), 1e-20);
         let a = clamp(albedo[m].xyz * k, vec3<f32>(0.0), vec3<f32>(1.0));
-        m13_records[3u * m + 2u] = vec4<f32>(len - radius, bitcast<f32>(pack2x16unorm(lo)), bitcast<f32>(pack4x8unorm(vec4<f32>(a, vis))), radius);
+        m13_records[3u * m + 2u] = vec4<f32>(len - radius, bitcast<f32>(dirs), bitcast<f32>(pack4x8unorm(vec4<f32>(a, vis))), radius);
     }
 }
 
@@ -805,6 +809,8 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
     // M13 gate 9: behind the pixel's large object only its other bins.
     var l_obj = vec3<f32>(0.0);
     var albedo = vec4<f32>(0.0);
+    // The world's up in the object's frame (after gate 14).
+    var up_obj = vec3<f32>(0.0, 0.0, 1.0);
     // The model's two parts per record, over 16 bins (M13 gate 10).
     var k_lit = vec3<f32>(0.0);
     var k_amb = vec3<f32>(0.0);
@@ -813,7 +819,9 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
     var c4 = vec4<f32>(0.0);
     if (g9_on) {
         todo &= g9_in_front(r2.x);
-        l_obj = oct_decode(unpack2x16unorm(bitcast<u32>(r2.y)) * 2.0 - vec2<f32>(1.0));
+        let dirs = bitcast<u32>(r2.y);
+        l_obj = oct_decode(vec2<f32>(f32(dirs & 1023u), f32((dirs >> 10u) & 1023u)) * (2.0 / 1023.0) - vec2<f32>(1.0));
+        up_obj = oct_decode(vec2<f32>(f32((dirs >> 20u) & 63u), f32(dirs >> 26u)) * (2.0 / 63.0) - vec2<f32>(1.0));
         albedo = unpack4x8unorm(bitcast<u32>(r2.z));
         k_lit = albedo.xyz * g9_e * albedo.w / (16.0 * 3.14159265);
         k_amb = g12_ambient(albedo.xyz) / 16.0;
@@ -857,7 +865,8 @@ fn g8_sample_record(r0: vec4<f32>, uv: vec4<f32>, r2: vec4<f32>, bins: u32, pix:
             }
             let n = oct_decode(texel.yz * 2.0 - vec2<f32>(1.0));
             let t = (1.0 - pb_get(b)) * cov;
-            g9_c += t * (k_lit * max(dot(n, l_obj), 0.0) + k_amb);
+            // (After gate 14: the ambient by the normal's height.)
+            g9_c += t * (k_lit * max(dot(n, l_obj), 0.0) + k_amb * (1.0 + G12_SKY_TILT * dot(n, up_obj)));
         }
         pb_set(b, 1.0 - (1.0 - pb_get(b)) * (1.0 - cov));
     }
@@ -1749,6 +1758,13 @@ fn hw_m13_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_in
         }
         g10_resolve(gid, g9_c, g9_pages_read > 0u, t);
         if ((G10_PROBE & 1048576u) != 0u) { atomicAdd(&g6_state[28], g10_samples); }
+        // Development (state word 28 = 2): the share of the pixel small
+        // entries cover, and the colour they give it.
+        if (atomicLoad(&g6_state[28]) == 2u) {
+            var covered = 0.0;
+            for (var b = 0u; b < 16u; b++) { covered += pb_get(b); }
+            colors[pixel] = vec4<f32>(covered / 16.0, g9_c.x + g9_c.y + g9_c.z, 0.0, 1.0);
+        }
     } else if (inside) {
         var sum = 0.0;
         for (var b = 0u; b < 16u; b++) { sum += pb_get(b); }
@@ -3367,6 +3383,12 @@ const G12_AT_QUARTER: u32 = 2u;
 const G12_AT_CENTRE: u32 = 3u;
 fn g12_target(to: u32, word: u32, kind: u32, index: u32, sub: u32) {}
 
+// A small instance's ambient follows its sample's normal, (1 + n·up) of it
+// (the sky above the horizon of a point facing n). 0 here, the model's
+// constant ambient; 1 in the variant lit by the cache (after gate 14,
+// `docs/results/m13-small-instances-development.md`).
+const G12_SKY_TILT: f32 = 0.0;
+
 // A small instance's ambient light (the model: a fifth of the sun's normal
 // irradiance; the variant lit by the cache: the sky's).
 fn g12_ambient(albedo: vec3<f32>) -> vec3<f32> {
@@ -3377,38 +3399,54 @@ fn g12_ambient(albedo: vec3<f32>) -> vec3<f32> {
 // arrives (M13 gate 12, development): shadow rays from its sunward point and
 // four points 60° from it, weighted by their cosines (G12_OBJECT_RAYS: 5,
 // the variant lit by the cache; 1 the sunward point alone, gate 9's and the
-// model's), cached per object while the light and the scene are still (a
-// word: 1 + the share × 254; 0 unknown).
+// model's). The points' results are cached per object while the light and
+// the scene are still (a word: bit 31 set, bit k point k open; 0 unknown).
+// After gate 14, each point is weighted also by how squarely the eye sees
+// it (G12_EYE_WEIGHT; none seen: by the light alone), so a boulder whose
+// lower side lies in its neighbours' shadow shows its lit top lit from
+// above.
 const G12_OBJECT_RAYS: u32 = 1u;
+const G12_EYE_WEIGHT: bool = false;
 fn g12_object_fraction(m: u32, centre: vec3<f32>, radius: f32, sun: G9Sun) -> f32 {
     let at = 16u * G11_BUCKETS + m;
-    if (G11_CACHE) {
-        let word = atomicLoad(&g11_sun[at]);
-        if (word != 0u) { return f32(word - 1u) / 254.0; }
-    }
+    var word = 0u;
+    if (G11_CACHE) { word = atomicLoad(&g11_sun[at]); }
     let l = sun.l;
     let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(l.z) < 0.9);
     let u = normalize(cross(helper, l));
     let v = cross(l, u);
-    // Each point weighted by its cosine to the light (the share of the
-    // light's irradiance on the sphere that arrives).
-    var open = 0.0;
-    var total = 0.0;
+    let known = word != 0u;
+    let e = normalize(camera.eye.xyz - centre);
+    var open = vec2<f32>(0.0);
+    var total = vec2<f32>(0.0);
     for (var k = 0u; k < G12_OBJECT_RAYS; k++) {
         var d = l;
         var weight = 1.0;
-        if (k > 0u) {
+        if (k > 0u && G12_OBJECT_RAYS == 5u) {
             let a = f32(k - 1u) * 1.5707963;
             d = 0.5 * l + 0.8660254 * (cos(a) * u + sin(a) * v);
             weight = 0.5;
+        } else if (k > 0u) {
+            // (Development: two rings of six, 40° and 75° from the
+            // sunward point, the second turned half a step.)
+            let ring = (k - 1u) / 6u;
+            let a = (f32((k - 1u) % 6u) + 0.5 * f32(ring)) * 1.0471976;
+            let th = select(0.6981317, 1.3089969, ring == 1u);
+            d = cos(th) * l + sin(th) * (cos(a) * u + sin(a) * v);
+            weight = cos(th);
         }
-        let q = centre + d * (radius * 1.05);
-        if (hw_segment_open(q, l, sun.dist)) { open += weight; }
-        total += weight;
+        if (!known) {
+            let q = centre + d * (radius * 1.05);
+            if (hw_segment_open(q, l, sun.dist)) { word |= 1u << k; }
+        }
+        // Weights: the light's alone, and with the eye's.
+        let w = weight * vec2<f32>(1.0, max(dot(d, e), 0.0));
+        total += w;
+        if ((word & (1u << k)) != 0u) { open += w; }
     }
-    let share = open / total;
-    if (G11_CACHE) { atomicStore(&g11_sun[at], 1u + u32(round(share * 254.0))); }
-    return share;
+    if (G11_CACHE && !known) { atomicStore(&g11_sun[at], word | 0x80000000u); }
+    if (G12_EYE_WEIGHT && total.y > 1e-3) { return open.y / total.y; }
+    return open.x / total.x;
 }
 
 // A bin's colour from its pixel's corners (the variant lit by the cache
