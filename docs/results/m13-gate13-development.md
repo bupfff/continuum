@@ -61,3 +61,25 @@ the other records 0.21 + 0.05; frame 16.56 against 15.68 ms.
   (replacing it by a cosine, timing only).
 - The workspace's GPU tests pass with the rect light's fast path (the
   golden image included).
+
+## Before the run (continued)
+
+- **Records as plain words** (their count in a buffer of its own, so the
+  lighting passes read them through the caches): no measurable change
+  (1.068× / 1.005×).
+- **The measure's rounds.** In order, the lit path's frames after the
+  model's ran 17.2–17.4 ms for about eight frames, then one at 19.2–19.3,
+  then 16.4–16.8 ms; after a 0.5 s pause they started at 26 ms and fell
+  over twenty frames. The GPU's clock takes about nine frames (some 150 ms)
+  to step after the load changes, so rounds of 11 frames measured the
+  switch. Rounds became 20 frames to warm up, then the median of 21
+  (amended in the stub before the run). With them: 1.064× / 1.042×, then
+  1.041× / 1.004× and 1.069× / 1.024× in later runs.
+- **Alternating frame by frame** measures something else: lit 18.74 ms,
+  gate 11's 14.51 ms standing (1.254×), as one renderer's trailing GPU work
+  lands in the other's frame. Not used.
+- **Colour with the lean quarter samples** (other views): 0.422× and
+  0.426× (gate 12's development: 0.420× and 0.426×).
+- Machine during this stretch: the disk nearly full (traces in the
+  scratchpad filled it; removed), memory 80% free, no thermal warning
+  recorded; the window server at 30–40% of a core.

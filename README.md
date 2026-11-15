@@ -246,10 +246,11 @@ nothing). Four landmarks, in order:
    by one, and the sun's visibility of still surfaces is kept in a
    world-space cache instead of re-traced each frame. Lit by the
    renderer's own lighting instead (soft shadows from every light, the
-   sky, bounce light), colour stays under half one-ray-per-pixel's error,
-   but a frame takes 17.8–18.8 ms against a 16.7 ms target, about 2 ms more
-   than the simpler lighting. It is not yet a renderer option, and flying
-   with colour is not measured.
+   sky, bounce light), colour stays under half one-ray-per-pixel's error
+   and a frame costs 1–5% more than with the simpler lighting (measured
+   side by side; 17.1–17.9 ms a frame on this machine with its external
+   displays running, where the simpler lighting takes 16.1–17.6). It is not
+   yet a renderer option, and flying with colour is not measured.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
