@@ -244,8 +244,12 @@ nothing). Four landmarks, in order:
    the view has settled (target 15): where a pixel's corners disagree (a
    sun shadow's edge, a fold of rock), its sub-pixel samples are shaded one
    by one, and the sun's visibility of still surfaces is kept in a
-   world-space cache instead of re-traced each frame. It is not in the
-   renderer yet, and flying with colour is not measured.
+   world-space cache instead of re-traced each frame. Lit by the
+   renderer's own lighting instead (soft shadows from every light, the
+   sky, bounce light), colour stays under half one-ray-per-pixel's error,
+   but a frame takes 17.8–18.8 ms against a 16.7 ms target, about 2 ms more
+   than the simpler lighting. It is not yet a renderer option, and flying
+   with colour is not measured.
 4. **One showcase scene** with all three, at 60 fps, against Cycles.
 
 A quality dial grows alongside: one setting for "how close to the
