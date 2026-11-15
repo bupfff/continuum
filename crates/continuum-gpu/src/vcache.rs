@@ -58,15 +58,15 @@ pub(crate) struct Moved {
     /// The lights its own pages re-bake for (whole pages).
     pub own: u32,
     /// For deforming geometry, which slice of the masked lights' shadows
-    /// this frame re-bakes: the slice, of how many, along which axis, over
-    /// which range (the first and last slices open past it, so every texel
-    /// lies in one).
-    pub slice: Option<(u32, u32, usize, f32, f32)>,
+    /// this frame re-bakes: the slice, of how many (a page belongs to the
+    /// slice its slot gives, slot mod slices, so slices split the pages
+    /// evenly and each page lies in one).
+    pub slice: Option<(u32, u32)>,
 }
 
 /// The most frames a light's lighting near a deforming object may lag its
 /// pose under [`CacheOptions::deforming_budget`] (M12 gate 2).
-pub const DEFORMING_MAX_LAG: u32 = 16;
+pub const DEFORMING_MAX_LAG: u32 = 120;
 const START_BUDGET: f32 = 8_000.0;
 /// Longest probe sequence the shader follows.
 const MAX_PROBE: usize = 64;
@@ -1989,7 +1989,10 @@ impl VirtualCache {
             entries.push(v4(old.1, f32::from_bits(id)));
             // The lights whose lighting this move updates (M12 gate 2).
             entries.push(v4(new.0, f32::from_bits(m.own)));
-            entries.push(v4(new.1, 0.0));
+            entries.push(v4(
+                new.1,
+                f32::from_bits(m.slice.map_or(0, |(k, n)| k | (n.max(1) << 16))),
+            ));
             for (l, light) in lights.iter().enumerate() {
                 let regions = [old_of(l), new].map(|b| {
                     if m.mask & (1 << l) != 0 {
@@ -1998,24 +2001,7 @@ impl VirtualCache {
                         empty
                     }
                 });
-                // A slice: the space between two planes across `axis`.
-                let clip = m.slice.map(|(k, n, axis, from, to)| {
-                    let at = |i: u32| from + (to - from) * i as f32 / n as f32;
-                    let (mut lo, mut hi) = (Vec3::splat(f32::MIN), Vec3::splat(f32::MAX));
-                    if k > 0 {
-                        lo[axis] = at(k);
-                    }
-                    if k + 1 < n {
-                        hi[axis] = at(k + 1);
-                    }
-                    (lo, hi)
-                });
                 for r in regions {
-                    let r = match clip {
-                        Some(c) if r.0.x <= r.1.x => (r.0.max(c.0), r.1.min(c.1)),
-                        _ => r,
-                    };
-                    let r = if r.0.cmple(r.1).all() { r } else { empty };
                     if r.0.x <= r.1.x {
                         unions[l] = grow(unions[l], r);
                     }

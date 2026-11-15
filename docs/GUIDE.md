@@ -70,12 +70,12 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
     Cycles).
   - **Lighting near it lags its pose within a budget**
     (`CacheOptions::deforming_budget`, 512 texel–light cones a frame):
-    one light at a time catches up, a slice of its shadows a frame, each
-    light within 16 frames. When the object stops, the lighting catches up
-    and the cache is exact again. `InstancedRenderer::deforming_lag`
-    reports the lag.
+    one light at a time catches up, a slice of its pages a frame. When the
+    object stops, the lighting catches up and the cache is exact again.
+    `InstancedRenderer::deforming_lag` reports the lag.
   - **It is still costly.** A 2 m blob 14 m from the camera in the
-    million-boulder field costs 1.6–1.95× the frame (development, M12
+    million-boulder field costs about 1.6× the frame, with lighting near
+    it lagging up to a second and 2–6% from exact there (development, M12
     G2). With `deforming_budget` 0 the lighting is exact every frame, at
     about 10× (M12 G1).
   - Not with streaming or the sub-pixel path. Normal maps keep the rest

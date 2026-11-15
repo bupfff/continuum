@@ -364,6 +364,9 @@ struct Movers {
     catching: Vec<Option<CatchUp>>,
     next_light: Vec<usize>,
     slices: u32,
+    /// The texel–light cones a whole catch-up is estimated to re-bake (the
+    /// largest seen, decaying slowly).
+    catchup_cost: f32,
     updates: [(u32, u32); 8],
 }
 
@@ -378,9 +381,6 @@ struct CatchUp {
     slices: u32,
     pose: u32,
     union: (Vec3, Vec3),
-    /// The slices' partition, fixed at the first: an axis and the range
-    /// along it the first and last slices extend past (none yet).
-    part: Option<(usize, f32, f32)>,
 }
 
 /// A box around every point a light cone toward `light` reaches near the
@@ -940,6 +940,13 @@ impl InstancedRenderer {
         d.pose = Some((triangles, normals));
     }
 
+    /// Development (M12 gate 2): the slices a deforming light's catch-up
+    /// takes now.
+    #[doc(hidden)]
+    pub fn deforming_slices(&self) -> u32 {
+        self.movers.as_ref().map_or(0, |m| m.slices)
+    }
+
     /// The most frames any light's lighting near deforming geometry lags its
     /// pose (M12 gate 2; 0 with `CacheOptions::deforming_budget` 0 or
     /// nothing deforming).
@@ -1070,16 +1077,12 @@ impl InstancedRenderer {
             && let Some(&(_, slices)) = movers.updates.iter().find(|u| u.0 == stats.frame)
             && slices > 0
         {
-            // Cones a slice re-baked, against the budget: the slices a whole
-            // catch-up would need.
-            let per_slice = stats.rebaked_texels as f32 / slices as f32;
-            let want =
-                ((per_slice * movers.slices as f32 / budget as f32).ceil() as u32).clamp(1, most);
-            movers.slices = if want > movers.slices {
-                want
-            } else {
-                want.max(movers.slices - 1)
-            };
+            // A slice's re-bake times the slices of its catch-up: the whole
+            // catch-up's (slices split the pages evenly), the largest seen
+            // decaying slowly; the slices a catch-up needs to fit the budget.
+            let whole = stats.rebaked_texels as f32 * slices as f32;
+            movers.catchup_cost = whole.max(0.98 * movers.catchup_cost);
+            movers.slices = ((movers.catchup_cost / budget as f32).ceil() as u32).clamp(1, most);
         }
         if movers.lag_boxes.len() != movers.placements.len() {
             movers.lag_boxes = movers.bounds.iter().map(|&b| vec![b; lights]).collect();
@@ -1130,7 +1133,6 @@ impl InstancedRenderer {
                             slices: movers.slices,
                             pose: movers.poses[k],
                             union: new,
-                            part: None,
                         });
                         movers.next_light[k] = (l + 1) % lights;
                         break;
@@ -1147,29 +1149,6 @@ impl InstancedRenderer {
             };
             let l = c.light;
             c.union = (c.union.0.min(new.0), c.union.1.max(new.1));
-            let part = *c.part.get_or_insert_with(|| {
-                // Along the longest axis of the shadows' union at the start.
-                let old_l = movers.lag_boxes[k][l];
-                let (flo, fhi) = movers.tree.fixed_root.bounds();
-                let scene = (flo.min(new.0).min(old_l.0), fhi.max(new.1).max(old_l.1));
-                let lb = movers.light_boxes[l];
-                let regions: Vec<(Vec3, Vec3)> = [old_l, new]
-                    .iter()
-                    .filter_map(|&b| crate::hierarchy::shadow_region(b, lb, scene))
-                    .collect();
-                let u = regions
-                    .iter()
-                    .fold((new.0, new.1), |a, r| (a.0.min(r.0), a.1.max(r.1)));
-                let e = u.1 - u.0;
-                let axis = if e.x >= e.y && e.x >= e.z {
-                    0
-                } else if e.y >= e.z {
-                    1
-                } else {
-                    2
-                };
-                (axis, u.0[axis], u.1[axis])
-            });
             moved.push(crate::vcache::Moved {
                 object,
                 old,
@@ -1180,9 +1159,9 @@ impl InstancedRenderer {
                 // they re-bake slice by slice, texel by texel, not as whole
                 // pages at once.
                 own: 0,
-                slice: Some((c.slice, c.slices, part.0, part.1, part.2)),
+                slice: Some((c.slice, c.slices)),
             });
-            asked += 1;
+            asked = asked.max(c.slices);
             c.slice += 1;
             if c.slice >= c.slices {
                 // Its texels were baked against the object anywhere in the
@@ -1402,6 +1381,7 @@ impl InstancedRenderer {
                 catching: vec![None; tree.objects.len()],
                 next_light: vec![0; tree.objects.len()],
                 slices: 1,
+                catchup_cost: 0.0,
                 updates: [(u32::MAX, 0); 8],
                 tree,
             }

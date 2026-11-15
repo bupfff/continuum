@@ -311,6 +311,55 @@ fn main() -> std::io::Result<()> {
         );
         return Ok(());
     }
+    // Development (`M12_ALIGN=1`): one deforming run, each frame's time
+    // beside its own statistics (they arrive two frames on), the slowest
+    // printed.
+    if std::env::var_os("M12_ALIGN").is_some() {
+        let view = target(&kernel, W, H);
+        let mut r = renderer(&kernel, &s, (W, H), Some(CacheOptions::default()));
+        let mut times = Vec::new();
+        let mut stats = std::collections::BTreeMap::new();
+        for k in 0..frames {
+            pose(&mut r, &s, k);
+            let t = Instant::now();
+            r.frame(s.camera, &view);
+            r.wait();
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            let c = r.cache_stats().expect("stats");
+            stats.insert(c.frame, c);
+            times.push((k, ms));
+            if k % 25 == 0 {
+                println!(
+                    "call {k}: slices {}, lag {}",
+                    r.deforming_slices(),
+                    r.deforming_lag()
+                );
+            }
+        }
+        // The cache frame a call renders: the first statistics' frame plus
+        // the call's index (statistics lag by a fixed number of frames).
+        let first = stats.keys().next().copied().unwrap_or(0);
+        let lag_calls = times.len() as u32 - stats.len() as u32;
+        println!("statistics from frame {first}, {} calls without", lag_calls);
+        let mut slow = times.clone();
+        slow.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for &(k, ms) in slow.iter().take(12) {
+            let f = first + k as u32;
+            let c = stats.get(&f);
+            println!(
+                "call {k} (cache frame {f}): {ms:.1} ms; baked pages {:?}, texels {:?}, rebaked pages {:?}, texel-lights {:?}, candidates {:?}, budget {:?}",
+                c.map(|c| c.pages_baked),
+                c.map(|c| c.texels_baked),
+                c.map(|c| c.rebaked_pages),
+                c.map(|c| c.rebaked_texels),
+                c.map(|c| c.candidates),
+                c.map(|c| c.budget),
+            );
+        }
+        let mean = times.iter().map(|t| t.1).sum::<f64>() / times.len() as f64;
+        println!("mean {mean:.2} ms");
+        return Ok(());
+    }
     let mut report = String::new();
     let mut say = |line: String| {
         println!("{line}");

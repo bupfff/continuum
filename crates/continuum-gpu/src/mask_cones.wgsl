@@ -3598,9 +3598,11 @@ fn moved_box(i: u32) -> Box3 {
     return Box3(moved[i].xyz, moved[i + 1u].xyz);
 }
 
-// Whether a cone toward light `l` from anywhere in box `p` may meet a box
-// moved this frame (old or new place).
-fn may_be_shadowed(p: Box3, l: u32) -> bool {
+// Whether a cone toward light `l` from anywhere in box `p` (of the page in
+// slot `s`) may meet a box moved this frame (old or new place). A deforming
+// object's light catching up in slices (M12 gate 2) takes, each frame, the
+// pages whose slot falls in that frame's slice (slot mod slices).
+fn may_be_shadowed(p: Box3, l: u32, s: u32) -> bool {
     let lights_n = vc.sky.z;
     if (!boxes_meet(p, moved_box(2u * l))) { return false; }
     let lb = light_box(lights[l]);
@@ -3608,6 +3610,8 @@ fn may_be_shadowed(p: Box3, l: u32) -> bool {
     let stride = 4u + 4u * lights_n;
     for (var k = 0u; k < vc.movers.x; k++) {
         let e = first + k * stride;
+        let slice = bitcast<u32>(moved[e + 3u].w);
+        if (slice != 0u && s % (slice >> 16u) != (slice & 0xffffu)) { continue; }
         let r = e + 4u + 4u * l;
         if (boxes_meet(p, moved_box(r)) && hull_meets(p, lb, moved_box(e))) { return true; }
         if (boxes_meet(p, moved_box(r + 2u)) && hull_meets(p, lb, moved_box(e + 2u))) { return true; }
@@ -3839,7 +3843,7 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (vc.sky.y == 1u && !unknown_sky && !charge_sky(s, info.xyz, lo, hi, page, visible)) { return; }
     var candidate = false;
     for (var l = 0u; l < lights_n && !candidate; l++) {
-        candidate = may_be_shadowed(page, l);
+        candidate = may_be_shadowed(page, l, s);
     }
     if (!candidate) { return; }
     // A page hidden for another reason (its sky the guess, set aside by the
@@ -3893,7 +3897,7 @@ fn vc_stale_texels(@builtin(global_invocation_id) gid: vec3<u32>) {
     let apex = Box3(surface.apex - vec3<f32>(pad), surface.apex + vec3<f32>(pad));
     let lights_n = vc.sky.z;
     for (var l = 0u; l < lights_n; l++) {
-        if (!may_be_shadowed(apex, l)) { continue; }
+        if (!may_be_shadowed(apex, l, s)) { continue; }
         if (cand.y == NONE) {
             mark_invalid(s);
             return;

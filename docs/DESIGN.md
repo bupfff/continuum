@@ -638,8 +638,14 @@ stay exact.
     slice of its shadows a frame. One catch-up spans tens of thousands of
     texels (fine ground pages in the lamp's shadow region), and spikes
     remain unexplained.
+  - **Later the same session:** slices by page slot and a slice count
+    from a whole catch-up's cost removed the spikes (99th percentile 48.9
+    ms, as still), but the mean is 1.64× still, the lag up to 59 frames,
+    and 6.4% near the object. About 7 ms of cache work beyond the budgeted
+    re-bakes is unexplained (stale passes, appends).
   - **Next levers:** receivers' lighting a level coarser while an object
-    deforms; a budget in time; profiling the spikes.
+    deforms; cheaper per-frame stale passes; a coarser prefilter for cones
+    meeting movers.
 
 **Then:**
   - **glTF skins and morph targets** (M12 G2): joints, weights, inverse

@@ -50,7 +50,45 @@ frame; 0 keeps M12 G1's exactness).
 | Full size, slices, 48-frame lag cap | 20.7 ms mean (1.6×) | 71.5 ms | — | — | — |
 | Full size, the cache never told (geometry alone) | 14.6 ms (still 12.8) | 42.0 ms | — | — | — |
 
+| Full size, slices by page slot, slice count from a whole catch-up's cost, lag cap 120 | **1.64×** (21.8 ms) | **48.9 ms** (still 42.1) | 2.1–6.4% (lag up to 59 frames) | not within 32 frames (lag 55) | exact |
+
 M12 G1's exact mode at full size: 108–114 ms means (9.6–10.1×).
+
+**After the first write-up (same session).** Frames aligned with their own
+statistics (they arrive two frames on) showed what the spikes were: about
+every seven frames, one frame re-baked 130–150 pages (7,000–9,000
+texel–light cones, about 8 µs each, 68–86 ms). Two causes:
+- **Spatial slices:** slicing along the shadow region's longest axis put
+  almost every nearby page in one slice. Slices now take the pages whose
+  cache slot falls in them (slot mod slices), an even split.
+- **The slice count:** it dropped by one on every quiet frame, so a
+  catch-up starting then ran whole. It now follows the largest whole
+  catch-up seen, decaying slowly. With the 512-cone budget a light's
+  catch-up of this blob takes about 15–26 slices, so the lag cap (16
+  frames for three lights) forced overruns. The cap became 120 frames, a
+  safety cap.
+
+**The result:** no frame re-bakes more than about 550 cones, and the 99th
+percentile is down to that of the still run. But:
+- the mean is still 1.64× still;
+- lighting lags up to a second (59 frames);
+- the error near the object reaches 6.4%;
+- after the object stops, catching up takes longer than criterion 2's 32
+  frames.
+
+The cache never told of the poses costs 14.6 ms against 13.2 still, so
+about 7 ms of the deforming frame is cache work beyond the budgeted
+re-bakes (about 4 ms): the stale passes over every slot and the candidate
+texel tests each frame a slice runs, and page appends and fills (not
+profiled).
+
+**The trade-off at this object's size:** a light's catch-up is about
+7,500 cones (about 60 ms of GPU time at this prefilter). Within a
+few-millisecond budget, that is about a second of lag for three lights.
+Making it cheaper needs fewer or cheaper cones per catch-up:
+- receivers re-baked a level coarser while an object deforms;
+- a coarser prefilter for cones that meet movers;
+- or the per-frame stale passes made cheaper.
 
 **What is left:**
 - **Catch-ups are large.** One light's catch-up re-bakes tens of thousands
