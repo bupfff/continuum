@@ -171,6 +171,42 @@ impl Renderer {
                 movable.push(k);
             }
         }
+        // The movers' structures need a static object: a scene whose every
+        // instance moves or deforms (a lone skinned character) gets a
+        // triangle a tenth of a millimetre across under it (M12 gate 3).
+        let anchored;
+        let scene = if !movable.is_empty() && movable.len() >= scene.instances.len() {
+            let (lo, _) = scene
+                .instances
+                .iter()
+                .map(|i| {
+                    let (a, b) = scene.geometries[i.geometry].bounds();
+                    let c = i.position - origin;
+                    let r = (b - a).length() * i.scale;
+                    (c - DVec3::splat(r as f64), c + DVec3::splat(r as f64))
+                })
+                .fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |s, b| {
+                    (s.0.min(b.0), s.1.max(b.1))
+                });
+            let mut s = scene.clone();
+            let e = 1e-4f32;
+            s.geometries.push(continuum::mesh::Surface::from_mesh(
+                vec![[Vec3::ZERO, Vec3::X * e, Vec3::Y * e]],
+                None,
+                None,
+            ));
+            s.instances.push(crate::Instance {
+                geometry: s.geometries.len() - 1,
+                rotation: Mat3::IDENTITY,
+                scale: 1.0,
+                position: origin + lo,
+                albedo: Vec3::ZERO,
+            });
+            anchored = s;
+            &anchored
+        } else {
+            scene
+        };
         let placed = (0..scene.geometries.len())
             .filter(|&g| scene.instances.iter().any(|i| i.geometry == g))
             .count();

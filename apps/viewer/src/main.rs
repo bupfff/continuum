@@ -114,6 +114,29 @@ impl World {
         }
     }
 
+    /// Skinned and morphing geometry (M12 gate 3), posed from every
+    /// animation together (files often animate a rig and a mesh's morph
+    /// weights apart): not with a sky, as movers.
+    fn deforming_geometries(&self) -> Vec<usize> {
+        match &self.animations {
+            Some(a) if !(self.cache && (self.sky || self.environment.is_some())) => a.deforming(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The deforming geometries' poses at `time` (60 Hz frames), looping
+    /// over the longest animation.
+    fn deforming_poses(&self, time: f32) -> Vec<continuum_gltf::Pose> {
+        match &self.animations {
+            Some(a) if !self.deforming_geometries().is_empty() => {
+                let all: Vec<usize> = (0..a.list.len()).collect();
+                let duration = a.list.iter().map(|x| x.duration).fold(1e-3, f32::max);
+                a.deform(&all, (time / 60.0) % duration)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// The first animation's pose at `time` (60 Hz frames), looping.
     fn animation_pose(&self, time: f32) -> Vec<(usize, Mat3, DVec3)> {
         match &self.animations {
@@ -459,6 +482,15 @@ impl Backend {
         }
     }
 
+    /// Poses deforming geometry (instanced scenes).
+    fn set_vertices(&mut self, poses: Vec<continuum_gltf::Pose>) {
+        if let Backend::Instanced(r) = self {
+            for p in poses {
+                r.set_vertices(p.geometry, p.triangles, p.normals);
+            }
+        }
+    }
+
     /// Moves animated instances (instanced scenes).
     fn set_transforms(&mut self, poses: &[(usize, Mat3, DVec3)]) {
         if let Backend::Instanced(r) = self {
@@ -556,6 +588,7 @@ impl App {
                 sky: (world.sky && world.cache && world.environment.is_none()).then_some(scene.sky),
                 environment: world.environment.clone().filter(|_| world.cache),
                 movable: world.animated_instances(),
+                deforming: world.deforming_geometries(),
                 ..Default::default()
             };
             let mut renderer = Renderer::new(
@@ -777,15 +810,19 @@ impl ApplicationHandler for App {
                 self.update(dt.min(0.1));
                 let moved = self.world.movers(self.time);
                 let changes: Vec<_> = moved.iter().map(|(m, s)| (*m, s)).collect();
-                let poses = if self.paused {
-                    Vec::new()
+                let (poses, shapes) = if self.paused {
+                    (Vec::new(), Vec::new())
                 } else {
-                    self.world.animation_pose(self.time)
+                    (
+                        self.world.animation_pose(self.time),
+                        self.world.deforming_poses(self.time),
+                    )
                 };
                 let fov = self.world.fov;
                 let Some(gpu) = &mut self.gpu else { return };
                 gpu.backend.update_surfaces(&changes);
                 gpu.backend.set_transforms(&poses);
+                gpu.backend.set_vertices(shapes);
                 let texture = match gpu.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -945,13 +982,24 @@ fn main() {
     }
     if let Some(a) = &world.animations {
         let moving = world.animated_instances().len();
+        let deforming = world.deforming_geometries().len();
         if moving > 0 {
             println!(
                 "Playing animation {} ({:.1} s, looping) on {moving} instances; P pauses.",
                 a.list[0].name.as_deref().unwrap_or("0"),
                 a.list[0].duration
             );
-        } else {
+        }
+        if deforming > 0 {
+            println!(
+                "Posing {deforming} skinned or morphing meshes from {} animations, looping; P pauses.",
+                a.list.len()
+            );
+        }
+        if moving == 0
+            && deforming == 0
+            && (!a.deforming().is_empty() || !a.instances(0).is_empty())
+        {
             println!(
                 "The file's animation does not play with a sky (movers and a sky do not mix in the cache yet)."
             );

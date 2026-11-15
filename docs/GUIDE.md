@@ -80,6 +80,12 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
     about 10× (M12 G1).
   - Not with streaming or the sub-pixel path. Normal maps keep the rest
     pose's tangents.
+  - **glTF skins and morph targets** import as deforming geometry (M12
+    G3: poses within 0.0004 mm of Blender's own):
+    `imported.deforming()` gives the geometries for
+    `RendererOptions::deforming`, and `imported.animations.deform(&[0, 1],
+    t)` their poses at time `t`, for `Renderer::set_vertices`. Skinned
+    meshes sit at the world origin. The viewer plays them.
 - **Moving lights.** Lights listed in `RendererOptions::moving_lights`
   move (`Renderer::set_light`; not spots). The cache's ledger never shows a
   result further from a fresh one than its certified bound and

@@ -166,6 +166,9 @@ Selected numbers (1280×720, Apple M4, release builds):
   fully bounced image with eight).
 - **Moving objects**, exactly, in the same frame; glTF animations play
   through them.
+- **Animated characters:** glTF skins and morph targets, posed as Blender
+  poses them (within a micrometre); any mesh the application deforms each
+  frame. Lighting near a deforming object catches up within a budget.
 - **glTF 2.0** import and export, with cameras, lights and animations.
 - **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
   entities moving its objects.
@@ -182,7 +185,9 @@ Honest about where it stands:
 - **The sky warms in a few hundred frames** (hardware rays); with moving
   objects, streamed detail or glass it falls back to a slower path that
   takes thousands of frames.
-- **Rigid motion only:** no skinned or morphing meshes yet.
+- **Deforming meshes are costly:** a character large on screen costs
+  about 1.6× the frame, and the lighting near it lags its motion (up to
+  about a second) until it stops.
 - **Bounce light** is one bounce by default (more on request), not yet
   with moving objects; several bounces are untried with streaming.
 - **Transparency** needs hardware ray queries.

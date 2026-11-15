@@ -1339,3 +1339,60 @@ fn deforming_geometry_catches_up() {
         "the pose does not show: {shown:?}"
     );
 }
+
+/// A glTF file whose only mesh is skinned (M12 gate 3: the tube made in
+/// Blender) renders on its own, every instance deforming (the renderer adds
+/// a static anchor), posed from its animations, and settles lit.
+#[test]
+fn skinned_gltf_alone_plays() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/skinned_tube.glb");
+    let imported = continuum_gltf::load(&path).expect("the skinned tube");
+    let all: Vec<usize> = (0..imported.animations.list.len()).collect();
+    let mut r = Renderer::new(
+        kernel(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        (WIDTH, HEIGHT),
+        &imported.scene,
+        DVec3::ZERO,
+        &lights(),
+        RendererOptions {
+            cache_options: CacheOptions {
+                frame_target_ms: 0.0,
+                ..Default::default()
+            },
+            deforming: imported.deforming(),
+            ..Default::default()
+        },
+    );
+    let view = target(&r);
+    let camera = Camera {
+        eye: Vec3::new(0.0, -4.0, 1.2),
+        target: Vec3::new(0.0, 0.0, 1.0),
+        vertical_fov_degrees: 50.0,
+    };
+    for k in 0..48 {
+        for p in imported.animations.deform(&all, k as f32 / 24.0) {
+            r.set_vertices(p.geometry, p.triangles, p.normals);
+        }
+        r.render(camera, &view);
+    }
+    let mut frames = 0;
+    while frames < 3_000 && !r.is_settled(8) {
+        r.render(camera, &view);
+        frames += 1;
+    }
+    assert!(r.is_settled(8), "not settled after {frames} frames");
+    let image = r.read_colors();
+    dump("skinned_tube", &image);
+    // The tube alone against the black: finite, and its pixels lit.
+    assert!(image.iter().flatten().all(|c| c.is_finite() && *c >= 0.0));
+    let lit = image
+        .iter()
+        .filter(|p| p.iter().sum::<f32>() > 0.05)
+        .count();
+    eprintln!("skinned tube: {lit} of {} pixels lit", image.len());
+    assert!(
+        lit * 50 > image.len(),
+        "the tube is not seen lit: {lit} pixels"
+    );
+}

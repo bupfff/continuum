@@ -1,0 +1,12 @@
+imported in 1.2 ms: 1 deforming geometries, 2 animations, 0 channels skipped
+   0.00 s: max 1.23104e-07 mean 8.38747e-09 corners 4788 verts 842
+   0.25 s: max 2.50233e-07 mean 5.00815e-08 corners 4788 verts 842
+   0.50 s: max 2.70283e-07 mean 5.18357e-08 corners 4788 verts 842
+   0.75 s: max 2.68221e-07 mean 6.8621e-08 corners 4788 verts 842
+   1.00 s: max 4.04533e-07 mean 1.14655e-07 corners 4788 verts 842
+   1.25 s: max 2.81155e-07 mean 7.14959e-08 corners 4788 verts 842
+   1.50 s: max 3.2791e-07 mean 9.49116e-08 corners 4788 verts 842
+   1.90 s: max 2.46208e-07 mean 5.86748e-08 corners 4788 verts 842
+1. posed as Blender poses it: largest distance 0.0004 mm (at most 0.2), largest mean 0.0001 mm (below 0.05) over 4788 corners: PASS; a pose took 0.07 ms
+2. played (three loops, then held at 1.33 s): 0.0000% from a renderer built with that pose (at most 1%); the rest pose 68.08% from it (at least 5%): PASS
+Verdict: PASS
