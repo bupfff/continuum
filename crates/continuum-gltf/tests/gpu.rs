@@ -151,14 +151,18 @@ fn camera() -> Camera {
 }
 
 fn target(renderer: &Renderer) -> wgpu::TextureView {
+    target_sized(renderer, WIDTH, HEIGHT)
+}
+
+fn target_sized(renderer: &Renderer, width: u32, height: u32) -> wgpu::TextureView {
     renderer
         .kernel()
         .device()
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
             size: wgpu::Extent3d {
-                width: WIDTH,
-                height: HEIGHT,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -384,6 +388,8 @@ fn cache_settles_near_per_pixel() {
                 pages: 1 << 15,
                 ..Default::default()
             },
+            // One ray a pixel, as the per-pixel image.
+            anti_aliasing: false,
             ..Default::default()
         },
     );
@@ -528,6 +534,11 @@ fn gltf_round_trip_keeps_materials() {
 
 /// The cache's settled image of `scene`.
 fn settled(scene: &InstancedScene) -> Image {
+    settled_with(scene, true)
+}
+
+/// `settled`, with anti-aliasing on or off.
+fn settled_with(scene: &InstancedScene, anti_aliasing: bool) -> Image {
     let mut r = renderer(
         kernel(),
         scene,
@@ -538,6 +549,7 @@ fn settled(scene: &InstancedScene) -> Image {
                 pages: 1 << 15,
                 ..Default::default()
             },
+            anti_aliasing,
             ..Default::default()
         },
     );
@@ -775,7 +787,112 @@ fn gltf_round_trip_keeps_vertex_colors() {
     assert_eq!(found, 1, "one geometry with colors");
 }
 
-/// Emission adds to what a surface reflects, exactly, in the cached path.
+/// Anti-aliasing (M15, on by default) takes edge pixels toward the area
+/// they cover: against the image rendered at 4 × 4 the size and averaged,
+/// edge pixels are nearer than with one ray a pixel, and other pixels are
+/// left alone. Needs hardware ray queries (one ray a pixel without).
+#[test]
+fn anti_aliasing_takes_edges_toward_their_area() {
+    let s = scene(DVec3::ZERO);
+    let render = |scale: u32, anti_aliasing: bool| {
+        let mut r = Renderer::new(
+            kernel(),
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            (WIDTH * scale, HEIGHT * scale),
+            &s,
+            DVec3::ZERO,
+            &lights(),
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                anti_aliasing,
+                ..Default::default()
+            },
+        );
+        let view = target_sized(&r, WIDTH * scale, HEIGHT * scale);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        assert!(r.is_settled(32), "not settled after {frames} frames");
+        (
+            r.read_colors(),
+            r.hardware_rays(),
+            r.stats().map_or(0, |s| s.edge_pixels),
+        )
+    };
+    let (one, hardware, _) = render(1, false);
+    if !hardware {
+        eprintln!("no hardware ray queries: anti-aliasing is off");
+        return;
+    }
+    let (aa, _, listed) = render(1, true);
+    let (big, _, _) = render(4, false);
+    let w = WIDTH as usize;
+    let reference: Image = (0..(WIDTH * HEIGHT) as usize)
+        .map(|p| {
+            let (x, y) = (p % w, p / w);
+            let mut sum = [0.0f32; 3];
+            for k in 0..16 {
+                let q = (4 * y + k / 4) * 4 * w + 4 * x + k % 4;
+                for c in 0..3 {
+                    sum[c] += big[q][c] / 16.0;
+                }
+            }
+            sum
+        })
+        .collect();
+    dump("aa_one", &one);
+    dump("aa_on", &aa);
+    dump("aa_reference", &reference);
+    assert_finite_and_lit(&aa);
+    // Edge pixels: where one ray is far from the reference.
+    let mean =
+        reference.iter().flatten().map(|&x| x as f64).sum::<f64>() / (3 * reference.len()) as f64;
+    let off = |a: &[f32; 3], b: &[f32; 3]| {
+        (0..3).map(|c| ((a[c] - b[c]) as f64).powi(2)).sum::<f64>() / 3.0
+    };
+    let edges: Vec<usize> = (0..reference.len())
+        .filter(|&p| off(&one[p], &reference[p]).sqrt() > 0.1 * mean)
+        .collect();
+    let rmse = |img: &Image| {
+        (edges
+            .iter()
+            .map(|&p| off(&img[p], &reference[p]))
+            .sum::<f64>()
+            / edges.len() as f64)
+            .sqrt()
+            / mean
+    };
+    let (e_one, e_aa) = (rmse(&one), rmse(&aa));
+    let unchanged = one
+        .iter()
+        .zip(&aa)
+        .filter(|(a, b)| off(a, b) == 0.0)
+        .count();
+    eprintln!(
+        "{listed} pixels listed; over {} edge pixels: one ray {e_one:.4}, anti-aliased {e_aa:.4} ({:.3}x); {unchanged} of {} pixels unchanged",
+        edges.len(),
+        e_aa / e_one,
+        one.len()
+    );
+    assert!(listed > 0, "no edge pixels listed");
+    assert!(
+        e_aa < 0.6 * e_one,
+        "edges not nearer their area: {e_aa} against {e_one}"
+    );
+    assert!(
+        unchanged * 10 >= one.len() * 8,
+        "anti-aliasing changed more than edges: {unchanged} unchanged"
+    );
+}
+
+/// Emission adds to what a surface reflects, exactly, in the cached path
+/// (pixel by pixel: one ray a pixel, as anti-aliased edges mix surfaces).
 #[test]
 fn emission_adds_to_the_cached_image() {
     let s = scene(DVec3::ZERO);
@@ -783,7 +900,7 @@ fn emission_adds_to_the_cached_image() {
     let glow = Vec3::new(0.5, 0.25, 0.0);
     glowing.geometry_emission = vec![Vec3::ZERO; s.geometries.len()];
     glowing.geometry_emission[0] = glow;
-    let (plain, lit) = (settled(&s), settled(&glowing));
+    let (plain, lit) = (settled_with(&s, false), settled_with(&glowing, false));
     let (mut on, mut off) = (0, 0);
     for (a, b) in plain.iter().zip(&lit) {
         let d = Vec3::from_array(*b) - Vec3::from_array(*a);

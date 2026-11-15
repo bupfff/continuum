@@ -280,6 +280,441 @@ fn hw_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     list_extra(pixel, samples, n, own_weight, quarters);
 }
 
+// --- M15: anti-aliasing on the default path ---------------------------------
+//
+// After the camera's visibility pass, `hw_aa_list` lists edge pixels: those
+// a neighbour of which sees another surface (another object, light or the
+// sky, or a point off the pixel's own triangle's plane). After shading,
+// `hw_aa_args` sets stage 0's samples per listed pixel within the frame's
+// ray budget; `hw_aa` traces them (the outer square of a fixed pattern of
+// eight) and gives each sample on the pixel's own surface the pixel's
+// colour, listing the others as records to shade; pixels whose samples did
+// not all see their own surface trace the inner four in stage 1
+// (`hw_aa_again`) if the budget allows; `hw_aa_retrace` traces again the
+// samples that hit a back face; `vc_aa_shade` shades the records from the
+// cache; `hw_aa_scatter` writes each pixel's average. (The buffers and the
+// pattern are in the kernel's source, for `vc_aa_shade`.)
+
+// Two hits of one object on different triangles lie on one surface where
+// the second lies within this many pixel footprints (at its distance) of
+// the first's plane.
+const AA_PLANE: f32 = 0.5;
+
+// The normal of the hit being compared (`aa_same_pixel`), found when
+// first needed: `aa_normal_known` false until then.
+var<private> aa_normal_known: bool = false;
+var<private> aa_normal: vec3<f32>;
+
+// Whether hit `a` (object, triangle, distance bits, light seen + 1) seen
+// along `da` at point `pa` sees the same surface as pixel (x, y): the same
+// light, the sky, or the same object on the same triangle or a point near
+// `a`'s triangle's plane (its normal kept in `aa_normal`; reset
+// `aa_normal_known` for another hit).
+fn aa_same_pixel(a: vec4<u32>, pa: vec3<f32>, da: vec3<f32>, x: u32, y: u32) -> bool {
+    let q = y * u32(camera.params.x) + x;
+    let b = vis[q];
+    if (a.w != b.w) { return false; }
+    if (a.w != 0u) { return true; }
+    if (a.x != b.x) { return false; }
+    if (a.x == NONE || a.y == b.y) { return true; }
+    if (!aa_normal_known) {
+        aa_normal = hit_from(a.xyz, da).normal;
+        aa_normal_known = true;
+    }
+    let tb = bitcast<f32>(b.z);
+    let pb = camera.eye.xyz + camera_dir(vec3<u32>(x, y, 0u)) * tb;
+    return abs(dot(pb - pa, aa_normal)) <= AA_PLANE * vc.params.y * tb;
+}
+
+// Whether pixel `gid` is at an edge: a neighbour (left, right, up or down;
+// diagonals add little) sees another surface. Not a pixel whose own hit is
+// blended (listed with its layers, M10 gate 19).
+fn aa_is_edge(gid: vec3<u32>) -> bool {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    let me = vis[gid.y * w + gid.x];
+    let dir = camera_dir(gid);
+    let pm = camera.eye.xyz + dir * bitcast<f32>(me.z);
+    if (me.x != NONE && me.w == 0u && hw_opacity(me.x, me.y, pm) < 1.0) { return false; }
+    aa_normal_known = false;
+    for (var k = 1u; k < 9u; k += 2u) {
+        let x = i32(gid.x) + i32(k % 3u) - 1;
+        let y = i32(gid.y) + i32(k / 3u) - 1;
+        if (x < 0 || y < 0 || x >= i32(w) || y >= i32(h)) { continue; }
+        if (!aa_same_pixel(me, pm, dir, u32(x), u32(y))) { return true; }
+    }
+    return false;
+}
+
+// The list's place for a workgroup's edge pixels: they are listed
+// together, so `hw_aa`'s workgroups take nearby pixels.
+var<workgroup> aa_wg_count: atomic<u32>;
+var<workgroup> aa_wg_base: u32;
+
+@compute @workgroup_size(8, 8)
+fn hw_aa_list(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    let edge = gid.x < w && gid.y < h && aa_is_edge(gid);
+    var local = 0u;
+    if (edge) { local = atomicAdd(&aa_wg_count, 1u); }
+    workgroupBarrier();
+    if (li == 0u) { aa_wg_base = atomicAdd(&aa_state[0], atomicLoad(&aa_wg_count)); }
+    workgroupBarrier();
+    let i = aa_wg_base + local;
+    if (edge && i < aa_cap()) { aa_data[i] = gid.y * w + gid.x; }
+}
+
+// Listed pixels this frame.
+fn aa_count() -> u32 {
+    return min(atomicLoad(&aa_state[0]), aa_cap());
+}
+
+// The frame's ray budget for anti-aliasing: `vc.extra.w` rays a pixel of
+// the image, on average.
+fn aa_budget() -> f32 {
+    return bitcast<f32>(vc.extra.w) * camera.params.x * camera.params.y;
+}
+
+// After shading: stage 0's samples per listed pixel (4, or 2 or 1 where
+// the frame's ray budget does not cover 4), and `hw_aa`'s dispatch (a
+// workgroup per 64 samples, in the dispatch arguments' words 12–14).
+// Listed pixels count in the stats' last counter (edge pixels).
+@compute @workgroup_size(1)
+fn hw_aa_args() {
+    let count = aa_count();
+    let budget = aa_budget();
+    var k = 1u;
+    if (f32(count) * 4.0 <= budget) {
+        k = 4u;
+    } else if (f32(count) * 2.0 <= budget) {
+        k = 2u;
+    }
+    atomicStore(&aa_state[1], k);
+    aa_data[aa_header() + 1u] = k;
+    aa_data[aa_header() + 2u] = 0u;
+    // `hw_aa`: an invocation per sample of its stage 0; the scatter (words
+    // 20–22): one per pixel.
+    dispatch_args[12] = (count * k + 63u) / 64u;
+    dispatch_args[13] = 1u;
+    dispatch_args[14] = 1u;
+    dispatch_args[20] = (count + 63u) / 64u;
+    dispatch_args[21] = 1u;
+    dispatch_args[22] = 1u;
+    atomicAdd(&vc_stats[15], count);
+}
+
+// The nearest front face along camera ray `dir` through both structures
+// (the static scene's and the movers', M9), as `hw_visibility_movers`.
+fn hw_trace_movers(eye: vec3<f32>, dir: vec3<f32>) -> vec3<u32> {
+    var best = hw_trace(eye, dir, 0.0);
+    let dist = bitcast<f32>(best.z);
+    var mq: ray_query;
+    rayQueryInitialize(&mq, movers_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, dist, eye, dir));
+    rayQueryProceed(&mq);
+    var moved = rayQueryGetCommittedIntersection(&mq);
+    if (moved.kind != 0u && !hw_front(moved.instance_custom_data, moved.geometry_index, moved.primitive_index, dir)) {
+        var fq: ray_query;
+        rayQueryInitialize(&fq, movers_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, dist, eye, dir));
+        while (rayQueryProceed(&fq)) {
+            let c = rayQueryGetCandidateIntersection(&fq);
+            if (hw_front(c.instance_custom_data, c.geometry_index, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+        }
+        moved = rayQueryGetCommittedIntersection(&fq);
+    }
+    if (moved.kind != 0u && moved.t < dist) {
+        let mesh = moved.instance_custom_data;
+        best = vec3<u32>(mesh, cam_tri(mesh, moved.geometry_index, moved.primitive_index), bitcast<u32>(moved.t));
+    }
+    return best;
+}
+
+// `hw_aa`'s workgroup: 64 samples, each listed pixel's in a row: each
+// sample's colour (its pixel's where it sees the pixel's surface) and its
+// record (the first word NONE where it took the pixel's colour, the second
+// then 1; else the sample | light seen + 1 << 4, then the hit, to shade).
+var<workgroup> aa_wg_colour: array<vec3<f32>, 64>;
+var<workgroup> aa_wg_record: array<vec4<u32>, 64>;
+// Each sample's record's place among the workgroup's (records are listed
+// together, so `vc_aa_shade`'s workgroups take nearby samples), and the
+// first (NONE: the records are full).
+var<workgroup> aa_wg_offset: array<u32, 64>;
+var<workgroup> aa_wg_records: u32;
+
+// Sample `j` of listed pixel `pixel`, which hit `hit` (object, triangle,
+// distance bits; `back`: a back face): the pixel's colour if it sees the
+// pixel's surface, or else a record to shade (taking a neighbour's colour
+// instead, where it sees the same surface, left 1.12–1.13× the error at
+// edges, development), in the workgroup's arrays at `li`. A sample that hit
+// a back face is listed to be traced again (`hw_aa_retrace`) and shaded.
+fn aa_sample_resolve(li: u32, pixel: u32, k: u32, j: u32, hit: vec3<u32>, back: bool) {
+    if (back) {
+        aa_wg_colour[li] = vec3<f32>(0.0);
+        aa_wg_record[li] = vec4<u32>(j | AA_RETRACE, hit);
+        return;
+    }
+    let eye = camera.eye.xyz;
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    let at = vec3<u32>(pixel % w, pixel / w, 0u);
+    let off = aa_offset(aa_sample(k, j));
+    let sd = camera_dir_at(at, off.x, off.y);
+    let t = bitcast<f32>(hit.z);
+    let s = vec4<u32>(hit, seen_light(eye, sd, t));
+    let ps = eye + sd * t;
+    aa_normal_known = false;
+    aa_wg_record[li] = vec4<u32>(NONE, 0u, 0u, 0u);
+    if (aa_same_pixel(s, ps, sd, at.x, at.y)) {
+        aa_wg_colour[li] = colors[pixel].xyz;
+        aa_wg_record[li].y = 1u;
+        return;
+    }
+    aa_wg_colour[li] = vec3<f32>(0.0);
+    aa_wg_record[li] = vec4<u32>(j | (s.w << 4u), hit);
+}
+
+// A listed pixel's samples in a stage: stage 0 the outer square's four
+// (or its diagonal pair at two samples a pixel), for every listed pixel;
+// stage 1 the inner square's, for the pixels stage 0 listed again.
+struct AaJob {
+    live: bool,
+    // The pixel's place in the list, the pixel, the sample (0–7) and the
+    // stage's samples a pixel.
+    i: u32,
+    pixel: u32,
+    j: u32,
+    per: u32,
+};
+
+fn aa_job(wid: u32, li: u32, stage: u32) -> AaJob {
+    let k = atomicLoad(&aa_state[1]);
+    var job: AaJob;
+    job.per = select(k, 4u, stage == 1u);
+    let slot = wid * (64u / job.per) + li / job.per;
+    job.j = li % job.per + 4u * stage;
+    if (stage == 0u) {
+        job.live = slot < aa_count();
+        job.i = slot;
+    } else {
+        job.live = slot < min(atomicLoad(&aa_state[6]), aa_cap());
+        job.i = 0u;
+        if (job.live) { job.i = aa_data[aa_again() + slot]; }
+    }
+    job.pixel = 0u;
+    if (job.live) { job.pixel = aa_data[job.i]; }
+    return job;
+}
+
+// After a stage's samples resolved: the invocation that holds a pixel's
+// first sample adds the colours taken from pixels to its sum and lists
+// the rest as records for `vc_aa_shade` (all taken as the pixel's own
+// colour if the records are full). After stage 0 with four samples a
+// pixel, a pixel whose four samples all saw its own surface is done; any
+// other is listed for stage 1.
+fn aa_finish(li: u32, job: AaJob, stage: u32) {
+    let k = atomicLoad(&aa_state[1]);
+    let at_s = aa_sums() + 5u * job.i;
+    let own_colour = colors[job.pixel].xyz;
+    var sum = own_colour;
+    if (stage == 1u) {
+        sum = vec3<f32>(bitcast<f32>(aa_data[at_s]), bitcast<f32>(aa_data[at_s + 1u]), bitcast<f32>(aa_data[at_s + 2u]));
+    }
+    var n = 0u;
+    var own = 0u;
+    for (var q = 0u; q < job.per; q++) {
+        sum += aa_wg_colour[li + q];
+        if (aa_wg_record[li + q].x != NONE) { n++; }
+        if (aa_wg_record[li + q].y == 1u) { own++; }
+    }
+    // (Diagnostics: samples traced, samples on the pixel's own surface,
+    // and pixels all of whose samples are.)
+    atomicAdd(&aa_state[3], job.per);
+    atomicAdd(&aa_state[5], own);
+    var again = false;
+    if (stage == 0u && own == k) {
+        atomicAdd(&aa_state[4], 1u);
+    } else if (stage == 0u && k == 4u) {
+        again = true;
+    }
+    let first = aa_wg_records + aa_wg_offset[li];
+    if (n > 0u && aa_wg_records == NONE) {
+        sum += own_colour * f32(n);
+        n = 0u;
+    }
+    var r = 0u;
+    for (var q = 0u; q < job.per && r < n; q++) {
+        let rec = aa_wg_record[li + q];
+        if (rec.x == NONE) { continue; }
+        let at_r = aa_records() + 8u * (first + r);
+        aa_data[at_r] = job.i;
+        aa_data[at_r + 1u] = rec.x;
+        aa_data[at_r + 2u] = rec.y;
+        aa_data[at_r + 3u] = rec.z;
+        aa_data[at_r + 4u] = rec.w;
+        r++;
+    }
+    aa_data[at_s] = bitcast<u32>(sum.x);
+    aa_data[at_s + 1u] = bitcast<u32>(sum.y);
+    aa_data[at_s + 2u] = bitcast<u32>(sum.z);
+    // (Stage 1's word: 8 once listed for it.)
+    aa_data[at_s + 3u + stage] = (first << 4u) | n | select(0u, 8u, stage == 1u);
+    if (stage == 0u) { aa_data[at_s + 4u] = select(0u, 8u, again); }
+    if (again) {
+        let b = atomicAdd(&aa_state[6], 1u);
+        if (b < aa_cap()) { aa_data[aa_again() + b] = job.i; }
+    }
+}
+
+// A sample's direction in its stage (`hw_aa`: an invocation per sample,
+// its pixel's in a row).
+fn aa_dir(job: AaJob) -> vec3<f32> {
+    let w = u32(camera.params.x);
+    let off = aa_offset(aa_sample(atomicLoad(&aa_state[1]), job.j));
+    return camera_dir_at(vec3<u32>(job.pixel % w, job.pixel / w, 0u), off.x, off.y);
+}
+
+// The rest of a stage once its sample is traced (`hit`, `back` if a back
+// face).
+fn aa_stage_end(li: u32, job: AaJob, stage: u32, hit: vec3<u32>, back: bool) {
+    aa_wg_record[li] = vec4<u32>(NONE, 0u, 0u, 0u);
+    if (job.live) { aa_sample_resolve(li, job.pixel, atomicLoad(&aa_state[1]), job.j, hit, back); }
+    workgroupBarrier();
+    if (li == 0u) {
+        var total = 0u;
+        for (var q = 0u; q < 64u; q++) {
+            aa_wg_offset[q] = total;
+            if (aa_wg_record[q].x != NONE) { total++; }
+        }
+        var base = 0u;
+        if (total > 0u) {
+            base = atomicAdd(&aa_state[2], total);
+            if (base + total > aa_cap()) { base = NONE; }
+        }
+        aa_wg_records = base;
+    }
+    workgroupBarrier();
+    if (job.live && li % job.per == 0u) { aa_finish(li, job, stage); }
+}
+
+// The nearest hit along camera ray `dir` through `scene_as`, front or
+// back: object, triangle, distance bits, and 1 if a back face (traced
+// again later: the loop that skips back faces, inline, made `hw_aa` a
+// third slower though few samples need it).
+fn hw_trace_once(eye: vec3<f32>, dir: vec3<f32>) -> vec4<u32> {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, eye, dir));
+    rayQueryProceed(&rq);
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind == 0u) { return vec4<u32>(NONE, NONE, bitcast<u32>(3.4e38), 0u); }
+    let o = hw_object(hit.instance_custom_data, hit.geometry_index);
+    let back = !hw_front(hit.instance_custom_data, hit.geometry_index, hit.primitive_index, dir);
+    return vec4<u32>(o.x, cam_tri(o.x, o.y, hit.primitive_index), bitcast<u32>(hit.t), select(0u, 1u, back));
+}
+
+@compute @workgroup_size(64)
+fn hw_aa(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = aa_job(wid.x, li, 0u);
+    var hit = vec4<u32>(NONE, NONE, 0u, 0u);
+    if (job.live) { hit = hw_trace_once(camera.eye.xyz, aa_dir(job)); }
+    aa_stage_end(li, job, 0u, hit.xyz, hit.w != 0u);
+}
+
+@compute @workgroup_size(64)
+fn hw_aa_again(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = aa_job(wid.x, li, 1u);
+    var hit = vec4<u32>(NONE, NONE, 0u, 0u);
+    if (job.live) { hit = hw_trace_once(camera.eye.xyz, aa_dir(job)); }
+    aa_stage_end(li, job, 1u, hit.xyz, hit.w != 0u);
+}
+
+// After the records are counted: those that hit a back face, traced again
+// skipping back faces (as `hw_trace`), with the light they see. One
+// invocation per record.
+@compute @workgroup_size(64)
+fn hw_aa_retrace(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= aa_data[aa_header()]) { return; }
+    let at = aa_records() + 8u * gid.x;
+    let js = aa_data[at + 1u];
+    if ((js & AA_RETRACE) == 0u) { return; }
+    let k = aa_data[aa_header() + 1u];
+    let pixel = aa_data[aa_data[at]];
+    let w = u32(camera.params.x);
+    let off = aa_offset(aa_sample(k, js & 0xfu));
+    let sd = camera_dir_at(vec3<u32>(pixel % w, pixel / w, 0u), off.x, off.y);
+    let hit = hw_trace(camera.eye.xyz, sd, 0.0);
+    aa_data[at + 1u] = (js & 0xfu) | (seen_light(camera.eye.xyz, sd, bitcast<f32>(hit.z)) << 4u);
+    aa_data[at + 2u] = hit.x;
+    aa_data[at + 3u] = hit.y;
+    aa_data[at + 4u] = hit.z;
+}
+
+// The stages for scenes with movers (M9): samples trace both structures.
+@compute @workgroup_size(64)
+fn hw_aa_movers(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = aa_job(wid.x, li, 0u);
+    var hit = vec3<u32>(NONE);
+    if (job.live) { hit = hw_trace_movers(camera.eye.xyz, aa_dir(job)); }
+    aa_stage_end(li, job, 0u, hit, false);
+}
+
+@compute @workgroup_size(64)
+fn hw_aa_again_movers(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = aa_job(wid.x, li, 1u);
+    var hit = vec3<u32>(NONE);
+    if (job.live) { hit = hw_trace_movers(camera.eye.xyz, aa_dir(job)); }
+    aa_stage_end(li, job, 1u, hit, false);
+}
+
+// After stage 0: stage 1's dispatch (a workgroup per 16 pixels listed
+// again, the dispatch arguments' words 24–26), if its samples fit the ray
+// budget with stage 0's (the header's third word 1 if so).
+@compute @workgroup_size(1)
+fn hw_aa_args_again() {
+    var n = min(atomicLoad(&aa_state[6]), aa_cap());
+    let k = atomicLoad(&aa_state[1]);
+    if (f32(aa_count() * k + 4u * n) > aa_budget()) { n = 0u; }
+    aa_data[aa_header() + 2u] = select(0u, 1u, n > 0u);
+    dispatch_args[24] = (n + 15u) / 16u;
+    dispatch_args[25] = 1u;
+    dispatch_args[26] = 1u;
+}
+
+// After both stages: the records to shade, in the header for
+// `vc_aa_shade` and as its dispatch (a workgroup per 64, the dispatch
+// arguments' words 16–18).
+@compute @workgroup_size(1)
+fn hw_aa_args_shade() {
+    let n = min(atomicLoad(&aa_state[2]), aa_cap());
+    aa_data[aa_header()] = n;
+    dispatch_args[16] = (n + 63u) / 64u;
+    dispatch_args[17] = 1u;
+    dispatch_args[18] = 1u;
+}
+
+// Each listed pixel's average: its samples taken from pixels, and those
+// `vc_aa_shade` shaded.
+@compute @workgroup_size(64)
+fn hw_aa_scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= aa_count()) { return; }
+    let pixel = aa_data[gid.x];
+    let k = atomicLoad(&aa_state[1]);
+    let at_s = aa_sums() + 5u * gid.x;
+    var sum = vec3<f32>(bitcast<f32>(aa_data[at_s]), bitcast<f32>(aa_data[at_s + 1u]), bitcast<f32>(aa_data[at_s + 2u]));
+    // Samples taken: the pixel's own, stage 0's, and stage 1's where it
+    // ran for the pixel.
+    let again = (aa_data[at_s + 4u] & 8u) != 0u && aa_data[aa_header() + 2u] == 1u;
+    let samples = 1u + k + select(0u, 4u, again);
+    for (var stage = 0u; stage < select(1u, 2u, again); stage++) {
+        let first = aa_data[at_s + 3u + stage] >> 4u;
+        let n = aa_data[at_s + 3u + stage] & 7u;
+        for (var r = 0u; r < n; r++) {
+            let at_r = aa_records() + 8u * (first + r);
+            sum += vec3<f32>(bitcast<f32>(aa_data[at_r + 5u]), bitcast<f32>(aa_data[at_r + 6u]), bitcast<f32>(aa_data[at_r + 7u]));
+        }
+    }
+    colors[pixel] = vec4<f32>(sum / f32(samples), 1.0);
+}
+
 // M13 gate 4: per pixel, a ray through its top-left corner, recording
 // (the object hit or NONE, 1 if that object is large for the coverage maps,
 // its distance's bits, 0) for `m13_coverage_near`.

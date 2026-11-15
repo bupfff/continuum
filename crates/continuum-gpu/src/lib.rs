@@ -593,6 +593,7 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_ledger",
     "vc_bake_indirect",
     "vc_shade_edges",
+    "vc_aa_shade",
     "vc_args_edges",
     "m13_coverage",
     "m13_coverage_maps",
@@ -625,6 +626,16 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_vc_bake_indirect",
     "hw_vc_bake_sky",
     "hw_vc_error_shares",
+    "hw_aa_list",
+    "hw_aa_args",
+    "hw_aa",
+    "hw_aa_movers",
+    "hw_aa_args_again",
+    "hw_aa_again",
+    "hw_aa_again_movers",
+    "hw_aa_args_shade",
+    "hw_aa_retrace",
+    "hw_aa_scatter",
 ];
 
 /// Bindings the `visibility` pass uses.

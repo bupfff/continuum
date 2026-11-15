@@ -2682,7 +2682,9 @@ struct VcParams {
     // rays at silhouette pixels (M7 gate 3), 2 and 3 through ray queries
     // (M7 gate 4)
     indirect: vec4<u32>,
-    // x: 1 if bounce samples gather emission (M10 gate 11)
+    // x: 1 if bounce samples gather emission (M10 gate 11); w: with
+    // anti-aliasing (M15), the extra rays a frame may trace per pixel, on
+    // average (f32 bits)
     extra: vec4<u32>,
 };
 
@@ -2780,7 +2782,7 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 @group(0) @binding(65) var<storage, read_write> invalid_list: array<u32>;
 // Indirect dispatch sizes (x, y, z each): the texel test, the bake's texel
 // jobs, the fill's pages.
-@group(0) @binding(66) var<storage, read_write> dispatch_args: array<u32, 12>;
+@group(0) @binding(66) var<storage, read_write> dispatch_args: array<u32, 28>;
 // Candidate pages: the slot, and its entry in `bake_list` (NONE: not read
 // in the frame before, so marked invalid if any texel is stale).
 @group(0) @binding(67) var<storage, read_write> candidates: array<vec2<u32>>;
@@ -5027,6 +5029,101 @@ fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocati
         }
     }
     colors[pixel] = vec4<f32>(sum, 1.0);
+}
+
+// --- M15: anti-aliasing on the default path (its passes are in
+// hw_visibility.wgsl, but for `vc_aa_shade`) ---
+//
+// One buffer (a pass's storage buffers are few): the edge list (up to half
+// the pixels); per listed pixel the sum of its samples taken from pixels
+// (three words) and, for each of `hw_aa`'s two stages, its shaded samples'
+// first record << 4 | their count; the pixels listed again for stage 1
+// (their places in the list); a header (records
+// to shade, stage 0's samples per pixel, 1 if stage 1 ran, one unused);
+// the records of samples to
+// shade (up to half the pixels' worth), eight words each: the listed
+// pixel's place, the sample | light seen + 1 << 4, the object, triangle and
+// distance bits hit, then the colour shaded.
+@group(0) @binding(107) var<storage, read_write> aa_data: array<u32>;
+// 0: pixels listed, 1: samples per listed pixel, 2: records to shade,
+// 3: samples traced, 4: pixels done after stage 0, 5: samples that saw
+// their pixel's own surface, 6: pixels listed for stage 1.
+@group(0) @binding(110) var<storage, read_write> aa_state: array<atomic<u32>, 8>;
+
+fn aa_pixels() -> u32 {
+    return u32(camera.params.x) * u32(camera.params.y);
+}
+
+fn aa_cap() -> u32 {
+    return (aa_pixels() + 1u) / 2u;
+}
+
+fn aa_sums() -> u32 {
+    return aa_cap();
+}
+
+fn aa_again() -> u32 {
+    return aa_sums() + 5u * aa_cap();
+}
+
+fn aa_header() -> u32 {
+    return aa_again() + aa_cap();
+}
+
+fn aa_records() -> u32 {
+    return aa_header() + 4u;
+}
+
+// Sample `j` of the pattern, in pixels from the centre (x right, y down):
+// two squares turned against the pixel grid, the outer one first, every
+// sample on its own row and column of sixteen.
+fn aa_offset(j: u32) -> vec2<f32> {
+    var o = select(vec2<f32>(-1.0, -5.0), vec2<f32>(-3.0, -7.0), j < 4u);
+    for (var r = 0u; r < (j & 3u); r++) { o = vec2<f32>(-o.y, o.x); }
+    return o / 16.0;
+}
+
+// A record's sample word's flag: hit a back face, to be traced again.
+const AA_RETRACE: u32 = 0x80000000u;
+
+// The pattern's sample for a pixel's `j`th of `k` in stage 0 (the outer
+// square's; its diagonal pair 0 and 2 with two; sample 0 alone with one),
+// or 4–7 in stage 1.
+fn aa_sample(k: u32, j: u32) -> u32 {
+    return select(j, 2u * j, k == 2u);
+}
+
+// The records `hw_aa` listed, shaded from the cache (textures read for the
+// sample's share of the pixel, its page requested as a pixel's is), the
+// sky or the light seen. One invocation per record.
+@compute @workgroup_size(64)
+fn vc_aa_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    if (gid.x >= aa_data[aa_header()]) { return; }
+    let k = aa_data[aa_header() + 1u];
+    let at = aa_records() + 8u * gid.x;
+    let pixel = aa_data[aa_data[at]];
+    let w = u32(camera.params.x);
+    let js = aa_data[at + 1u];
+    let off = aa_offset(aa_sample(k, js & 0xfu));
+    let sd = camera_dir_at(vec3<u32>(pixel % w, pixel / w, 0u), off.x, off.y);
+    let seen = js >> 4u;
+    let hit = vec3<u32>(aa_data[at + 2u], aa_data[at + 3u], aa_data[at + 4u]);
+    var c = vec3<f32>(0.0);
+    if (seen != 0u) {
+        let l = lights[seen - 1u];
+        c = l.radiance.xyz * spot_falloff(l, -sd);
+    } else if (hit.x == NONE) {
+        c = sky_seen(sd);
+    } else {
+        sub_share = inverseSqrt(f32(1u + k + 4u * aa_data[aa_header() + 2u]));
+        vc_request_priority = 0u;
+        c = vc_hit_color(sd, hit_from(hit, sd), false);
+        if (vc_request_priority > 0u) { vc_request(vc_request_key, vc_request_priority); }
+    }
+    aa_data[at + 5u] = bitcast<u32>(c.x);
+    aa_data[at + 6u] = bitcast<u32>(c.y);
+    aa_data[at + 7u] = bitcast<u32>(c.z);
 }
 
 var<workgroup> fallback_count: atomic<u32>;

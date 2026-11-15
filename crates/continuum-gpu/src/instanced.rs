@@ -78,6 +78,15 @@ enum CameraDispatch {
     /// One invocation per page of the pool, per object-hierarchy node and
     /// per object (M13 gate 8's once-a-frame pass).
     Prep,
+    /// A workgroup per 64 samples of the edge pixels listed for
+    /// anti-aliasing (M15), from the dispatch arguments' words 12–14.
+    Aa,
+    /// A workgroup per 64 of their samples to shade, words 16–18.
+    AaShade,
+    /// A workgroup per 64 listed pixels, words 20–22.
+    AaScatter,
+    /// A workgroup per 16 pixels listed again (stage 1), words 24–26.
+    AaAgain,
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -947,6 +956,24 @@ impl InstancedRenderer {
         self.movers.as_ref().map_or(0, |m| m.slices)
     }
 
+    /// Diagnostics (M15): the last frame's anti-aliasing counters: edge
+    /// pixels listed, samples per listed pixel, samples shaded (no pixel
+    /// nearby saw their surface), samples traced, pixels all of whose
+    /// samples saw its own surface, samples that did. Waits for the GPU; zeros
+    /// without anti-aliasing.
+    #[doc(hidden)]
+    pub fn aa_counters(&self) -> [u32; 6] {
+        let Some(cache) = &self.cache else {
+            return [0; 6];
+        };
+        if !cache.state.anti_aliasing() {
+            return [0; 6];
+        }
+        let words: Vec<u32> =
+            bytemuck::cast_slice(&cache.state.read_buffer(&self.device, 110)).to_vec();
+        [words[0], words[1], words[2], words[3], words[4], words[5]]
+    }
+
     /// The most frames any light's lighting near deforming geometry lags its
     /// pose (M12 gate 2; 0 with `CacheOptions::deforming_budget` 0 or
     /// nothing deforming).
@@ -1603,7 +1630,7 @@ impl InstancedRenderer {
             ));
         }
         let m13_lit = cache.is_some() && pixel_cones && kernel.profile_stage.get() == 20;
-        let camera_dispatch: Vec<CameraDispatch> = if m13_lit {
+        let mut camera_dispatch: Vec<CameraDispatch> = if m13_lit {
             // Gate 12's passes in order (prep, roots, corners, the first
             // records' arguments and lighting, bins, bin arguments, bin
             // rays, shading arguments, shading, the other records' arguments,
@@ -1651,6 +1678,60 @@ impl InstancedRenderer {
                 })
                 .collect()
         };
+        // Anti-aliasing on the default path (M15), with hardware camera
+        // rays: the edge list before shading, the
+        // samples after it (and after any layers behind blended surfaces).
+        let aa = cache.as_ref().is_some_and(|o| o.anti_aliasing)
+            && hw.is_some()
+            && !pixel_cones
+            && passes
+                .iter()
+                .any(|(_, keep)| keep.as_slice() == VC_SHADE_BINDINGS);
+        if aa {
+            let pass =
+                |name: &'static str| (kernel.entry(name), kernel.entry_bindings(name, false));
+            let shade = passes
+                .iter()
+                .position(|(_, keep)| keep.as_slice() == VC_SHADE_BINDINGS)
+                .expect("a shading pass");
+            passes.insert(shade, pass("hw_aa_list"));
+            camera_dispatch.insert(shade, CameraDispatch::Screen);
+            let after = passes
+                .iter()
+                .rposition(|(_, keep)| {
+                    keep.as_slice() == VC_SHADE_BINDINGS
+                        || keep.as_slice() == VC_SHADE_EDGES_BINDINGS
+                })
+                .expect("a shading pass")
+                + 1;
+            let movers = hw.as_ref().is_some_and(|hw| hw.movers.is_some());
+            for (k, (name, dispatch)) in [
+                ("hw_aa_args", CameraDispatch::One),
+                (
+                    if movers { "hw_aa_movers" } else { "hw_aa" },
+                    CameraDispatch::Aa,
+                ),
+                ("hw_aa_args_again", CameraDispatch::One),
+                (
+                    if movers {
+                        "hw_aa_again_movers"
+                    } else {
+                        "hw_aa_again"
+                    },
+                    CameraDispatch::AaAgain,
+                ),
+                ("hw_aa_args_shade", CameraDispatch::One),
+                ("hw_aa_retrace", CameraDispatch::AaShade),
+                ("vc_aa_shade", CameraDispatch::AaShade),
+                ("hw_aa_scatter", CameraDispatch::AaScatter),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                passes.insert(after + k, pass(name));
+                camera_dispatch.insert(after + k, dispatch);
+            }
+        }
         let cache = cache.map(|options| Cache {
             state: VirtualCache::new(
                 &device,
@@ -1709,6 +1790,9 @@ impl InstancedRenderer {
         let mut cache = cache;
         if hw_edges && let Some(c) = &mut cache {
             c.state.set_hardware_edges(blend);
+        }
+        if aa && let Some(c) = &mut cache {
+            c.state.set_anti_aliasing();
         }
         if let Some(c) = &mut cache
             && c.sky_hw
@@ -2345,6 +2429,18 @@ impl InstancedRenderer {
             (CameraDispatch::Listed, Some(cache)) => {
                 pass.dispatch_workgroups_indirect(cache.state.buffer(66), 36)
             }
+            (CameraDispatch::Aa, Some(cache)) => {
+                pass.dispatch_workgroups_indirect(cache.state.buffer(66), 48)
+            }
+            (CameraDispatch::AaShade, Some(cache)) => {
+                pass.dispatch_workgroups_indirect(cache.state.buffer(66), 64)
+            }
+            (CameraDispatch::AaScatter, Some(cache)) => {
+                pass.dispatch_workgroups_indirect(cache.state.buffer(66), 80)
+            }
+            (CameraDispatch::AaAgain, Some(cache)) => {
+                pass.dispatch_workgroups_indirect(cache.state.buffer(66), 96)
+            }
             (CameraDispatch::Tiles, _) => {
                 pass.dispatch_workgroups(self.width.div_ceil(64), self.height.div_ceil(64), 1)
             }
@@ -2652,6 +2748,41 @@ impl InstancedRenderer {
         .to_vec();
         let n = (self.width * self.height) as usize;
         words.chunks(4).take(n).map(|v| v[0]).collect()
+    }
+
+    /// Diagnostics (M15): each pixel's camera hit in the latest frame:
+    /// object (`u32::MAX` for none), triangle, distance and light seen + 1.
+    /// Waits for the GPU.
+    #[doc(hidden)]
+    pub fn read_hits(&self) -> Vec<(u32, u32, f32, u32)> {
+        let vis = self.vis.as_ref().expect("targets made");
+        let size = vis.size();
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("visibility readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(vis, 0, &staging, 0, size);
+        self.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let words: Vec<u32> = bytemuck::cast_slice::<u8, u32>(
+            &staging
+                .slice(..)
+                .get_mapped_range()
+                .expect("mapped visibility"),
+        )
+        .to_vec();
+        let n = (self.width * self.height) as usize;
+        words
+            .chunks(4)
+            .take(n)
+            .map(|v| (v[0], v[1], f32::from_bits(v[2]), v[3]))
+            .collect()
     }
 
     /// Waits for every submitted frame and reads back what the cache has not

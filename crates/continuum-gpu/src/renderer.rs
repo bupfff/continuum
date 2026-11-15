@@ -104,6 +104,18 @@ pub struct RendererOptions {
     /// cache (they take the first light and the sky, with a shadow per
     /// instance).
     pub sub_pixel: bool,
+    /// Anti-aliasing (on by default; M15): with the cache and hardware ray
+    /// queries, pixels at an edge (a neighbour sees another object, a light,
+    /// the sky, or a surface off the pixel's own plane) average up to eight
+    /// more rays through their square, each shaded from the cache where it
+    /// sees another surface than the pixel's own. Within a ray budget
+    /// (`CacheOptions::aa_rays`, half a ray a pixel on average): edges take
+    /// four rays, eight where those disagree and the frame's total fits.
+    /// Error at edges about a third of one ray's, and steady in motion;
+    /// about 1.45× the frame on a textured scene with foliage at 1280×720
+    /// (`docs/results/m15-gate1.md`). Not with the sub-pixel path, which
+    /// resolves pixels itself.
+    pub anti_aliasing: bool,
 }
 
 impl Default for RendererOptions {
@@ -120,6 +132,7 @@ impl Default for RendererOptions {
             moving_lights: Vec::new(),
             streaming: None,
             sub_pixel: false,
+            anti_aliasing: true,
         }
     }
 }
@@ -219,6 +232,7 @@ impl Renderer {
             && options.streaming.is_none()
             && placed <= 64;
         let mut cache_options = options.cache_options;
+        cache_options.anti_aliasing |= options.anti_aliasing && !sub_pixel;
         if sub_pixel {
             kernel.set_prefilter(8.0);
             kernel.set_hardware_rays(true);

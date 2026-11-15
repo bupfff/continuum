@@ -666,6 +666,89 @@ Criteria:
    with it still (three of each, alternating); 99th percentile at most
    33.3 ms; fallback at most 10%.
 
+#### Anti-aliasing on the default path (M15 design, 2026-11-15)
+
+The user's second gap (2026-11-15): edges on the default path (one ray a
+pixel) are jagged and crawl in motion. No blending of previous frames is
+allowed (§4), so each frame must stand alone. Earlier tries: pixel cones
+(M7 G1) and compute silhouette rays (M7 G3) failed on cost; M7 G4's
+silhouette rays through ray queries (four quarter rays at edge pixels,
+each shaded) passed on the textured scene at 1.29× and failed on the
+field from 150 m (3.03×), and stayed off; they did not support movers.
+The sub-pixel path (M13) resolves pixels itself, for static instanced
+scenes only.
+
+The design (`CacheOptions::anti_aliasing`; `RendererOptions::anti_aliasing`,
+on by default), with hardware camera rays:
+- **Edge pixels.** A pass after visibility lists pixels a neighbour of
+  which (left, right, up or down) sees another surface: another object,
+  light or the sky, or, on the same object, a point more than half a
+  pixel footprint off the pixel's own triangle's plane (silhouettes
+  within one object, creases). Diagonal neighbours added nothing
+  measurable (development: the same error with 28% more pixels listed).
+  The list is written a workgroup at a time, so later passes take nearby
+  pixels together.
+- **Samples.** A fixed pattern of eight per pixel: two squares turned
+  against the pixel grid, each sample on its own row and column of 16
+  (with the pixel's own ray, nine coverage levels along any axis). Stage
+  0 traces the outer four; a pixel whose four all see its own surface is
+  done (64% of listed pixels on the textured scene), the others trace the
+  inner four (stage 1). One invocation per sample.
+- **Colour.** A sample on the pixel's own surface takes the pixel's
+  colour; any other is shaded from the cache, textures read for its share
+  of the pixel, its page requested as a pixel's is (MSAA's idea, a shade
+  per surface, with every other surface shaded where the sample meets
+  it). Taking a neighbour's colour where it saw the same surface was
+  cheaper but left 1.12–1.13× the error at edges (development).
+- **Budget.** At most `CacheOptions::aa_rays` extra rays a frame per pixel
+  of the image on average (0.5): stage 0 takes four samples a pixel, or
+  two or one where four would exceed it; stage 1 runs if the frame's total
+  fits. The list holds up to half the pixels.
+- **Back faces.** Metal's ray queries ignore back-face culling (M10 G8),
+  so camera rays re-trace past back faces with a candidate loop. Inline
+  in the sample pass that loop made it a third slower though 1–2% of
+  samples need it; samples that hit a back face are traced again in a
+  small pass of their own and shaded.
+- **Movers and deforming geometry** trace both structures (`hw_aa_movers`);
+  blended pixels keep their layers (M10 G19) and are not listed.
+- **Not:** the compute path without ray queries (M7 G3's stays);
+  sub-pixel features no pixel centre meets (M13's territory); texture
+  detail inside surfaces (M7 G2's filtering; the textured scene's error
+  left elsewhere is mostly its grout and mortar lines).
+
+Prior art: adaptive supersampling at edges (Whitted 1980); MSAA's shading
+once per surface per pixel; ray-traced supersampling of edge pixels picked
+by a temporal anti-aliasing pass (Marrs et al. 2018, ATAA), here without
+any temporal pass. No novelty is claimed.
+
+**Development** (`aa_dev`, 1280×720, against the 16×16 settled cached
+image; error over geometric edge pixels, those whose 256 samples see more
+than one object or light or depths 5% apart):
+
+| View | One ray | Anti-aliased | M7 quarters | Frame (anti-aliased / M7) |
+|---|---|---|---|---|
+| Textured scene with foliage | 23.75% | 7.42% (0.312×) | 9.31% (0.392×) | 1.44× / 1.52× |
+| Field standing (100,000 boulders) | 53.09% | 20.43% (0.385×) | 21.51% (0.405×) | 1.97× / 1.75× |
+
+In a slow turn (a quarter pixel a frame, 640×360) the frame-to-frame
+change at edges is off the reference's by 0.32× one ray's on the textured
+scene (M7 quarters 0.45×). With a million boulders the field standing
+costs 2.15–2.25× (3 ms at 720p): its horizon band, where boulders are
+smaller than a pixel, lists most of the edge pixels.
+
+**Gate M15 G1** (`m15_gate1`): the textured scene with foliage and the
+million-boulder field standing, 1280×720, against the 16×16 settled cached
+image. Criteria, both views:
+1. **Cost** (timed first, five interleaved rounds): anti-aliasing adds at
+   most 3.3 ms (a fifth of a 60 fps frame) to one ray's warm frame.
+2. **Edges:** relative RMSE over geometric edge pixels at most 0.5× one
+   ray's.
+3. **Elsewhere:** over the other pixels at most one ray's.
+4. **Motion:** a turn of six frames at a quarter pixel a frame: over the
+   pixels that are geometric edges in any frame, the RMS of each
+   frame-to-frame change's difference from the reference's at most 0.5×
+   one ray's.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

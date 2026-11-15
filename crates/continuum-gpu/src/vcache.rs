@@ -237,6 +237,18 @@ pub struct CacheOptions {
     /// or 2 (one diagonal pair, alternating from pixel to pixel), averaged
     /// with the pixel's own ray.
     pub edge_samples: u32,
+    /// Anti-aliasing on the default path (M15), with hardware camera rays:
+    /// a pixel at an edge (a neighbour sees another object, light or the
+    /// sky, a point off its plane, or a normal more than 25° from its own)
+    /// averages eight more rays in a fixed pattern with its own, each
+    /// sample taking the colour of the pixel or the neighbour nearest it
+    /// that sees the same surface, and shaded only where none does.
+    pub anti_aliasing: bool,
+    /// With `anti_aliasing`: the extra rays a frame may trace, per pixel of
+    /// the image on average. Edge pixels trace four samples (two, or one,
+    /// where four would exceed it), then those whose four did not all see
+    /// their own surface four more if the frame's total fits.
+    pub aa_rays: f32,
     /// The error while flying, reported (M4 gate 13): pixels a frame (up to
     /// 4,096; 0: off) shaded both as shown and with each light's share and
     /// the sky's computed at the pixel's own point, from which
@@ -299,6 +311,8 @@ impl Default for CacheOptions {
             edge_rays: false,
             deforming_budget: 512,
             edge_samples: 4,
+            anti_aliasing: false,
+            aa_rays: 0.5,
             error_probes: 0,
             glossy_rays: true,
             self_spacing: 0.01,
@@ -1012,6 +1026,9 @@ pub(crate) struct VirtualCache {
     /// The extra samples' list (buffer 81): silhouette rays through ray
     /// queries, or layers behind alpha-blended surfaces (M10 gate 16).
     extra_samples: bool,
+    /// Anti-aliasing on the default path (M15): the pixels' normals, the
+    /// edge list and its colours (107), its counters (110).
+    aa: bool,
     append_pages: u32,
     alloc_frame: Vec<u32>,
     appended: f32,
@@ -1290,7 +1307,10 @@ impl VirtualCache {
                     wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
-            (66, empty("dispatch args", 48, wgpu::BufferUsages::INDIRECT)),
+            (
+                66,
+                empty("dispatch args", 112, wgpu::BufferUsages::INDIRECT),
+            ),
             (
                 68,
                 empty("light poses", (POSE_RING * lights) as u64 * 64, copy_dst),
@@ -1502,6 +1522,7 @@ impl VirtualCache {
             slot_target: vec![0; options.pages as usize],
             slot_retries: vec![0; options.pages as usize],
             extra_samples: false,
+            aa: false,
             sky_rebaked: 0,
             mover_ids: HashMap::new(),
             append_pages,
@@ -1581,6 +1602,30 @@ impl VirtualCache {
                     mapped_at_creation: false,
                 }),
             ));
+        }
+        if self.aa {
+            // The edge list holds up to half the pixels.
+            let pixels = width as u64 * height as u64;
+            let cap = pixels.div_ceil(2).max(1);
+            self.buffers.retain(|(b, _)| *b != 107 && *b != 110);
+            for (binding, label, size) in [
+                // The list, its sums, a header and the records to shade
+                // (`aa_data` in the kernel).
+                (107, "aa data", (15 * cap + 4) * 4),
+                (110, "aa counters", 32),
+            ] {
+                self.buffers.push((
+                    binding,
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size,
+                        usage: wgpu::BufferUsages::STORAGE
+                            | wgpu::BufferUsages::COPY_SRC
+                            | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                ));
+            }
         }
         let tile = self.options.request_tile;
         let tiles = width.div_ceil(tile) * height.div_ceil(tile);
@@ -1874,7 +1919,7 @@ impl VirtualCache {
                 (self.options.indirect && self.options.emission_bounce) as u32,
                 self.options.bounces.clamp(1, 8),
                 self.probes(),
-                0,
+                self.options.aa_rays.max(0.0).to_bits(),
             ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
@@ -2194,6 +2239,17 @@ impl VirtualCache {
         }
     }
 
+    /// Anti-aliasing on the default path (M15) runs.
+    pub(crate) fn anti_aliasing(&self) -> bool {
+        self.aa
+    }
+
+    /// Anti-aliasing on the default path (M15) runs; before the first
+    /// `resize`, which makes its buffers.
+    pub(crate) fn set_anti_aliasing(&mut self) {
+        self.aa = true;
+    }
+
     pub(crate) fn set_hardware_edges(&mut self, blend: bool) {
         self.hardware_edges = self.options.edge_rays;
         self.extra_samples = self.hardware_edges || blend;
@@ -2206,6 +2262,9 @@ impl VirtualCache {
         encoder.clear_buffer(self.buffer(64), 0, None);
         if self.lighting {
             encoder.clear_buffer(self.buffer(83), 0, None);
+        }
+        if self.aa {
+            encoder.clear_buffer(self.buffer(110), 0, None);
         }
     }
 
