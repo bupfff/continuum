@@ -66,11 +66,18 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   `RendererOptions::deforming` take a new pose each frame
   (`Renderer::set_vertices`: triangles and normals, the same count and
   order; skinned characters or morph targets posed by the application).
-  - The cache stays exact (M12 G1: no stale light in 30 checks), and the
-    geometry is as accurate as a static one (1.08% from Cycles).
-  - It is costly: every texel in the object's shadows re-bakes each frame
-    it moves. A 2 m blob 10 m from the camera made frames about 10× slower
-    (108–114 ms in the million-boulder field).
+  - The geometry is as accurate as a static one (M12 G1: 1.08% from
+    Cycles).
+  - **Lighting near it lags its pose within a budget**
+    (`CacheOptions::deforming_budget`, 512 texel–light cones a frame):
+    one light at a time catches up, a slice of its shadows a frame, each
+    light within 16 frames. When the object stops, the lighting catches up
+    and the cache is exact again. `InstancedRenderer::deforming_lag`
+    reports the lag.
+  - **It is still costly.** A 2 m blob 14 m from the camera in the
+    million-boulder field costs 1.6–1.95× the frame (development, M12
+    G2). With `deforming_budget` 0 the lighting is exact every frame, at
+    about 10× (M12 G1).
   - Not with streaming or the sub-pixel path. Normal maps keep the rest
     pose's tangents.
 - **Moving lights.** Lights listed in `RendererOptions::moving_lights`

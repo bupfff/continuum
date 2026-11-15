@@ -68,10 +68,11 @@ pub struct RendererOptions {
     pub movable: Vec<usize>,
     /// Geometries whose vertices change ([`Renderer::set_vertices`]: skinned
     /// characters, morph targets, anything posed each frame; M12). Their
-    /// instances move as movers do (they are made movable): the cache
-    /// re-bakes what a pose changes, their own pages included. Not with
-    /// streaming or the sub-pixel path; under a sky, as movers (slow).
-    /// Empty (the default): none.
+    /// instances move as movers do (they are made movable). Lighting near
+    /// them lags their pose within `CacheOptions::deforming_budget` and
+    /// catches up when they stop (0: exact every frame, about 10× the frame
+    /// for a large object). Not with streaming or the sub-pixel path; under
+    /// a sky, as movers (slow). Empty (the default): none.
     pub deforming: Vec<usize>,
     /// Lights that may move ([`Renderer::set_light`]; not spots). With the
     /// cache, an error ledger re-bakes only what may be more than

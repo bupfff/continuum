@@ -348,6 +348,39 @@ struct Movers {
     /// A box around each light's cone ends (as the shader's `light_box`,
     /// a little larger).
     light_boxes: Vec<(Vec3, Vec3)>,
+    /// Deforming geometry's instances (M12 gate 2): which movers deform;
+    /// per mover and light, the box its lighting last caught up with and
+    /// the frames it has lagged since; per mover the light catching up now
+    /// (a slice of its shadows a frame) and the light after; the slices a
+    /// catch-up takes, and per recent cache frame whether it re-baked a
+    /// slice (to fit the slices to the budget).
+    deforming: Vec<bool>,
+    lag_boxes: Vec<Vec<(Vec3, Vec3)>>,
+    lag_frames: Vec<Vec<u32>>,
+    /// Per mover its poses so far, and per light the pose its lighting
+    /// last caught up with (behind while less).
+    poses: Vec<u32>,
+    light_poses: Vec<Vec<u32>>,
+    catching: Vec<Option<CatchUp>>,
+    next_light: Vec<usize>,
+    slices: u32,
+    updates: [(u32, u32); 8],
+}
+
+/// A light's lighting near a deforming object catching up with its pose
+/// (M12 gate 2), a slice of its shadows a frame: the slice next, of how
+/// many; the pose it catches up with (the first slice's) and the union of
+/// the object's boxes over the slices so far (what it was baked against).
+#[derive(Clone, Copy)]
+struct CatchUp {
+    light: usize,
+    slice: u32,
+    slices: u32,
+    pose: u32,
+    union: (Vec3, Vec3),
+    /// The slices' partition, fixed at the first: an axis and the range
+    /// along it the first and last slices extend past (none yet).
+    part: Option<(usize, f32, f32)>,
 }
 
 /// A box around every point a light cone toward `light` reaches near the
@@ -907,6 +940,21 @@ impl InstancedRenderer {
         d.pose = Some((triangles, normals));
     }
 
+    /// The most frames any light's lighting near deforming geometry lags its
+    /// pose (M12 gate 2; 0 with `CacheOptions::deforming_budget` 0 or
+    /// nothing deforming).
+    pub fn deforming_lag(&self) -> u32 {
+        self.movers.as_ref().map_or(0, |m| {
+            m.lag_frames
+                .iter()
+                .zip(&m.deforming)
+                .filter(|(_, d)| **d)
+                .flat_map(|(f, _)| f.iter().copied())
+                .max()
+                .unwrap_or(0)
+        })
+    }
+
     /// Applies the poses given since the last frame (M12): each deformed
     /// geometry's triangles, normals, refit hierarchy and hardware
     /// structure, its new box, and its instances marked moved.
@@ -971,6 +1019,8 @@ impl InstancedRenderer {
                 for (k, p) in movers.placements.iter().enumerate() {
                     if p.geometry == d.geometry {
                         movers.dirty[k] = true;
+                        movers.deforming[k] = true;
+                        movers.poses[k] += 1;
                     }
                 }
             }
@@ -984,6 +1034,18 @@ impl InstancedRenderer {
         let Some(movers) = &mut self.movers else {
             return;
         };
+        // Deforming objects whose lighting still lags a pose catch up with
+        // it in turn after they stop (M12 gate 2).
+        for k in 0..movers.placements.len() {
+            if movers.deforming[k]
+                && movers
+                    .light_poses
+                    .get(k)
+                    .is_some_and(|f| f.iter().any(|&n| n < movers.poses[k]))
+            {
+                movers.dirty[k] = true;
+            }
+        }
         if !movers.dirty.iter().any(|&d| d) {
             return;
         }
@@ -995,6 +1057,36 @@ impl InstancedRenderer {
                 .expect("scene buffer")
                 .1
         };
+        let lights = movers.light_boxes.len();
+        let all = (1u32 << lights) - 1;
+        // Deforming geometry's lighting in turn (M12 gate 2): fit the
+        // slices a catch-up takes to the re-bakes' measured cost.
+        let (budget, frame) = self.cache.as_ref().map_or((0, 0), |c| {
+            (c.state.deforming_budget(), c.state.frame_index())
+        });
+        let most = (crate::vcache::DEFORMING_MAX_LAG / lights.max(1) as u32).max(1);
+        if budget > 0
+            && let Some(stats) = self.cache.as_ref().map(|c| c.state.stats())
+            && let Some(&(_, slices)) = movers.updates.iter().find(|u| u.0 == stats.frame)
+            && slices > 0
+        {
+            // Cones a slice re-baked, against the budget: the slices a whole
+            // catch-up would need.
+            let per_slice = stats.rebaked_texels as f32 / slices as f32;
+            let want =
+                ((per_slice * movers.slices as f32 / budget as f32).ceil() as u32).clamp(1, most);
+            movers.slices = if want > movers.slices {
+                want
+            } else {
+                want.max(movers.slices - 1)
+            };
+        }
+        if movers.lag_boxes.len() != movers.placements.len() {
+            movers.lag_boxes = movers.bounds.iter().map(|&b| vec![b; lights]).collect();
+            movers.lag_frames = vec![vec![0; lights]; movers.placements.len()];
+            movers.light_poses = vec![vec![0; lights]; movers.placements.len()];
+        }
+        let mut asked = 0;
         let mut moved = Vec::new();
         for k in 0..movers.placements.len() {
             if !std::mem::take(&mut movers.dirty[k]) {
@@ -1005,13 +1097,105 @@ impl InstancedRenderer {
             let old = movers.bounds[k];
             let new = p.world_bounds(movers.local[p.geometry]);
             movers.bounds[k] = new;
-            moved.push((object, [old.0, old.1], [new.0, new.1]));
             self.queue.write_buffer(
                 buffer(30),
                 object as u64 * 64,
                 bytemuck::cast_slice(&p.rows()),
             );
+            if !movers.deforming[k] || budget == 0 {
+                movers.lag_boxes[k] = vec![new; lights];
+                movers.lag_frames[k] = vec![0; lights];
+                movers.light_poses[k] = vec![movers.poses[k]; lights];
+                moved.push(crate::vcache::Moved {
+                    object,
+                    old,
+                    new,
+                    olds: Vec::new(),
+                    mask: all,
+                    own: all,
+                    slice: None,
+                });
+                continue;
+            }
+            // One light at a time catches up, a slice of its shadows a
+            // frame; the lights take turns.
+            if movers.catching[k].is_none() {
+                let start = movers.next_light[k];
+                for step in 0..lights {
+                    let l = (start + step) % lights;
+                    if movers.light_poses[k][l] < movers.poses[k] {
+                        movers.catching[k] = Some(CatchUp {
+                            light: l,
+                            slice: 0,
+                            slices: movers.slices,
+                            pose: movers.poses[k],
+                            union: new,
+                            part: None,
+                        });
+                        movers.next_light[k] = (l + 1) % lights;
+                        break;
+                    }
+                }
+            }
+            for l in 0..lights {
+                if movers.light_poses[k][l] < movers.poses[k] {
+                    movers.lag_frames[k][l] += 1;
+                }
+            }
+            let Some(mut c) = movers.catching[k] else {
+                continue;
+            };
+            let l = c.light;
+            c.union = (c.union.0.min(new.0), c.union.1.max(new.1));
+            let part = *c.part.get_or_insert_with(|| {
+                // Along the longest axis of the shadows' union at the start.
+                let old_l = movers.lag_boxes[k][l];
+                let (flo, fhi) = movers.tree.fixed_root.bounds();
+                let scene = (flo.min(new.0).min(old_l.0), fhi.max(new.1).max(old_l.1));
+                let lb = movers.light_boxes[l];
+                let regions: Vec<(Vec3, Vec3)> = [old_l, new]
+                    .iter()
+                    .filter_map(|&b| crate::hierarchy::shadow_region(b, lb, scene))
+                    .collect();
+                let u = regions
+                    .iter()
+                    .fold((new.0, new.1), |a, r| (a.0.min(r.0), a.1.max(r.1)));
+                let e = u.1 - u.0;
+                let axis = if e.x >= e.y && e.x >= e.z {
+                    0
+                } else if e.y >= e.z {
+                    1
+                } else {
+                    2
+                };
+                (axis, u.0[axis], u.1[axis])
+            });
+            moved.push(crate::vcache::Moved {
+                object,
+                old,
+                new,
+                olds: movers.lag_boxes[k].clone(),
+                mask: 1 << l,
+                // Its own texels lie in its box, so in its shadows' region:
+                // they re-bake slice by slice, texel by texel, not as whole
+                // pages at once.
+                own: 0,
+                slice: Some((c.slice, c.slices, part.0, part.1, part.2)),
+            });
+            asked += 1;
+            c.slice += 1;
+            if c.slice >= c.slices {
+                // Its texels were baked against the object anywhere in the
+                // union: the next catch-up starts from there.
+                movers.lag_boxes[k][l] = c.union;
+                movers.light_poses[k][l] = c.pose;
+                movers.lag_frames[k][l] = 0;
+                movers.catching[k] = None;
+            } else {
+                movers.catching[k] = Some(c);
+            }
         }
+        movers.updates[(frame % 8) as usize] = (frame, asked);
         let (root, region, items) = mover_subtree(&movers.tree, &movers.bounds);
         let node = std::mem::size_of::<NodeGpu>() as u64;
         let nodes = buffer(9);
@@ -1038,8 +1222,11 @@ impl InstancedRenderer {
             // Every texel's apex lies within the objects' boxes; the
             // movers' old boxes stay in for this frame's test.
             let (mut lo, mut hi) = top.bounds();
-            for (_, old, _) in &moved {
-                (lo, hi) = (lo.min(old[0]), hi.max(old[1]));
+            for m in &moved {
+                (lo, hi) = (lo.min(m.old.0), hi.max(m.old.1));
+                for o in &m.olds {
+                    (lo, hi) = (lo.min(o.0), hi.max(o.1));
+                }
             }
             let pad = 1e-3 * lo.abs().max(hi.abs()).max_element().max(1.0);
             let scene = (lo - Vec3::splat(pad), hi + Vec3::splat(pad));
@@ -1207,6 +1394,15 @@ impl InstancedRenderer {
                 local,
                 origin,
                 light_boxes: lights.iter().map(light_box).collect(),
+                deforming: vec![false; tree.objects.len()],
+                lag_boxes: Vec::new(),
+                lag_frames: Vec::new(),
+                poses: vec![0; tree.objects.len()],
+                light_poses: Vec::new(),
+                catching: vec![None; tree.objects.len()],
+                next_light: vec![0; tree.objects.len()],
+                slices: 1,
+                updates: [(u32::MAX, 0); 8],
                 tree,
             }
         });

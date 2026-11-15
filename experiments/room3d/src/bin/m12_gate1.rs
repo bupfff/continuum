@@ -77,6 +77,10 @@
 //! - `M12_ACC=1`: criterion 2 alone;
 //! - `M12_TRACE=1`: frame statistics;
 //! - `M12_PROBE=1`: images of the blob through each path.
+//! - `M12_COARSE=1` (after the run): a blob of 32 × 16 segments. On 10,000
+//!   boulders it cost 1.51× still against 1.79× for 128 × 64, so the
+//!   number of texels re-baked, not the blob's triangles, is most of the
+//!   cost.
 
 use std::f32::consts::{PI, TAU};
 use std::path::Path;
@@ -96,7 +100,13 @@ const H: u32 = 720;
 /// The blob at frame `k`, outward.
 fn blob(k: usize) -> Surface {
     let k = k as f32;
-    let s = Surface::parametric(128, 64, |u, v| {
+    // (Development, `M12_COARSE=1`: 32 × 16 segments.)
+    let (nu, nv) = if std::env::var_os("M12_COARSE").is_some() {
+        (32, 16)
+    } else {
+        (128, 64)
+    };
+    let s = Surface::parametric(nu, nv, |u, v| {
         let (theta, phi) = (TAU * u, PI * v);
         let r = 1.0
             + 0.15 * (3.0 * theta + 0.05 * k).sin() * (2.0 * phi).sin()

@@ -1280,3 +1280,62 @@ fn sub_pixel_detail_settles_near_one_ray() {
         "sub-pixel detail's mean {ratio}× one ray's"
     );
 }
+
+/// Deforming geometry (`RendererOptions::deforming`, M12): a geometry posed
+/// through `Renderer::set_vertices` settles, once its lighting has caught
+/// up (lagging within the bake budget, M12 gate 2), to the image of the
+/// same renderer built with that pose as its rest pose; and the pose shows.
+#[test]
+fn deforming_geometry_catches_up() {
+    let s = scene(DVec3::ZERO);
+    let options = || RendererOptions {
+        cache_options: CacheOptions {
+            frame_target_ms: 0.0,
+            pages: 1 << 15,
+            ..Default::default()
+        },
+        deforming: vec![2],
+        ..Default::default()
+    };
+    // The spheres, half again as large.
+    let posed: Vec<[Vec3; 3]> = s.geometries[2]
+        .triangles
+        .iter()
+        .map(|t| t.map(|v| v * 1.5))
+        .collect();
+    let settle = |r: &mut Renderer, view: &wgpu::TextureView| {
+        let mut frames = 0;
+        while frames < 3_000 && !r.is_settled(8) {
+            r.render(camera(), view);
+            frames += 1;
+        }
+        assert!(r.is_settled(8), "not settled after {frames} frames");
+        r.read_colors()
+    };
+    let mut r = renderer(kernel(), &s, DVec3::ZERO, options());
+    let view = target(&r);
+    let rest = settle(&mut r, &view);
+    r.set_vertices(2, posed.clone(), s.geometries[2].normals.clone());
+    // (Past the settled state of the rest pose first.)
+    for _ in 0..16 {
+        r.render(camera(), &view);
+    }
+    let moved = settle(&mut r, &view);
+    let mut built = s.clone();
+    built.geometries[2].triangles = posed;
+    let mut b = renderer(kernel(), &built, DVec3::ZERO, options());
+    let view_b = target(&b);
+    let reference = settle(&mut b, &view_b);
+    dump("deforming", &moved);
+    let d = difference(&moved, &reference);
+    let shown = difference(&rest, &reference);
+    eprintln!("deformed against built for the pose: {d:?}; the rest pose against it: {shown:?}");
+    assert!(
+        d.relative_rmse <= 0.01,
+        "posed geometry far from built: {d:?}"
+    );
+    assert!(
+        shown.relative_rmse >= 0.05,
+        "the pose does not show: {shown:?}"
+    );
+}

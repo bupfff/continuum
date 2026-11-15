@@ -43,6 +43,30 @@ const EVICT_PER_FRAME: usize = 2_048;
 const EVICT_AGE: u32 = 64;
 /// The adaptive bake budget's floor and starting point (cones per frame).
 const MIN_BUDGET: f32 = 1_000.0;
+/// An object moved this frame, for the cache's stale pass: its world box the
+/// frame before and now; for deforming geometry (M12 gate 2), per light the
+/// box when that light's lighting last caught up (empty: the frame
+/// before's for every light); the lights whose lighting this move updates
+/// (a bit each; all for rigid movers), those its own pages re-bake for, and
+/// the slice of the shadows re-baked.
+pub(crate) struct Moved {
+    pub object: u32,
+    pub old: (Vec3, Vec3),
+    pub new: (Vec3, Vec3),
+    pub olds: Vec<(Vec3, Vec3)>,
+    pub mask: u32,
+    /// The lights its own pages re-bake for (whole pages).
+    pub own: u32,
+    /// For deforming geometry, which slice of the masked lights' shadows
+    /// this frame re-bakes: the slice, of how many, along which axis, over
+    /// which range (the first and last slices open past it, so every texel
+    /// lies in one).
+    pub slice: Option<(u32, u32, usize, f32, f32)>,
+}
+
+/// The most frames a light's lighting near a deforming object may lag its
+/// pose under [`CacheOptions::deforming_budget`] (M12 gate 2).
+pub const DEFORMING_MAX_LAG: u32 = 16;
 const START_BUDGET: f32 = 8_000.0;
 /// Longest probe sequence the shader follows.
 const MAX_PROBE: usize = 64;
@@ -200,6 +224,15 @@ pub struct CacheOptions {
     /// 3.03× on the field from 150 m up, where half the pixels are edges
     /// (compute rays: 1.84× and 24×).
     pub edge_rays: bool,
+    /// The texel–light cones a frame may re-bake for deforming geometry
+    /// (M12 gate 2; `RendererOptions::deforming`), decided by the user on
+    /// 2026-11-15: lighting near a deforming object updates light by light,
+    /// in turn, as often as this allows (each light at least every
+    /// [`DEFORMING_MAX_LAG`] frames), while its shape is current every
+    /// frame. Exactness costs about 10× the frame when such an object is
+    /// large on screen (M12 gate 1). 0: every light, every frame (exact,
+    /// as rigid movers are).
+    pub deforming_budget: u32,
     /// With `edge_rays` through ray queries: 4 quarter-rays per edge pixel,
     /// or 2 (one diagonal pair, alternating from pixel to pixel), averaged
     /// with the pixel's own ray.
@@ -264,6 +297,7 @@ impl Default for CacheOptions {
             emission_bounce: true,
             indirect_sample_cost: 8,
             edge_rays: false,
+            deforming_budget: 512,
             edge_samples: 4,
             error_probes: 0,
             glossy_rays: true,
@@ -1613,6 +1647,16 @@ impl VirtualCache {
     }
 
     /// The latest frame whose shading has been read back.
+    /// [`CacheOptions::deforming_budget`] and the frame being planned (M12
+    /// gate 2).
+    pub(crate) fn deforming_budget(&self) -> u32 {
+        self.options.deforming_budget
+    }
+
+    pub(crate) fn frame_index(&self) -> u32 {
+        self.frame
+    }
+
     pub(crate) fn stats(&self) -> CacheStats {
         if self.latest == 0 {
             return CacheStats::default();
@@ -1916,7 +1960,7 @@ impl VirtualCache {
     /// shadow regions' lo and hi.
     pub(crate) fn set_moved(
         &mut self,
-        moved: &[(u32, [Vec3; 2], [Vec3; 2])],
+        moved: &[Moved],
         lights: &[(Vec3, Vec3)],
         scene: (Vec3, Vec3),
     ) {
@@ -1926,18 +1970,52 @@ impl VirtualCache {
         let mut unions = vec![empty; lights.len()];
         let mut all = empty;
         let mut entries = Vec::new();
-        for (object, old, new) in moved {
-            let (old, new) = ((old[0], old[1]), (new[0], new[1]));
+        for m in moved {
+            let new = m.new;
+            // The old box a light is tested with: where the object was when
+            // that light's lighting last caught up with it (the frame
+            // before, but for deforming objects' lagging lights).
+            let old_of = |l: usize| m.olds.get(l).copied().unwrap_or(m.old);
+            let mut old = m.old;
+            for l in 0..lights.len() {
+                if m.mask & (1 << l) != 0 {
+                    old = grow(old, old_of(l));
+                }
+            }
             all = grow(grow(all, old), new);
             let next = self.mover_ids.len() as u32;
-            let id = *self.mover_ids.entry(*object).or_insert(next);
-            entries.push(v4(old.0, f32::from_bits(*object)));
+            let id = *self.mover_ids.entry(m.object).or_insert(next);
+            entries.push(v4(old.0, f32::from_bits(m.object)));
             entries.push(v4(old.1, f32::from_bits(id)));
-            entries.push(v4(new.0, 0.0));
+            // The lights whose lighting this move updates (M12 gate 2).
+            entries.push(v4(new.0, f32::from_bits(m.own)));
             entries.push(v4(new.1, 0.0));
             for (l, light) in lights.iter().enumerate() {
-                for b in [old, new] {
-                    let r = crate::hierarchy::shadow_region(b, *light, scene).unwrap_or(empty);
+                let regions = [old_of(l), new].map(|b| {
+                    if m.mask & (1 << l) != 0 {
+                        crate::hierarchy::shadow_region(b, *light, scene).unwrap_or(empty)
+                    } else {
+                        empty
+                    }
+                });
+                // A slice: the space between two planes across `axis`.
+                let clip = m.slice.map(|(k, n, axis, from, to)| {
+                    let at = |i: u32| from + (to - from) * i as f32 / n as f32;
+                    let (mut lo, mut hi) = (Vec3::splat(f32::MIN), Vec3::splat(f32::MAX));
+                    if k > 0 {
+                        lo[axis] = at(k);
+                    }
+                    if k + 1 < n {
+                        hi[axis] = at(k + 1);
+                    }
+                    (lo, hi)
+                });
+                for r in regions {
+                    let r = match clip {
+                        Some(c) if r.0.x <= r.1.x => (r.0.max(c.0), r.1.min(c.1)),
+                        _ => r,
+                    };
+                    let r = if r.0.cmple(r.1).all() { r } else { empty };
                     if r.0.x <= r.1.x {
                         unions[l] = grow(unions[l], r);
                     }

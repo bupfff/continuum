@@ -3784,12 +3784,20 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
     // A page on a moved object (it lies within the moved boxes' union) is
     // stale whole.
     var own = false;
+    // The lights its move updates (M12 gate 2: a deforming object's lights
+    // in turn; all for rigid movers).
+    var own_mask = 0u;
     if (boxes_meet(page, moved_box(2u * lights_n))) {
         for (var k = 0u; k < vc.movers.x; k++) {
-            if (bitcast<u32>(moved[first + k * stride].w) == m) { own = true; }
+            if (bitcast<u32>(moved[first + k * stride].w) == m) {
+                own = true;
+                own_mask = bitcast<u32>(moved[first + k * stride + 2u].w);
+            }
         }
     }
-    if (own) {
+    // (A deforming object's lights catching up in slices update none of
+    // its pages whole: its texels take the test below, M12 gate 2.)
+    if (own && own_mask != 0u) {
         if (!visible) {
             mark_invalid(s);
             return;
@@ -3799,17 +3807,21 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
             mark_invalid(s);
             return;
         }
-        let j = append_jobs(PAGE_TEXELS * lights_n);
+        let updated = countOneBits(own_mask & ((1u << lights_n) - 1u));
+        let j = append_jobs(PAGE_TEXELS * updated);
         if (j == NONE) {
             atomicAdd(&mover_stats[3], 1u);
             fail_entry(entry, s);
             return;
         }
         atomicAdd(&mover_stats[6], 1u);
+        var at = j;
         for (var l = 0u; l < lights_n; l++) {
+            if ((own_mask & (1u << l)) == 0u) { continue; }
             for (var k = 0u; k < PAGE_TEXELS; k++) {
-                bake_jobs[j + l * PAGE_TEXELS + k] = vec2<u32>(entry, k | (l << 8u));
+                bake_jobs[at + k] = vec2<u32>(entry, k | (l << 8u));
             }
+            at += PAGE_TEXELS;
         }
         // With a sky: the page moved with its object, so its sky shows the
         // guess until re-baked (listed; the CPU waits until it stops).
