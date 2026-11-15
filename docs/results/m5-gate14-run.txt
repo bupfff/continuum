@@ -1,0 +1,9 @@
+near: 1. frames from an empty cache, after the first 10: max 32.8 ms (at most 100), 99th percentile 18.7 ms (at most 33.3): PASS; mean 10.9 ms; first 10 [31.3, 6.1, 27.9, 8.5, 6.5, 6.5, 8.2, 6.7, 8.0, 6.2] ms; settled 2826 frames later
+20 m up: 1. frames from an empty cache, after the first 10: max 24.9 ms (at most 100), 99th percentile 19.2 ms (at most 33.3): PASS; mean 11.3 ms; first 10 [54.2, 9.1, 9.5, 8.6, 8.5, 9.6, 9.1, 8.4, 7.8, 7.7] ms; settled 2748 frames later
+3. M5 gate 6's three lights at the field's camera, per-pixel cones: 0 pixels differ from no window clipped (none allowed): PASS
+near: 2. per-pixel cones (16×16, 320×180) vs Cycles (4,096 spp, 7 s), surfaces: 4.10% (at most 3%): FAIL; 10796 pixels apart
+near (reported): the panel alone vs Cycles: 648.48%
+near (reported): the cache's settled image vs per-pixel cones: 7.25%
+20 m up: 2. per-pixel cones (16×16, 320×180) vs Cycles (4,096 spp, 8 s), surfaces: 1.52% (at most 3%): PASS; 562 pixels apart
+20 m up (reported): the cache's settled image vs per-pixel cones: 13.03%
+Verdict: FAIL

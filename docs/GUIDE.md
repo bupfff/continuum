@@ -194,6 +194,13 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   motion is not measured. Lights seen directly are drawn by the bins
   their light covers, behind what lies in front, at 0.15–0.21× one ray's
   error near them and no measurable cost (M13 G14).
+- **Surfaces very close to a large light** (centimetres from a light
+  tens of metres across, such as objects resting on a glowing floor) are
+  lit approximately. Their shadow cones are clipped and capped so that
+  frames stay bounded (M5 G14: at most about 33 ms from an empty cache,
+  where they took seconds before), and near such a light the shading is
+  about 4% from Cycles. Boulders resting on the light come out too dark.
+  Lights of ordinary size and distance are unaffected (bit-identical).
 - **The sky** traces hardware rays where camera rays do
   (`CacheOptions::sky_rays`, the default): views of the boulder field warm
   in 166–400 frames from an empty cache (M5 G13). With movers, streamed
