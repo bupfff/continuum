@@ -168,23 +168,6 @@ fn hw_trace(eye: vec3<f32>, dir: vec3<f32>, t_min: f32) -> vec3<u32> {
     return vec3<u32>(o.x, cam_tri(o.x, o.y, hit.primitive_index), bitcast<u32>(hit.t));
 }
 
-// The opacity at world point `p` on triangle `t` of object `m`: 1 unless
-// alpha-blended (M10 gate 16; its factor in its material's second word's
-// z, w set), then the factor times its base color texture's alpha.
-fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
-    let mat = materials[2u * m + 1u];
-    if (mat.w == 0u) { return 1.0; }
-    var a = bitcast<f32>(mat.z);
-    let layer = object_texture[m];
-    if (layer != NONE) {
-        let b = barycentric(m, t, p);
-        let uv = tri_tex[3u * t] * b.x + tri_tex[3u * t + 1u] * b.y + tri_tex[3u * t + 2u] * b.z;
-        let size = f32(textureDimensions(base_color).x);
-        a *= textureSampleLevel(base_color, base_sampler, wrap_uv(m, SLOT_BASE, uv, size, 0.0), i32(layer), 0.0).w;
-    }
-    return clamp(a, 0.0, 1.0);
-}
-
 // Appends a record to the extra samples' list for `vc_shade_edges`, at the
 // stats' last counter, five words a record: up to four samples (object,
 // triangle, distance bits, weight bits), then the pixel, its own sample's
@@ -198,32 +181,38 @@ fn list_extra(pixel: u32, samples: array<vec4<u32>, 4>, n: u32, own_weight: f32,
 }
 
 // The layers behind camera hit `own` (object, triangle, distance bits) if
-// it is alpha-blended (M10 gate 16), listed for `vc_shade_edges`: the ray
-// traces on through blended surfaces, front faces only, each layer weighing
-// its opacity times what the layers before let through; the fourth takes
-// what is left. Whether the pixel was listed.
-fn list_layers(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) -> bool {
-    if (own.x == NONE) { return false; }
+// it is alpha-blended (M10 gate 16) or transmissive (M16), listed for
+// `vc_shade_edges` as a layered record (the samples' word AA_LAYERS): the
+// own hit first, then up to three behind it. The ray traces on through
+// blended and transmissive surfaces, front faces only (thin glass: straight
+// on), while they let enough through; the shading pass weighs each layer.
+fn list_layers(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
+    if (own.x == NONE) { return; }
+    let tr = transmission_of(own.x);
     let first = hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z));
-    if (first >= 1.0) { return false; }
+    if (first >= 1.0 && tr <= 0.0) { return; }
     var samples: array<vec4<u32>, 4>;
-    var n = 0u;
-    var through = 1.0 - first;
+    samples[0] = vec4<u32>(own, 0u);
+    var n = 1u;
+    var through = select(1.0 - first, 0.96 * tr, tr > 0.0);
     var t = bitcast<f32>(own.z);
     loop {
         if (n >= 4u || through <= 1e-4) { break; }
         let hit = hw_trace(eye, dir, t * (1.0 + 1e-5) + 1e-4);
-        var a = 1.0;
-        if (hit.x != NONE && n < 3u) { a = hw_opacity(hit.x, hit.y, eye + dir * bitcast<f32>(hit.z)); }
-        let weight = through * a;
-        samples[n] = vec4<u32>(hit, bitcast<u32>(weight));
+        samples[n] = vec4<u32>(hit, 0u);
         n++;
-        through -= weight;
-        if (hit.x == NONE || a >= 1.0) { break; }
+        if (hit.x == NONE) { break; }
+        let ht = transmission_of(hit.x);
+        if (ht > 0.0) {
+            through *= 0.96 * ht;
+        } else {
+            let a = hw_opacity(hit.x, hit.y, eye + dir * bitcast<f32>(hit.z));
+            if (a >= 1.0) { break; }
+            through *= 1.0 - a;
+        }
         t = bitcast<f32>(hit.z);
     }
-    list_extra(pixel, samples, n, first, 0xffffu);
-    return atomicLoad(&g6_state[27]) != 0u;
+    list_extra(pixel, samples, n, 1.0, LAYERED);
 }
 
 // `hw_visibility` with alpha blending (M10 gate 19): a pixel whose hit is
@@ -257,7 +246,7 @@ fn hw_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eye = camera.eye.xyz;
     let own = vis[pixel];
     let dir = camera_dir(gid);
-    if (own.x != NONE && hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z)) < 1.0) { return; }
+    if (own.x != NONE && (hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z)) < 1.0 || transmission_of(own.x) > 0.0)) { return; }
     if (!is_edge(gid, w, h)) { return; }
     // Two samples (`vc.indirect.w` 3): one diagonal pair of quarters,
     // alternating from pixel to pixel, with the pixel's own ray; four
@@ -335,7 +324,7 @@ fn aa_is_edge(gid: vec3<u32>) -> bool {
     let me = vis[gid.y * w + gid.x];
     let dir = camera_dir(gid);
     let pm = camera.eye.xyz + dir * bitcast<f32>(me.z);
-    if (me.x != NONE && me.w == 0u && hw_opacity(me.x, me.y, pm) < 1.0) { return false; }
+    if (me.x != NONE && me.w == 0u && (hw_opacity(me.x, me.y, pm) < 1.0 || transmission_of(me.x) > 0.0)) { return false; }
     aa_normal_known = false;
     for (var k = 1u; k < 9u; k += 2u) {
         let x = i32(gid.x) + i32(k % 3u) - 1;
@@ -475,6 +464,25 @@ fn aa_sample_resolve(li: u32, pixel: u32, k: u32, j: u32, hit: vec3<u32>, back: 
     if (aa_same_pixel(s, ps, sd, at.x, at.y)) {
         aa_wg_colour[li] = colors[pixel].xyz;
         aa_wg_record[li].y = 1u;
+        return;
+    }
+    // A surface camera rays see through (blending, transmission): shading
+    // it alone would leave out what lies behind, so the sample takes the
+    // colour of a neighbour that sees that object (layers and all), or
+    // else the pixel's.
+    if (s.x != NONE && s.w == 0u && sees_through(s.x)) {
+        var colour = colors[pixel].xyz;
+        for (var k = 1u; k < 9u; k += 2u) {
+            let x = i32(at.x) + i32(k % 3u) - 1;
+            let y = i32(at.y) + i32(k / 3u) - 1;
+            if (x < 0 || y < 0 || x >= i32(w) || y >= i32(h)) { continue; }
+            let q = u32(y) * w + u32(x);
+            if (vis[q].x == s.x && vis[q].w == 0u) {
+                colour = colors[q].xyz;
+                break;
+            }
+        }
+        aa_wg_colour[li] = colour;
         return;
     }
     aa_wg_colour[li] = vec3<f32>(0.0);

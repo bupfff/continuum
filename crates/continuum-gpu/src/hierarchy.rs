@@ -481,11 +481,17 @@ pub(crate) fn flatten_instanced(
         let Some(o) = objects.iter().find(|o| o.geometry == g) else {
             continue;
         };
-        if o.clear <= 0.0 {
+        if o.clear == 0.0 {
             continue;
         }
         let end = roots.get(k + 1).map_or(flat.blas.len() as u32, |r| r.1);
-        let opacity = 1.0 - o.clear;
+        // Blending: its opacity; transmission (M16, `clear` below zero):
+        // what passes at normal incidence.
+        let opacity = if o.clear > 0.0 {
+            1.0 - o.clear
+        } else {
+            1.0 - 0.96 * -o.clear
+        };
         for c in
             &mut flat.blas_cov[root as usize * COVERAGE_SAMPLES..end as usize * COVERAGE_SAMPLES]
         {

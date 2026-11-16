@@ -79,6 +79,7 @@ fn room() -> (InstancedScene, Vec<Light>, Camera) {
         geometry_emission: Vec::new(),
         geometry_emissive_textures: Vec::new(),
         geometry_blend: Vec::new(),
+        geometry_transmission: Vec::new(),
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),

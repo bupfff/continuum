@@ -1645,7 +1645,7 @@ impl MaskConeKernel {
                 rotation: i.rotation,
                 scale: i.scale,
                 translation: (i.position - origin).as_vec3(),
-                clear: scene.blend_clear(i.geometry),
+                clear: scene.instance_clear(i),
             })
             .collect();
         let (mut flat, xforms, mut bounds, geometry_ranges) =
@@ -1809,19 +1809,23 @@ impl MaskConeKernel {
                     e[2] | layer << 16,
                     mr,
                     emissive_of(i),
-                    // Alpha blending (M10 gate 16): the opacity factor, and 1.
-                    scene
+                    // Alpha blending (M10 gate 16): the opacity factor, and
+                    // 1; transmission (M16): its factor, and 2.
+                    match scene.geometry_blend.get(i.geometry).copied().flatten() {
+                        Some(o) => o.clamp(0.0, 1.0).to_bits(),
+                        None => scene.transmission(i.geometry).to_bits(),
+                    },
+                    if scene
                         .geometry_blend
                         .get(i.geometry)
-                        .copied()
-                        .flatten()
-                        .map_or(0, |o| o.clamp(0.0, 1.0).to_bits()),
-                    scene
-                        .geometry_blend
-                        .get(i.geometry)
-                        .copied()
-                        .flatten()
-                        .is_some() as u32,
+                        .is_some_and(|b| b.is_some())
+                    {
+                        1
+                    } else if scene.transmission(i.geometry) > 0.0 {
+                        2
+                    } else {
+                        0
+                    },
                 ]
             })
             .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0, 0, 0, 0, 0]))
@@ -2511,7 +2515,7 @@ impl MaskConeKernel {
                 rotation: i.rotation,
                 scale: i.scale,
                 translation: (i.position - origin).as_vec3(),
-                clear: scene.blend_clear(i.geometry),
+                clear: scene.instance_clear(i),
             })
             .collect();
         // Geometries with a proxy level are never seen by camera rays
@@ -3183,6 +3187,16 @@ pub struct InstancedScene {
     /// surfaces (a few layers, composited front to back); shadows from them
     /// keep the factor's share of the light. glTF's BLEND materials.
     pub geometry_blend: Vec<Option<f32>>,
+    /// Each geometry's transmission factor if it lets light through as thin
+    /// glass does (empty: none; M16; glTF's `KHR_materials_transmission`
+    /// without a volume). Its surface keeps its full specular reflection;
+    /// of the light it does not reflect, this share passes straight through
+    /// tinted by its base color, the rest is diffuse. With hardware camera
+    /// rays and the cache, pixels see through it (a few layers); shadows
+    /// from it keep its share of the light (untinted). Otherwise it shows
+    /// its surface alone. Not with alpha blending on the same geometry
+    /// (blending wins).
+    pub geometry_transmission: Vec<Option<f32>>,
     /// Each geometry's normal map, if any (empty: none; M10 gate 5): an
     /// index into `textures` of a tangent-space normal map (linear, OpenGL's
     /// convention as glTF specifies: green toward the image's top), read
@@ -3256,19 +3270,43 @@ impl Wrap {
 }
 
 impl InstancedScene {
-    /// One less geometry `g`'s opacity if it is alpha-blended (0: opaque;
-    /// M10 gate 16), as transforms carry it for shadows.
-    pub(crate) fn blend_clear(&self, g: usize) -> f32 {
-        self.geometry_blend
+    /// What transforms carry for instance `i`'s shadows: one less its
+    /// geometry's opacity if it is alpha-blended (M10 gate 16); for
+    /// transmission (M16) less than zero, its factor times its albedo's mean
+    /// negated (cones weigh each triangle by Fresnel's share at the cone's
+    /// angle); 0 for opaque.
+    pub(crate) fn instance_clear(&self, i: &Instance) -> f32 {
+        if let Some(o) = self.geometry_blend.get(i.geometry).copied().flatten() {
+            return 1.0 - o.clamp(0.0, 1.0);
+        }
+        let mean = (i.albedo.x + i.albedo.y + i.albedo.z) / 3.0;
+        -self.transmission(i.geometry) * mean.clamp(0.0, 1.0)
+    }
+
+    /// Geometry `g`'s transmission factor (0: none, or blended; M16).
+    pub(crate) fn transmission(&self, g: usize) -> f32 {
+        if self.geometry_blend.get(g).is_some_and(|b| b.is_some()) {
+            return 0.0;
+        }
+        self.geometry_transmission
             .get(g)
             .copied()
             .flatten()
-            .map_or(0.0, |o| 1.0 - o.clamp(0.0, 1.0))
+            .map_or(0.0, |t| t.clamp(0.0, 1.0))
+    }
+
+    /// Whether camera rays see through some geometry: alpha blending (M10
+    /// gate 16) or transmission (M16).
+    pub(crate) fn sees_through(&self) -> bool {
+        (0..self.geometries.len()).any(|g| {
+            self.geometry_blend.get(g).is_some_and(|b| b.is_some()) || self.transmission(g) > 0.0
+        })
     }
     /// The scene with alpha blending replaced by its fallback (M10 gate 16):
     /// a textured blended geometry cut at an alpha of 0.5 over its opacity
-    /// factor, an untextured one opaque. For renderers without blending
-    /// (no hardware camera rays, movers, or no cache).
+    /// factor, an untextured one opaque; transmissive geometry opaque (M16).
+    /// For renderers without blending (no hardware camera rays, movers, or
+    /// no cache).
     pub(crate) fn blend_as_mask(&self) -> InstancedScene {
         let mut s = self.clone();
         let n = s.geometries.len();
@@ -3282,6 +3320,7 @@ impl InstancedScene {
             }
         }
         s.geometry_blend.clear();
+        s.geometry_transmission.clear();
         s
     }
 

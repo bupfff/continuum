@@ -158,6 +158,64 @@ for g, path in enumerate(job["geometries"]):
         mat.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
         mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[2])
         surface = mix.outputs["Shader"]
+    elif (job.get("transmission") or [None] * len(job["geometries"]))[g] is not None:
+        # Transmission as thin glass (M16, glTF's KHR_materials_transmission
+        # without a volume): the opaque surface mixed by one less the factor
+        # with its specular layer alone (the Principled BSDF, base black)
+        # plus a Transparent BSDF passing the base color times one less the
+        # Fresnel reflectance: light goes straight through, and shadow rays
+        # pass tinted (no caustics).
+        t = job["transmission"][g]
+        spec = nodes.new("ShaderNodeBsdfPrincipled")
+        spec.distribution = "GGX"
+        spec.inputs["Base Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+        spec.inputs["Metallic"].default_value = 0.0
+        spec.inputs["Roughness"].default_value = material[1] if material else 0.0
+        spec.inputs["IOR"].default_value = 1.5
+        # Fresnel's reflectance the same from either side (thin glass; the
+        # Fresnel node takes 1 / IOR from behind, total internal reflection
+        # past 42°): Schlick's, F0 0.04, of |N·I|, as Continuum's shadows.
+        geometry = nodes.new("ShaderNodeNewGeometry")
+        cosine = nodes.new("ShaderNodeVectorMath")
+        cosine.operation = "DOT_PRODUCT"
+        mat.node_tree.links.new(geometry.outputs["Normal"], cosine.inputs[0])
+        mat.node_tree.links.new(geometry.outputs["Incoming"], cosine.inputs[1])
+        magnitude = nodes.new("ShaderNodeMath")
+        magnitude.operation = "ABSOLUTE"
+        mat.node_tree.links.new(cosine.outputs["Value"], magnitude.inputs[0])
+        grazing = nodes.new("ShaderNodeMath")
+        grazing.operation = "SUBTRACT"
+        grazing.inputs[0].default_value = 1.0
+        mat.node_tree.links.new(magnitude.outputs[0], grazing.inputs[1])
+        fifth = nodes.new("ShaderNodeMath")
+        fifth.operation = "POWER"
+        fifth.inputs[1].default_value = 5.0
+        mat.node_tree.links.new(grazing.outputs[0], fifth.inputs[0])
+        # 1 - F = 0.96 (1 - (1 - |N·I|)^5).
+        rest = nodes.new("ShaderNodeMath")
+        rest.operation = "SUBTRACT"
+        rest.inputs[0].default_value = 1.0
+        mat.node_tree.links.new(fifth.outputs[0], rest.inputs[1])
+        unreflected = nodes.new("ShaderNodeMath")
+        unreflected.operation = "MULTIPLY"
+        unreflected.inputs[1].default_value = 0.96
+        mat.node_tree.links.new(rest.outputs[0], unreflected.inputs[0])
+        tint = nodes.new("ShaderNodeMix")
+        tint.data_type = "RGBA"
+        tint.blend_type = "MULTIPLY"
+        tint.inputs["Factor"].default_value = 1.0
+        mat.node_tree.links.new(base_socket, tint.inputs["A"])
+        mat.node_tree.links.new(unreflected.outputs[0], tint.inputs["B"])
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        mat.node_tree.links.new(tint.outputs["Result"], transparent.inputs["Color"])
+        through = nodes.new("ShaderNodeAddShader")
+        mat.node_tree.links.new(spec.outputs["BSDF"], through.inputs[0])
+        mat.node_tree.links.new(transparent.outputs["BSDF"], through.inputs[1])
+        mix = nodes.new("ShaderNodeMixShader")
+        mix.inputs["Fac"].default_value = t
+        mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[1])
+        mat.node_tree.links.new(through.outputs["Shader"], mix.inputs[2])
+        surface = mix.outputs["Shader"]
     else:
         surface = bsdf.outputs["BSDF"]
     emission = (job.get("emission") or [None] * len(job["geometries"]))[g]
@@ -376,7 +434,7 @@ cy.diffuse_bounces = job["bounces"]
 cy.glossy_bounces = job["bounces"]
 cy.transmission_bounces = 0
 cy.volume_bounces = 0
-cy.transparent_max_bounces = 64 if any(c is not None for c in (job.get("alpha") or []) + (job.get("blend") or [])) else 0
+cy.transparent_max_bounces = 64 if any(c is not None for c in (job.get("alpha") or []) + (job.get("blend") or []) + (job.get("transmission") or [])) else 0
 cy.caustics_reflective = False
 cy.caustics_refractive = False
 cy.sample_clamp_direct = 0.0

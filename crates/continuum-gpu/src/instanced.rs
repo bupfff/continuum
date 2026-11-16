@@ -1324,20 +1324,20 @@ impl InstancedRenderer {
         moving_lights: &[usize],
         stream: Option<StreamOptions>,
     ) -> Self {
-        // Alpha blending needs the cache's extra-samples pass: hardware camera
-        // rays, no movers (M10 gate 16); otherwise its fallback.
+        // Alpha blending and transmission need the cache's extra-samples
+        // pass: hardware camera rays, no movers (M10 gate 16, M16);
+        // otherwise their fallback.
         let blending = cache.is_some()
             && kernel.uses_hardware_rays()
             && !kernel.pixel_cones.get()
             && movable.is_empty();
         let fallback;
-        let scene: &InstancedScene =
-            if !blending && scene.geometry_blend.iter().any(|b| b.is_some()) {
-                fallback = scene.blend_as_mask();
-                &fallback
-            } else {
-                scene
-            };
+        let scene: &InstancedScene = if !blending && scene.sees_through() {
+            fallback = scene.blend_as_mask();
+            &fallback
+        } else {
+            scene
+        };
         let cut = scene.with_cutouts();
         let scene: &InstancedScene = &cut;
         let device = kernel.device.clone();
@@ -1380,7 +1380,7 @@ impl InstancedRenderer {
                         rotation: i.rotation,
                         scale: i.scale,
                         translation: (i.position - origin).as_vec3(),
-                        clear: scene.blend_clear(i.geometry),
+                        clear: scene.instance_clear(i),
                     }
                 })
                 .collect();
@@ -1442,7 +1442,7 @@ impl InstancedRenderer {
             && cache.is_some_and(|o| o.sky_rays)
             && movable.is_empty()
             && stream.is_none()
-            && !scene.geometry_blend.iter().any(|b| b.is_some());
+            && !scene.sees_through();
         let visibility = hw.as_ref().map(|hw| {
             if hw.movers.is_some() {
                 (
@@ -1459,7 +1459,9 @@ impl InstancedRenderer {
         // Silhouette rays through ray queries (M7 gate 4): with the cache's
         // edge rays and hardware camera rays (not with movers, whose own
         // structure the pass does not trace).
-        let blend = scene.geometry_blend.iter().any(|b| b.is_some());
+        // Layers behind surfaces camera rays see through: alpha blending
+        // (M10 gate 16) and transmission (M16).
+        let blend = scene.sees_through();
         let hw_edges = cache.as_ref().is_some_and(|o| o.edge_rays || blend)
             && hw.as_ref().is_some_and(|hw| hw.movers.is_none());
         let shade_bindings = |list: &[u32]| {

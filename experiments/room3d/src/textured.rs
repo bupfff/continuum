@@ -284,6 +284,7 @@ impl Textured {
             geometry_emission: Vec::new(),
             geometry_emissive_textures: Vec::new(),
             geometry_blend: Vec::new(),
+            geometry_transmission: Vec::new(),
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
@@ -432,6 +433,37 @@ impl Textured {
                 roughness: 0.4,
             }),
         ];
+        self
+    }
+
+    /// M16 gate 1's glass: gate 16's two panes as thin transmissive glass,
+    /// smooth (roughness 0): a blue-tinted pane with transmission 0.9 and a
+    /// green one with 0.7, before the brick block and the boulders.
+    /// Double-sided (coincident reversed faces) for Continuum, whose cones
+    /// see only faces turned toward them; one-sided for Cycles, which would
+    /// pass light through both coincident faces.
+    pub fn with_transmission(mut self, double_sided: bool) -> Textured {
+        use continuum_gpu::Material;
+        self = self.with_glass(double_sided);
+        let n = self.scene.geometries.len();
+        let (a, b) = (n - 2, n - 1);
+        self.scene.geometry_blend = vec![None; n];
+        self.scene.geometry_textures.resize(n, None);
+        self.scene.geometry_textures[a] = None;
+        self.scene.geometry_textures[b] = None;
+        self.scene.geometry_transmission = vec![None; n];
+        self.scene.geometry_transmission[a] = Some(0.9);
+        self.scene.geometry_transmission[b] = Some(0.7);
+        self.scene.geometry_materials.resize(n, None);
+        for g in [a, b] {
+            self.scene.geometry_materials[g] = Some(Material {
+                metallic: 0.0,
+                roughness: 0.0,
+            });
+        }
+        let m = self.scene.instances.len();
+        self.scene.instances[m - 2].albedo = Vec3::new(0.6, 0.8, 1.0);
+        self.scene.instances[m - 1].albedo = Vec3::new(0.55, 0.95, 0.6);
         self
     }
 

@@ -107,6 +107,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_emission: Vec::new(),
         geometry_emissive_textures: Vec::new(),
         geometry_blend: Vec::new(),
+        geometry_transmission: Vec::new(),
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),
@@ -459,6 +460,7 @@ fn gltf_round_trip_keeps_materials() {
     s.geometry_emission[0] = Vec3::new(0.5, 0.25, 0.125);
     s.geometry_emissive_textures = vec![Some(0), None, None];
     s.geometry_blend = vec![None, Some(0.4), None];
+    s.geometry_transmission = vec![None, None, Some(0.8)];
     s.texture_wrap = vec![[continuum_gpu::Wrap::Clamp, continuum_gpu::Wrap::Mirror]];
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
@@ -519,6 +521,13 @@ fn gltf_round_trip_keeps_materials() {
         let blend =
             |scene: &InstancedScene, g: usize| scene.geometry_blend.get(g).copied().flatten();
         assert_eq!(blend(&s, a.geometry), blend(&imported, b.geometry));
+        let transmission = |scene: &InstancedScene, g: usize| {
+            scene.geometry_transmission.get(g).copied().flatten()
+        };
+        assert_eq!(
+            transmission(&s, a.geometry),
+            transmission(&imported, b.geometry)
+        );
         let wrap = |scene: &InstancedScene, g: usize| {
             scene.geometry_textures.get(g).copied().flatten().map(|t| {
                 scene
@@ -889,6 +898,100 @@ fn anti_aliasing_takes_edges_toward_their_area() {
         unchanged * 10 >= one.len() * 8,
         "anti-aliasing changed more than edges: {unchanged} unchanged"
     );
+}
+
+/// Transmission (M16): thin glass shows what lies behind it. With the
+/// spheres as clear glass (transmission 1, white, smooth), their pixels come
+/// far nearer the image without them than with them opaque, and they still
+/// reflect (the image differs from the one without them). Needs hardware
+/// ray queries (opaque without).
+#[test]
+fn transmission_shows_what_lies_behind() {
+    let s = scene(DVec3::ZERO);
+    let mut glass = s.clone();
+    glass.geometry_materials = vec![
+        None,
+        None,
+        Some(continuum_gpu::Material {
+            metallic: 0.0,
+            roughness: 0.0,
+        }),
+    ];
+    let mut opaque = glass.clone();
+    glass.geometry_transmission = vec![None, None, Some(1.0)];
+    for i in glass.instances.iter_mut().filter(|i| i.geometry == 2) {
+        i.albedo = Vec3::ONE;
+    }
+    for i in opaque.instances.iter_mut().filter(|i| i.geometry == 2) {
+        i.albedo = Vec3::ONE;
+    }
+    let mut removed = s.clone();
+    removed.instances.retain(|i| i.geometry != 2);
+    let render = |scene: &InstancedScene| {
+        let mut r = renderer(
+            kernel(),
+            scene,
+            DVec3::ZERO,
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                anti_aliasing: false,
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        (r.read_colors(), r.hardware_rays())
+    };
+    let (with_glass, hardware) = render(&glass);
+    if !hardware {
+        eprintln!("no hardware ray queries: transmission shows opaque");
+        return;
+    }
+    let (with_opaque, _) = render(&opaque);
+    let (without, _) = render(&removed);
+    dump("glass", &with_glass);
+    dump("glass_opaque", &with_opaque);
+    dump("glass_removed", &without);
+    assert_finite_and_lit(&with_glass);
+    // The spheres' pixels: where the opaque spheres change the image.
+    let mean =
+        without.iter().flatten().map(|&x| x as f64).sum::<f64>() / (3 * without.len()) as f64;
+    let off = |a: &[f32; 3], b: &[f32; 3]| {
+        (0..3)
+            .map(|c| ((a[c] - b[c]) as f64).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let spheres: Vec<usize> = (0..without.len())
+        .filter(|&p| off(&with_opaque[p], &without[p]) > 0.05 * mean)
+        .collect();
+    let dist = |img: &Image| {
+        spheres
+            .iter()
+            .map(|&p| off(&img[p], &without[p]))
+            .sum::<f64>()
+            / spheres.len() as f64
+    };
+    let (d_glass, d_opaque) = (dist(&with_glass), dist(&with_opaque));
+    eprintln!(
+        "over {} sphere pixels, from the image without them: glass {d_glass:.4}, opaque {d_opaque:.4} ({:.3}x)",
+        spheres.len(),
+        d_glass / d_opaque
+    );
+    assert!(spheres.len() > 50, "spheres not found");
+    assert!(
+        d_glass < 0.5 * d_opaque,
+        "glass not see-through: {d_glass} against {d_opaque}"
+    );
+    assert!(d_glass > 0.0, "glass left no trace");
 }
 
 /// Emission adds to what a surface reflects, exactly, in the cached path

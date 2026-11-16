@@ -150,6 +150,10 @@ pub struct ImportStats {
     pub animation_channels_skipped: usize,
     /// Skinned or morphing meshes placed as deforming geometry (M12 gate 3).
     pub deforming: usize,
+    /// Parts of `KHR_materials_transmission` not yet imported (M16): a
+    /// transmission texture, or a volume (`KHR_materials_volume`; the
+    /// material renders as thin glass).
+    pub transmission_ignored: usize,
 }
 
 /// An imported scene: geometry, instances (world positions), the file's first
@@ -310,6 +314,8 @@ struct Primitive {
     emissive_texture: Option<u32>,
     /// Its opacity if alpha-blended (M10 gate 16).
     blend: Option<f32>,
+    /// Its transmission factor (M16), if any and not blended.
+    transmission: Option<f32>,
     /// Its alpha cutoff (over its base color texture's alpha).
     alpha_cutoff: Option<f32>,
     /// Its vertex colors per triangle corner (`COLOR_0`, M10 gate 17).
@@ -470,6 +476,24 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             .map(|c| c / factor[3].max(1e-6));
             let blend = (material.alpha_mode() == gltf::material::AlphaMode::Blend)
                 .then_some(factor[3].clamp(0.0, 1.0));
+            // Transmission (M16, `KHR_materials_transmission`), as thin glass:
+            // its factor (its texture and any volume not yet).
+            let transmission = material
+                .transmission()
+                .map(|t| {
+                    if t.transmission_texture().is_some() {
+                        stats.transmission_ignored += 1;
+                    }
+                    t.transmission_factor().clamp(0.0, 1.0)
+                })
+                .filter(|&t| t > 0.0 && blend.is_none());
+            if transmission.is_some()
+                && material
+                    .volume()
+                    .is_some_and(|v| v.thickness_factor() > 0.0)
+            {
+                stats.transmission_ignored += 1;
+            }
             let double_sided = material.double_sided();
             // Skin weights and morph targets (M12 gate 3), in glTF's axes.
             let d3 = |v: [f32; 3]| DVec3::from_array(v.map(f64::from));
@@ -571,6 +595,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 metallic_roughness,
                 emissive_texture,
                 blend,
+                transmission,
                 alpha_cutoff,
                 colors: colors.is_some().then_some(corner_colors),
                 deform,
@@ -1049,6 +1074,7 @@ fn push_geometry(
     scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
     scene.geometry_emissive_textures.push(p.emissive_texture);
     scene.geometry_blend.push(p.blend);
+    scene.geometry_transmission.push(p.transmission);
     scene.geometries.len() - 1
 }
 
@@ -1136,6 +1162,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_alpha_cutoff.push(p.alpha_cutoff);
     scene.geometry_emissive_textures.push(p.emissive_texture);
     scene.geometry_blend.push(p.blend);
+    scene.geometry_transmission.push(p.transmission);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -1252,6 +1279,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let mut meshes: Vec<String> = Vec::new();
     let mut materials: Vec<String> = Vec::new();
     let mut emissive_strength = false;
+    let mut transmission_used = false;
     let mut mesh_of: HashMap<(usize, [u32; 3]), usize> = HashMap::new();
     let mut nodes: Vec<String> = Vec::new();
     let (c, c_inv) = axes();
@@ -1332,16 +1360,33 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 {
                     write!(g, r#","emissiveTexture":{{"index":{t}}}"#).unwrap();
                 }
-                if strength > 1.0 {
-                    write!(
-                        g,
-                        r#","extensions":{{"KHR_materials_emissive_strength":{{"emissiveStrength":{strength:?}}}}}"#
-                    )
-                    .unwrap();
-                }
                 g
             } else {
                 String::new()
+            };
+            // Extensions: emissive strength; transmission (M16).
+            let mut extensions: Vec<String> = Vec::new();
+            if e.max_element() > 0.0 && strength > 1.0 {
+                extensions.push(format!(
+                    r#""KHR_materials_emissive_strength":{{"emissiveStrength":{strength:?}}}"#
+                ));
+            }
+            let transmission = scene
+                .geometry_transmission
+                .get(i.geometry)
+                .copied()
+                .flatten()
+                .filter(|_| scene.geometry_blend.get(i.geometry).copied().flatten().is_none());
+            if let Some(t) = transmission {
+                transmission_used = true;
+                extensions.push(format!(
+                    r#""KHR_materials_transmission":{{"transmissionFactor":{t:?}}}"#
+                ));
+            }
+            let glow = if extensions.is_empty() {
+                glow
+            } else {
+                format!(r#"{glow},"extensions":{{{}}}"#, extensions.join(","))
             };
             materials.push(format!(
                 r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{:?},{:?},{:?},{:?}],"metallicFactor":{:?},"roughnessFactor":{:?}{base}}}{glow}{bumps}{cut}}}"#,
@@ -1414,8 +1459,16 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
         views.join(","),
         bin.len()
     );
-    if emissive_strength {
-        json.push_str(r#","extensionsUsed":["KHR_materials_emissive_strength"]"#);
+    let used: Vec<&str> = [
+        (emissive_strength, "\"KHR_materials_emissive_strength\""),
+        (transmission_used, "\"KHR_materials_transmission\""),
+    ]
+    .iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, name)| *name)
+    .collect();
+    if !used.is_empty() {
+        write!(json, r#","extensionsUsed":[{}]"#, used.join(",")).unwrap();
     }
     if !images.is_empty() {
         write!(

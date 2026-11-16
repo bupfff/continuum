@@ -765,6 +765,66 @@ the shading pass's 29 storage buffers), and the camera pass's own
 back-face loop (deferred here to a pass of its own, it made the sample
 pass a third faster; the visibility pass might gain the same).
 
+#### Transmission (M16 design, 2026-11-15)
+
+The user's third gap, material breadth, starts with transmission: a glTF
+glass material (`KHR_materials_transmission`) rendered opaque, the gap a
+user would meet first. First thin glass (no volume: light passes straight
+through, as glTF defines it without `KHR_materials_volume`); refraction
+through volumes after.
+- **The model** (glTF's): of the light a surface's specular layer does not
+  reflect, its transmission factor passes through tinted by its base
+  colour, the rest is diffuse. The specular layer keeps its full
+  reflection (alpha blending scales it down with the surface, so glass
+  drawn as blending looks wrong at the edges and in reflections).
+- **Camera rays** reuse alpha blending's layers (M10 G19), now one
+  layered record for both: the visibility pass lists a pixel whose hit
+  is blended or transmissive with its own hit and up to three layers
+  behind (straight on, front faces only); the extra-samples pass shades
+  them front to back, each transmissive layer showing its surface
+  (`vc_hit_color`: reflection plus the diffuse share it keeps) and passing
+  `vc_transmit` (the tinted share) to the next.
+- **Shadows:** cones weigh a transmissive object's triangles by one less
+  its factor times its albedo's mean times one less Fresnel's reflectance
+  (Schlick's) at the cone's angle to each triangle; prefiltered nodes take
+  normal incidence. Untinted: the cache holds one channel per light, so
+  coloured shadows are not modelled.
+- **Anti-aliasing:** pixels seeing through are not listed; an edge
+  pixel's sample that meets a see-through surface takes a neighbour's
+  colour that sees it (layers and all).
+- **Import and save:** `KHR_materials_transmission`'s factor
+  (`InstancedScene::geometry_transmission`); its texture and a volume are
+  counted in `ImportStats::transmission_ignored` (rendered thin).
+- **Not:** without hardware camera rays, or with movers, transmissive
+  geometry is opaque (as blending's fallback); bounce and reflection rays
+  see it opaque; rough transmission is sharp; one interface per object
+  along a ray (a closed thin-walled mesh shows its front wall only).
+
+The Cycles reference mixes the opaque Principled BSDF by one less the
+factor with the specular layer alone (base black) plus a Transparent BSDF
+passing the base colour times one less Fresnel's reflectance, Schlick's
+of |N·I| (Blender's Fresnel node takes the inverted index from behind:
+total internal reflection darkened shadow rays reaching a pane from its
+back, a reference fault found in development). Panes are double-sided
+for Continuum (cones see only faces turned toward them) and one-sided for
+Cycles (which would pass light through both coincident faces), as M10
+G16.
+
+**Development** (`transmission_dev`, 640×360, Cycles at 1,024 samples,
+ours 4×4, bounce light on): 5.04% from Cycles (panes opaque 85.16%, as
+alpha blending with opacity one less the factor 13.74%); over the pixels
+transmission changes 7.94% (blending 23.34%), the rest mostly Cycles'
+tinted shadows; 1.19× the frame with the panes opaque.
+
+**Gate M16 G1** (`m16_gate1`): the textured scene with gate 16's panes as
+thin glass (`Textured::with_transmission`), 1280×720, bounce light on,
+ours 4×4 against Cycles at 4,096 samples. Criteria:
+1. **Speed** (timed first, five interleaved rounds): the warm frame at
+   most 1.3× the panes opaque (blending's bar).
+2. **Accuracy:** within 7% of Cycles, and over the pixels transmission
+   changes at most 0.5× the error of the panes drawn as alpha blending
+   with opacity one less the factor.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

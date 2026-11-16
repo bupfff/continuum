@@ -526,6 +526,11 @@ fn node_cone_test(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
 // The weight `rasterize` draws a triangle with: its object's opacity if it
 // is alpha-blended (M10 gate 16; set per mesh by `add_mesh_coverage_if`).
 var<private> tri_weight: f32 = 1.0;
+// A transmissive object's factor times its albedo's mean (M16; 0: none):
+// `cover_triangle` sets each triangle's weight to one less that times one
+// less Fresnel's reflectance (Schlick's, F0 0.04) at the cone's angle to
+// it, as thin glass passes light.
+var<private> tri_transmit: f32 = 0.0;
 
 // Rasterizes triangle `t` into `acc` if it faces the apex and may touch the cone.
 fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, t: u32) -> bool {
@@ -542,6 +547,11 @@ fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
     if (dot(n, direction(c, 0.0, 0.0)) >= 0.0 && dot(n, direction(c, 1.0, 0.0)) >= 0.0
         && dot(n, direction(c, 0.0, 1.0)) >= 0.0 && dot(n, direction(c, 1.0, 1.0)) >= 0.0) { return false; }
     if (!may_touch(c, v0, v1, v2)) { return false; }
+    if (tri_transmit > 0.0) {
+        let cos_t = abs(dot(normalize(n), normalize(direction(c, 0.5, 0.5))));
+        let f = 0.04 + 0.96 * pow(1.0 - cos_t, 5.0);
+        tri_weight = 1.0 - tri_transmit * (1.0 - f);
+    }
     return rasterize(c, acc, span, v0, v1, v2);
 }
 
@@ -657,7 +667,12 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
     let range = meshes[m];
     // An alpha-blended object covers by its opacity (M10 gate 16).
     tri_weight = 1.0;
-    if (range.w != NONE) { tri_weight = 1.0 - xforms[4u * range.w + 3u].z; }
+    tri_transmit = 0.0;
+    if (range.w != NONE) {
+        let clear = xforms[4u * range.w + 3u].z;
+        tri_weight = 1.0 - max(clear, 0.0);
+        tri_transmit = max(-clear, 0.0);
+    }
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
     // Cells written by this mesh's edges; the running sum is zero outside them.
@@ -4997,6 +5012,55 @@ fn vc_args_edges() {
     dispatch_args[11] = 1u;
 }
 
+// The extra samples' word of a layered record (`list_layers`): the
+// samples are the pixel's own hit and the layers behind it.
+const LAYERED: u32 = 0xfffeu;
+
+// A layered record (`list_layers`, M10 gate 16 and M16): the pixel's own
+// hit and the layers behind it along the pixel's centre ray, front to
+// back. An alpha-blended surface shows its opacity's share of its colour
+// and passes the rest; a transmissive one shows its surface (its
+// reflection and the diffuse share it keeps, `vc_hit_color`) and passes
+// what `vc_transmit` gives, tinted; anything else, or the last layer
+// listed, is opaque; a miss shows the sky.
+fn vc_shade_layers(i: u32, pixel: u32, at: vec3<u32>, n: u32) {
+    let dir = camera_dir_at(at, 0.0, 0.0);
+    sub_share = 1.0;
+    var sum = vec3<f32>(0.0);
+    var through = vec3<f32>(1.0);
+    for (var j = 0u; j < min(n, 4u); j++) {
+        let e = edge_hits[5u * i + j];
+        if (e.x == NONE) {
+            sum += through * sky_seen(dir);
+            break;
+        }
+        let hit = hit_from(e.xyz, dir);
+        let last = j + 1u == min(n, 4u) && j > 0u;
+        if (j == 0u && transmission_of(e.x) <= 0.0) {
+            // The pixel's own blended hit, as the shading pass shaded it.
+            let a = hw_opacity(e.x, e.y, camera.eye.xyz + dir * hit.distance);
+            sum = colors[pixel].xyz * a;
+            through = vec3<f32>(1.0 - a);
+            continue;
+        }
+        let c = vc_hit_color(dir, hit, false);
+        if (last) {
+            sum += through * c;
+            break;
+        }
+        if (transmission_of(e.x) > 0.0) {
+            sum += through * c;
+            through *= vc_transmit;
+        } else {
+            let a = hw_opacity(e.x, e.y, camera.eye.xyz + dir * hit.distance);
+            sum += through * a * c;
+            if (a >= 1.0) { break; }
+            through *= 1.0 - a;
+        }
+    }
+    colors[pixel] = vec4<f32>(sum, 1.0);
+}
+
 @compute @workgroup_size(8, 8)
 fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     lane = li;
@@ -5008,6 +5072,10 @@ fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocati
     let head = edge_hits[5u * i + 4u];
     let pixel = head.x;
     let at = vec3<u32>(pixel % w, pixel / w, 0u);
+    if (head.w == LAYERED) {
+        vc_shade_layers(i, pixel, at, head.z);
+        return;
+    }
     // The pixel's own sample, then each listed one, by its weight.
     var sum = colors[pixel].xyz * bitcast<f32>(head.y);
     for (var j = 0u; j < min(head.z, 4u); j++) {
@@ -5125,6 +5193,37 @@ fn vc_aa_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     aa_data[at + 5u] = bitcast<u32>(c.x);
     aa_data[at + 6u] = bitcast<u32>(c.y);
     aa_data[at + 7u] = bitcast<u32>(c.z);
+}
+
+// The opacity at world point `p` on triangle `t` of object `m`: 1 unless
+// alpha-blended (M10 gate 16; its factor in its material's second word's
+// z, w 1), then the factor times its base color texture's alpha.
+fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
+    let mat = materials[2u * m + 1u];
+    if (mat.w != 1u) { return 1.0; }
+    var a = bitcast<f32>(mat.z);
+    let layer = object_texture[m];
+    if (layer != NONE) {
+        let b = barycentric(m, t, p);
+        let uv = tri_tex[3u * t] * b.x + tri_tex[3u * t + 1u] * b.y + tri_tex[3u * t + 2u] * b.z;
+        let size = f32(textureDimensions(base_color).x);
+        a *= textureSampleLevel(base_color, base_sampler, wrap_uv(m, SLOT_BASE, uv, size, 0.0), i32(layer), 0.0).w;
+    }
+    return clamp(a, 0.0, 1.0);
+}
+
+// Object `m`'s transmission factor (M16; its material's second word's z,
+// w 2), 0 if none.
+fn transmission_of(m: u32) -> f32 {
+    let mat = materials[2u * m + 1u];
+    if (mat.w != 2u) { return 0.0; }
+    return bitcast<f32>(mat.z);
+}
+
+// Whether camera rays may see through object `m`: alpha blending (M10
+// gate 16) or transmission (M16).
+fn sees_through(m: u32) -> bool {
+    return materials[2u * m + 1u].w != 0u;
 }
 
 var<workgroup> fallback_count: atomic<u32>;
@@ -5407,8 +5506,15 @@ fn vc_error_probes(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local
 // cache: the page of the wanted mip, or failing that the finest coarser one
 // resident, or failing that unshadowed light. `sample`: the pixel samples
 // this frame (its request and statistics count).
+// What a transmissive surface (M16) shaded by `vc_hit_color` lets through
+// of the light behind it, per channel (0 for anything else): its factor of
+// the light it does not reflect, tinted by its base colour.
+var<private> vc_transmit: vec3<f32> = vec3<f32>(0.0);
+
 fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     let surface = camera.eye.xyz + dir * hit.distance;
+    let transmission = transmission_of(hit.mesh);
+    vc_transmit = vec3<f32>(0.0);
     let c = tri_vchart[hit.tri];
     let uv = chart_uv(hit.mesh, hit.tri, surface);
     // A deforming object's pages re-bake every frame it is posed: they
@@ -5440,7 +5546,12 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         atomicAdd(&vc_stats[2], 1u);
         if (f.found && f.mip == wanted) { atomicAdd(&vc_stats[3], 1u); }
     }
-    if (!pbr) { return base * e / 3.14159265 + glow; }
+    if (!pbr) {
+        // Transmission (M16) on a Lambertian surface: its share of the
+        // light passes, the rest is diffuse.
+        vc_transmit = base * transmission;
+        return base * (1.0 - transmission) * e / 3.14159265 + glow;
+    }
     // Metallic-roughness: the specular layer's directional albedo (the
     // split sum), glossy reflections along the mirror direction, and the
     // diffuse part less what the specular layer reflects.
@@ -5460,7 +5571,11 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         if (up < 0.01) { refl = normalize(refl + hit.normal * (0.01 - up)); }
         spec += albedo_spec * reflected_light(point, refl, mat.y);
     }
-    let diffuse = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
+    let unreflected = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
+    // Transmission (M16): of the light the specular layer does not reflect,
+    // its factor passes through (tinted), the rest is diffuse.
+    vc_transmit = unreflected * transmission;
+    let diffuse = unreflected * (1.0 - transmission);
     return diffuse * e / 3.14159265 + spec + glow;
 }
 
@@ -5749,7 +5864,12 @@ fn mesh_fragment(world_cone: Cone, m: u32, base: u32) -> Fragment {
     let range = meshes[m];
     // An alpha-blended object covers by its opacity (M10 gate 16).
     tri_weight = 1.0;
-    if (range.w != NONE) { tri_weight = 1.0 - xforms[4u * range.w + 3u].z; }
+    tri_transmit = 0.0;
+    if (range.w != NONE) {
+        let clear = xforms[4u * range.w + 3u].z;
+        tri_weight = 1.0 - max(clear, 0.0);
+        tri_transmit = max(-clear, 0.0);
+    }
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
     var span = vec2<u32>(68u, 0u);

@@ -1895,8 +1895,9 @@ pub(crate) fn lighting_layout(
         "streamed lighting levels need every geometry from the first with a proxy on to have one"
     );
     assert!(
-        (first..count).all(|g| scene.blend_clear(g) <= 0.0),
-        "streamed lighting levels with blending are not supported yet"
+        (first..count).all(|g| scene.geometry_blend.get(g).is_none_or(|b| b.is_none())
+            && scene.transmission(g) == 0.0),
+        "streamed lighting levels with blending or transmission are not supported yet"
     );
     let static_tris = scene.geometries[..first]
         .iter()
