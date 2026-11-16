@@ -489,6 +489,9 @@ pub(crate) fn flatten_instanced(
         // what passes at normal incidence.
         let opacity = if o.clear > 0.0 {
             1.0 - o.clear
+        } else if o.clear <= -2.0 {
+            // A volume: two surfaces.
+            1.0 - (0.96 * (-2.0 - o.clear)).powi(2)
         } else {
             1.0 - 0.96 * -o.clear
         };

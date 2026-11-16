@@ -285,6 +285,7 @@ impl Textured {
             geometry_emissive_textures: Vec::new(),
             geometry_blend: Vec::new(),
             geometry_transmission: Vec::new(),
+            geometry_volumes: Vec::new(),
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
@@ -464,6 +465,54 @@ impl Textured {
         let m = self.scene.instances.len();
         self.scene.instances[m - 2].albedo = Vec3::new(0.6, 0.8, 1.0);
         self.scene.instances[m - 1].albedo = Vec3::new(0.55, 0.95, 0.6);
+        self
+    }
+
+    /// M16's solid glass: a clear glass sphere (radius 0.45 m, index 1.5)
+    /// resting on the ground between the camera and the brick block, and a
+    /// glass block (0.6 × 0.4 × 0.6 m) tinted by its attenuation (to 0.5,
+    /// 0.8, 0.6 over 0.3 m), both smooth, transmission 1, white.
+    pub fn with_glass_solids(mut self) -> Textured {
+        use continuum_gpu::{Material, Volume};
+        let sphere = Surface::parametric(64, 32, |u, v| {
+            let (theta, phi) = (u * TAU, (v - 0.5) * std::f32::consts::PI);
+            Vec3::new(theta.cos() * phi.cos(), theta.sin() * phi.cos(), phi.sin()) * 0.45
+        });
+        let block = Surface::cuboid(Vec3::new(-0.3, -0.2, 0.0), Vec3::new(0.3, 0.2, 0.6));
+        let first = self.scene.geometries.len();
+        self.scene.geometries.extend([sphere, block]);
+        let n = self.scene.geometries.len();
+        self.scene.geometry_textures.resize(n, None);
+        self.scene.geometry_materials.resize(n, None);
+        self.scene.geometry_transmission.resize(n, None);
+        self.scene.geometry_volumes.resize(n, None);
+        for g in first..n {
+            self.scene.geometry_materials[g] = Some(Material {
+                metallic: 0.0,
+                roughness: 0.0,
+            });
+            self.scene.geometry_transmission[g] = Some(1.0);
+        }
+        self.scene.geometry_volumes[first] = Some(Volume::default());
+        self.scene.geometry_volumes[first + 1] = Some(Volume {
+            attenuation_color: Vec3::new(0.5, 0.8, 0.6),
+            attenuation_distance: 0.3,
+            ..Volume::default()
+        });
+        self.scene.instances.push(Instance {
+            geometry: first,
+            rotation: Mat3::IDENTITY,
+            scale: 1.0,
+            position: DVec3::new(-0.2, 3.0, 0.45),
+            albedo: Vec3::ONE,
+        });
+        self.scene.instances.push(Instance {
+            geometry: first + 1,
+            rotation: Mat3::from_rotation_z(0.4),
+            scale: 1.0,
+            position: DVec3::new(1.2, 3.5, 0.0),
+            albedo: Vec3::ONE,
+        });
         self
     }
 

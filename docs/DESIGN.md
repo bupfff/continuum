@@ -835,9 +835,49 @@ the shading pass keeps that (8 bits a channel in the colour's unused
 fourth word) and the extra-samples pass shades only the layers behind.
 **Gate 2 passed** (`docs/results/m16-gate2.md`): 1.217× the frame,
 5.08% from Cycles, 0.346× blending's error over the pane pixels.
-**Next in material breadth:** volumes (refraction through closed glass,
-`KHR_materials_volume`), then clearcoat and sheen, the index of
-refraction and specular extensions, and a second texture coordinate set.
+**Volumes (solid glass, design and development 2026-11-15):**
+`InstancedScene::geometry_volumes` (`Volume`: index of refraction,
+attenuation colour and distance; glTF's `KHR_materials_volume` with
+`KHR_materials_ior`, imported and saved). A camera ray meeting solid glass
+is listed as a record of its own: in the visibility pass it refracts in
+by the hit's interpolated normal, crosses the glass (dimmed by Beer's law
+over the path) to where it meets the surface again (a ray of either
+facing: from inside the far surface is a back face), reflects back in at
+total internal reflection (up to three times), refracts out, and goes on
+from just inside the far surface (so a surface touching the glass, the
+ground under it, is met at the contact); another object met inside, or
+touching the glass's surface within a hair (found by a second query), is
+seen with no surface between. The record holds the hit behind, what the
+far surface and path pass (8 bits a channel), the exit point and the
+direction; the extra-samples pass lights the hit behind from the exit
+point (`shade_from`). Shadows pass two surfaces at the cone's angle
+(Fresnel twice), untinted by the attenuation. The Cycles reference: the
+Principled BSDF with its transmission weight and index, a Volume
+Absorption for the attenuation, shadow rays meeting a Transparent BSDF at
+each surface (one less Schlick's reflectance), no caustics, transmission
+bounces allowed beyond the diffuse bounce (with the job's one bounce the
+glass rendered black).
+Development (`transmission_dev solids`, 640×360, Cycles 1,024 samples): a
+clear sphere and a tinted block 34.81% from Cycles unclamped (thin
+40.07%, opaque 108.87%), where about a dozen pixels of the sun's highlight
+on the smooth sphere decide it; with every channel clamped at 4× the
+image's mean 8.40% (thin 21.94%, opaque 87.86%), over the glass's pixels
+16.73% against thin's 44.43%; 1.09–1.33× the frame with them opaque.
+Left: the block's shadow (Cycles' is green from the attenuation).
+
+**Gate M16 G3** (`m16_gate3`): the textured scene with the glass sphere
+and block (`Textured::with_glass_solids`), 1280×720, bounce light on, ours
+4×4 against Cycles at 4,096 samples. Criteria:
+1. **Speed** (timed first, five interleaved rounds): the warm frame at
+   most 1.3× the same glass opaque.
+2. **Accuracy,** every channel of both images clamped at 4× the image's
+   mean (the sun's reflection in the smooth sphere covers a few pixels at
+   its full radiance, where its sub-pixel place decides the error): within
+   12% of Cycles, and over the pixels transmission changes at most 0.5×
+   the error of the same glass drawn thin.
+
+**Then in material breadth:** clearcoat and sheen, the index of refraction
+and specular extensions for surfaces, a second texture coordinate set.
 
 ## 3.5 What the 2D phase (M0) taught us
 

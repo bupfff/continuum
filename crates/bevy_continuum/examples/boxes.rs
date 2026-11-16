@@ -92,6 +92,7 @@ fn scene() -> ContinuumScene {
             geometry_emissive_textures: Vec::new(),
             geometry_blend: Vec::new(),
             geometry_transmission: Vec::new(),
+            geometry_volumes: Vec::new(),
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),

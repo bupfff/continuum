@@ -188,6 +188,10 @@ fn list_extra(pixel: u32, samples: array<vec4<u32>, 4>, n: u32, own_weight: f32,
 // on), while they let enough through; the shading pass weighs each layer.
 fn list_layers(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
     if (own.x == NONE) { return; }
+    if (is_volume(own.x)) {
+        list_volume(pixel, eye, dir, own);
+        return;
+    }
     let tr = transmission_of(own.x);
     let first = hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z));
     if (first >= 1.0 && tr <= 0.0) { return; }
@@ -213,6 +217,157 @@ fn list_layers(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
         t = bitcast<f32>(hit.z);
     }
     list_extra(pixel, samples, n, 1.0, LAYERED);
+}
+
+// Per object, its volume if it is solid glass (M16): attenuation colour and
+// distance, then the index of refraction.
+@group(0) @binding(111) var<storage, read> volumes: array<vec4<f32>>;
+
+// Fresnel's reflectance of a dielectric interface for light arriving at
+// cosine `c` to its normal, `eta` the index beyond over the index before
+// (1 at total internal reflection).
+fn fresnel_dielectric(c: f32, eta: f32) -> f32 {
+    let ci = abs(c);
+    let g2 = eta * eta - 1.0 + ci * ci;
+    if (g2 < 0.0) { return 1.0; }
+    let g = sqrt(g2);
+    let a = (g - ci) / (g + ci);
+    let b = (ci * (g + ci) - 1.0) / (ci * (g - ci) + 1.0);
+    return 0.5 * a * a * (1.0 + b * b);
+}
+
+// The nearest hit of either facing along a ray from `origin` (no culling:
+// a ray inside closed glass meets its far surface from behind): object,
+// triangle, distance bits.
+fn hw_trace_any(origin: vec3<f32>, dir: vec3<f32>) -> vec3<u32> {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x1u, 0xffu, 0.0, 3.4e38, origin, dir));
+    rayQueryProceed(&rq);
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind == 0u) { return vec3<u32>(NONE, NONE, bitcast<u32>(3.4e38)); }
+    let o = hw_object(hit.instance_custom_data, hit.geometry_index);
+    return vec3<u32>(o.x, cam_tri(o.x, o.y, hit.primitive_index), bitcast<u32>(hit.t));
+}
+
+// Another object than `m` within distance `reach` along a ray from
+// `origin` (object, triangle, distance bits; NONE if none): what a ray
+// inside glass `m` meets touching its surface.
+fn hw_other_within(origin: vec3<f32>, dir: vec3<f32>, reach: f32, m: u32) -> vec3<u32> {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x2u, 0xffu, 0.0, reach, origin, dir));
+    var best = vec3<u32>(NONE, NONE, bitcast<u32>(3.4e38));
+    while (rayQueryProceed(&rq)) {
+        let c = rayQueryGetCandidateIntersection(&rq);
+        let o = hw_object(c.instance_custom_data, c.geometry_index);
+        if (o.x != m && c.t < bitcast<f32>(best.z)) {
+            best = vec3<u32>(o.x, cam_tri(o.x, o.y, c.primitive_index), bitcast<u32>(c.t));
+        }
+    }
+    return best;
+}
+
+// The nearest front face along a ray from `origin` (not the eye):
+// object, triangle, distance bits.
+fn hw_trace_from(origin: vec3<f32>, dir: vec3<f32>) -> vec3<u32> {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_as, RayDesc(HW_RAY_FLAGS, 0xffu, 0.0, 3.4e38, origin, dir));
+    rayQueryProceed(&rq);
+    var hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind != 0u && !hw_front(hit.instance_custom_data, hit.geometry_index, hit.primitive_index, dir)) {
+        var fq: ray_query;
+        rayQueryInitialize(&fq, scene_as, RayDesc(HW_FRONT_FLAGS, 0xffu, 0.0, 3.4e38, origin, dir));
+        while (rayQueryProceed(&fq)) {
+            let c = rayQueryGetCandidateIntersection(&fq);
+            if (hw_front(c.instance_custom_data, c.geometry_index, c.primitive_index, dir)) { rayQueryConfirmIntersection(&fq); }
+        }
+        hit = rayQueryGetCommittedIntersection(&fq);
+    }
+    if (hit.kind == 0u) { return vec3<u32>(NONE, NONE, bitcast<u32>(3.4e38)); }
+    let o = hw_object(hit.instance_custom_data, hit.geometry_index);
+    return vec3<u32>(o.x, cam_tri(o.x, o.y, hit.primitive_index), bitcast<u32>(hit.t));
+}
+
+// A camera ray refracted through solid glass (M16), listed as a VOLUMED
+// record for `vc_shade_volume`: into the glass at the pixel's own hit (by
+// its interpolated normal), across it to where it meets the glass's
+// surface again (dimmed by the attenuation over the path), reflected back
+// in at total internal reflection (up to three times), out by refraction,
+// and on to what it meets. What the far surface and the path pass go in
+// the record (8 bits a channel); the near surface's share is the shading
+// pass's. Another object met inside (resting on the glass, or within it)
+// is seen from there with no surface between. A ray still inside after
+// three reflections passes straight on from the pixel's hit instead.
+fn list_volume(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
+    let m = own.x;
+    let t0 = bitcast<f32>(own.z);
+    let p0 = eye + dir * t0;
+    let att = volumes[2u * m];
+    let ior = volumes[2u * m + 1u].x;
+    let n0 = shading_normal(m, own.y, p0, -dir);
+    var d = refract(dir, n0, 1.0 / ior);
+    var origin = p0 - n0 * surface_offset(t0);
+    var far = vec3<f32>(1.0);
+    var exit = p0 + dir * surface_offset(t0);
+    var out = dir;
+    var through = false;
+    // Another object met inside the glass (resting on it or within it): seen
+    // through the glass from where the ray was, with no surface between.
+    var inside = vec3<u32>(NONE);
+    if (dot(d, d) > 0.0) {
+        for (var k = 0u; k < 4u; k++) {
+            var h = hw_trace_any(origin, d);
+            if (h.x == NONE) { break; }
+            var t = bitcast<f32>(h.z);
+            // A surface touching the glass's own (the ground under it) meets
+            // the ray first: no air between them.
+            if (h.x == m) {
+                let touching = hw_other_within(origin, d, t * (1.0 + 1e-4) + surface_offset(t0 + t), m);
+                if (touching.x != NONE) {
+                    h = touching;
+                    t = bitcast<f32>(h.z);
+                }
+            }
+            if (h.x != m) {
+                if (att.w < 3.0e38) { far *= pow(att.xyz, vec3<f32>(t / att.w)); }
+                inside = h;
+                exit = origin;
+                out = d;
+                through = true;
+                break;
+            }
+            let pe = origin + d * t;
+            if (att.w < 3.0e38) { far *= pow(att.xyz, vec3<f32>(t / att.w)); }
+            let ne = shading_normal(m, h.y, pe, -d);
+            let refracted = refract(d, ne, ior);
+            if (dot(refracted, refracted) == 0.0) {
+                // Total internal reflection: back into the glass.
+                d = reflect(d, ne);
+                origin = pe + ne * surface_offset(t0 + t);
+                continue;
+            }
+            far *= 1.0 - fresnel_dielectric(dot(d, ne), 1.0 / ior);
+            out = normalize(refracted);
+            // Just inside the far surface: the ray on skips it (a back face
+            // from there) and meets what lies beyond, even a surface
+            // touching it (glass resting on the ground).
+            exit = pe - out * surface_offset(t0 + t);
+            through = true;
+            break;
+        }
+    }
+    if (!through) {
+        far = vec3<f32>(1.0);
+        exit = p0 + dir * surface_offset(t0);
+        out = dir;
+    }
+    var behind = inside;
+    if (inside.x == NONE) { behind = hw_trace_from(exit, out); }
+    var samples: array<vec4<u32>, 4>;
+    samples[0] = vec4<u32>(own, 0u);
+    samples[1] = vec4<u32>(behind, pack4x8unorm(vec4<f32>(far, 0.0)));
+    samples[2] = vec4<u32>(bitcast<vec3<u32>>(exit), 0u);
+    samples[3] = vec4<u32>(bitcast<vec3<u32>>(out), 0u);
+    list_extra(pixel, samples, 4u, 1.0, VOLUMED);
 }
 
 // `hw_visibility` with alpha blending (M10 gate 19): a pixel whose hit is

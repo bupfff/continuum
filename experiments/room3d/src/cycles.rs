@@ -506,6 +506,27 @@ fn render_instanced_inner(
             }
         })
         .collect();
+    // Each transmissive geometry's volume (M16): [ior, r, g, b, distance]
+    // (distance 0: no attenuation), or null.
+    let volumes: Vec<String> = (0..scene.geometries.len())
+        .map(|g| {
+            match (
+                transmission[g].as_str(),
+                scene.geometry_volumes.get(g).copied().flatten(),
+            ) {
+                (t, Some(v)) if t != "null" => {
+                    let d = if v.attenuation_distance.is_finite() {
+                        v.attenuation_distance
+                    } else {
+                        0.0
+                    };
+                    let a = v.attenuation_color;
+                    format!("[{}, {}, {}, {}, {}]", v.ior, a.x, a.y, a.z, d)
+                }
+                _ => "null".to_string(),
+            }
+        })
+        .collect();
     // Each geometry's alpha cutoff (M10 gate 6), or null.
     let alpha: Vec<String> = (0..scene.geometries.len())
         .map(|g| {
@@ -519,7 +540,7 @@ fn render_instanced_inner(
         })
         .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "transmission": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "transmission": [{}], "volumes": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -533,6 +554,7 @@ fn render_instanced_inner(
         emission_textures.join(", "),
         blend.join(", "),
         transmission.join(", "),
+        volumes.join(", "),
         colors.join(", "),
         extensions.join(", "),
         instances.to_string_lossy(),

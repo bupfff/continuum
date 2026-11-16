@@ -158,6 +158,64 @@ for g, path in enumerate(job["geometries"]):
         mat.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
         mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[2])
         surface = mix.outputs["Shader"]
+    elif (job.get("volumes") or [None] * len(job["geometries"]))[g] is not None:
+        # Solid glass (M16, KHR_materials_volume): the Principled BSDF with
+        # its transmission weight and index of refraction, a Volume Absorption
+        # for the attenuation (coefficient -ln(colour) / distance a channel:
+        # density times one less its colour); shadow rays meet a Transparent
+        # BSDF at each surface passing the base colour times one less
+        # Schlick's Fresnel reflectance of |N·I| (no caustics: Continuum's
+        # shadows pass straight through).
+        t = job["transmission"][g]
+        ior, ar, ag, ab, dist = job["volumes"][g]
+        bsdf.inputs["Transmission Weight"].default_value = t
+        bsdf.inputs["IOR"].default_value = ior
+        geometry = nodes.new("ShaderNodeNewGeometry")
+        cosine = nodes.new("ShaderNodeVectorMath")
+        cosine.operation = "DOT_PRODUCT"
+        mat.node_tree.links.new(geometry.outputs["Normal"], cosine.inputs[0])
+        mat.node_tree.links.new(geometry.outputs["Incoming"], cosine.inputs[1])
+        magnitude = nodes.new("ShaderNodeMath")
+        magnitude.operation = "ABSOLUTE"
+        mat.node_tree.links.new(cosine.outputs["Value"], magnitude.inputs[0])
+        grazing = nodes.new("ShaderNodeMath")
+        grazing.operation = "SUBTRACT"
+        grazing.inputs[0].default_value = 1.0
+        mat.node_tree.links.new(magnitude.outputs[0], grazing.inputs[1])
+        fifth = nodes.new("ShaderNodeMath")
+        fifth.operation = "POWER"
+        fifth.inputs[1].default_value = 5.0
+        mat.node_tree.links.new(grazing.outputs[0], fifth.inputs[0])
+        rest = nodes.new("ShaderNodeMath")
+        rest.operation = "SUBTRACT"
+        rest.inputs[0].default_value = 1.0
+        mat.node_tree.links.new(fifth.outputs[0], rest.inputs[1])
+        unreflected = nodes.new("ShaderNodeMath")
+        unreflected.operation = "MULTIPLY"
+        unreflected.inputs[1].default_value = 0.96 * t
+        mat.node_tree.links.new(rest.outputs[0], unreflected.inputs[0])
+        tint = nodes.new("ShaderNodeMix")
+        tint.data_type = "RGBA"
+        tint.blend_type = "MULTIPLY"
+        tint.inputs["Factor"].default_value = 1.0
+        mat.node_tree.links.new(base_socket, tint.inputs["A"])
+        mat.node_tree.links.new(unreflected.outputs[0], tint.inputs["B"])
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        mat.node_tree.links.new(tint.outputs["Result"], transparent.inputs["Color"])
+        light_path = nodes.new("ShaderNodeLightPath")
+        mix = nodes.new("ShaderNodeMixShader")
+        mat.node_tree.links.new(light_path.outputs["Is Shadow Ray"], mix.inputs["Fac"])
+        mat.node_tree.links.new(bsdf.outputs["BSDF"], mix.inputs[1])
+        mat.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[2])
+        surface = mix.outputs["Shader"]
+        if dist > 0.0:
+            import math
+            sigma = [-math.log(max(c, 1e-6)) / dist for c in (ar, ag, ab)]
+            density = max(max(sigma), 1e-9)
+            absorb = nodes.new("ShaderNodeVolumeAbsorption")
+            absorb.inputs["Color"].default_value = (1.0 - sigma[0] / density, 1.0 - sigma[1] / density, 1.0 - sigma[2] / density, 1.0)
+            absorb.inputs["Density"].default_value = density
+            mat.node_tree.links.new(absorb.outputs["Volume"], out.inputs["Volume"])
     elif (job.get("transmission") or [None] * len(job["geometries"]))[g] is not None:
         # Transmission as thin glass (M16, glTF's KHR_materials_transmission
         # without a volume): the opaque surface mixed by one less the factor
@@ -434,6 +492,15 @@ cy.diffuse_bounces = job["bounces"]
 cy.glossy_bounces = job["bounces"]
 cy.transmission_bounces = 0
 cy.volume_bounces = 0
+if any(v is not None for v in (job.get("volumes") or [])):
+    # Solid glass (M16): no caustics, as Continuum's shadows pass straight
+    # through; rays cross it (two refractions, reflections inside) and still
+    # take the job's diffuse bounces beyond.
+    cy.caustics_refractive = False
+    cy.caustics_reflective = False
+    cy.transmission_bounces = 8
+    cy.glossy_bounces = max(job["bounces"], 4)
+    cy.max_bounces = job["bounces"] + 12
 cy.transparent_max_bounces = 64 if any(c is not None for c in (job.get("alpha") or []) + (job.get("blend") or []) + (job.get("transmission") or [])) else 0
 cy.caustics_reflective = False
 cy.caustics_refractive = False

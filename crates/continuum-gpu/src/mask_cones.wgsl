@@ -531,6 +531,9 @@ var<private> tri_weight: f32 = 1.0;
 // less Fresnel's reflectance (Schlick's, F0 0.04) at the cone's angle to
 // it, as thin glass passes light.
 var<private> tri_transmit: f32 = 0.0;
+// The object is solid glass (M16, a volume): light passes two surfaces, at
+// the same angle, as far as shadows go.
+var<private> tri_volume: bool = false;
 
 // Rasterizes triangle `t` into `acc` if it faces the apex and may touch the cone.
 fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, t: u32) -> bool {
@@ -550,7 +553,9 @@ fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<functio
     if (tri_transmit > 0.0) {
         let cos_t = abs(dot(normalize(n), normalize(direction(c, 0.5, 0.5))));
         let f = 0.04 + 0.96 * pow(1.0 - cos_t, 5.0);
-        tri_weight = 1.0 - tri_transmit * (1.0 - f);
+        var passes = tri_transmit * (1.0 - f);
+        if (tri_volume) { passes *= 1.0 - f; }
+        tri_weight = 1.0 - passes;
     }
     return rasterize(c, acc, span, v0, v1, v2);
 }
@@ -668,10 +673,16 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
     // An alpha-blended object covers by its opacity (M10 gate 16).
     tri_weight = 1.0;
     tri_transmit = 0.0;
+    tri_volume = false;
     if (range.w != NONE) {
         let clear = xforms[4u * range.w + 3u].z;
         tri_weight = 1.0 - max(clear, 0.0);
         tri_transmit = max(-clear, 0.0);
+        // A volume: at most -2 (two surfaces).
+        if (clear <= -2.0) {
+            tri_transmit = -2.0 - clear;
+            tri_volume = true;
+        }
     }
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }
@@ -5015,6 +5026,34 @@ fn vc_args_edges() {
 // The extra samples' word of a layered record (`list_layers`): the
 // samples are the pixel's own hit and the layers behind it.
 const LAYERED: u32 = 0xfffeu;
+// ... of a record of a ray refracted through solid glass (`list_volume`,
+// M16): the pixel's own hit; the hit behind the glass with what the glass
+// passes (its far surface's share and its attenuation, 8 bits a channel);
+// the point the ray left the glass; the direction it left in.
+const VOLUMED: u32 = 0xfffdu;
+
+// A record of a ray refracted through solid glass (M16): the pixel's own
+// surface as the shading pass shaded it, plus what lies behind, lit from
+// where the ray left the glass, through what the near surface passes (the
+// colour's fourth word) and what the glass and its far surface pass.
+fn vc_shade_volume(i: u32, pixel: u32) {
+    let own = colors[pixel];
+    let near = unpack4x8unorm(bitcast<u32>(own.w)).xyz;
+    let behind = edge_hits[5u * i + 1u];
+    let far = unpack4x8unorm(behind.w).xyz;
+    let exit = bitcast<vec3<f32>>(edge_hits[5u * i + 2u].xyz);
+    let out = bitcast<vec3<f32>>(edge_hits[5u * i + 3u].xyz);
+    sub_share = 1.0;
+    var c: vec3<f32>;
+    if (behind.x == NONE) {
+        c = sky_seen(out);
+    } else {
+        shade_from = vec4<f32>(exit, 1.0);
+        c = vc_hit_color(out, hit_from(behind.xyz, out), false);
+        shade_from = vec4<f32>(0.0);
+    }
+    colors[pixel] = vec4<f32>(own.xyz + near * far * c, 1.0);
+}
 
 // A layered record (`list_layers`, M10 gate 16 and M16): the pixel's own
 // hit and the layers behind it along the pixel's centre ray, front to
@@ -5085,6 +5124,10 @@ fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocati
     let at = vec3<u32>(pixel % w, pixel / w, 0u);
     if (head.w == LAYERED) {
         vc_shade_layers(i, pixel, at, head.z);
+        return;
+    }
+    if (head.w == VOLUMED) {
+        vc_shade_volume(i, pixel);
         return;
     }
     // The pixel's own sample, then each listed one, by its weight.
@@ -5224,11 +5267,16 @@ fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
 }
 
 // Object `m`'s transmission factor (M16; its material's second word's z,
-// w 2), 0 if none.
+// w 2, or 3 for a volume), 0 if none.
 fn transmission_of(m: u32) -> f32 {
     let mat = materials[2u * m + 1u];
-    if (mat.w != 2u) { return 0.0; }
+    if (mat.w != 2u && mat.w != 3u) { return 0.0; }
     return bitcast<f32>(mat.z);
+}
+
+// Whether object `m` is solid transmissive glass (M16, a volume).
+fn is_volume(m: u32) -> bool {
+    return materials[2u * m + 1u].w == 3u;
 }
 
 // Whether camera rays may see through object `m`: alpha blending (M10
@@ -5529,8 +5577,12 @@ fn vc_error_probes(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local
 // the light it does not reflect, tinted by its base colour.
 var<private> vc_transmit: vec3<f32> = vec3<f32>(0.0);
 
+// Where `vc_hit_color`'s ray starts if not at the eye (w 1; M16: the point
+// a ray refracted through glass leaves it).
+var<private> shade_from: vec4<f32> = vec4<f32>(0.0);
+
 fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
-    let surface = camera.eye.xyz + dir * hit.distance;
+    let surface = select(camera.eye.xyz, shade_from.xyz, shade_from.w > 0.5) + dir * hit.distance;
     let transmission = transmission_of(hit.mesh);
     vc_transmit = vec3<f32>(0.0);
     let c = tri_vchart[hit.tri];
@@ -5883,10 +5935,16 @@ fn mesh_fragment(world_cone: Cone, m: u32, base: u32) -> Fragment {
     // An alpha-blended object covers by its opacity (M10 gate 16).
     tri_weight = 1.0;
     tri_transmit = 0.0;
+    tri_volume = false;
     if (range.w != NONE) {
         let clear = xforms[4u * range.w + 3u].z;
         tri_weight = 1.0 - max(clear, 0.0);
         tri_transmit = max(-clear, 0.0);
+        // A volume: at most -2 (two surfaces).
+        if (clear <= -2.0) {
+            tri_transmit = -2.0 - clear;
+            tri_volume = true;
+        }
     }
     var acc: array<f32, 68>;
     for (var b = 0u; b < 68u; b++) { acc[b] = 0.0; }

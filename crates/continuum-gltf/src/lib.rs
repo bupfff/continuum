@@ -151,8 +151,7 @@ pub struct ImportStats {
     /// Skinned or morphing meshes placed as deforming geometry (M12 gate 3).
     pub deforming: usize,
     /// Parts of `KHR_materials_transmission` not yet imported (M16): a
-    /// transmission texture, or a volume (`KHR_materials_volume`; the
-    /// material renders as thin glass).
+    /// transmission texture.
     pub transmission_ignored: usize,
 }
 
@@ -316,6 +315,8 @@ struct Primitive {
     blend: Option<f32>,
     /// Its transmission factor (M16), if any and not blended.
     transmission: Option<f32>,
+    /// Its volume (M16), if transmissive with a thickness.
+    volume: Option<continuum_gpu::Volume>,
     /// Its alpha cutoff (over its base color texture's alpha).
     alpha_cutoff: Option<f32>,
     /// Its vertex colors per triangle corner (`COLOR_0`, M10 gate 17).
@@ -476,8 +477,10 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
             .map(|c| c / factor[3].max(1e-6));
             let blend = (material.alpha_mode() == gltf::material::AlphaMode::Blend)
                 .then_some(factor[3].clamp(0.0, 1.0));
-            // Transmission (M16, `KHR_materials_transmission`), as thin glass:
-            // its factor (its texture and any volume not yet).
+            // Transmission (M16, `KHR_materials_transmission`): its factor
+            // (its texture not yet); with a thickness
+            // (`KHR_materials_volume`), solid glass, its index of refraction
+            // from `KHR_materials_ior`.
             let transmission = material
                 .transmission()
                 .map(|t| {
@@ -487,13 +490,15 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     t.transmission_factor().clamp(0.0, 1.0)
                 })
                 .filter(|&t| t > 0.0 && blend.is_none());
-            if transmission.is_some()
-                && material
-                    .volume()
-                    .is_some_and(|v| v.thickness_factor() > 0.0)
-            {
-                stats.transmission_ignored += 1;
-            }
+            let volume = material
+                .volume()
+                .filter(|v| transmission.is_some() && v.thickness_factor() > 0.0)
+                .map(|v| continuum_gpu::Volume {
+                    ior: material.ior().unwrap_or(1.5),
+                    attenuation_color: Vec3::from_array(v.attenuation_color()),
+                    attenuation_distance: v.attenuation_distance(),
+                    thickness: v.thickness_factor(),
+                });
             let double_sided = material.double_sided();
             // Skin weights and morph targets (M12 gate 3), in glTF's axes.
             let d3 = |v: [f32; 3]| DVec3::from_array(v.map(f64::from));
@@ -596,6 +601,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 emissive_texture,
                 blend,
                 transmission,
+                volume,
                 alpha_cutoff,
                 colors: colors.is_some().then_some(corner_colors),
                 deform,
@@ -1075,6 +1081,7 @@ fn push_geometry(
     scene.geometry_emissive_textures.push(p.emissive_texture);
     scene.geometry_blend.push(p.blend);
     scene.geometry_transmission.push(p.transmission);
+    scene.geometry_volumes.push(p.volume);
     scene.geometries.len() - 1
 }
 
@@ -1163,6 +1170,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_emissive_textures.push(p.emissive_texture);
     scene.geometry_blend.push(p.blend);
     scene.geometry_transmission.push(p.transmission);
+    scene.geometry_volumes.push(p.volume);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -1280,6 +1288,8 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let mut materials: Vec<String> = Vec::new();
     let mut emissive_strength = false;
     let mut transmission_used = false;
+    let mut volume_used = false;
+    let mut ior_used = false;
     let mut mesh_of: HashMap<(usize, [u32; 3]), usize> = HashMap::new();
     let mut nodes: Vec<String> = Vec::new();
     let (c, c_inv) = axes();
@@ -1382,6 +1392,23 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                 extensions.push(format!(
                     r#""KHR_materials_transmission":{{"transmissionFactor":{t:?}}}"#
                 ));
+                if let Some(v) = scene.geometry_volumes.get(i.geometry).copied().flatten() {
+                    volume_used = true;
+                    let a = v.attenuation_color;
+                    let mut entry = format!(
+                        r#""KHR_materials_volume":{{"thicknessFactor":{:?},"attenuationColor":[{:?},{:?},{:?}]"#,
+                        v.thickness, a.x, a.y, a.z
+                    );
+                    if v.attenuation_distance.is_finite() {
+                        write!(entry, r#","attenuationDistance":{:?}"#, v.attenuation_distance).unwrap();
+                    }
+                    entry.push('}');
+                    extensions.push(entry);
+                    if v.ior != 1.5 {
+                        ior_used = true;
+                        extensions.push(format!(r#""KHR_materials_ior":{{"ior":{:?}}}"#, v.ior));
+                    }
+                }
             }
             let glow = if extensions.is_empty() {
                 glow
@@ -1462,6 +1489,8 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let used: Vec<&str> = [
         (emissive_strength, "\"KHR_materials_emissive_strength\""),
         (transmission_used, "\"KHR_materials_transmission\""),
+        (volume_used, "\"KHR_materials_volume\""),
+        (ior_used, "\"KHR_materials_ior\""),
     ]
     .iter()
     .filter(|(on, _)| *on)

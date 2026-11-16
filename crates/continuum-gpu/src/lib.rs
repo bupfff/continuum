@@ -709,7 +709,7 @@ pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
 pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
-    &[2, 3, 6, 30, 31, 32, 42, 52, 55, 56, 57, 58, 76, 81];
+    &[2, 3, 6, 24, 30, 31, 32, 42, 52, 55, 56, 57, 58, 76, 81, 111];
 /// `vc_args_edges` (M10 gate 19): `vc_shade_edges`'s dispatch from the
 /// list's count.
 pub(crate) const VC_ARGS_EDGES_BINDINGS: &[u32] = &[42, 66, 81];
@@ -1017,7 +1017,7 @@ impl MaskConeKernel {
     #[doc(hidden)]
     pub fn hw_vc_source(&self) -> String {
         let mut kernel = self.source.clone();
-        let head = "fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {\n    let surface = camera.eye.xyz + dir * hit.distance;";
+        let head = "fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {\n    let surface = select(camera.eye.xyz, shade_from.xyz, shade_from.w > 0.5) + dir * hit.distance;";
         assert!(kernel.contains(head), "vc_hit_color not found");
         kernel = kernel.replace(
             head,
@@ -1782,6 +1782,21 @@ impl MaskConeKernel {
                 .and_then(|k| linear.iter().position(|&m| m == k))
                 .map_or(0, |p| p as u32 + 1)
         };
+        // Per object, its volume if solid glass (M16): attenuation colour and
+        // distance, then the index of refraction (a last entry for none).
+        let volumes: Vec<[f32; 4]> = scene
+            .instances
+            .iter()
+            .map(|i| scene.volume(i.geometry).unwrap_or_default())
+            .chain(std::iter::once(Volume::default()))
+            .flat_map(|v| {
+                let a = v.attenuation_color.clamp(Vec3::splat(1e-4), Vec3::ONE);
+                [
+                    [a.x, a.y, a.z, v.attenuation_distance.min(3.0e38)],
+                    [v.ior.max(1.0), 0.0, 0.0, 0.0],
+                ]
+            })
+            .collect();
         let materials: Vec<[u32; 4]> = scene
             .instances
             .iter()
@@ -1810,7 +1825,8 @@ impl MaskConeKernel {
                     mr,
                     emissive_of(i),
                     // Alpha blending (M10 gate 16): the opacity factor, and
-                    // 1; transmission (M16): its factor, and 2.
+                    // 1; transmission (M16): its factor, and 2 (3 for a
+                    // volume).
                     match scene.geometry_blend.get(i.geometry).copied().flatten() {
                         Some(o) => o.clamp(0.0, 1.0).to_bits(),
                         None => scene.transmission(i.geometry).to_bits(),
@@ -1821,6 +1837,8 @@ impl MaskConeKernel {
                         .is_some_and(|b| b.is_some())
                     {
                         1
+                    } else if scene.volume(i.geometry).is_some() {
+                        3
                     } else if scene.transmission(i.geometry) > 0.0 {
                         2
                     } else {
@@ -2008,6 +2026,7 @@ impl MaskConeKernel {
                 storage("texture coordinates", bytemuck::cast_slice(&tex)),
             ),
             (76, storage("materials", bytemuck::cast_slice(&materials))),
+            (111, storage("volumes", bytemuck::cast_slice(&volumes))),
         ];
         let mut buffers = buffers;
         // M13 gate 3 (profile stage 15): each placed geometry's directional
@@ -3197,6 +3216,13 @@ pub struct InstancedScene {
     /// its surface alone. Not with alpha blending on the same geometry
     /// (blending wins).
     pub geometry_transmission: Vec<Option<f32>>,
+    /// Each transmissive geometry's volume, if it is solid glass rather than
+    /// thin (empty: none; M16; glTF's `KHR_materials_volume` and
+    /// `KHR_materials_ior`): camera rays refract into it, cross it (dimmed by
+    /// its attenuation) and refract out where they leave its closed surface.
+    /// Shadows pass two of its surfaces, untinted by the attenuation.
+    /// Ignored without transmission.
+    pub geometry_volumes: Vec<Option<Volume>>,
     /// Each geometry's normal map, if any (empty: none; M10 gate 5): an
     /// index into `textures` of a tangent-space normal map (linear, OpenGL's
     /// convention as glTF specifies: green toward the image's top), read
@@ -3280,7 +3306,20 @@ impl InstancedScene {
             return 1.0 - o.clamp(0.0, 1.0);
         }
         let mean = (i.albedo.x + i.albedo.y + i.albedo.z) / 3.0;
-        -self.transmission(i.geometry) * mean.clamp(0.0, 1.0)
+        let transmit = self.transmission(i.geometry) * mean.clamp(0.0, 1.0);
+        // A volume (two surfaces for shadows): at most -2.
+        if self.volume(i.geometry).is_some() {
+            return -2.0 - transmit;
+        }
+        -transmit
+    }
+
+    /// Geometry `g`'s volume if it is transmissive solid glass (M16).
+    pub(crate) fn volume(&self, g: usize) -> Option<Volume> {
+        if self.transmission(g) <= 0.0 {
+            return None;
+        }
+        self.geometry_volumes.get(g).copied().flatten()
     }
 
     /// Geometry `g`'s transmission factor (0: none, or blended; M16).
@@ -3602,6 +3641,34 @@ pub struct Material {
     pub metallic: f32,
     /// Perceptual roughness, 0 (a mirror) to 1.
     pub roughness: f32,
+}
+
+/// Solid transmissive glass (M16; glTF's `KHR_materials_volume` with
+/// `KHR_materials_ior`): the medium inside a closed transmissive geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Volume {
+    /// Index of refraction (1.5 for glass). The surface's reflectance stays
+    /// that of 1.5 (F0 0.04).
+    pub ior: f32,
+    /// The colour white light becomes after `attenuation_distance` inside.
+    pub attenuation_color: Vec3,
+    /// The distance (in the geometry's world units) at which light is
+    /// `attenuation_color`; infinite for none.
+    pub attenuation_distance: f32,
+    /// glTF's thickness factor, kept for saving (rays measure the geometry
+    /// itself).
+    pub thickness: f32,
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Volume {
+            ior: 1.5,
+            attenuation_color: Vec3::ONE,
+            attenuation_distance: f32::INFINITY,
+            thickness: 1.0,
+        }
+    }
 }
 
 /// A base color texture: sRGB-encoded RGBA8, rows from the top (as glTF

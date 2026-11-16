@@ -108,6 +108,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_emissive_textures: Vec::new(),
         geometry_blend: Vec::new(),
         geometry_transmission: Vec::new(),
+        geometry_volumes: Vec::new(),
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),
@@ -461,6 +462,16 @@ fn gltf_round_trip_keeps_materials() {
     s.geometry_emissive_textures = vec![Some(0), None, None];
     s.geometry_blend = vec![None, Some(0.4), None];
     s.geometry_transmission = vec![None, None, Some(0.8)];
+    s.geometry_volumes = vec![
+        None,
+        None,
+        Some(continuum_gpu::Volume {
+            ior: 1.33,
+            attenuation_color: Vec3::new(0.5, 0.7, 0.9),
+            attenuation_distance: 0.4,
+            thickness: 0.6,
+        }),
+    ];
     s.texture_wrap = vec![[continuum_gpu::Wrap::Clamp, continuum_gpu::Wrap::Mirror]];
     let path = std::env::temp_dir().join(format!("continuum-mat-{}.glb", std::process::id()));
     continuum_gltf::save(&s, &path).unwrap();
@@ -528,6 +539,9 @@ fn gltf_round_trip_keeps_materials() {
             transmission(&s, a.geometry),
             transmission(&imported, b.geometry)
         );
+        let volume =
+            |scene: &InstancedScene, g: usize| scene.geometry_volumes.get(g).copied().flatten();
+        assert_eq!(volume(&s, a.geometry), volume(&imported, b.geometry));
         let wrap = |scene: &InstancedScene, g: usize| {
             scene.geometry_textures.get(g).copied().flatten().map(|t| {
                 scene
@@ -992,6 +1006,26 @@ fn transmission_shows_what_lies_behind() {
         "glass not see-through: {d_glass} against {d_opaque}"
     );
     assert!(d_glass > 0.0, "glass left no trace");
+    // Solid glass (a volume): rays refract through the spheres, so their
+    // pixels differ from thin glass's, and the spheres stay see-through.
+    let mut solid = glass.clone();
+    solid.geometry_volumes = vec![None, None, Some(continuum_gpu::Volume::default())];
+    let (with_solid, _) = render(&solid);
+    dump("glass_solid", &with_solid);
+    let d_solid = dist(&with_solid);
+    let bent = spheres
+        .iter()
+        .map(|&p| off(&with_solid[p], &with_glass[p]))
+        .sum::<f64>()
+        / spheres.len() as f64;
+    eprintln!(
+        "solid glass: {d_solid:.4} from the image without the spheres; {bent:.4} from thin glass"
+    );
+    assert!(
+        d_solid < 0.6 * d_opaque,
+        "solid glass not see-through: {d_solid} against {d_opaque}"
+    );
+    assert!(bent > 0.02 * mean, "solid glass does not refract: {bent}");
 }
 
 /// Emission adds to what a surface reflects, exactly, in the cached path

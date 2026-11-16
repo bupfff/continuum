@@ -65,18 +65,34 @@ fn main() -> std::io::Result<()> {
             view_formats: &[],
         })
         .create_view(&Default::default());
-    let t = Textured::new().with_transmission(true);
-    let single = Textured::new().with_transmission(false);
+    // `solids`: the glass sphere and block (volumes); the third image is
+    // the same glass drawn thin, not as blending.
+    let solids = std::env::args().any(|a| a == "solids");
+    let (t, single) = if solids {
+        (
+            Textured::new().with_glass_solids(),
+            Textured::new().with_glass_solids(),
+        )
+    } else {
+        (
+            Textured::new().with_transmission(true),
+            Textured::new().with_transmission(false),
+        )
+    };
     kernel.set_sky(t.sky);
     let mut opaque = t.scene.clone();
     opaque.geometry_transmission.clear();
     let mut blended = t.scene.clone();
-    blended.geometry_blend = t
-        .scene
-        .geometry_transmission
-        .iter()
-        .map(|x| x.map(|tr| 1.0 - tr))
-        .collect();
+    if solids {
+        blended.geometry_volumes.clear();
+    } else {
+        blended.geometry_blend = t
+            .scene
+            .geometry_transmission
+            .iter()
+            .map(|x| x.map(|tr| 1.0 - tr))
+            .collect();
+    }
     let render = |scene: &InstancedScene| {
         let mut r = InstancedRenderer::with_cache_lights(
             &kernel,
@@ -130,7 +146,11 @@ fn main() -> std::io::Result<()> {
         samples,
         1,
         1,
-        &out_dir.join("transmission_dev_cycles"),
+        &out_dir.join(if solids {
+            "transmission_dev_solids_cycles"
+        } else {
+            "transmission_dev_cycles"
+        }),
     )?;
     let mean_all = ours
         .iter()
@@ -152,10 +172,11 @@ fn main() -> std::io::Result<()> {
     let region = keep(&reference.pixels);
     let mean = |px: &[[f32; 3]]| px.iter().map(|p| (p[0] + p[1] + p[2]) as f64).sum::<f64>();
     println!(
-        "{w}x{h}, Cycles {samples} samples ({:.0} s): ours {:.2}%, panes opaque {:.2}%, as alpha blending {:.2}%",
+        "{w}x{h}, Cycles {samples} samples ({:.0} s): ours {:.2}%, opaque {:.2}%, {} {:.2}%",
         reference.seconds,
         100.0 * relative_rmse(&ours, &reference.pixels),
         100.0 * relative_rmse(&flat, &reference.pixels),
+        if solids { "thin" } else { "as alpha blending" },
         100.0 * relative_rmse(&blend, &reference.pixels)
     );
     println!(
@@ -167,6 +188,26 @@ fn main() -> std::io::Result<()> {
         100.0 * (mean(&keep(&ours)) / mean(&region) - 1.0),
         100.0 * (mean(&keep(&flat)) / mean(&region) - 1.0),
         100.0 * (mean(&keep(&blend)) / mean(&region) - 1.0)
+    );
+    // The same with every channel clamped at 4× the image's mean (a
+    // highlight of the sun covers a few pixels at its full radiance).
+    let cap = 4.0 * mean_all as f32;
+    let clamp =
+        |img: &[[f32; 3]]| -> Vec<[f32; 3]> { img.iter().map(|p| p.map(|c| c.min(cap))).collect() };
+    let rc = clamp(&reference.pixels);
+    println!(
+        "clamped at 4x the mean: ours {:.2}%, opaque {:.2}%, other {:.2}%; over the changed pixels: ours {:.2}%, other {:.2}%; pixels above the cap: ours {}, Cycles {}",
+        100.0 * relative_rmse(&clamp(&ours), &rc),
+        100.0 * relative_rmse(&clamp(&flat), &rc),
+        100.0 * relative_rmse(&clamp(&blend), &rc),
+        100.0 * relative_rmse(&keep(&clamp(&ours)), &keep(&rc)),
+        100.0 * relative_rmse(&keep(&clamp(&blend)), &keep(&rc)),
+        ours.iter().filter(|p| p.iter().any(|&c| c > cap)).count(),
+        reference
+            .pixels
+            .iter()
+            .filter(|p| p.iter().any(|&c| c > cap))
+            .count()
     );
     println!(
         "warm frame: ours {t_ours:.2} ms, opaque {t_flat:.2} ms ({:.3}x), blending {t_blend:.2} ms",
@@ -181,7 +222,8 @@ fn main() -> std::io::Result<()> {
                 room3d::to_rgb(Vec3::from_array(*p)),
             );
         }
-        image.save(&out_dir.join(format!("transmission_dev_{name}.png")))
+        let tag = if solids { "solids_" } else { "" };
+        image.save(&out_dir.join(format!("transmission_dev_{tag}{name}.png")))
     };
     save("ours", &ours)?;
     save("opaque", &flat)?;
