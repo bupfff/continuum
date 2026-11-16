@@ -133,6 +133,9 @@ pub struct RendererOptions {
     /// How the display scales the image up with `scale` above 1 (M19;
     /// Catmull-Rom by default).
     pub upscale: crate::Upscale,
+    /// Depth of field (M20; None by default: a pinhole), with hardware ray
+    /// queries. See [`crate::DepthOfField`].
+    pub depth_of_field: Option<crate::DepthOfField>,
 }
 
 impl Default for RendererOptions {
@@ -155,6 +158,7 @@ impl Default for RendererOptions {
             fog: None,
             bloom: Some(crate::Bloom::default()),
             upscale: crate::Upscale::CatmullRom,
+            depth_of_field: None,
         }
     }
 }
@@ -307,6 +311,7 @@ impl Renderer {
         inner.set_auto_exposure(options.auto_exposure);
         inner.set_bloom(options.bloom);
         inner.set_upscale(options.upscale);
+        inner.set_depth_of_field(options.depth_of_field);
         Renderer { kernel, inner }
     }
 
@@ -376,6 +381,12 @@ impl Renderer {
     /// Bloom for the display (M19; None: off), from the next frame.
     pub fn set_bloom(&mut self, bloom: Option<crate::Bloom>) {
         self.inner.set_bloom(bloom);
+    }
+
+    /// Depth of field (M20; None: a pinhole), from the next frame; the
+    /// colours [`Self::read_colors`] returns are blurred.
+    pub fn set_depth_of_field(&mut self, lens: Option<crate::DepthOfField>) {
+        self.inner.set_depth_of_field(lens);
     }
 
     /// The display's auto-exposure (M17; None: off), from the next frame.

@@ -1271,6 +1271,92 @@ fn fog_veils_the_scene() {
     );
 }
 
+/// Depth of field (M20): a lens with no aperture leaves the image as it
+/// was; focused at the middle of the view with a wide aperture, the ground
+/// in front loses its detail (the checker's edges) while the image's light
+/// stays.
+#[test]
+fn depth_of_field_blurs_what_is_out_of_focus() {
+    let s = scene(DVec3::ZERO);
+    let render = |lens: Option<continuum_gpu::DepthOfField>| {
+        let mut r = renderer(
+            kernel(),
+            &s,
+            DVec3::ZERO,
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                depth_of_field: lens,
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        r.render(camera(), &view);
+        (r.read_colors(), r.hardware_rays())
+    };
+    let (sharp, hardware) = render(None);
+    if !hardware {
+        eprintln!("no hardware ray queries: no depth of field");
+        return;
+    }
+    let focus = (camera().target - camera().eye).length();
+    let (closed, _) = render(Some(continuum_gpu::DepthOfField {
+        focus_distance: focus,
+        aperture_radius: 0.0,
+        ..Default::default()
+    }));
+    let (open, _) = render(Some(continuum_gpu::DepthOfField {
+        focus_distance: focus,
+        aperture_radius: 0.5,
+        max_blur: 0.1,
+    }));
+    dump("dof_sharp", &sharp);
+    dump("dof_open", &open);
+    // Detail in a band of rows: the mean absolute step between neighbours.
+    let detail = |img: &Image, rows: std::ops::Range<u32>| {
+        let mut sum = 0.0f64;
+        let mut n = 0.0;
+        for y in rows {
+            for x in 0..WIDTH - 1 {
+                let (a, b) = (
+                    img[(y * WIDTH + x) as usize],
+                    img[(y * WIDTH + x + 1) as usize],
+                );
+                sum += (0..3).map(|k| (a[k] - b[k]).abs() as f64).sum::<f64>();
+                n += 1.0;
+            }
+        }
+        sum / n
+    };
+    let mean =
+        |img: &Image| img.iter().flatten().map(|&x| x as f64).sum::<f64>() / (3 * img.len()) as f64;
+    let (near, middle) = (HEIGHT - 16..HEIGHT, HEIGHT / 2 - 4..HEIGHT / 2 + 4);
+    let near_kept = detail(&open, near.clone()) / detail(&sharp, near);
+    let middle_kept = detail(&open, middle.clone()) / detail(&sharp, middle);
+    let light = mean(&open) / mean(&sharp);
+    eprintln!(
+        "depth of field: near detail kept {near_kept:.3}, middle {middle_kept:.3}; light {light:.4}"
+    );
+    assert_eq!(closed, sharp, "a lens with no aperture changes the image");
+    assert!(
+        near_kept < 0.6,
+        "the ground in front stays sharp: {near_kept}"
+    );
+    assert!(
+        middle_kept > near_kept + 0.2,
+        "the plane in focus blurs: {middle_kept} against {near_kept}"
+    );
+    assert!((light - 1.0).abs() < 0.02, "light not kept: {light}");
+}
+
 /// Bloom (M19): with a float target (linear light, no exposure), the
 /// target holds (1 − strength) of each pixel plus strength of the image at
 /// a quarter of its size (4 × 4 means) blurred by the Gaussian across and

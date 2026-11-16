@@ -1059,6 +1059,81 @@ native.
 CPU's, the light kept to 1.00000, +0.262 ms; Catmull-Rom 0.870× nearest's
 error, +0.291 ms over nearest, the frame 0.506× native.
 
+#### Depth of field (M20 design, 2026-11-16)
+
+A thin lens (`DepthOfField`: the focus distance, the aperture's radius,
+the largest blur as a share of the image's height, 4% by default;
+`RendererOptions::depth_of_field`, off by default; hardware ray queries),
+as Cycles renders a camera with depth of field (a circular aperture).
+Gathered each frame from the pinhole image and its depths, nothing kept
+between frames (§4), after fog and before bloom, into the colours
+(`read_colors` returns them blurred). A post-process gather in the family
+games use (scatter-as-gather with near and far fields: Jimenez 2014,
+"Next generation post processing in Call of Duty: Advanced Warfare";
+highlights splatted apart, as engines' bokeh sprites do); no novelty is
+claimed.
+- **Prepare** (16 × 16 tiles): each pixel's signed radius c = f·A·(1/F −
+  1/z) pixels (z along the view axis; negative in front of the plane in
+  focus), clamped; level 0 as halves (colour, c); levels 1–4 in shared
+  memory, 2 × 2 merged into the colours' mean and the radius of the least
+  blurred (a texel across an edge spreads no farther than its sharper
+  side); each tile's reach in front and behind, dilated to the tiles it
+  can reach.
+- **Highlights:** pixels 8× brighter than their tile's mean and blurred by
+  2 px or more give their excess over that mean to a list (4,096, binned
+  per tile, 64 each; a tile with more reads the whole list), and every
+  pixel their disc covers adds it back exactly. Sparse taps on coarse
+  levels scatter a bright light's disc into blotches.
+- **Gather:** a centre tap, the 36 pixels within 3.5 px, and rings
+  [3.5·2^(k−1), 3.5·2^k) of 16 taps on a golden-angle spiral read
+  bilinearly from level k, out to the tile's reach (an in-focus pixel only
+  as far as what is in front reaches: nothing behind shows through it).
+  Each tap covers the pixel by its own disc (its edge as soft as half the
+  taps' spacing), weighted by its area over its disc's; taps fall into
+  three groups by their c against the pixel's (in front, its own surface,
+  behind), each normalized where it passes one; the result is front over
+  own over behind, and where nothing behind covers the pixel the nearest
+  behind stand in for what the pinhole image hides.
+- **Sparse:** every fourth pixel gathered; then the even pixels between
+  those of the same layer, blurred by 6 px or more and within 25% of each
+  other, interpolated, the rest gathered; then every pixel likewise (3 px).
+- **Not:** aperture blades, cat's eyes, blur seen through glass layers
+  (the first surface's depth), anti-aliased edges blurred by their
+  centre's depth.
+
+Two references. (1) The lens sampled outright in our renderer: 256
+aperture points stratified by the concentric map; for each the eye moved
+to it with the image plane sheared through the pixel offset so the plane
+in focus stays put, settled, sub-pixel offsets cycling through 4 × 4. It
+measures the gather alone, free of the shading's own distance from
+Cycles. (2) Cycles' thin lens (its f-stop the focal length over twice the
+radius); ours at 0.9× and 1.1× the radius were farther from it than 1×,
+so the two lenses agree.
+
+**Development** (`dof_dev`, 640×360, the textured scene, sun and sky,
+aperture 0.1 m): focused at 5 m (the distance blurred) 1.95% from the
+sampled lens against the pinhole's 15.10% (0.129×); focused on the brick
+block at 9.1 m (the ground in front blurred) 1.89% against 14.11%
+(0.134×); at 5 m with foliage 2.61% against 16.55% (0.158×). Against
+Cycles (1,024 samples) 6.93%, 7.16% and 7.60%, where the sampled lens is
+6.57%, 6.93% and 7.04% (1.055×, 1.033×, 1.080×): the floor is the
+shading's (our pinhole 7.08% from Cycles' pinhole on this scene), and
+Cycles' own noise is 1.1% of the lens's effect. An exact gather on the
+CPU (every pixel a tap) was 1.43% at 5 m; the coarse levels make most of
+the rest. Cost at 1280×720: +1.71 ms (9.1 m), +1.77 ms (5 m), +2.00 ms (5
+m with foliage); about 0.5 ms of it is reading the colours and depths
+once. A seen point light blurs into a disc; the GPU test keeps the
+image's light to 1.008, and a lens without aperture leaves the image
+bit-identical.
+
+**Gate M20 G1** (`m20_gate1`), the bars set with the development numbers
+above known: (1) depth of field adds at most 2.0 ms to the warm frame at
+1280×720 in the two day views; (2) in each of three views (the two above
+and a night view not used in development: the glowing panel, foliage and
+the night lights, focused at 3 m), within 0.2× the pinhole's error from
+the sampled lens; (3) in each, at most 1.12× the sampled lens's error from
+Cycles (4,096 samples).
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

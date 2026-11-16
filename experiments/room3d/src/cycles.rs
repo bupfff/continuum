@@ -224,7 +224,7 @@ pub fn render_instanced_lights(
     work: &Path,
 ) -> io::Result<Reference> {
     render_instanced_inner(
-        scene, origin, lights, sky, None, None, camera, size, samples, bounces, seed, work,
+        scene, origin, lights, sky, None, None, None, camera, size, samples, bounces, seed, work,
     )
 }
 
@@ -254,6 +254,7 @@ pub fn render_instanced_fog(
         sky,
         None,
         Some(fog),
+        None,
         camera,
         size,
         samples,
@@ -285,6 +286,41 @@ pub fn render_instanced_environment(
         Vec3::ZERO,
         Some(environment),
         None,
+        None,
+        camera,
+        size,
+        samples,
+        bounces,
+        seed,
+        work,
+    )
+}
+
+/// [`render_instanced_lights`] through a thin lens (M20): Blender's depth
+/// of field focused at the lens's distance, its f-stop the focal length
+/// over twice the aperture's radius (a circular aperture).
+#[allow(clippy::too_many_arguments)]
+pub fn render_instanced_dof(
+    scene: &InstancedScene,
+    origin: DVec3,
+    lights: &[Light],
+    sky: Vec3,
+    lens: &continuum_gpu::DepthOfField,
+    camera: Camera,
+    size: (u32, u32),
+    samples: u32,
+    bounces: u32,
+    seed: u32,
+    work: &Path,
+) -> io::Result<Reference> {
+    render_instanced_inner(
+        scene,
+        origin,
+        lights,
+        sky,
+        None,
+        None,
+        Some(lens),
         camera,
         size,
         samples,
@@ -334,6 +370,7 @@ fn render_instanced_inner(
     sky: Vec3,
     environment: Option<&continuum_gpu::Environment>,
     fog: Option<(&continuum_gpu::Fog, f32, f32)>,
+    lens: Option<&continuum_gpu::DepthOfField>,
     camera: Camera,
     (width, height): (u32, u32),
     samples: u32,
@@ -613,9 +650,18 @@ fn render_instanced_inner(
         ),
         None => "null".to_string(),
     };
+    // Depth of field (M20): {focus, aperture} (the aperture's radius), or
+    // null.
+    let dof_json = lens.map_or("null".to_string(), |l| {
+        format!(
+            r#"{{"focus": {}, "aperture": {}}}"#,
+            l.focus_distance, l.aperture_radius
+        )
+    });
     let job = format!(
         r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "transmission": [{}], "volumes": [{}], "specular": [{}], "clearcoat": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "fog": {fog_json},
+  "dof": {dof_json},
   "lights": {lights_json},
   "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},

@@ -486,6 +486,9 @@ pub struct InstancedRenderer {
     /// Bloom and the upscaler (M19).
     bloom: Option<crate::Bloom>,
     upscale: crate::Upscale,
+    /// Depth of field (M20), and its passes once set.
+    dof: Option<crate::DepthOfField>,
+    dof_passes: Option<crate::dof::DofPasses>,
     bloom_passes: crate::exposure::BloomPasses,
     meter: crate::exposure::Meter,
     metered_at: std::cell::Cell<Option<Instant>>,
@@ -1930,6 +1933,8 @@ impl InstancedRenderer {
             auto_exposure: None,
             bloom: None,
             upscale: crate::Upscale::Nearest,
+            dof: None,
+            dof_passes: None,
             bloom_passes,
             meter,
             metered_at: std::cell::Cell::new(None),
@@ -2467,6 +2472,35 @@ impl InstancedRenderer {
         );
         self.meter.bind(device, &self.colors);
         self.vis = Some(vis);
+        self.dof_passes = None;
+        self.make_dof();
+    }
+
+    /// Makes and binds depth of field's passes if it is on and they do not
+    /// fit the image (M20).
+    fn make_dof(&mut self) {
+        let (Some(lens), Some(vis)) = (self.dof, &self.vis) else {
+            return;
+        };
+        let size = (self.width, self.height);
+        let max_px = lens.max_blur * self.height as f32;
+        if self
+            .dof_passes
+            .as_ref()
+            .is_some_and(|p| p.fits(size, max_px))
+        {
+            return;
+        }
+        let mut passes = crate::dof::DofPasses::new(&self.device, size, max_px);
+        passes.bind(&self.device, &self.camera_buf, &self.colors, vis);
+        self.dof_passes = Some(passes);
+    }
+
+    /// Records depth of field's passes (M20), if on, after the camera's.
+    fn encode_dof(&self, encoder: &mut wgpu::CommandEncoder, camera: &Camera) {
+        if let (Some(lens), Some(passes)) = (&self.dof, &self.dof_passes) {
+            passes.encode(&self.queue, encoder, camera.vertical_fov_degrees, lens);
+        }
     }
 
     /// Camera pass `k` (of `passes`), timed on the GPU where the cache has
@@ -2698,6 +2732,23 @@ impl InstancedRenderer {
         self.upscale = upscale;
     }
 
+    /// Diagnostics (M20): the last frame's depth-of-field highlights, and
+    /// the tiles with more than their lists hold.
+    pub fn depth_of_field_highlights(&self) -> Option<(u32, u32)> {
+        self.dof_passes
+            .as_ref()
+            .map(|p| p.highlights(&self.device, &self.queue))
+    }
+
+    /// Depth of field (M20; off by default), from the next frame: a thin
+    /// lens's blur gathered from the frame's colours and depths, written
+    /// into the colours (`read_colors` returns them blurred). With hardware
+    /// ray queries.
+    pub fn set_depth_of_field(&mut self, lens: Option<crate::DepthOfField>) {
+        self.dof = lens.filter(|_| self.hw.is_some());
+        self.make_dof();
+    }
+
     /// The display's tone map (M17; `ToneMap::Reinhard` here by default,
     /// `Renderer` defaults to `ToneMap::PbrNeutral`), from the next frame.
     pub fn set_tone_map(&mut self, tone_map: crate::ToneMap) {
@@ -2865,6 +2916,7 @@ impl InstancedRenderer {
             encoder.resolve_query_set(set, 0..4, resolve, 0);
             encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, 32);
         }
+        self.encode_dof(&mut encoder, &camera);
         self.encode_camera_end(&mut encoder);
         if let Some(stream) = &self.stream {
             stream.encode_feedback(&mut encoder, (self.width, self.height));
@@ -3115,6 +3167,7 @@ impl InstancedRenderer {
             cache.state.untimed();
             cache.state.encode_readback(&mut encoder);
         }
+        self.encode_dof(&mut encoder, &camera);
         self.encode_meter(&mut encoder);
         crate::live::encode_display(
             &mut encoder,

@@ -131,6 +131,7 @@ struct Frame<'a> {
 
 mod coverage_maps;
 mod cutout;
+mod dof;
 mod exposure;
 mod fog;
 mod hierarchy;
@@ -144,6 +145,7 @@ mod tangents;
 mod vcache;
 
 pub use cutout::cut_out;
+pub use dof::DepthOfField;
 pub use exposure::{AutoExposure, Bloom, ToneMap, Upscale};
 pub use fog::Fog;
 pub use lightmap::Lightmap;

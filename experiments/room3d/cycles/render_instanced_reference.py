@@ -461,6 +461,15 @@ camera.matrix_world = Matrix(
     )
 )
 scene.camera = camera
+dof = job.get("dof")
+if dof:
+    # Depth of field (M20): a thin lens with a circular aperture; Cycles'
+    # aperture radius is the focal length over twice the f-stop.
+    data.dof.use_dof = True
+    data.dof.focus_distance = dof["focus"]
+    data.dof.aperture_fstop = data.lens * 1e-3 / (2.0 * dof["aperture"])
+    data.dof.aperture_blades = 0
+    data.dof.aperture_ratio = 1.0
 
 sky = job.get("sky", [0.0, 0.0, 0.0])
 world = bpy.data.worlds.new("sky")
