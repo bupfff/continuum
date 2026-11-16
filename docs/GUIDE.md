@@ -214,6 +214,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   from its index, tinted and scaled. 3.64% from Cycles (highlights
   clamped), 1.13× the frame on a scene of coated boulders. The coat's
   textures and normal map are not imported; sheen is not supported.
+- **Display** (M17 gate 2): `RendererOptions::tone_map` (Khronos PBR
+  Neutral by default, within 0.45/255 of Blender's view on average;
+  `ToneMap::Agx`, an approximation of the original AgX, not Blender 5.2's;
+  `ToneMap::Reinhard`, the old curve) and `RendererOptions::auto_exposure`
+  (on by default: the exposure that shows the frame's middle luminances at
+  middle grey, adapting over half a second; it multiplies
+  `Renderer::set_exposure`, and `read_colors` stays linear). A float
+  target gets linear light times the exposure, for an engine's own tone
+  map.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **Anti-aliasing, on by default** (`RendererOptions::anti_aliasing`; M15
