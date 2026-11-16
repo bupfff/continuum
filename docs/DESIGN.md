@@ -1254,6 +1254,45 @@ shutter's; means within 0.12%. The new view passed narrowly (0.343× against
 camera dollies and turns keeps more of its leaves than the sampled shutter
 (two lines sampled; motion across them missed).
 
+#### Bounce light with movers (M22 design, 2026-11-16)
+
+Item 5's first gap: bounce light (`CacheOptions::indirect`) is off by
+default and refuses movers and moving lights; "bounce by default" needs it
+to stay right while things move. Direct light under movers is exact (M9:
+stale texels re-baked or hidden the same frame). Bounce cannot be exact
+the same way: a page's bounce samples (3×3 points, 192 rays each) see
+everything above them, so any mover in view touches them. Instead, §3.1's
+ledger, for the first time on bounce in the cache:
+- **Charges.** Each frame something moves, the stale pass (which already
+  visits every resident page's world box) charges each page that holds
+  bounce samples with a bound on the share of its view (cosine-weighted
+  solid angle over π) the change could alter: for each moved object's old
+  and new boxes, min(1, (r/d)²) for a bounding sphere of radius r at
+  distance d from the page's box; for the shadows it moved, the same box
+  swept away from each light to the scene's edge, min(1, π r / h) at
+  distance h from the sweep's axis (a line of spheres summed). The
+  radiance a changed share can carry is at most the brightest surface's, so
+  a page's bounce error is at most its charge times that.
+- **Re-bakes.** A page whose charge passes `bounce_epsilon` (0.01 by
+  default) is listed; the CPU queues its bounce samples alone (job kind 5)
+  for the next bakes within the budget, largest first, and the bake clears
+  its charge. The charge stands until then, so what is shown stays within
+  ε times the brightest radiance of a fresh bake, plus the charge of
+  frames not yet baked (the lag, reported).
+- **At rest.** With nothing moving, pages still charged above ε / 100 are
+  listed and re-baked with what the budget leaves, so a still scene
+  settles to a fresh bake's image.
+- Bounce samples read their hits' direct light through stale marks as
+  before; a hit re-baked in the same frame may be read before it (the
+  page stays charged by its own motion terms until its next re-bake).
+- **Then:** moving lights (a light that moves charges every page by its
+  change in irradiance, which the ledger of M9 G2 already bounds for direct
+  light), and `indirect` on by default once both hold.
+
+Prior art: the ledger itself (§3.1); incremental radiosity with line-space
+hierarchies (Drettakis & Sillion 1997) bounds radiosity changes from
+moving objects the same way, by the form factors they can change.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
