@@ -669,6 +669,8 @@ fn exposure_scales_the_drawn_colors() {
                 pages: 1 << 15,
                 ..Default::default()
             },
+            // The factor set by hand alone (auto-exposure: its own test).
+            auto_exposure: None,
             ..Default::default()
         },
     );
@@ -1051,6 +1053,129 @@ fn transmission_shows_what_lies_behind() {
         "solid glass not see-through: {d_solid} against {d_opaque}"
     );
     assert!(bent > 0.02 * mean, "solid glass does not refract: {bent}");
+}
+
+/// Auto-exposure (M17): with a float target (linear light) and no
+/// adaptation time, the target holds the colors times the exposure that
+/// shows the mean of log2 luminance between the 50th and 95th percentiles
+/// at the key, computed here on the CPU from `read_colors` with the same
+/// half-stop bins.
+#[test]
+fn auto_exposure_shows_the_middle_at_the_key() {
+    let s = scene(DVec3::ZERO);
+    let format = wgpu::TextureFormat::Rgba32Float;
+    let auto = continuum_gpu::AutoExposure {
+        seconds: 0.0,
+        ..Default::default()
+    };
+    let mut r = Renderer::new(
+        kernel(),
+        format,
+        (WIDTH, HEIGHT),
+        &s,
+        DVec3::ZERO,
+        &lights(),
+        RendererOptions {
+            cache_options: CacheOptions {
+                frame_target_ms: 0.0,
+                pages: 1 << 15,
+                ..Default::default()
+            },
+            auto_exposure: Some(auto),
+            ..Default::default()
+        },
+    );
+    let device = r.kernel().device().clone();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("float target"),
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut frames = 0;
+    while frames < 2_000 && !r.is_settled(32) {
+        r.render(camera(), &view);
+        frames += 1;
+    }
+    r.render(camera(), &view);
+    let colors = r.read_colors();
+    let queue = r.kernel().queue().clone();
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (WIDTH * HEIGHT * 16) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH * 16),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let drawn: Vec<f32> = buffer
+        .slice(..)
+        .get_mapped_range()
+        .unwrap()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect();
+    // The exposure the display used: drawn over colors where both are lit.
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (k, c) in colors.iter().enumerate() {
+        for ch in 0..3 {
+            num += drawn[4 * k + ch] as f64 * c[ch] as f64;
+            den += (c[ch] as f64).powi(2);
+        }
+    }
+    let used = num / den;
+    // The same on the CPU.
+    let mut hist = [0u32; 64];
+    for c in &colors {
+        let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let b = if l <= 0.0 {
+            0
+        } else {
+            ((l.log2() + 16.0) * 2.0).clamp(0.0, 63.0) as usize
+        };
+        hist[b] += 1;
+    }
+    let total: u32 = hist.iter().sum();
+    let (lo, hi) = (total as f64 * 0.5, total as f64 * 0.95);
+    let (mut seen, mut weight, mut sum) = (0.0f64, 0.0f64, 0.0f64);
+    for (b, &n) in hist.iter().enumerate() {
+        let take = ((seen + n as f64).min(hi) - seen.max(lo)).max(0.0);
+        sum += take * ((b as f64 + 0.5) * 0.5 - 16.0);
+        weight += take;
+        seen += n as f64;
+    }
+    let want = 0.18 / (sum / weight).exp2();
+    eprintln!("auto-exposure: the display used {used:.5}, the CPU's {want:.5}");
+    assert!((used / want - 1.0).abs() < 1e-3, "{used} against {want}");
 }
 
 /// Emission adds to what a surface reflects, exactly, in the cached path

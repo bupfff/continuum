@@ -930,6 +930,38 @@ pixels they change.
 **Then in material breadth:** sheen (Cycles' sheen model differs from
 glTF's), a second texture coordinate set.
 
+#### Display: tone mapping and auto-exposure (M17 design, 2026-11-15)
+
+The user's fourth gap, atmosphere and post, starts with what every image
+shows: the display transform. It was `c / (c + 0.6)` and a fixed exposure.
+- **Tone maps** (`ToneMap`, in the display pass): Khronos PBR Neutral
+  (the published formula; Khronos's for glTF viewers; `Renderer`'s
+  default), an approximation of the original AgX (Benjamin Wrensch's fit
+  of Troy Sobotka's), and the old curve (`InstancedRenderer`'s default, so
+  earlier experiments draw as before). Blender 5.2's own AgX is built from
+  a 57³ table of a third-party configuration and differs from the
+  approximation (development, 896 test colours: mean 0.027, at most 0.25 on
+  saturated colours), so AgX is not claimed to be Blender's; PBR Neutral
+  matched Blender's view of that name to a mean of 0.0016 (at most 0.024,
+  a dark pure red where Blender's own table interpolates).
+- **Auto-exposure** (`AutoExposure`; on by default in `Renderer`): before
+  the display pass, a histogram of the frame's log2 luminance (64 half
+  stops from −16 to +16) and a one-invocation pass that sets the exposure
+  showing the mean between two percentiles (0.5 and 0.95) at a key (0.18),
+  approached exponentially with a time constant (0.5 s; 0: at once). Only
+  that number carries between frames, no image data: the rule against
+  blending previous frames concerns image quality, and an adapting camera
+  is a camera. It multiplies the exposure set by hand; `read_colors` stays
+  linear and unscaled. Tested (`auto_exposure_shows_the_middle_at_the_key`):
+  the display's exposure equals the rule computed on the CPU from
+  `read_colors` to 1e-3.
+
+**Gate M17 G1** (`m17_gate1`): criteria in the binary's doc comment: the
+meter's cost (at most 0.15 ms at 720p), PBR Neutral against Blender's view
+on two rendered views (mean 1/255, 99th percentile 3/255), and adaptation
+after a step (no overshoot past 0.5%, within 2% after five time
+constants).
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

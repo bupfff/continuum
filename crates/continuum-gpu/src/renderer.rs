@@ -116,6 +116,14 @@ pub struct RendererOptions {
     /// (`docs/results/m15-gate1.md`). Not with the sub-pixel path, which
     /// resolves pixels itself.
     pub anti_aliasing: bool,
+    /// How the display maps light to the screen (M17): Khronos PBR Neutral
+    /// by default, as Blender's view of that name.
+    pub tone_map: crate::ToneMap,
+    /// Auto-exposure for the display (M17; on by default): the exposure
+    /// that shows the frame's middle luminances at middle grey, approached
+    /// over half a second. It multiplies [`Renderer::set_exposure`]'s
+    /// factor; [`Renderer::read_colors`] stays unscaled. None: off.
+    pub auto_exposure: Option<crate::AutoExposure>,
 }
 
 impl Default for RendererOptions {
@@ -133,6 +141,8 @@ impl Default for RendererOptions {
             streaming: None,
             sub_pixel: false,
             anti_aliasing: true,
+            tone_map: crate::ToneMap::PbrNeutral,
+            auto_exposure: Some(crate::AutoExposure::default()),
         }
     }
 }
@@ -278,6 +288,8 @@ impl Renderer {
         if !options.deforming.is_empty() {
             inner.set_deforming(scene, &options.deforming);
         }
+        inner.set_tone_map(options.tone_map);
+        inner.set_auto_exposure(options.auto_exposure);
         Renderer { kernel, inner }
     }
 
@@ -337,6 +349,16 @@ impl Renderer {
     /// [`Self::read_colors`] stays unscaled.
     pub fn set_exposure(&mut self, factor: f32) {
         self.inner.set_exposure(factor);
+    }
+
+    /// The display's tone map (M17), from the next frame.
+    pub fn set_tone_map(&mut self, tone_map: crate::ToneMap) {
+        self.inner.set_tone_map(tone_map);
+    }
+
+    /// The display's auto-exposure (M17; None: off), from the next frame.
+    pub fn set_auto_exposure(&mut self, auto: Option<crate::AutoExposure>) {
+        self.inner.set_auto_exposure(auto);
     }
 
     /// Follows the target's new size.

@@ -61,6 +61,7 @@ pub(crate) fn display_bind(
     display: &wgpu::RenderPipeline,
     colors: &wgpu::Buffer,
     dims: &wgpu::Buffer,
+    meter: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("display"),
@@ -73,6 +74,10 @@ pub(crate) fn display_bind(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: dims.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: meter.as_entire_binding(),
             },
         ],
     })
@@ -747,20 +752,15 @@ impl LiveRenderer {
                 &entries,
             )]
         };
-        let display_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("live display"),
-            layout: &display.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: colors_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: dims_buf.as_entire_binding(),
-                },
-            ],
+        // The display's meter binding (M17): unused here (no
+        // auto-exposure), a placeholder.
+        let meter = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("live meter"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
         });
+        let display_bind = display_bind(device, display, &colors_buf, dims_buf, &meter);
         (colors_buf, camera_binds, display_bind)
     }
 

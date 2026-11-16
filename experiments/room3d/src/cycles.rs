@@ -627,6 +627,63 @@ fn reuse(out: &Path, pixels: usize) -> Option<Reference> {
 /// Runs a reference script in a background Blender and reads its output,
 /// trying once more if Blender exits without a result (it did once, with no
 /// error, on a job that rendered the next time).
+/// Blender's own view transforms (M17) of a linear image (`width × height`,
+/// rows from the top): for each of "Khronos_PBR_Neutral", "AgX" and
+/// "Standard", the sRGB-encoded display values it shows. Runs
+/// `cycles/view_transform.py` with Blender (`$BLENDER`, else the app).
+pub fn blender_views(
+    linear: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    work: &Path,
+) -> io::Result<Vec<(String, Vec<[f32; 3]>)>> {
+    std::fs::create_dir_all(work)?;
+    let input = work.join("linear.f32");
+    let bytes: Vec<u8> = linear
+        .iter()
+        .flatten()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    std::fs::write(&input, bytes)?;
+    let stem = work.join("view");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("cycles/view_transform.py");
+    let blender = std::env::var_os("BLENDER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "/Applications/Blender.app/Contents/MacOS/Blender".into());
+    let result = Command::new(blender)
+        .args(["-b", "--factory-startup", "-noaudio", "--python"])
+        .arg(&script)
+        .arg("--")
+        .arg(&input)
+        .arg(width.to_string())
+        .arg(height.to_string())
+        .arg(&stem)
+        .output()?;
+    if !String::from_utf8_lossy(&result.stdout).contains("views done") {
+        return Err(io::Error::other(format!(
+            "Blender failed:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        )));
+    }
+    ["Khronos_PBR_Neutral", "AgX", "Standard"]
+        .iter()
+        .map(|view| {
+            let data = std::fs::read(format!("{}_{view}.f32", stem.to_string_lossy()))?;
+            let px: Vec<[f32; 3]> = data
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .map(|c| {
+                    let f = |k: usize| f32::from_le_bytes([c[k], c[k + 1], c[k + 2], c[k + 3]]);
+                    [f(0), f(4), f(8)]
+                })
+                .collect();
+            Ok((view.to_string(), px))
+        })
+        .collect()
+}
+
 fn run_blender(script: &str, job_path: &Path, out: &Path) -> io::Result<Reference> {
     run_blender_once(script, job_path, out).or_else(|_| run_blender_once(script, job_path, out))
 }

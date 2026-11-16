@@ -475,6 +475,12 @@ pub struct InstancedRenderer {
     footprint: f32,
     /// The display's exposure (see `set_exposure`).
     exposure: f32,
+    /// The display's tone map and auto-exposure (M17), and when the last
+    /// metered frame was drawn (for the adaptation's rate).
+    tone_map: crate::ToneMap,
+    auto_exposure: Option<crate::AutoExposure>,
+    meter: crate::exposure::Meter,
+    metered_at: std::cell::Cell<Option<Instant>>,
     /// Time the caller waited for the GPU since the last frame
     /// ([`Self::wait`]): the cache's frame period counts it (M5 gate 14), as
     /// a frame call counts its own wait.
@@ -1420,6 +1426,8 @@ impl InstancedRenderer {
         );
         let dims_buf = uniform_buffer(&device, "dims", &[0; std::mem::size_of::<DisplayDims>()]);
         let display = display_pipeline(&device, target_format);
+        // The auto-exposure meter (M17), bound with the colours below.
+        let meter = crate::exposure::Meter::new(&device);
         let pixel_cones = kernel.pixel_cones.get();
         // Pixel cones need no camera rays, so no acceleration structure.
         // M13 gate 4 (profile stage 16) traces corner rays in hardware.
@@ -1818,7 +1826,7 @@ impl InstancedRenderer {
             passes,
             camera_dispatch,
             hw,
-            display_bind: display_bind(&device, &display, &colors, &dims_buf),
+            display_bind: display_bind(&device, &display, &colors, &dims_buf, &meter.state),
             mark: kernel.entry("mark"),
             display,
             scene: scene_buffers,
@@ -1861,6 +1869,10 @@ impl InstancedRenderer {
             pixel_offset: [0.0; 2],
             footprint: 1.0,
             exposure: 1.0,
+            tone_map: crate::ToneMap::Reinhard,
+            auto_exposure: None,
+            meter,
+            metered_at: std::cell::Cell::new(None),
             waited: std::cell::Cell::new(Duration::ZERO),
             texture_box: true,
             movers,
@@ -2380,7 +2392,14 @@ impl InstancedRenderer {
                 *b = movers;
             }
         }
-        self.display_bind = display_bind(device, &self.display, &self.colors, &self.dims_buf);
+        self.display_bind = display_bind(
+            device,
+            &self.display,
+            &self.colors,
+            &self.dims_buf,
+            &self.meter.state,
+        );
+        self.meter.bind(device, &self.colors);
         self.vis = Some(vis);
     }
 
@@ -2558,7 +2577,66 @@ impl InstancedRenderer {
     /// renderer was made for) into `encoder`: for engines that order their
     /// own passes, after [`Self::frame_compute`].
     pub fn encode_display(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        self.encode_meter(encoder);
         crate::live::encode_display(encoder, &self.display, &self.display_bind, target, None);
+    }
+
+    /// Records the auto-exposure meter (M17) before a display pass, if on:
+    /// its adaptation's rate from the time since the last metered frame.
+    fn encode_meter(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(auto) = self.auto_exposure else {
+            return;
+        };
+        let now = Instant::now();
+        let rate = match self.metered_at.get() {
+            Some(t) if auto.seconds > 0.0 => {
+                let dt = now.duration_since(t).as_secs_f32().min(0.25);
+                1.0 - (-dt / auto.seconds).exp()
+            }
+            _ => 1.0,
+        };
+        self.metered_at.set(Some(now));
+        self.meter
+            .encode(&self.queue, encoder, (self.width, self.height), &auto, rate);
+    }
+
+    /// The display's tone map (M17; `ToneMap::Reinhard` here by default,
+    /// `Renderer` defaults to `ToneMap::PbrNeutral`), from the next frame.
+    pub fn set_tone_map(&mut self, tone_map: crate::ToneMap) {
+        self.tone_map = tone_map;
+    }
+
+    /// Auto-exposure for the display (M17; off here by default), from the
+    /// next frame. It multiplies `set_exposure`'s factor.
+    pub fn set_auto_exposure(&mut self, auto: Option<crate::AutoExposure>) {
+        if auto.is_some() && self.auto_exposure.is_none() {
+            self.metered_at.set(None);
+        }
+        self.auto_exposure = auto;
+    }
+
+    /// Diagnostics (M17): the auto-exposure meter's exposure and the frames
+    /// it has metered. Waits for the GPU.
+    #[doc(hidden)]
+    pub fn metered_exposure(&self) -> (f32, f32) {
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("meter readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.meter.state, 0, &staging, 0, 16);
+        self.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let words: Vec<f32> = bytemuck::cast_slice::<u8, f32>(
+            &staging.slice(..).get_mapped_range().expect("mapped meter"),
+        )
+        .to_vec();
+        (words[0], words[1])
     }
 
     fn frame_to(&mut self, camera: Camera, target: Option<&wgpu::TextureView>) {
@@ -2573,7 +2651,12 @@ impl InstancedRenderer {
         let dims = DisplayDims {
             size: [self.width, self.height],
             flags: [self.display_mode(), self.scale],
-            exposure: [self.exposure, 0.0, 0.0, 0.0],
+            exposure: [
+                self.exposure,
+                self.tone_map.code(),
+                self.auto_exposure.is_some() as u32 as f32,
+                0.0,
+            ],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
@@ -2676,6 +2759,7 @@ impl InstancedRenderer {
             cache.state.encode_readback(&mut encoder);
         }
         if let Some(target) = target {
+            self.encode_meter(&mut encoder);
             crate::live::encode_display(
                 &mut encoder,
                 &self.display,
@@ -2826,7 +2910,12 @@ impl InstancedRenderer {
         let dims = DisplayDims {
             size: [self.width, self.height],
             flags: [self.display_mode(), self.scale],
-            exposure: [self.exposure, 0.0, 0.0, 0.0],
+            exposure: [
+                self.exposure,
+                self.tone_map.code(),
+                self.auto_exposure.is_some() as u32 as f32,
+                0.0,
+            ],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
@@ -2896,6 +2985,7 @@ impl InstancedRenderer {
             cache.state.untimed();
             cache.state.encode_readback(&mut encoder);
         }
+        self.encode_meter(&mut encoder);
         crate::live::encode_display(
             &mut encoder,
             &self.display,
