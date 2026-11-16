@@ -164,8 +164,10 @@ Selected numbers (1280×720, Apple M4, release builds):
   colors, alpha cutouts, alpha blending, transmissive glass, thin
   (`KHR_materials_transmission`: full reflections, tinted light through,
   5.08% from Cycles) or solid (`KHR_materials_volume`: refraction in and
-  out, absorption, total internal reflection; 8.3% from Cycles),
-  double-sided faces, texture transforms and wrap modes.
+  out, absorption, total internal reflection; 8.3% from Cycles), clear
+  coats and a surface's index of refraction and tinted reflectance
+  (`KHR_materials_clearcoat`, `_ior`, `_specular`), double-sided faces,
+  texture transforms and wrap modes.
 - **Indirect light**, in the cache: one bounce by default, more on request
   (`CacheOptions::bounces`; a closed room goes from 45% to 6.5% of Cycles'
   fully bounced image with eight).

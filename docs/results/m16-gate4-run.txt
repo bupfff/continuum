@@ -1,0 +1,6 @@
+M16 gate 4: 1280x720, adapter Apple M4
+1. speed: with / without the lobes 1.134x (at most 1.25x): PASS (rounds, ms: 5.99/5.30 5.99/5.28 6.01/5.30 5.97/5.30 5.99/5.28)
+2. accuracy against Cycles (63 s, METAL), clamped at 4x its mean: 3.64% (at most 6%; ignoring the lobes 4.94%); over the 112639 pixels the lobes change: 3.90% against 8.48% ignoring them (0.461x, at most 0.65x): PASS
+   unclamped: 44.98% (ignoring the lobes 136.60%), over the changed pixels 98.73% (300.54%); means over them: ours +0.38%, ignoring +0.75%; pixels above the clamp: ours 88, Cycles 110
+views that did not settle within 20,000 frames: 0
+Verdict: 1 PASS, 2 PASS: PASS

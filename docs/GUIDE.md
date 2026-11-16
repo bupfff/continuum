@@ -207,6 +207,13 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   sharp; a transmission texture is ignored
   (`ImportStats::transmission_ignored`). Without ray queries or with
   movers, glass is opaque.
+- **Clear coats and reflectance** (`InstancedScene::geometry_clearcoat`,
+  `geometry_specular`; glTF's `KHR_materials_clearcoat`, `_ior` and
+  `_specular`; M16 gate 4): a coat of index 1.5 with its own highlights
+  and reflection over the material under it; a dielectric's reflectance
+  from its index, tinted and scaled. 3.64% from Cycles (highlights
+  clamped), 1.13× the frame on a scene of coated boulders. The coat's
+  textures and normal map are not imported; sheen is not supported.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **Anti-aliasing, on by default** (`RendererOptions::anti_aliasing`; M15
