@@ -1,0 +1,19 @@
+M20 gate 2: 640x360, timed at 1280x720, adapter Apple M4
+1. cost, (a) focused on the brick block: +1.789 ms (at most 2.2): PASS; highlights Some((160, 0)) (rounds, without/with ms: 2.724/4.508 2.735/4.524 2.734/4.543 2.762/4.555 2.784/4.555)
+1. cost, (b) focused at 5 m: +1.901 ms (at most 2.2): PASS; highlights Some((160, 0)) (rounds, without/with ms: 2.783/4.692 2.783/4.684 2.801/4.702 2.803/4.692 2.798/4.694)
+1. cost, (c) night, focused at 3 m: +2.488 ms (at most 2.8): PASS; highlights Some((3347, 0)) (rounds, without/with ms: 2.849/5.339 2.843/5.331 2.852/5.335 2.853/5.350 2.861/5.334)
+1. cost, (d) metallic boulders, focused at 3 m: +1.824 ms (reported); highlights Some((970, 0)) (rounds, without/with ms: 4.887/6.731 4.880/6.704 4.901/6.711 4.902/6.733 4.909/6.733)
+2. (a) focused on the brick block: from the sampled lens 1.89%, the pinhole 14.11% (0.134x, at most 0.2x): PASS
+3. (a) focused on the brick block: from Cycles (13 s, METAL) 7.09%, the sampled lens 6.92% (1.025x, at most 1.12x), the pinhole 15.40%; means against Cycles: ours -2.40%, sampled lens -2.40%, pinhole -2.41% (ours took 29 s): PASS
+4. (a) focused on the brick block: the mean of ours +0.000% from the sampled lens's (within 1%): PASS
+2. (b) focused at 5 m: from the sampled lens 1.95%, the pinhole 15.10% (0.129x, at most 0.2x): PASS
+3. (b) focused at 5 m: from Cycles (13 s, METAL) 6.90%, the sampled lens 6.56% (1.053x, at most 1.12x), the pinhole 16.09%; means against Cycles: ours -2.44%, sampled lens -2.40%, pinhole -2.40% (ours took 29 s): PASS
+4. (b) focused at 5 m: the mean of ours -0.036% from the sampled lens's (within 1%): PASS
+2. (c) night, focused at 3 m: from the sampled lens 121.12%, the pinhole 4818.91% (0.025x, at most 0.2x): PASS
+3. (c) night, focused at 3 m: from Cycles (34 s, METAL) 50.75%, the sampled lens 107.60% (0.472x, at most 1.12x), the pinhole 4676.59%; means against Cycles: ours -3.33%, sampled lens -2.85%, pinhole -2.80% (ours took 45 s): PASS
+4. (c) night, focused at 3 m: the mean of ours -0.497% from the sampled lens's (within 1%): PASS
+2. (d) metallic boulders, focused at 3 m: from the sampled lens 4.81%, the pinhole 101.54% (0.047x, at most 0.2x): PASS
+3. (d) metallic boulders, focused at 3 m: from Cycles (16 s, METAL) 6.66%, the sampled lens 6.65% (1.001x, at most 1.12x), the pinhole 100.67%; means against Cycles: ours -0.86%, sampled lens -0.72%, pinhole -0.70% (ours took 32 s): PASS
+4. (d) metallic boulders, focused at 3 m: the mean of ours -0.137% from the sampled lens's (within 1%): PASS
+views that did not settle within 20,000 frames: 0
+Verdict: 1 PASS, 2 PASS, 3 PASS, 4 PASS: PASS

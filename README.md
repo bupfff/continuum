@@ -191,6 +191,10 @@ Selected numbers (1280×720, Apple M4, release builds):
   image's light (0.26 ms at 720p), and rendering below the display's size
   drawn up by a clamped bicubic (half size: half the frame, 0.87× the
   error of the nearest pixel).
+- **Depth of field:** a thin lens's blur from each frame alone, bright
+  lights blurred into clean discs; 0.03–0.13× a pinhole's error from the
+  lens sampled outright, as close to Cycles' lens as that is, 1.8–2.5 ms
+  at 720p.
 - **glTF 2.0** import and export, with cameras, lights and animations.
 - **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
   entities moving its objects.

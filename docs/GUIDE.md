@@ -242,6 +242,20 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   bicubic clamped to its four nearest pixels' range, 0.87× the nearest
   pixel's error at half size for 0.29 ms. Both act at display only:
   `read_colors` stays linear, at the rendered size and unbloomed.
+- **Depth of field** (`RendererOptions::depth_of_field`,
+  `DepthOfField`; M20 gate 2): off by default. A thin lens focused at
+  `focus_distance` with an aperture of `aperture_radius` (scene units; a
+  50 mm lens at f/2 has 12.5 mm), as Blender's Cycles renders a camera
+  with depth of field and a round aperture; blur beyond `max_blur` (a
+  share of the image's height, 4%) is clamped. Gathered each frame from
+  the colours and depths, nothing kept between frames; small bright
+  sources (lights, glints) are blurred exactly into discs. `read_colors`
+  returns the blurred image (bloom and the display follow it). 0.03–0.13×
+  a pinhole's error from the lens sampled outright in four views, the
+  image's light within 0.5%, 1.8–2.5 ms at 720p. With hardware ray
+  queries; blur through glass layers uses the first surface's depth, and
+  apertures have no blades. `InstancedRenderer::depth_of_field_highlights`
+  reports the last frame's highlights.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **Anti-aliasing, on by default** (`RendererOptions::anti_aliasing`; M15
