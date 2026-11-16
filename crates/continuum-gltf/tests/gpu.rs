@@ -669,8 +669,10 @@ fn exposure_scales_the_drawn_colors() {
                 pages: 1 << 15,
                 ..Default::default()
             },
-            // The factor set by hand alone (auto-exposure: its own test).
+            // The factor set by hand alone (auto-exposure and bloom: their
+            // own tests).
             auto_exposure: None,
+            bloom: None,
             ..Default::default()
         },
     );
@@ -1082,6 +1084,7 @@ fn auto_exposure_shows_the_middle_at_the_key() {
                 ..Default::default()
             },
             auto_exposure: Some(auto),
+            bloom: None,
             ..Default::default()
         },
     );
@@ -1265,6 +1268,187 @@ fn fog_veils_the_scene() {
     assert!(
         unchanged.relative_rmse < 1e-4,
         "fog of no density changes the image: {unchanged:?}"
+    );
+}
+
+/// Bloom (M19): with a float target (linear light, no exposure), the
+/// target holds (1 − strength) of each pixel plus strength of the image at
+/// a quarter of its size (4 × 4 means) blurred by the Gaussian across and
+/// down (weights renormalized at the edges) and sampled bilinearly,
+/// computed here on the CPU from `read_colors`; and the image's total light
+/// is kept.
+#[test]
+fn bloom_spreads_light_and_keeps_it() {
+    let s = scene(DVec3::ZERO);
+    let format = wgpu::TextureFormat::Rgba32Float;
+    let bloom = continuum_gpu::Bloom {
+        strength: 0.25,
+        radius: 0.05,
+    };
+    let mut r = Renderer::new(
+        kernel(),
+        format,
+        (WIDTH, HEIGHT),
+        &s,
+        DVec3::ZERO,
+        &lights(),
+        RendererOptions {
+            cache_options: CacheOptions {
+                frame_target_ms: 0.0,
+                pages: 1 << 15,
+                ..Default::default()
+            },
+            auto_exposure: None,
+            bloom: Some(bloom),
+            ..Default::default()
+        },
+    );
+    let device = r.kernel().device().clone();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("float target"),
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut frames = 0;
+    while frames < 2_000 && !r.is_settled(32) {
+        r.render(camera(), &view);
+        frames += 1;
+    }
+    r.render(camera(), &view);
+    let colors = r.read_colors();
+    let queue = r.kernel().queue().clone();
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (WIDTH * HEIGHT * 16) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH * 16),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let drawn: Vec<[f32; 3]> = buffer
+        .slice(..)
+        .get_mapped_range()
+        .unwrap()
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|b| {
+            let f = |k: usize| f32::from_le_bytes([b[k], b[k + 1], b[k + 2], b[k + 3]]);
+            [f(0), f(4), f(8)]
+        })
+        .collect();
+    // The CPU's bloom.
+    let (w, h) = (WIDTH as usize, HEIGHT as usize);
+    let (qw, qh) = (w.div_ceil(4), h.div_ceil(4));
+    let mut quarter = vec![[0.0f64; 3]; qw * qh];
+    for qy in 0..qh {
+        for qx in 0..qw {
+            let (mut sum, mut n) = ([0.0f64; 3], 0.0);
+            for j in 0..4 {
+                for i in 0..4 {
+                    let (x, y) = (4 * qx + i, 4 * qy + j);
+                    if x < w && y < h {
+                        for c in 0..3 {
+                            sum[c] += colors[y * w + x][c] as f64;
+                        }
+                        n += 1.0;
+                    }
+                }
+            }
+            quarter[qy * qw + qx] = sum.map(|v| v / n);
+        }
+    }
+    let sigma = (bloom.radius as f64 * h as f64 / 4.0).max(0.25);
+    let taps = (3.0 * sigma).ceil() as i64;
+    let blur = |src: &[[f64; 3]], down: bool| -> Vec<[f64; 3]> {
+        let mut out = vec![[0.0f64; 3]; qw * qh];
+        for y in 0..qh as i64 {
+            for x in 0..qw as i64 {
+                let (mut sum, mut weight) = ([0.0f64; 3], 0.0);
+                for k in -taps..=taps {
+                    let (sx, sy) = if down { (x, y + k) } else { (x + k, y) };
+                    if sx < 0 || sy < 0 || sx >= qw as i64 || sy >= qh as i64 {
+                        continue;
+                    }
+                    let wgt = (-0.5 * (k * k) as f64 / (sigma * sigma)).exp();
+                    for c in 0..3 {
+                        sum[c] += wgt * src[sy as usize * qw + sx as usize][c];
+                    }
+                    weight += wgt;
+                }
+                out[y as usize * qw + x as usize] = sum.map(|v| v / weight);
+            }
+        }
+        out
+    };
+    let blurred = blur(&blur(&quarter, false), true);
+    let s_ = bloom.strength as f64;
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    let (mut total_in, mut total_out) = (0.0f64, 0.0f64);
+    for y in 0..h {
+        for x in 0..w {
+            let u = ((x as f64 + 0.5) / 4.0 - 0.5, (y as f64 + 0.5) / 4.0 - 0.5);
+            let (ix, iy) = (u.0.floor(), u.1.floor());
+            let (fx, fy) = (u.0 - ix, u.1 - iy);
+            let mut b = [0.0f64; 3];
+            for k in 0..4 {
+                let qx = (ix as i64 + (k & 1)).clamp(0, qw as i64 - 1) as usize;
+                let qy = (iy as i64 + (k >> 1)).clamp(0, qh as i64 - 1) as usize;
+                let wgt = if k & 1 == 1 { fx } else { 1.0 - fx }
+                    * if k >> 1 == 1 { fy } else { 1.0 - fy };
+                for c in 0..3 {
+                    b[c] += wgt * blurred[qy * qw + qx][c];
+                }
+            }
+            for c in 0..3 {
+                let want = (1.0 - s_) * colors[y * w + x][c] as f64 + s_ * b[c];
+                let got = drawn[y * w + x][c] as f64;
+                num += (got - want).powi(2);
+                den += want.powi(2);
+                total_in += colors[y * w + x][c] as f64;
+                total_out += got;
+            }
+        }
+    }
+    let rel = (num / den).sqrt();
+    eprintln!(
+        "bloom: {rel:.2e} from the CPU's; total light {:.5} of the image's",
+        total_out / total_in
+    );
+    assert!(rel < 1e-3, "bloom differs from the CPU's: {rel}");
+    assert!(
+        (total_out / total_in - 1.0).abs() < 0.01,
+        "bloom changed the light: {}",
+        total_out / total_in
     );
 }
 

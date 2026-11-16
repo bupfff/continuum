@@ -20,8 +20,11 @@ use continuum::mesh::Surface;
 pub(crate) struct DisplayDims {
     pub size: [u32; 2],
     pub flags: [u32; 2],
-    /// x: the exposure (0: 1).
+    /// x: the exposure (0: 1); y: the tone map; z: 1 with auto-exposure;
+    /// w: the upscaler.
     pub exposure: [f32; 4],
+    /// Bloom (M19): strength, the quarter image's size, 1 if on.
+    pub bloom: [f32; 4],
 }
 
 /// The pass that tonemaps the colors buffer into a surface texture.
@@ -62,6 +65,7 @@ pub(crate) fn display_bind(
     colors: &wgpu::Buffer,
     dims: &wgpu::Buffer,
     meter: &wgpu::Buffer,
+    bloom: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("display"),
@@ -78,6 +82,10 @@ pub(crate) fn display_bind(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: meter.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: bloom.as_entire_binding(),
             },
         ],
     })
@@ -760,7 +768,7 @@ impl LiveRenderer {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let display_bind = display_bind(device, display, &colors_buf, dims_buf, &meter);
+        let display_bind = display_bind(device, display, &colors_buf, dims_buf, &meter, &meter);
         (colors_buf, camera_binds, display_bind)
     }
 
@@ -1027,6 +1035,7 @@ impl LiveRenderer {
             size: [self.width, self.height],
             flags: [!self.srgb as u32, 0],
             exposure: [1.0, 0.0, 0.0, 0.0],
+            bloom: [0.0; 4],
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));

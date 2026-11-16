@@ -127,6 +127,12 @@ pub struct RendererOptions {
     /// Fog with light shafts (M18; None: clear air), with the cache,
     /// hardware ray queries and no movers. See [`crate::Fog`].
     pub fog: Option<crate::Fog>,
+    /// Bloom for the display (M19; on by default: 4% of the light spread by
+    /// a Gaussian of 2% of the image's height, energy kept). None: off.
+    pub bloom: Option<crate::Bloom>,
+    /// How the display scales the image up with `scale` above 1 (M19;
+    /// Catmull-Rom by default).
+    pub upscale: crate::Upscale,
 }
 
 impl Default for RendererOptions {
@@ -147,6 +153,8 @@ impl Default for RendererOptions {
             tone_map: crate::ToneMap::PbrNeutral,
             auto_exposure: Some(crate::AutoExposure::default()),
             fog: None,
+            bloom: Some(crate::Bloom::default()),
+            upscale: crate::Upscale::CatmullRom,
         }
     }
 }
@@ -297,6 +305,8 @@ impl Renderer {
         }
         inner.set_tone_map(options.tone_map);
         inner.set_auto_exposure(options.auto_exposure);
+        inner.set_bloom(options.bloom);
+        inner.set_upscale(options.upscale);
         Renderer { kernel, inner }
     }
 
@@ -361,6 +371,11 @@ impl Renderer {
     /// The display's tone map (M17), from the next frame.
     pub fn set_tone_map(&mut self, tone_map: crate::ToneMap) {
         self.inner.set_tone_map(tone_map);
+    }
+
+    /// Bloom for the display (M19; None: off), from the next frame.
+    pub fn set_bloom(&mut self, bloom: Option<crate::Bloom>) {
+        self.inner.set_bloom(bloom);
     }
 
     /// The display's auto-exposure (M17; None: off), from the next frame.

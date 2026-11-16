@@ -144,7 +144,7 @@ mod tangents;
 mod vcache;
 
 pub use cutout::cut_out;
-pub use exposure::{AutoExposure, ToneMap};
+pub use exposure::{AutoExposure, Bloom, ToneMap, Upscale};
 pub use fog::Fog;
 pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};

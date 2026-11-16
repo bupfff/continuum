@@ -1024,6 +1024,37 @@ Cycles and at most 0.35× the error without fog.
 **Gate 1 passed** (`docs/results/m18-gate1.md`): 0.802 ms at 720p; 9.58%
 and 5.51% from Cycles (0.216× and 0.146× the error without fog).
 
+#### Bloom and upscaling (M19 design, 2026-11-16)
+
+Two display-time effects; `read_colors` stays linear and untouched.
+- **Bloom** (`Bloom`; `Renderer`'s default: strength 0.04, radius 2% of
+  the image's height): before the display, the image at a quarter of its
+  size (4 × 4 means), blurred by a Gaussian across and down (weights
+  renormalized at the edges); the display shows (1 − strength) of each
+  pixel plus strength of the blur there (bilinear), in linear light before
+  exposure and the tone map, so the image's light is kept. Tested
+  (`bloom_spreads_light_and_keeps_it`): 4e-8 from the same computed on the
+  CPU, total light 1.00018 of the image's.
+- **Upscaling** (`Upscale`; `Renderer`'s default Catmull-Rom; with a
+  render scale above 1): the display sampled the nearest rendered pixel;
+  now Catmull and Rom's bicubic, clamped to its four nearest pixels' range
+  (no ringing), or bilinear. No temporal reconstruction (§4), so detail
+  missing at the lower resolution stays missing.
+
+**Development** (`post_dev`, the textured scene with foliage, 640×360 to a
+1280×720 float target against the scene rendered at 1280×720): nearest
+12.25% from the native render, bilinear 11.19%, Catmull-Rom 10.65%
+(0.87×); the scale-2 frame 0.41× native with nearest, 0.50× with
+Catmull-Rom (its 16 reads a pixel in the display cost 0.29 ms at 720p);
+bloom 0.25 ms at 1280×720.
+
+**Gate M19 G1** (`m19_gate1`), the bars set with the development numbers
+above known: (1) bloom within 1e-3 of the CPU's computation and the
+image's light kept within 1%, at 1280×720; (2) bloom adds at most 0.3 ms;
+(3) Catmull-Rom from 640×360 at most 0.9× nearest's error against the
+native render, at most 0.35 ms more than nearest, the frame at most 0.55×
+native.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

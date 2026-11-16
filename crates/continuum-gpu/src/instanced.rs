@@ -483,6 +483,10 @@ pub struct InstancedRenderer {
     /// metered frame was drawn (for the adaptation's rate).
     tone_map: crate::ToneMap,
     auto_exposure: Option<crate::AutoExposure>,
+    /// Bloom and the upscaler (M19).
+    bloom: Option<crate::Bloom>,
+    upscale: crate::Upscale,
+    bloom_passes: crate::exposure::BloomPasses,
     meter: crate::exposure::Meter,
     metered_at: std::cell::Cell<Option<Instant>>,
     /// The sky's radiance the fog scatters (M18), and whether this frame
@@ -1438,8 +1442,10 @@ impl InstancedRenderer {
         );
         let dims_buf = uniform_buffer(&device, "dims", &[0; std::mem::size_of::<DisplayDims>()]);
         let display = display_pipeline(&device, target_format);
-        // The auto-exposure meter (M17), bound with the colours below.
+        // The auto-exposure meter (M17) and bloom (M19), bound with the
+        // colours below.
         let meter = crate::exposure::Meter::new(&device);
+        let bloom_passes = crate::exposure::BloomPasses::new(&device, (width, height));
         let pixel_cones = kernel.pixel_cones.get();
         // Pixel cones need no camera rays, so no acceleration structure.
         // M13 gate 4 (profile stage 16) traces corner rays in hardware.
@@ -1870,7 +1876,14 @@ impl InstancedRenderer {
             passes,
             camera_dispatch,
             hw,
-            display_bind: display_bind(&device, &display, &colors, &dims_buf, &meter.state),
+            display_bind: display_bind(
+                &device,
+                &display,
+                &colors,
+                &dims_buf,
+                &meter.state,
+                &bloom_passes.out,
+            ),
             mark: kernel.entry("mark"),
             display,
             scene: scene_buffers,
@@ -1915,6 +1928,9 @@ impl InstancedRenderer {
             exposure: 1.0,
             tone_map: crate::ToneMap::Reinhard,
             auto_exposure: None,
+            bloom: None,
+            upscale: crate::Upscale::Nearest,
+            bloom_passes,
             meter,
             metered_at: std::cell::Cell::new(None),
             fog_sky: kernel.sky(),
@@ -2439,12 +2455,15 @@ impl InstancedRenderer {
                 *b = movers;
             }
         }
+        self.bloom_passes = crate::exposure::BloomPasses::new(device, (width, height));
+        self.bloom_passes.bind(device, &self.colors);
         self.display_bind = display_bind(
             device,
             &self.display,
             &self.colors,
             &self.dims_buf,
             &self.meter.state,
+            &self.bloom_passes.out,
         );
         self.meter.bind(device, &self.colors);
         self.vis = Some(vis);
@@ -2646,6 +2665,11 @@ impl InstancedRenderer {
     /// Records the auto-exposure meter (M17) before a display pass, if on:
     /// its adaptation's rate from the time since the last metered frame.
     fn encode_meter(&self, encoder: &mut wgpu::CommandEncoder) {
+        // Bloom first (M19), from the rendered colours.
+        if let Some(b) = &self.bloom {
+            self.bloom_passes
+                .encode(&self.queue, encoder, (self.width, self.height), b);
+        }
         let Some(auto) = self.auto_exposure else {
             return;
         };
@@ -2660,6 +2684,18 @@ impl InstancedRenderer {
         self.metered_at.set(Some(now));
         self.meter
             .encode(&self.queue, encoder, (self.width, self.height), &auto, rate);
+    }
+
+    /// Bloom for the display (M19; off here by default), from the next
+    /// frame.
+    pub fn set_bloom(&mut self, bloom: Option<crate::Bloom>) {
+        self.bloom = bloom;
+    }
+
+    /// How the display scales the image up to its target with a render
+    /// scale above 1 (M19; `Upscale::Nearest` here by default).
+    pub fn set_upscale(&mut self, upscale: crate::Upscale) {
+        self.upscale = upscale;
     }
 
     /// The display's tone map (M17; `ToneMap::Reinhard` here by default,
@@ -2726,8 +2762,15 @@ impl InstancedRenderer {
                 self.exposure,
                 self.tone_map.code(),
                 self.auto_exposure.is_some() as u32 as f32,
-                0.0,
+                self.upscale.code() as f32,
             ],
+            bloom: match self.bloom {
+                Some(b) => {
+                    let (qw, qh) = self.bloom_passes.quarter();
+                    [b.strength.clamp(0.0, 1.0), qw as f32, qh as f32, 1.0]
+                }
+                None => [0.0; 4],
+            },
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
@@ -2994,8 +3037,15 @@ impl InstancedRenderer {
                 self.exposure,
                 self.tone_map.code(),
                 self.auto_exposure.is_some() as u32 as f32,
-                0.0,
+                self.upscale.code() as f32,
             ],
+            bloom: match self.bloom {
+                Some(b) => {
+                    let (qw, qh) = self.bloom_passes.quarter();
+                    [b.strength.clamp(0.0, 1.0), qw as f32, qh as f32, 1.0]
+                }
+                None => [0.0; 4],
+            },
         };
         self.queue
             .write_buffer(&self.dims_buf, 0, bytemuck::bytes_of(&dims));
