@@ -1,0 +1,12 @@
+M20 gate 1: 640x360, timed at 1280x720, adapter Apple M4
+1. cost, (a) focused on the brick block: +1.657 ms (at most 2.0): PASS; highlights Some((0, 0)) (rounds, without/with ms: 2.766/4.428 2.756/4.424 2.783/4.439 2.778/4.429 2.778/4.434)
+1. cost, (b) focused at 5 m: +1.752 ms (at most 2.0): PASS; highlights Some((10, 0)) (rounds, without/with ms: 2.779/4.537 2.782/4.546 2.796/4.529 2.782/4.533 2.790/4.542)
+1. cost, (c) night, focused at 3 m: +2.124 ms (reported); highlights Some((531, 0)) (rounds, without/with ms: 2.853/4.978 2.843/4.958 2.834/4.958 2.834/4.979 2.849/4.964)
+2. (a) focused on the brick block: from the sampled lens 1.89%, the pinhole 14.11% (0.134x, at most 0.2x): PASS
+3. (a) focused on the brick block: from Cycles (13 s, METAL) 7.15%, the sampled lens 6.92% (1.034x, at most 1.12x), the pinhole 15.40%; means against Cycles: ours -2.41%, sampled lens -2.40%, pinhole -2.41% (ours took 29 s): PASS
+2. (b) focused at 5 m: from the sampled lens 1.95%, the pinhole 15.10% (0.129x, at most 0.2x): PASS
+3. (b) focused at 5 m: from Cycles (13 s, METAL) 6.92%, the sampled lens 6.56% (1.056x, at most 1.12x), the pinhole 16.09%; means against Cycles: ours -2.44%, sampled lens -2.40%, pinhole -2.40% (ours took 29 s): PASS
+2. (c) night, focused at 3 m: from the sampled lens 1368.72%, the pinhole 4818.91% (0.284x, at most 0.2x): FAIL
+3. (c) night, focused at 3 m: from Cycles (37 s, METAL) 1321.28%, the sampled lens 107.61% (12.279x, at most 1.12x), the pinhole 4676.65%; means against Cycles: ours -6.83%, sampled lens -2.84%, pinhole -2.80% (ours took 45 s): FAIL
+views that did not settle within 20,000 frames: 0
+Verdict: 1 PASS, 2 FAIL, 3 FAIL: FAIL
