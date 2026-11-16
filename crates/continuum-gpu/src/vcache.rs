@@ -1431,7 +1431,19 @@ impl VirtualCache {
                     wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
-            (115, empty("bounce state", 32, wgpu::BufferUsages::COPY_DST)),
+            (115, empty("bounce state", 64, wgpu::BufferUsages::COPY_DST)),
+            (
+                116,
+                empty(
+                    "bounce ledger",
+                    if options.indirect && movers > 0 {
+                        options.pages as u64 * 32
+                    } else {
+                        32
+                    },
+                    wgpu::BufferUsages::empty(),
+                ),
+            ),
             (
                 67,
                 empty(
@@ -1937,17 +1949,13 @@ impl VirtualCache {
                 self.drains.insert(self.frame);
             }
             if let Some(drain) = self.bounce_pass {
-                let state = [
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    self.options.bounce_epsilon.max(0.0).to_bits(),
-                    drain as u32,
-                ];
-                queue.write_buffer(self.buffer(115), 0, bytemuck::cast_slice(&state));
+                // This frame's shadows' box starts empty; the frame before's
+                // (the other parity) stays for the telescoped charge.
+                let parity = self.frame % 2;
+                queue.write_buffer(self.buffer(115), parity as u64 * 32, &[0u8; 24]);
+                let control = [self.options.bounce_epsilon.max(0.0).to_bits(), drain as u32];
+                queue.write_buffer(self.buffer(115), 24, bytemuck::cast_slice(&control));
+                queue.write_buffer(self.buffer(115), 56, bytemuck::bytes_of(&parity));
             }
         }
         let lit = std::mem::take(&mut self.lights_moved) && self.moving > 0;

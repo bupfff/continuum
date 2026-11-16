@@ -192,6 +192,12 @@ fn main() -> std::io::Result<()> {
             let log = ours.cache_log();
             let recent = &log[log.len().saturating_sub(every)..];
             let samples: u32 = recent.iter().map(|s| s.indirect_samples).sum();
+            let slog = stale.cache_log();
+            let stale_samples: u32 = slog[slog.len().saturating_sub(every)..]
+                .iter()
+                .map(|s| s.indirect_samples)
+                .sum();
+            println!("  bounce samples baked without re-bakes: {stale_samples}");
             println!(
                 "frame {f} (boulders +{at:.2} m): ours {:.3}% from a fresh bake, without re-bakes {:.3}%; bounce samples baked over the last {every} frames {samples}",
                 100.0 * relative_rmse(&ours.read_colors(), &reference),

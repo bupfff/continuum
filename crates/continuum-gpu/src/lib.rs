@@ -743,7 +743,7 @@ pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
 pub(crate) const VC_SELF_BAKE_BINDINGS: &[u32] =
     &[0, 2, 3, 5, 23, 24, 25, 26, 29, 30, 33, 34, 54, 49, 50, 51];
 pub(crate) const VC_FILL_BINDINGS: &[u32] = &[
-    3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64, 73, 77,
+    3, 30, 33, 37, 38, 40, 41, 46, 47, 48, 61, 62, 63, 64, 73, 77, 116,
 ];
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     79, 0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52,
@@ -787,7 +787,7 @@ pub(crate) const VC_STALE_BINDINGS: &[u32] = &[
     3, 30, 33, 38, 40, 41, 43, 46, 48, 52, 60, 61, 62, 63, 64, 65, 67, 77, 78, 115,
 ];
 /// Bounce light's ledger under movers (M22).
-pub(crate) const VC_BOUNCE_BINDINGS: &[u32] = &[3, 30, 41, 60, 61, 62, 64, 78, 115];
+pub(crate) const VC_BOUNCE_BINDINGS: &[u32] = &[3, 30, 40, 41, 60, 61, 62, 64, 78, 115, 116];
 pub(crate) const VC_ARGS_BINDINGS: &[u32] = &[64, 66, 67];
 pub(crate) const VC_STALE_TEXELS_BINDINGS: &[u32] = &[
     2, 3, 23, 24, 30, 33, 34, 41, 43, 52, 54, 60, 61, 62, 63, 64, 65, 67,

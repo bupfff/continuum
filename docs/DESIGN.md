@@ -1364,6 +1364,30 @@ changed, re-bakes only for pages pixels read, charges that weigh what a
 mover can block by its distance from the page's own surface rather than
 its box), and the own pages' fill race.
 
+**Development after gate 1 (2026-11-16):**
+- **Tighter charges, both sound:** telescoped as the sky's ledger (per
+  mover, its share at the bake plus now: `bounce_ledger`, binding 116,
+  with the shadows' box double-buffered by frame parity), and the frames'
+  crescents summed (a sphere moving δ changes at most 4rδ of the area it
+  shows, over πd²); the charge is the lesser. Largest charges fell from
+  1,560 to about 20 (own pages, charged 1 a frame).
+- **Only pages pixels read re-bake while moving;** the drain takes the
+  rest at rest.
+- **The cost did not fall:** the ledger still re-bakes about 210 pages a
+  frame (57,000–68,000 bounce samples per 30 frames against about 1,000
+  without re-bakes). The pages over ε carry charges of 2–32: near a moving
+  boulder a 1% share of the view really is exceeded within frames, so the
+  volume is set by what moves and by ε, and each re-bake costs a full page
+  (9 × 192 rays). The image at the end of the motion 0.431× without
+  re-bakes (0.443× before).
+- **Next, for gate 2:** (1) partial re-bakes: a charge knows the
+  directions that changed (the moved spheres seen from the page), so only
+  those hemicube bins need tracing, with each bin's contribution kept to
+  update the sum exactly (memory: 9 × 192 halves a page, or a coarser bin
+  grid); (2) thresholds scaled by what bounce contributes to the page
+  (§3.1: "scaled by how much the result contributes"): a sunlit page's
+  bounce change matters far less than a shadowed one's.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -1773,8 +1797,10 @@ place, for a new conversation. **Now:** items 1–4 of the user's order are
 done through M21 (atmosphere and post: M17–M21 passed); item 5, lighting
 gaps, is under way with M22, bounce light with movers (§3.4 "Bounce light
 with movers"): G1 failed on cost (the ledger's re-bakes double the moving
-frame) and one check of its new flight; image and rest passed; next,
-cheaper re-bakes for G2. Movers under a sky cost 331 ms a frame, a gap of
+frame) and one check of its new flight; image and rest passed. Since:
+tighter sound charges (telescoped, swept), but the re-bakes' cost stays;
+next, partial re-bakes of the bins a move changed, or thresholds scaled by
+bounce's share of a page (§3.4, "Development after gate 1"). Movers under a sky cost 331 ms a frame, a gap of
 its own. Then the rest of item 5 (bounce on by default and quicker to settle,
 emissive surfaces as lights, receivers next to large lights). Read this block, then the milestone table
 (§6) and the results files it names. Item 1 of "Next, in order" below (the

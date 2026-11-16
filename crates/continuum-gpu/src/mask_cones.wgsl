@@ -2971,16 +2971,59 @@ fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: v
 // Slots listed for the CPU to re-bake their sky (top bit: a page on a
 // moved object); count in mover_stats[7].
 @group(0) @binding(78) var<storage, read_write> sky_list: array<u32>;
-// Bounce light under movers (M22): words 0-5 the box of this frame's
+// Bounce light under movers (M22): words 8p to 8p + 5 the box of the
 // candidate pages (where moved shadows may fall; each bound as an ordered
-// float, `ordered_max`: lo negated), 6 the threshold (ε, as f32 bits), 7 1
-// for a drain at rest (no move: list what is charged above ε / 100). Per
-// slot the charge since its bounce samples were baked is
-// `slot_info[3s + 1].w` (f32 bits); bit 1 of `slot_info[3s].w` says it is
-// listed (sky_list, bit 30) for a re-bake of its bounce samples alone, bits
-// 8-31 the frame it was listed; bit 2 that its samples were baked while
+// float, lo negated) of frames of parity p (word 14: this frame's), 6 the
+// threshold (ε, as f32 bits), 7 1 for a drain at rest (no move: list what
+// is charged above ε / 100). Per slot the charge since its bounce samples
+// were baked is `slot_info[3s + 1].w` (f32 bits, for diagnostics; the
+// ledger is `bounce_ledger`); bit 1 of `slot_info[3s].w` says it is listed
+// (sky_list, bit 30) for a re-bake of its bounce samples alone, bits 8-31
+// the frame it was listed; bit 2 that its samples were baked while
 // something moved.
-@group(0) @binding(115) var<storage, read_write> bounce_state: array<atomic<u32>, 8>;
+@group(0) @binding(115) var<storage, read_write> bounce_state: array<atomic<u32>, 16>;
+// Per slot: the charges since its bounce samples were baked (x: what movers
+// covered then, y: what they cover now less then, telescoped as the sky's
+// ledger; z: the frames' crescents summed), the charge the lesser; and
+// which movers (and bit 31 of w: the shadows' box) it has been charged for
+// since.
+@group(0) @binding(116) var<storage, read_write> bounce_ledger: array<vec4<f32>>;
+
+// The candidate pages' box of frames of parity `p` (empty: lo > hi).
+fn shadow_box(p: u32) -> Box3 {
+    let b = 8u * p;
+    if (atomicLoad(&bounce_state[b + 3u]) == 0u) { return Box3(vec3<f32>(1.0), vec3<f32>(-1.0)); }
+    let hi = vec3<f32>(unordered(atomicLoad(&bounce_state[b + 3u])), unordered(atomicLoad(&bounce_state[b + 4u])),
+                       unordered(atomicLoad(&bounce_state[b + 5u])));
+    let lo = -vec3<f32>(unordered(atomicLoad(&bounce_state[b])), unordered(atomicLoad(&bounce_state[b + 1u])),
+                        unordered(atomicLoad(&bounce_state[b + 2u])));
+    return Box3(lo, hi);
+}
+
+// A box's charge on `page` as a share of its view (0 for an empty box).
+fn box_share(page: Box3, b: Box3) -> f32 {
+    if (any(b.lo > b.hi)) { return 0.0; }
+    return sphere_charge(page, (b.lo + b.hi) * 0.5, 0.5 * length(b.hi - b.lo)) / 3.14159265;
+}
+
+// What a box moving from `a` to `b` (as bounding spheres of the same
+// radius r, centres δ apart) can change in `page`'s view, as a share: the
+// two crescents between the discs it shows then and now, at most 4 r δ of
+// area, at the nearest distance d of either sphere's surface, over π d²;
+// at most the two spheres' shares.
+fn swept_share(page: Box3, a: Box3, b: Box3) -> f32 {
+    if (any(a.lo > a.hi) || any(b.lo > b.hi)) { return box_share(page, a) + box_share(page, b); }
+    let ca = (a.lo + a.hi) * 0.5;
+    let cb = (b.lo + b.hi) * 0.5;
+    let r = 0.5 * max(length(a.hi - a.lo), length(b.hi - b.lo));
+    let delta = length(cb - ca);
+    let da = length(max(vec3<f32>(0.0), max(page.lo - ca, ca - page.hi)));
+    let db = length(max(vec3<f32>(0.0), max(page.lo - cb, cb - page.hi)));
+    let d = min(da, db) - r;
+    let whole = box_share(page, a) + box_share(page, b);
+    if (d <= 0.0) { return whole; }
+    return min(whole, 4.0 * r * delta / (3.14159265 * d * d));
+}
 
 fn ordered(x: f32) -> u32 {
     let b = bitcast<u32>(x);
@@ -3497,6 +3540,10 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Bit 2: bounce samples baked while something moved, from hits whose
     // light may have been stale then: the drain at rest bakes them again.
     let moving = select(0u, 4u, fresh && vc.movers.x > 0u);
+    if (!keep && arrayLength(&bounce_ledger) > 2u * e.w + 1u) {
+        bounce_ledger[2u * e.w] = vec4<f32>(0.0);
+        bounce_ledger[2u * e.w + 1u] = vec4<f32>(0.0);
+    }
     slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u | select(0u, prev.w & 0xffffff06u, keep) | moving);
     slot_info[3u * e.w + 1u] = vec4<u32>(bitcast<vec3<u32>>(bake_bounds[2u * p].xyz), charge);
     slot_info[3u * e.w + 2u] = bitcast<vec4<u32>>(bake_bounds[2u * p + 1u]);
@@ -3880,8 +3927,9 @@ fn vc_bounce(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (info.w == 0u) { return; }
     // Baked without bounce samples (for light at hits).
     if (bitcast<f32>(slot_info[3u * s + 2u].w) == 1.0) { return; }
-    var charge = bitcast<f32>(slot_info[3u * s + 1u].w);
     let drain = atomicLoad(&bounce_state[7]) != 0u;
+    var led = bounce_ledger[2u * s];
+    var mask = bitcast<vec4<u32>>(bounce_ledger[2u * s + 1u]);
     if (!drain) {
         let m = info.x;
         let lo = bitcast<vec3<f32>>(slot_info[3u * s + 1u].xyz);
@@ -3890,29 +3938,56 @@ fn vc_bounce(@builtin(global_invocation_id) gid: vec3<u32>) {
         let lights_n = vc.sky.z;
         let first = 2u * lights_n + 2u;
         let stride = 4u + 4u * lights_n;
-        let pi = 3.14159265;
         for (var k = 0u; k < vc.movers.x; k++) {
             let e = first + k * stride;
             if (bitcast<u32>(moved[e].w) == m) {
-                charge += 1.0;
+                // Its own object moved: everything it sees moved with it.
+                led.x += 1.0;
+                led.z += 1.0;
                 continue;
             }
-            let old = moved_box(e);
-            let now = moved_box(e + 2u);
-            charge += sphere_charge(page, (old.lo + old.hi) * 0.5, 0.5 * length(old.hi - old.lo)) / pi;
-            charge += sphere_charge(page, (now.lo + now.hi) * 0.5, 0.5 * length(now.hi - now.lo)) / pi;
+            // Telescoped: what the page sees can have changed only where
+            // the mover was at the bake (its old box the first frame it
+            // moves after) or is now.
+            let o = box_share(page, moved_box(e));
+            let n = box_share(page, moved_box(e + 2u));
+            // The frames' crescents summed bound it too (z).
+            led.z += swept_share(page, moved_box(e), moved_box(e + 2u));
+            let id = bitcast<u32>(moved[e + 1u].w);
+            if (id < 96u) {
+                let bit = 1u << (id % 32u);
+                if ((mask[id / 32u] & bit) == 0u) {
+                    mask[id / 32u] |= bit;
+                    led.x += o;
+                    led.y += n;
+                } else {
+                    led.y += n - o;
+                }
+            } else {
+                led.x += o + n;
+            }
         }
-        let shade_hi = vec3<f32>(unordered(atomicLoad(&bounce_state[3])), unordered(atomicLoad(&bounce_state[4])),
-                                 unordered(atomicLoad(&bounce_state[5])));
-        let shade_lo = -vec3<f32>(unordered(atomicLoad(&bounce_state[0])), unordered(atomicLoad(&bounce_state[1])),
-                                  unordered(atomicLoad(&bounce_state[2])));
-        if (atomicLoad(&bounce_state[3]) != 0u && all(shade_lo <= shade_hi)) {
-            charge += sphere_charge(page, (shade_lo + shade_hi) * 0.5, 0.5 * length(shade_hi - shade_lo)) / pi;
+        // The shadows' box likewise, now against the frame before.
+        let parity = atomicLoad(&bounce_state[14]);
+        let now = box_share(page, shadow_box(parity));
+        led.z += swept_share(page, shadow_box(1u - parity), shadow_box(parity));
+        if ((mask.w & 0x80000000u) == 0u) {
+            mask.w |= 0x80000000u;
+            led.x += now;
+            led.y += now;
+        } else {
+            led.y += now - box_share(page, shadow_box(1u - parity));
         }
-        slot_info[3u * s + 1u].w = bitcast<u32>(charge);
+        bounce_ledger[2u * s] = led;
+        bounce_ledger[2u * s + 1u] = bitcast<vec4<f32>>(mask);
     }
+    let charge = min(led.x + max(led.y, 0.0), led.z);
+    slot_info[3u * s + 1u].w = bitcast<u32>(charge);
     let threshold = bitcast<f32>(atomicLoad(&bounce_state[6])) * select(1.0, 0.01, drain);
-    let due = charge > threshold || (drain && (info.w & 4u) != 0u);
+    // While moving, only pages pixels read re-bake; the drain at rest takes
+    // the rest.
+    let visible = slot_used[s] + vc.movers.w >= vc.counts.y;
+    let due = (charge > threshold && (drain || visible)) || (drain && (info.w & 4u) != 0u);
     // Listed (bit 1) in the frame bits 8-31 hold; again if no re-bake came
     // within 16 frames.
     let since = (vc.counts.y - (info.w >> 8u)) & 0xffffffu;
@@ -4008,12 +4083,13 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!candidate) { return; }
     // Where moved shadows may fall, for bounce light's ledger (M22).
     if (vc.indirect.y == 1u) {
-        atomicMax(&bounce_state[0], ordered(-page.lo.x));
-        atomicMax(&bounce_state[1], ordered(-page.lo.y));
-        atomicMax(&bounce_state[2], ordered(-page.lo.z));
-        atomicMax(&bounce_state[3], ordered(page.hi.x));
-        atomicMax(&bounce_state[4], ordered(page.hi.y));
-        atomicMax(&bounce_state[5], ordered(page.hi.z));
+        let b = 8u * atomicLoad(&bounce_state[14]);
+        atomicMax(&bounce_state[b], ordered(-page.lo.x));
+        atomicMax(&bounce_state[b + 1u], ordered(-page.lo.y));
+        atomicMax(&bounce_state[b + 2u], ordered(-page.lo.z));
+        atomicMax(&bounce_state[b + 3u], ordered(page.hi.x));
+        atomicMax(&bounce_state[b + 4u], ordered(page.hi.y));
+        atomicMax(&bounce_state[b + 5u], ordered(page.hi.z));
     }
     // A page hidden for another reason (its sky the guess, set aside by the
     // ledger) is not re-baked in part: the fill would show it.
