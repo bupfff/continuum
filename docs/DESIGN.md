@@ -1739,10 +1739,17 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-14, thirteenth session)
+### 3.8 Next steps, in order (updated 2026-11-16, fifteenth session)
 
-**Start here (updated 2026-11-15, fourteenth session).** The state in one
-place, for a new conversation. Read this block, then the milestone table
+**Start here (updated 2026-11-16, fifteenth session).** The state in one
+place, for a new conversation. **Now:** items 1–4 of the user's order are
+done through M21 (atmosphere and post: M17–M21 passed); item 5, lighting
+gaps, is under way with M22, bounce light with movers, in development (§3.4
+"Bounce light with movers": the ledger built, `verify_bounce` measuring
+it, 50 of 2,429 pages over ε at rest; next a drain pass for hits re-baked
+later, then the gate; movers under a sky cost 331 ms a frame, a gap of its
+own). Then the rest of item 5 (bounce on by default and quicker to settle,
+emissive surfaces as lights, receivers next to large lights). Read this block, then the milestone table
 (§6) and the results files it names. Item 1 of "Next, in order" below (the
 design for M13's far field, §3.4) and items 2.1–2.3 are done (M4 G13 and
 M14 G15 passed; M14 G14, several bounces with streaming, failed one view's
