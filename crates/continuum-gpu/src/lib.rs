@@ -599,6 +599,7 @@ const ENTRY_POINTS: &[&str] = &[
     "vc_args_bake",
     "vc_ledger_reset",
     "vc_ledger",
+    "vc_bounce",
     "vc_bake_indirect",
     "vc_shade_edges",
     "vc_aa_shade",
@@ -632,6 +633,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_page_args",
     "hw_m13_page_bake",
     "hw_vc_bake_indirect",
+    "hw_vc_bake_indirect_movers",
     "hw_vc_bake_sky",
     "hw_vc_error_shares",
     "hw_aa_list",
@@ -757,6 +759,11 @@ pub(crate) const HW_VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
     2, 3, 8, 23, 24, 30, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 45, 52, 54, 55, 56, 57, 58, 64,
     73, 74, 75,
 ];
+/// The same with movers (M22): their structure too.
+pub(crate) const HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS: &[u32] = &[
+    2, 3, 8, 23, 24, 30, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 45, 52, 54, 55, 56, 57, 58, 59,
+    64, 73, 74, 75,
+];
 /// Sky samples through hardware ray queries (M5 gate 13).
 pub(crate) const HW_VC_BAKE_SKY_BINDINGS: &[u32] =
     &[2, 3, 23, 24, 30, 32, 33, 34, 38, 41, 46, 47, 54, 64];
@@ -775,8 +782,10 @@ pub(crate) const VC_BAKE_INDIRECT_BINDINGS: &[u32] = &[
 ];
 /// The movers' stale passes (M9) and the dispatch sizes after each.
 pub(crate) const VC_STALE_BINDINGS: &[u32] = &[
-    3, 30, 33, 38, 40, 41, 43, 46, 48, 52, 60, 61, 62, 63, 64, 65, 67, 77, 78,
+    3, 30, 33, 38, 40, 41, 43, 46, 48, 52, 60, 61, 62, 63, 64, 65, 67, 77, 78, 115,
 ];
+/// Bounce light's ledger under movers (M22).
+pub(crate) const VC_BOUNCE_BINDINGS: &[u32] = &[3, 30, 41, 60, 61, 62, 64, 78, 115];
 pub(crate) const VC_ARGS_BINDINGS: &[u32] = &[64, 66, 67];
 pub(crate) const VC_STALE_TEXELS_BINDINGS: &[u32] = &[
     2, 3, 23, 24, 30, 33, 34, 41, 43, 52, 54, 60, 61, 62, 63, 64, 65, 67,

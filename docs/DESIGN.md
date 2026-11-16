@@ -1293,6 +1293,32 @@ Prior art: the ledger itself (§3.1); incremental radiosity with line-space
 hierarchies (Drettakis & Sillion 1997) bounds radiosity changes from
 moving objects the same way, by the form factors they can change.
 
+**Development so far (2026-11-16, `bounce_movers_dev`; no gate yet).**
+- Built: `vc_bounce` (the charges, after the stale pass, which now records
+  the box of its candidate pages; listings through the sky list's bit 30;
+  a drain every eighth still frame until one lists nothing); the fill keeps
+  a page's charge unless its bounce samples are baked anew (planned with
+  them, or a retry); `CacheOptions::bounce_epsilon`. Bounce light no longer
+  refuses movers (moving lights still refused).
+- **Fixed on the way:** bounce rays did not see movers (they queried the
+  static structure only); `hw_vc_bake_indirect_movers` queries the movers'
+  too. With a fixed bake budget, a renderer settled at rest now matches
+  one built at the same poses exactly (0.0000%); before, 1.02% apart.
+- **Found:** with a time-based budget the settled image depends on the
+  order pages became resident (bounce samples read the levels resident at
+  their hits): 0.06–0.81% between two settled renderers. Measure with a
+  fixed budget.
+- **Found:** movers under a sky cost 331 ms a frame at 640×360 on the
+  textured scene with six boulders (sun only: 38.7 ms), M9 G3's sky
+  re-bakes; a gap of its own.
+- **Not yet working:** during motion (six boulders, 0.02 m a frame, sun
+  only, fixed budget) the ledger's re-bakes leave the image 1.50–1.99%
+  from a fresh bake against 1.33–1.81% with no bounce re-bakes at all, and
+  after stopping 1.94%. A fresh bake differs in residency history too, so
+  the next step is a bounce counterpart of `verify_cache`: re-bake every
+  resident page's bounce samples in place and compare each page's change
+  with its charge (soundness, as M9 measured direct light).
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

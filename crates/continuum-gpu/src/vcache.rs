@@ -209,7 +209,9 @@ pub struct CacheOptions {
     /// 3×3 grid per page (192 rays each), from the direct light the cache
     /// holds at the hits. The first three lights' bounce re-colors free; later
     /// lights' is baked at their radiance, so re-coloring one re-bakes bounce
-    /// light (M10 gate 21). Not with movers or moving lights. Off by default.
+    /// light (M10 gate 21). With movers, a ledger re-bakes it where moves may
+    /// have changed it (M22, `bounce_epsilon`); not with moving lights. Off
+    /// by default.
     pub indirect: bool,
     /// With bounce light (M10 gate 11; on by default): its samples also
     /// gather the emission of the surfaces they hit, so emissive geometry
@@ -217,6 +219,11 @@ pub struct CacheOptions {
     pub emission_bounce: bool,
     /// What a bounce sample counts against the bake budget, in sun texels.
     pub indirect_sample_cost: u32,
+    /// Bounce light with movers (M22): the share of a page's view (cosine-
+    /// weighted, of the whole hemisphere) that moves may change before its
+    /// bounce samples re-bake. At rest, pages charged above a hundredth of
+    /// it re-bake with what the budget leaves.
+    pub bounce_epsilon: f32,
     /// Anti-aliasing at silhouettes (M7 gates 3–4): pixels whose neighbours
     /// see another object or depth average four rays through their
     /// quarters. With hardware camera rays (and no movers) the rays are ray
@@ -315,6 +322,7 @@ impl Default for CacheOptions {
             indirect: false,
             emission_bounce: true,
             indirect_sample_cost: 8,
+            bounce_epsilon: 0.01,
             edge_rays: false,
             deforming_budget: 512,
             edge_samples: 4,
@@ -973,6 +981,16 @@ pub(crate) struct VirtualCache {
     /// texels).
     moved: Vec<[f32; 4]>,
     moved_count: u32,
+    /// Bounce light's ledger under movers (M22): on; whether pages may still
+    /// be charged; the last frame anything moved; the frames that drained;
+    /// this frame's pass (Some(true): a drain at rest).
+    bounce_ledger: bool,
+    bounce_dirty: bool,
+    last_motion: u32,
+    drains: std::collections::BTreeSet<u32>,
+    bounce_pass: Option<bool>,
+    /// Pages the last read-back frame listed for bounce re-bakes.
+    bounce_listed: u32,
     /// Moving lights (M9 gate 2): how many, the lights' poses now (written
     /// into the ring each frame), and whether one moved since the last
     /// frame.
@@ -1132,8 +1150,8 @@ impl VirtualCache {
             "moving lights with a sky in the cache are not supported yet"
         );
         assert!(
-            !options.indirect || (movers == 0 && moving.is_empty()),
-            "bounce light with moving objects or lights is not supported yet"
+            !options.indirect || moving.is_empty(),
+            "bounce light with moving lights is not supported yet"
         );
         let mut moving_index = vec![u32::MAX; lights as usize];
         for (j, &l) in moving.iter().enumerate() {
@@ -1413,6 +1431,7 @@ impl VirtualCache {
                     wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
+            (115, empty("bounce state", 32, wgpu::BufferUsages::COPY_DST)),
             (
                 67,
                 empty(
@@ -1511,6 +1530,12 @@ impl VirtualCache {
             bake_bounds: Vec::new(),
             moved: Vec::new(),
             moved_count: 0,
+            bounce_ledger: options.indirect && movers > 0,
+            bounce_dirty: false,
+            last_motion: 0,
+            drains: Default::default(),
+            bounce_pass: None,
+            bounce_listed: 0,
             moving: moving.len() as u32,
             poses: poses.to_vec(),
             lights_moved: false,
@@ -1899,6 +1924,32 @@ impl VirtualCache {
         if moved > 0 {
             queue.write_buffer(self.buffer(60), 0, bytemuck::cast_slice(&self.moved));
         }
+        // Bounce light's ledger (M22): charges when something moved; then,
+        // every eighth still frame, a drain until one lists nothing.
+        self.bounce_pass = None;
+        if self.bounce_ledger {
+            if moved > 0 {
+                self.bounce_pass = Some(false);
+                self.bounce_dirty = true;
+                self.last_motion = self.frame;
+            } else if self.bounce_dirty && (self.frame - self.last_motion).is_multiple_of(8) {
+                self.bounce_pass = Some(true);
+                self.drains.insert(self.frame);
+            }
+            if let Some(drain) = self.bounce_pass {
+                let state = [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    self.options.bounce_epsilon.max(0.0).to_bits(),
+                    drain as u32,
+                ];
+                queue.write_buffer(self.buffer(115), 0, bytemuck::cast_slice(&state));
+            }
+        }
         let lit = std::mem::take(&mut self.lights_moved) && self.moving > 0;
         if self.moving > 0 {
             queue.write_buffer(
@@ -2011,6 +2062,12 @@ impl VirtualCache {
     /// Bounce samples to bake this frame (after `upload`).
     pub(crate) fn indirect_jobs(&self) -> u32 {
         self.indirect_jobs.len() as u32
+    }
+
+    /// This frame's pass of bounce light's ledger (M22): Some(true) for a
+    /// drain at rest, Some(false) for charges after a move.
+    pub(crate) fn bounce_pass(&self) -> Option<bool> {
+        self.bounce_pass
     }
 
     /// Moving lights tracked by the ledger.
@@ -2387,7 +2444,7 @@ impl VirtualCache {
                     INCOMPLETE_CAP as u64 * 4,
                 );
             }
-            if self.sky {
+            if self.sky || self.bounce_ledger {
                 encoder.copy_buffer_to_buffer(
                     self.buffer(78),
                     0,
@@ -2628,7 +2685,7 @@ impl VirtualCache {
                 let listed = (mover[15] as usize).min(INCOMPLETE_CAP as usize);
                 incomplete.extend_from_slice(&words[first..first + listed]);
             }
-            if self.sky {
+            if self.sky || self.bounce_ledger {
                 let first = first + (INVALID_CAP + INCOMPLETE_CAP) as usize;
                 let listed = (mover[7] as usize).min(SKY_LIST_CAP as usize);
                 sky_listed.extend_from_slice(&words[first..first + listed]);
@@ -2716,7 +2773,31 @@ impl VirtualCache {
         self.evict_invalid(&invalid, frame);
         // Sky re-bakes for movers (M9 gate 3): a receiver's now; a moved
         // object's page (listed once per sky bake) a while later.
+        // Bounce light's ledger (M22): listed pages re-bake their bounce
+        // samples alone, now; a drain that listed nothing ends the drains.
+        let mut bounce_listed = 0;
+        for &entry in &sky_listed {
+            if entry & 0x4000_0000 == 0 || entry >> 31 == 1 {
+                continue;
+            }
+            bounce_listed += 1;
+            let slot = entry & 0x3fff_ffff;
+            if trace_bakes() {
+                eprintln!("bounce listed frame {frame} slot {slot}");
+            }
+            if self.retrying.insert(slot) {
+                self.retry.push_back((slot, frame));
+            }
+        }
+        if self.drains.remove(&frame) && bounce_listed == 0 && self.last_motion < frame {
+            self.bounce_dirty = false;
+            self.drains.clear();
+        }
+        self.bounce_listed = bounce_listed;
         for entry in sky_listed {
+            if entry & 0x4000_0000 != 0 && entry >> 31 == 0 {
+                continue;
+            }
             let (slot, own) = (entry & 0x7fff_ffff, entry >> 31 == 1);
             if trace_bakes() {
                 eprintln!("sky listed frame {frame} slot {slot} own {own}");

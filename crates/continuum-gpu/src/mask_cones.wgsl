@@ -2971,6 +2971,23 @@ fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: v
 // Slots listed for the CPU to re-bake their sky (top bit: a page on a
 // moved object); count in mover_stats[7].
 @group(0) @binding(78) var<storage, read_write> sky_list: array<u32>;
+// Bounce light under movers (M22): words 0-5 the box of this frame's
+// candidate pages (where moved shadows may fall; each bound as an ordered
+// float, `ordered_max`: lo negated), 6 the threshold (ε, as f32 bits), 7 1
+// for a drain at rest (no move: list what is charged above ε / 100). Per
+// slot the charge since its bounce samples were baked is
+// `slot_info[3s + 1].w` (f32 bits) and bit 1 of `slot_info[3s].w` says it
+// is listed (sky_list, bit 30) for a re-bake of its bounce samples alone.
+@group(0) @binding(115) var<storage, read_write> bounce_state: array<atomic<u32>, 8>;
+
+fn ordered(x: f32) -> u32 {
+    let b = bitcast<u32>(x);
+    return select(b | 0x80000000u, ~b, x < 0.0);
+}
+
+fn unordered(u: u32) -> f32 {
+    return bitcast<f32>(select(~u, u & 0x7fffffffu, (u & 0x80000000u) != 0u));
+}
 
 fn vc_hash(k: vec3<u32>) -> u32 {
     var h = (k.x * 0x9E3779B1u) ^ (k.y * 0x85EBCA77u) ^ (k.z * 0xC2B2AE3Du);
@@ -3463,15 +3480,21 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (bake_bounds[2u * p + 1u].w == 1.0 && vc.indirect.y == 1u) {
         for (var q = 0u; q < 9u * IND_CH; q++) { indirect[e.w * 9u * IND_CH + q] = vec2<u32>(0u); }
     }
-    // The page's key and box, for the stale pass (M9); a bake makes it
-    // current.
-    slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u);
-    slot_info[3u * e.w + 1u] = bitcast<vec4<u32>>(bake_bounds[2u * p]);
-    slot_info[3u * e.w + 2u] = bitcast<vec4<u32>>(bake_bounds[2u * p + 1u]);
     // hi.w 2: re-baked for a move, its sky still the guess; hi.w 3 (planned)
     // and 4 (appended): its sky alone re-baked, which clears a sky guess and
     // leaves any other mark to the light channels' bakes (M9 gate 3).
     let kind = bake_bounds[2u * p + 1u].w;
+    // The page's key and box, for the stale pass (M9); a bake makes it
+    // current. Bounce light's charge and listing (M22) stay unless this bake
+    // takes the page's bounce samples anew (planned with them, or a retry).
+    let prev = slot_info[3u * e.w];
+    let same = prev.w != 0u && all(prev.xyz == e.xyz);
+    let fresh = p < vc.jobs.y && (kind == 0.0 || kind == 2.0 || kind == 5.0);
+    let keep = same && !fresh;
+    let charge = select(0u, slot_info[3u * e.w + 1u].w, keep);
+    slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u | select(0u, prev.w & 2u, keep));
+    slot_info[3u * e.w + 1u] = vec4<u32>(bitcast<vec3<u32>>(bake_bounds[2u * p].xyz), charge);
+    slot_info[3u * e.w + 2u] = bitcast<vec4<u32>>(bake_bounds[2u * p + 1u]);
     // Planned with the sky later (M5 gate 9): with movers, its sky ledger
     // says "never baked" (stride 0) until its sky is baked alone (M9 gate 5).
     if (kind == 2.0 && p < vc.jobs.y && arrayLength(&sky_ledger) > 2u * e.w + 1u) {
@@ -3835,6 +3858,63 @@ fn sky_rebake(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>) -> bool {
     return true;
 }
 
+// Bounce light's ledger (M22), one thread per slot, after the stale pass:
+// a page holding bounce samples is charged the share of its view (cosine-
+// weighted solid angle over π, at most 1 each) that this frame's moves can
+// change: each moved object's old and new boxes (by bounding spheres), the
+// box of the pages its shadows may fall on, and the whole view for a page
+// on a moved object. Past the threshold it is listed, once, for its
+// bounce samples' re-bake, which clears the charge. A drain at rest (no
+// move) lists what is charged above a hundredth of the threshold.
+@compute @workgroup_size(64)
+fn vc_bounce(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let s = gid.x + gid.y * 65535u * 64u;
+    if (s >= arrayLength(&slot_stale)) { return; }
+    let info = slot_info[3u * s];
+    if (info.w == 0u) { return; }
+    // Baked without bounce samples (for light at hits).
+    if (bitcast<f32>(slot_info[3u * s + 2u].w) == 1.0) { return; }
+    var charge = bitcast<f32>(slot_info[3u * s + 1u].w);
+    let drain = atomicLoad(&bounce_state[7]) != 0u;
+    if (!drain) {
+        let m = info.x;
+        let lo = bitcast<vec3<f32>>(slot_info[3u * s + 1u].xyz);
+        let hi = bitcast<vec3<f32>>(slot_info[3u * s + 2u].xyz);
+        let page = world_box(m, lo, hi);
+        let lights_n = vc.sky.z;
+        let first = 2u * lights_n + 2u;
+        let stride = 4u + 4u * lights_n;
+        let pi = 3.14159265;
+        for (var k = 0u; k < vc.movers.x; k++) {
+            let e = first + k * stride;
+            if (bitcast<u32>(moved[e].w) == m) {
+                charge += 1.0;
+                continue;
+            }
+            let old = moved_box(e);
+            let now = moved_box(e + 2u);
+            charge += sphere_charge(page, (old.lo + old.hi) * 0.5, 0.5 * length(old.hi - old.lo)) / pi;
+            charge += sphere_charge(page, (now.lo + now.hi) * 0.5, 0.5 * length(now.hi - now.lo)) / pi;
+        }
+        let shade_hi = vec3<f32>(unordered(atomicLoad(&bounce_state[3])), unordered(atomicLoad(&bounce_state[4])),
+                                 unordered(atomicLoad(&bounce_state[5])));
+        let shade_lo = -vec3<f32>(unordered(atomicLoad(&bounce_state[0])), unordered(atomicLoad(&bounce_state[1])),
+                                  unordered(atomicLoad(&bounce_state[2])));
+        if (atomicLoad(&bounce_state[3]) != 0u && all(shade_lo <= shade_hi)) {
+            charge += sphere_charge(page, (shade_lo + shade_hi) * 0.5, 0.5 * length(shade_hi - shade_lo)) / pi;
+        }
+        slot_info[3u * s + 1u].w = bitcast<u32>(charge);
+    }
+    let threshold = bitcast<f32>(atomicLoad(&bounce_state[6])) * select(1.0, 0.01, drain);
+    if (charge > threshold && (info.w & 2u) == 0u) {
+        let q = atomicAdd(&mover_stats[7], 1u);
+        if (q < arrayLength(&sky_list)) {
+            sky_list[q] = s | 0x40000000u;
+            slot_info[3u * s].w = info.w | 2u;
+        }
+    }
+}
+
 // One thread per slot (dispatched in rows of 65,535 workgroups).
 @compute @workgroup_size(64)
 fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -3916,6 +3996,15 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
         candidate = may_be_shadowed(page, l, s);
     }
     if (!candidate) { return; }
+    // Where moved shadows may fall, for bounce light's ledger (M22).
+    if (vc.indirect.y == 1u) {
+        atomicMax(&bounce_state[0], ordered(-page.lo.x));
+        atomicMax(&bounce_state[1], ordered(-page.lo.y));
+        atomicMax(&bounce_state[2], ordered(-page.lo.z));
+        atomicMax(&bounce_state[3], ordered(page.hi.x));
+        atomicMax(&bounce_state[4], ordered(page.hi.y));
+        atomicMax(&bounce_state[5], ordered(page.hi.z));
+    }
     // A page hidden for another reason (its sky the guess, set aside by the
     // ledger) is not re-baked in part: the fill would show it.
     if (unknown_sky || mark != 0u) {

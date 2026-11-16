@@ -1358,6 +1358,43 @@ fn hw_vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invo
     bounce_finish(li, job, sum, missing);
 }
 
+// `hw_bounce_hit` with movers (M22): the nearer of the static structure's
+// hit and the movers' (`movers_as`, the objects as they are now).
+fn hw_bounce_hit_movers(eye: vec3<f32>, dir: vec3<f32>, own: u32) -> Hit {
+    var hit = hw_bounce_hit(eye, dir, own);
+    var mq: ray_query;
+    rayQueryInitialize(&mq, movers_as, RayDesc(0x1u, 0xffu, 0.0, hit.distance, eye, dir));
+    rayQueryProceed(&mq);
+    let h = rayQueryGetCommittedIntersection(&mq);
+    if (h.kind != 0u && h.t < hit.distance) {
+        let m = h.instance_custom_data;
+        let t = cam_tri(m, h.geometry_index, h.primitive_index);
+        let v0 = tris[3u * t].xyz;
+        let n = normalize(normal_to_world(m, cross(tris[3u * t + 1u].xyz - v0, tris[3u * t + 2u].xyz - v0)));
+        hit = Hit(h.t, m, t, select(n, -n, dot(n, dir) > 0.0));
+    }
+    return hit;
+}
+
+// `hw_vc_bake_indirect` with movers (M22): bounce rays see them too.
+@compute @workgroup_size(64)
+fn hw_vc_bake_indirect_movers(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    if (li == 0u) { atomicStore(&ind_lit_missing, NONE); }
+    workgroupBarrier();
+    let job = bounce_job(wg);
+    var sum = array<vec3<f32>, 5>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    var missing = 0.0;
+    if (job.listed && job.surf.ok) {
+        for (var b = li; b < IND_BINS; b += 64u) {
+            let dir = normalize(bin_world(job.surf.normal, bin_local(b, IND_R)));
+            let hit = hw_bounce_hit_movers(job.surf.apex, dir, job.e.x);
+            missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum, job.bounces);
+        }
+    }
+    bounce_finish(li, job, sum, missing);
+}
+
 // Whether a ray from `eye` along `dir` meets nothing (FORCE_OPAQUE |
 // TERMINATE_ON_FIRST_HIT: visibility only).
 fn hw_sky_open(eye: vec3<f32>, dir: vec3<f32>) -> bool {

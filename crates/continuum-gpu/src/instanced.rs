@@ -18,19 +18,19 @@ use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_EDGES_BINDINGS, HW_LAYERS_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
-    HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS,
-    HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
-    M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS,
-    M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS, M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS,
-    M13_PAGE_ARGS_BINDINGS, M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS,
-    M13_ROOTS_BINDINGS, M13_SHADE_ARGS_BINDINGS, M13_SHADE_BACKGROUND_BINDINGS,
-    M13_SHADE_MISSES_BINDINGS, M13_SHADE_RAYS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel,
-    RECT_LIGHT_BINDINGS, RectLight, SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS,
-    VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS,
-    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS, HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS,
+    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS,
+    InstancedScene, Light, LightGpu, M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS,
+    M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS, M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS,
+    M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS, M13_PAGE_BAKE_BINDINGS,
+    M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS, M13_SHADE_ARGS_BINDINGS,
+    M13_SHADE_BACKGROUND_BINDINGS, M13_SHADE_MISSES_BINDINGS, M13_SHADE_RAYS_BINDINGS,
+    M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
+    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
+    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_BOUNCE_BINDINGS, VC_ERROR_PROBES_BINDINGS,
+    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
+    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS,
+    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -154,6 +154,16 @@ impl Cache {
                 list.push(("stale args", &passes[1], &binds[1], Dispatch::Groups(1, 1)));
                 list.push(("stale texels", &passes[2], &binds[2], Dispatch::Indirect(0)));
             }
+            // Bounce light's ledger (M22): charges after a move, or a drain
+            // at rest.
+            if self.state.bounce_pass().is_some() && !keep_ledger {
+                list.push((
+                    "bounce ledger",
+                    &passes[6],
+                    &binds[6],
+                    slots(self.state.pages()),
+                ));
+            }
             if lit {
                 list.push(("ledger", &passes[5], &binds[5], slots(self.state.pages())));
             }
@@ -260,7 +270,7 @@ struct Cache {
     /// With movers or moving lights: the stale passes (pages, then
     /// candidates' texels), each followed by a dispatch-size pass, then the
     /// ledger's reset and check passes, and their bind groups.
-    movers: Option<([wgpu::ComputePipeline; 6], Vec<wgpu::BindGroup>)>,
+    movers: Option<([wgpu::ComputePipeline; 7], Vec<wgpu::BindGroup>)>,
     /// Movers in the scene, moving lights tracked.
     has_movers: bool,
     moving_lights: bool,
@@ -1832,6 +1842,7 @@ impl InstancedRenderer {
                         kernel.entry("vc_args_bake"),
                         kernel.entry("vc_ledger_reset"),
                         kernel.entry("vc_ledger"),
+                        kernel.entry("vc_bounce"),
                     ],
                     Vec::new(),
                 )
@@ -1841,7 +1852,9 @@ impl InstancedRenderer {
             // Bounce rays through hardware ray queries where camera rays
             // use them (M14 gate 10).
             indirect: options.indirect.then(|| {
-                let name = if bounce_hw {
+                let name = if bounce_hw && !movable.is_empty() {
+                    "hw_vc_bake_indirect_movers"
+                } else if bounce_hw {
                     "hw_vc_bake_indirect"
                 } else {
                     "vc_bake_indirect"
@@ -2430,6 +2443,7 @@ impl InstancedRenderer {
                         VC_ARGS_BAKE_BINDINGS,
                         VC_LEDGER_RESET_BINDINGS,
                         VC_LEDGER_BINDINGS,
+                        VC_BOUNCE_BINDINGS,
                     ])
                     .map(|(pipeline, keep)| bind_group(device, pipeline, &all, &[], None, keep))
                     .collect()
@@ -2445,7 +2459,11 @@ impl InstancedRenderer {
                         &all,
                         &tlas,
                         Some(&self.textures),
-                        HW_VC_BAKE_INDIRECT_BINDINGS,
+                        if cache.has_movers {
+                            HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS
+                        } else {
+                            HW_VC_BAKE_INDIRECT_BINDINGS
+                        },
                     )
                 } else {
                     bind_group(
