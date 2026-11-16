@@ -1380,8 +1380,8 @@ impl VirtualCache {
                         16
                     },
                     // Cleared when a light past the third is re-colored
-                    // (M10 gate 21).
-                    wgpu::BufferUsages::COPY_DST,
+                    // (M10 gate 21); read back by `verify_bounce` (M22).
+                    wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
                 ),
             ),
             (
@@ -2259,6 +2259,85 @@ impl VirtualCache {
             0,
             0,
         ]
+    }
+
+    /// Diagnostics (M22): of `slots`, those holding bounce samples.
+    pub(crate) fn bounce_pages(&self, slots: &[u32]) -> Vec<u32> {
+        slots
+            .iter()
+            .copied()
+            .filter(|&s| self.slot_target[s as usize] > 0)
+            .collect()
+    }
+
+    /// Diagnostics (M22): uploads a bake of `slots`' bounce samples alone
+    /// (as retries, job kind 5), reading the direct light the cache holds
+    /// now; the counts for `encode_bake`.
+    pub(crate) fn upload_rebake_bounce(&mut self, queue: &wgpu::Queue, slots: &[u32]) -> [u32; 6] {
+        let mut list = Vec::new();
+        let mut bounds = Vec::new();
+        self.bounce_pass = None;
+        self.indirect_jobs.clear();
+        self.sky_samples.clear();
+        self.page_sky.clear();
+        for (index, &slot) in slots.iter().enumerate() {
+            let k = self.slot_key[slot as usize];
+            let (m, c, mip, page) = unpack(k);
+            list.push([k[0], k[1], k[2], slot]);
+            let b = self.page_bounds(m, c, mip, page);
+            bounds.push([b[0], b[1], b[2], b[3]]);
+            bounds.push([b[4], b[5], b[6], 5.0]);
+            if self.sky {
+                self.page_sky.push([0, 1 << 24]);
+            }
+            let target = self.slot_target[slot as usize].max(1) as u32;
+            for s in 0..INDIRECT_SAMPLES {
+                self.indirect_jobs.push([index as u32, s | target << 8]);
+            }
+        }
+        queue.write_buffer(self.buffer(38), 0, bytemuck::cast_slice(&list));
+        queue.write_buffer(self.buffer(63), 0, bytemuck::cast_slice(&bounds));
+        if self.sky && !self.page_sky.is_empty() {
+            queue.write_buffer(self.buffer(48), 0, bytemuck::cast_slice(&self.page_sky));
+        }
+        if !self.indirect_jobs.is_empty() {
+            queue.write_buffer(
+                self.buffer(74),
+                0,
+                bytemuck::cast_slice(&self.indirect_jobs),
+            );
+        }
+        let mut params: VcParams = Zeroable::zeroed();
+        params.counts = [self.table.entries.len() as u32 - 1, self.frame, 1, 1];
+        params.jobs = [0, list.len() as u32, 0, REQUEST_SET as u32 - 1];
+        params.params = [self.inv_base, 0.0, self.options.pixels_per_texel, 0.0];
+        params.sky = [
+            0,
+            self.sky as u32,
+            self.lights,
+            self.options.light_ratio as u32,
+        ];
+        params.movers = [0, self.append_pages, self.append_jobs(), VISIBLE_WINDOW];
+        params.ledger = [
+            self.moving,
+            POSE_RING,
+            self.options.ledger_epsilon.to_bits(),
+            0x7fff_ffff,
+        ];
+        params.indirect = [
+            self.indirect_jobs.len() as u32,
+            1,
+            !self.options.glossy_rays as u32,
+            0,
+        ];
+        params.extra = [
+            self.options.emission_bounce as u32,
+            self.options.bounces.clamp(1, 8),
+            0,
+            0,
+        ];
+        queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        [0, 0, 0, list.len() as u32, 0, 0]
     }
 
     /// The object-space box of the apexes of page `(m, c, mip, page)`'s

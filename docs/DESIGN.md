@@ -1311,13 +1311,31 @@ moving objects the same way, by the form factors they can change.
 - **Found:** movers under a sky cost 331 ms a frame at 640×360 on the
   textured scene with six boulders (sun only: 38.7 ms), M9 G3's sky
   re-bakes; a gap of its own.
-- **Not yet working:** during motion (six boulders, 0.02 m a frame, sun
-  only, fixed budget) the ledger's re-bakes leave the image 1.50–1.99%
-  from a fresh bake against 1.33–1.81% with no bounce re-bakes at all, and
-  after stopping 1.94%. A fresh bake differs in residency history too, so
-  the next step is a bounce counterpart of `verify_cache`: re-bake every
-  resident page's bounce samples in place and compare each page's change
-  with its charge (soundness, as M9 measured direct light).
+- **`InstancedRenderer::verify_bounce`** (`BounceCheck`): re-bakes every
+  resident page's bounce samples alone, in place, from the direct light
+  the cache holds, compares, and restores the cache: a measure free of
+  residency history.
+- **Fixed with it:** listings were lost (some pages listed, never re-baked,
+  never listed again: charges up to 780 held); a listing now carries its
+  frame and expires after 16 frames. Pages whose bounce samples were baked
+  while something moved read hits whose light could be stale; they are
+  marked (bit 2) and the drain bakes them again at rest.
+- **Where it stands** (six boulders at 0.02 m a frame for 60 frames, sun
+  only, fixed budget, 640×360): pages over ε of the largest bounce value
+  against an in-place re-bake, 256–367 during motion with the ledger
+  against 495–585 without re-bakes; after stopping 50 of 2,429 (largest
+  change 8% of the largest value, every charge drained), against 313
+  before the fixes. The image against a fresh bake: 1.71% at frame 60
+  with the ledger, 1.82% without re-bakes, 1.33% after stopping (a fresh
+  bake's residency differs: direct light alone moving is 0.44–0.83% off,
+  and 0.0000% at rest). Moving frames 42 ms at 640×360 (movers' own cost
+  without bounce 38.7 ms).
+- **Left:** the 50 pages at rest are pages whose hits were re-baked after
+  them (a dependency the ledger does not track: a drain pass after the
+  first, or charging a page when its hits re-bake); the gate's criteria
+  (verify_bounce's pages over ε while moving and at rest, the image
+  against the same renderer re-baked in place, the cost of moving frames);
+  movers under a sky (331 ms) first or alongside.
 
 ## 3.5 What the 2D phase (M0) taught us
 

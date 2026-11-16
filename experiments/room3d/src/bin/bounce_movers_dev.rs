@@ -172,6 +172,18 @@ fn main() -> std::io::Result<()> {
                 save("ours", &ours.read_colors())?;
                 save("stale", &stale.read_colors())?;
             }
+            let (co, cs) = (ours.verify_bounce(eps), stale.verify_bounce(eps));
+            println!(
+                "  bounce re-baked in place: ours {} pages, {} changed, {} over eps, {} missed by the ledger, largest change {:.3e} (of {:.3e}), largest charge {:.3}; without re-bakes {} over eps",
+                co.pages,
+                co.changed,
+                co.over_epsilon,
+                co.missed,
+                co.largest_change,
+                co.largest_value,
+                co.largest_charge,
+                cs.over_epsilon
+            );
             let log = ours.cache_log();
             let recent = &log[log.len().saturating_sub(every)..];
             let samples: u32 = recent.iter().map(|s| s.indirect_samples).sum();
@@ -197,6 +209,17 @@ fn main() -> std::io::Result<()> {
     println!(
         "stopped: ours settled in {n} frames, {:.4}% from a fresh bake",
         100.0 * relative_rmse(&ours.read_colors(), &reference)
+    );
+    let c = ours.verify_bounce(eps);
+    println!(
+        "  bounce re-baked in place after stopping: {} pages, {} changed, {} over eps, {} missed, largest change {:.3e} (of {:.3e}), largest charge {:.3}",
+        c.pages,
+        c.changed,
+        c.over_epsilon,
+        c.missed,
+        c.largest_change,
+        c.largest_value,
+        c.largest_charge
     );
     Ok(())
 }

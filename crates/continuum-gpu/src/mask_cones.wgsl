@@ -2976,8 +2976,10 @@ fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: v
 // float, `ordered_max`: lo negated), 6 the threshold (ε, as f32 bits), 7 1
 // for a drain at rest (no move: list what is charged above ε / 100). Per
 // slot the charge since its bounce samples were baked is
-// `slot_info[3s + 1].w` (f32 bits) and bit 1 of `slot_info[3s].w` says it
-// is listed (sky_list, bit 30) for a re-bake of its bounce samples alone.
+// `slot_info[3s + 1].w` (f32 bits); bit 1 of `slot_info[3s].w` says it is
+// listed (sky_list, bit 30) for a re-bake of its bounce samples alone, bits
+// 8-31 the frame it was listed; bit 2 that its samples were baked while
+// something moved.
 @group(0) @binding(115) var<storage, read_write> bounce_state: array<atomic<u32>, 8>;
 
 fn ordered(x: f32) -> u32 {
@@ -3492,7 +3494,10 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fresh = p < vc.jobs.y && (kind == 0.0 || kind == 2.0 || kind == 5.0);
     let keep = same && !fresh;
     let charge = select(0u, slot_info[3u * e.w + 1u].w, keep);
-    slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u | select(0u, prev.w & 2u, keep));
+    // Bit 2: bounce samples baked while something moved, from hits whose
+    // light may have been stale then: the drain at rest bakes them again.
+    let moving = select(0u, 4u, fresh && vc.movers.x > 0u);
+    slot_info[3u * e.w] = vec4<u32>(e.xyz, 1u | select(0u, prev.w & 0xffffff06u, keep) | moving);
     slot_info[3u * e.w + 1u] = vec4<u32>(bitcast<vec3<u32>>(bake_bounds[2u * p].xyz), charge);
     slot_info[3u * e.w + 2u] = bitcast<vec4<u32>>(bake_bounds[2u * p + 1u]);
     // Planned with the sky later (M5 gate 9): with movers, its sky ledger
@@ -3865,7 +3870,8 @@ fn sky_rebake(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>) -> bool {
 // box of the pages its shadows may fall on, and the whole view for a page
 // on a moved object. Past the threshold it is listed, once, for its
 // bounce samples' re-bake, which clears the charge. A drain at rest (no
-// move) lists what is charged above a hundredth of the threshold.
+// move) lists what is charged above a hundredth of the threshold, and what
+// was baked while something moved (its hits' light may have been stale).
 @compute @workgroup_size(64)
 fn vc_bounce(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s = gid.x + gid.y * 65535u * 64u;
@@ -3906,11 +3912,15 @@ fn vc_bounce(@builtin(global_invocation_id) gid: vec3<u32>) {
         slot_info[3u * s + 1u].w = bitcast<u32>(charge);
     }
     let threshold = bitcast<f32>(atomicLoad(&bounce_state[6])) * select(1.0, 0.01, drain);
-    if (charge > threshold && (info.w & 2u) == 0u) {
+    let due = charge > threshold || (drain && (info.w & 4u) != 0u);
+    // Listed (bit 1) in the frame bits 8-31 hold; again if no re-bake came
+    // within 16 frames.
+    let since = (vc.counts.y - (info.w >> 8u)) & 0xffffffu;
+    if (due && ((info.w & 2u) == 0u || since > 16u)) {
         let q = atomicAdd(&mover_stats[7], 1u);
         if (q < arrayLength(&sky_list)) {
             sky_list[q] = s | 0x40000000u;
-            slot_info[3u * s].w = info.w | 2u;
+            slot_info[3u * s].w = (info.w & 0xffu) | 2u | ((vc.counts.y & 0xffffffu) << 8u);
         }
     }
 }

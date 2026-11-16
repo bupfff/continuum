@@ -163,7 +163,9 @@ pub use vcache::{CacheOptions, CacheStats};
 #[doc(hidden)]
 pub use hierarchy::Hierarchy;
 #[doc(hidden)]
-pub use instanced::{CacheCheck, FrameProfile, InstancedRenderer, LedgerCheck, SkyCheck};
+pub use instanced::{
+    BounceCheck, CacheCheck, FrameProfile, InstancedRenderer, LedgerCheck, SkyCheck,
+};
 #[doc(hidden)]
 pub use lightmap::{BLOCK, BLOCK_PLANES, hemicube_weights};
 #[doc(hidden)]

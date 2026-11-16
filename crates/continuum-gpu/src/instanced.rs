@@ -297,6 +297,43 @@ pub struct CacheCheck {
     pub largest: f32,
 }
 
+/// What [`InstancedRenderer::verify_bounce`] found (M22): resident pages'
+/// bounce samples against a re-bake in place.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BounceCheck {
+    /// Pages holding bounce samples that shading may read.
+    pub pages: u32,
+    /// The largest bounce value held or re-baked (the scale of the others).
+    pub largest_value: f32,
+    /// Pages whose samples changed by more than 1e-4 of that scale.
+    pub changed: u32,
+    /// Pages that changed by more than ε of that scale.
+    pub over_epsilon: u32,
+    /// Of those, pages whose charge had not reached ε (the ledger missed
+    /// them).
+    pub missed: u32,
+    /// The largest change.
+    pub largest_change: f32,
+    /// The largest charge held.
+    pub largest_charge: f32,
+}
+
+/// Two halves packed in a word (low first).
+fn half_pair(w: u32) -> [f32; 2] {
+    let f = |h: u32| {
+        let (sign, exp, man) = ((h >> 15) & 1, (h >> 10) & 0x1f, h & 0x3ff);
+        let v = if exp == 0 {
+            man as f32 * 2f32.powi(-24)
+        } else if exp == 31 {
+            f32::INFINITY
+        } else {
+            (1.0 + man as f32 / 1024.0) * 2f32.powi(exp as i32 - 15)
+        };
+        if sign == 1 { -v } else { v }
+    };
+    [f(w & 0xffff), f(w >> 16)]
+}
+
 /// What [`InstancedRenderer::verify_ledger`] found for a moving light.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LedgerCheck {
@@ -3327,6 +3364,90 @@ impl InstancedRenderer {
         self.wait();
         profile.readback = start.elapsed();
         profile
+    }
+
+    /// Diagnostics (M22): re-bakes every resident page's bounce samples
+    /// alone, in place, from the direct light the cache holds now, compares
+    /// them with what the cache held, and restores what it held (so a check
+    /// does not change the flight it measures). `epsilon`: bounce light's
+    /// threshold, as `CacheOptions::bounce_epsilon`.
+    pub fn verify_bounce(&mut self, epsilon: f32) -> BounceCheck {
+        let Some(cache) = &mut self.cache else {
+            return BounceCheck::default();
+        };
+        if cache.indirect.is_none() {
+            return BounceCheck::default();
+        }
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let device = &self.device;
+        let before = cache.state.read_buffer(device, 73);
+        let info = cache.state.read_buffer(device, 61);
+        let marks = cache.state.read_buffer(device, 62);
+        let used = cache.state.read_buffer(device, 40);
+        let readable = cache.state.readable_pages(bytemuck::cast_slice(&marks));
+        let pages = cache.state.bounce_pages(&readable);
+        let chunk = (cache.state.rebake_chunk() / 9).max(1);
+        for part in pages.chunks(chunk) {
+            let counts = cache.state.upload_rebake_bounce(&self.queue, part);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            cache.encode_bake(&mut encoder, counts);
+            self.queue.submit([encoder.finish()]);
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("GPU poll failed");
+        }
+        let after = cache.state.read_buffer(device, 73);
+        self.queue.write_buffer(cache.state.buffer(73), 0, &before);
+        self.queue.write_buffer(cache.state.buffer(61), 0, &info);
+        self.queue.write_buffer(cache.state.buffer(40), 0, &used);
+        let (b, a): (&[u32], &[u32]) =
+            (bytemuck::cast_slice(&before), bytemuck::cast_slice(&after));
+        let info: &[u32] = bytemuck::cast_slice(&info);
+        // Per slot 9 samples × 5 channels, each (r, g) and (b, bounces held)
+        // as halves.
+        let per = 9 * 5 * 2;
+        let rgb = |w: &[u32], k: usize| {
+            let lo = half_pair(w[k]);
+            [lo[0], lo[1], half_pair(w[k + 1])[0]]
+        };
+        let mut largest_value = 0.0f32;
+        let mut changes = Vec::with_capacity(pages.len());
+        for &slot in &pages {
+            let first = slot as usize * per;
+            let (mut change, mut value) = (0.0f32, 0.0f32);
+            for k in (first..first + per).step_by(2) {
+                let (x, y) = (rgb(b, k), rgb(a, k));
+                for c in 0..3 {
+                    change = change.max((x[c] - y[c]).abs());
+                    value = value.max(x[c].abs().max(y[c].abs()));
+                }
+            }
+            largest_value = largest_value.max(value);
+            let charge = f32::from_bits(info[12 * slot as usize + 7]);
+            if std::env::var_os("CONTINUUM_TRACE_BOUNCE").is_some() && change > 2e-6 {
+                eprintln!(
+                    "bounce check: slot {slot} charge {charge} listed {} change {change:.3e}",
+                    info[12 * slot as usize + 3] & 2
+                );
+            }
+            changes.push((change, charge));
+        }
+        let mut check = BounceCheck {
+            pages: pages.len() as u32,
+            largest_value,
+            ..Default::default()
+        };
+        for (change, charge) in changes {
+            let stale = change > epsilon * largest_value;
+            check.changed += (change > 1e-4 * largest_value) as u32;
+            check.over_epsilon += stale as u32;
+            check.missed += (stale && charge <= epsilon) as u32;
+            check.largest_change = check.largest_change.max(change);
+            check.largest_charge = check.largest_charge.max(charge);
+        }
+        check
     }
 
     /// Diagnostics (M9 gate 1): re-bakes every resident page that shading
