@@ -189,6 +189,17 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   re-coloring one re-bakes bounce light (3.07% from Cycles with five lamps
   at night, M10 gate 22, where bounce costs 1.17× the frame). Not with
   movers or moving lights.
+- **Thin glass** (`InstancedScene::geometry_transmission`, glTF's
+  `KHR_materials_transmission`; M16 gate 2): of the light a surface does
+  not reflect, the factor passes straight through tinted by its base
+  colour, the rest is diffuse, and its reflections stay at full strength.
+  With hardware ray queries, the cache and no movers, pixels see a few
+  layers through; shadows keep what passes at each triangle's angle to
+  the light, untinted. 5.08% from Cycles on two panes, 1.22× the frame
+  with a quarter of the image behind glass. Thick glass (a volume) is
+  drawn thin, rough glass sharp; a transmission texture is ignored
+  (`ImportStats::transmission_ignored`). Without ray queries or with
+  movers, glass is opaque.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **Anti-aliasing, on by default** (`RendererOptions::anti_aliasing`; M15
