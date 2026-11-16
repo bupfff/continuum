@@ -504,6 +504,63 @@ cy.diffuse_bounces = job["bounces"]
 cy.glossy_bounces = job["bounces"]
 cy.transmission_bounces = 0
 cy.volume_bounces = 0
+fog = job.get("fog")
+if fog:
+    # Fog (M18): a box holding Volume Scatter (colour the albedo) and Volume
+    # Absorption (colour the albedo: absorbing one less it) at the same
+    # density, the extinction, falling as exp(-falloff z) above 0 where it
+    # does; single scattering.
+    e = fog["extent"]
+    bpy.ops.mesh.primitive_cube_add(size=1.0)
+    box = bpy.context.active_object
+    box.name = "fog"
+    box.scale = (2 * e, 2 * e, fog["top"] - fog["bottom"])
+    box.location = (0.0, 0.0, 0.5 * (fog["top"] + fog["bottom"]))
+    fm = bpy.data.materials.new("fog")
+    fm.use_nodes = True
+    fn = fm.node_tree.nodes
+    fn.clear()
+    fout = fn.new("ShaderNodeOutputMaterial")
+    scatter = fn.new("ShaderNodeVolumeScatter")
+    absorb = fn.new("ShaderNodeVolumeAbsorption")
+    a = fog["albedo"]
+    scatter.inputs["Color"].default_value = (a[0], a[1], a[2], 1.0)
+    absorb.inputs["Color"].default_value = (a[0], a[1], a[2], 1.0)
+    scatter.inputs["Anisotropy"].default_value = fog["g"]
+    if fog["falloff"] > 0.0:
+        geo = fn.new("ShaderNodeNewGeometry")
+        sep = fn.new("ShaderNodeSeparateXYZ")
+        fm.node_tree.links.new(geo.outputs["Position"], sep.inputs[0])
+        clampz = fn.new("ShaderNodeMath")
+        clampz.operation = "MAXIMUM"
+        clampz.inputs[1].default_value = 0.0
+        fm.node_tree.links.new(sep.outputs["Z"], clampz.inputs[0])
+        scale = fn.new("ShaderNodeMath")
+        scale.operation = "MULTIPLY"
+        scale.inputs[1].default_value = -fog["falloff"]
+        fm.node_tree.links.new(clampz.outputs[0], scale.inputs[0])
+        ex = fn.new("ShaderNodeMath")
+        ex.operation = "EXPONENT"
+        fm.node_tree.links.new(scale.outputs[0], ex.inputs[0])
+        dens = fn.new("ShaderNodeMath")
+        dens.operation = "MULTIPLY"
+        dens.inputs[1].default_value = fog["density"]
+        fm.node_tree.links.new(ex.outputs[0], dens.inputs[0])
+        fm.node_tree.links.new(dens.outputs[0], scatter.inputs["Density"])
+        fm.node_tree.links.new(dens.outputs[0], absorb.inputs["Density"])
+    else:
+        scatter.inputs["Density"].default_value = fog["density"]
+        absorb.inputs["Density"].default_value = fog["density"]
+        # (Blender 5.2 finds a constant density homogeneous itself.)
+        if hasattr(fm.cycles, "homogeneous_volume"):
+            fm.cycles.homogeneous_volume = True
+    add = fn.new("ShaderNodeAddShader")
+    fm.node_tree.links.new(scatter.outputs["Volume"], add.inputs[0])
+    fm.node_tree.links.new(absorb.outputs["Volume"], add.inputs[1])
+    fm.node_tree.links.new(add.outputs["Shader"], fout.inputs["Volume"])
+    box.data.materials.append(fm)
+    box.visible_shadow = True
+
 if any(v is not None for v in (job.get("volumes") or [])):
     # Solid glass (M16): no caustics, as Continuum's shadows pass straight
     # through; rays cross it (two refractions, reflections inside) and still
@@ -513,6 +570,9 @@ if any(v is not None for v in (job.get("volumes") or [])):
     cy.transmission_bounces = 8
     cy.glossy_bounces = max(job["bounces"], 4)
     cy.max_bounces = job["bounces"] + 12
+if fog:
+    cy.volume_bounces = 0
+    cy.volume_step_rate = 0.25
 cy.transparent_max_bounces = 64 if any(c is not None for c in (job.get("alpha") or []) + (job.get("blend") or []) + (job.get("transmission") or [])) else 0
 cy.caustics_reflective = False
 cy.caustics_refractive = False

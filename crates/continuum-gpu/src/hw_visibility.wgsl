@@ -939,6 +939,201 @@ fn hw_aa_scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
     colors[pixel] = vec4<f32>(sum / f32(samples), 1.0);
 }
 
+// --- M18: fog with light shafts ---------------------------------------------
+//
+// `hw_fog_visibility` traces, from the centre of each cell of a grid around
+// the eye (snapped to its cells, so a cell keeps its place as the eye
+// moves), a ray toward the first light: its visibility, which the fog's
+// light shafts read trilinearly. `hw_fog_froxels` integrates, for each
+// column of froxels (a tile of the image, slices in depth spaced
+// geometrically), the light the fog scatters toward the eye and what it
+// lets through, front to back. `hw_fog_apply` gives each pixel the light
+// through the fog to its hit (or the far end) and the light gathered.
+
+struct FogParams {
+    origin: vec4<f32>,
+    cell: vec4<f32>,
+    dims: vec4<u32>,
+    // Nearest and farthest depth, slices.
+    froxel: vec4<f32>,
+    // Froxels across, down, deep; pixels per froxel's side.
+    fdims: vec4<u32>,
+    // Extinction at 0, falloff, top, anisotropy.
+    medium: vec4<f32>,
+    albedo: vec4<f32>,
+    // The sky light it scatters, as radiance toward the eye per unit
+    // scattered.
+    ambient: vec4<f32>,
+};
+
+@group(0) @binding(112) var<storage, read> fog: FogParams;
+@group(0) @binding(113) var<storage, read_write> fog_vis: array<f32>;
+// Per froxel (slice-major): the light gathered from the eye to the slice's
+// far end, and what is let through.
+@group(0) @binding(114) var<storage, read_write> froxels: array<vec4<f32>>;
+
+@compute @workgroup_size(8, 8, 1)
+fn hw_fog_visibility(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = fog.dims.xyz;
+    if (any(gid >= dims)) { return; }
+    let p = fog.origin.xyz + (vec3<f32>(gid) + 0.5) * fog.cell.xyz;
+    let to = light_center(lights[0]) - p;
+    let dist = length(to);
+    var rq: ray_query;
+    // Any hit blocks (opaque, the first ends the search).
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x5u, 0xffu, 0.0, dist, p, to / max(dist, 1e-6)));
+    rayQueryProceed(&rq);
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    fog_vis[(gid.z * dims.y + gid.y) * dims.x + gid.x] = select(1.0, 0.0, hit.kind != 0u);
+}
+
+// The first light's visibility at `p`, trilinear between the grid's cells
+// (1 outside the grid across; the nearest cell above or below it).
+fn fog_visibility(p: vec3<f32>) -> f32 {
+    let dims = fog.dims.xyz;
+    let q = (p - fog.origin.xyz) / fog.cell.xyz - 0.5;
+    if (q.x < -0.5 || q.y < -0.5 || q.x > f32(dims.x) - 0.5 || q.y > f32(dims.y) - 0.5) { return 1.0; }
+    let c = clamp(q, vec3<f32>(0.0), vec3<f32>(dims) - 1.0);
+    let i = vec3<u32>(floor(c));
+    let f = c - vec3<f32>(i);
+    let j = min(i + 1u, dims - 1u);
+    var v = 0.0;
+    for (var k = 0u; k < 8u; k++) {
+        let x = select(i.x, j.x, (k & 1u) != 0u);
+        let y = select(i.y, j.y, (k & 2u) != 0u);
+        let z = select(i.z, j.z, (k & 4u) != 0u);
+        let w = select(1.0 - f.x, f.x, (k & 1u) != 0u) * select(1.0 - f.y, f.y, (k & 2u) != 0u) * select(1.0 - f.z, f.z, (k & 4u) != 0u);
+        v += w * fog_vis[(z * dims.y + y) * dims.x + x];
+    }
+    return v;
+}
+
+// Henyey and Greenstein's phase for cosine `c` between the light's and the
+// eye's directions of travel.
+fn fog_phase(c: f32, g: f32) -> f32 {
+    let d = 1.0 + g * g - 2.0 * g * c;
+    return (1.0 - g * g) / (4.0 * 3.14159265 * d * sqrt(d));
+}
+
+// The solid angle light `l` fills seen from `p` (small lights).
+fn fog_light_solid_angle(p: vec3<f32>, l: LightRect) -> f32 {
+    let to = light_center(l) - p;
+    let d2 = max(dot(to, to), 1e-8);
+    if (is_sphere(l)) {
+        return 3.14159265 * l.edge_u.x * l.edge_u.x / d2 * spot_falloff(l, normalize(p - l.corner.xyz));
+    }
+    let n = cross(l.edge_u.xyz, l.edge_v.xyz);
+    var facing = abs(dot(normalize(n), to)) / sqrt(d2);
+    if (l.corner.w > 0.5 && dot(n, -to) <= 0.0) { facing = 0.0; }
+    return length(n) * facing / d2;
+}
+
+// The camera ray through image point `(px, py)` (pixels, continuous).
+fn fog_ray(px: f32, py: f32) -> vec3<f32> {
+    let aspect = camera.params.x / camera.params.y;
+    let sx = (px / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
+    let sy = (1.0 - py / camera.params.y * 2.0) * camera.params.z;
+    return normalize(camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy);
+}
+
+// Slice `i`'s far end's depth.
+fn fog_slice_depth(i: f32) -> f32 {
+    return fog.froxel.x * pow(fog.froxel.y / fog.froxel.x, i / fog.froxel.z);
+}
+
+@compute @workgroup_size(8, 8)
+fn hw_fog_froxels(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let fd = fog.fdims;
+    if (gid.x >= fd.x || gid.y >= fd.y) { return; }
+    let tile = f32(fd.w);
+    let dir = fog_ray((f32(gid.x) + 0.5) * tile, (f32(gid.y) + 0.5) * tile);
+    let eye = camera.eye.xyz;
+    let m = fog.medium;
+    let count = arrayLength(&lights);
+    var through = 1.0;
+    var gathered = vec3<f32>(0.0);
+    var before = 0.0;
+    // Where the ray is in the layer: its whole length, or up to (or from)
+    // where it crosses the top.
+    var lo = 0.0;
+    var hi = 3.4e38;
+    if (abs(dir.z) > 1e-6) {
+        let cross_top = (m.z - eye.z) / dir.z;
+        if (dir.z > 0.0) { hi = select(cross_top, -1.0, cross_top < 0.0); } else { lo = max(cross_top, 0.0); }
+    } else if (eye.z >= m.z) {
+        hi = -1.0;
+    }
+    for (var i = 0u; i < fd.z; i++) {
+        let after = fog_slice_depth(f32(i + 1u));
+        // The slice's optical depth, exact (clipped at the top), and the
+        // light gathered at the middle of its part in the layer.
+        let a = max(before, lo);
+        let b = min(after, hi);
+        if (b > a) {
+            let p = eye + dir * (0.5 * (a + b));
+            let tau = fog_depth(eye + dir * before, dir, after - before, m.x, m.y, m.z);
+            // The light arriving at p and scattered toward the eye, per unit
+            // scattered: the first light's with its shadow, the others'
+            // without, each dimmed by the fog on its way; the sky's.
+            var light_in = fog.ambient.xyz;
+            for (var l = 0u; l < count; l++) {
+                let to = light_center(lights[l]) - p;
+                let dist = length(to);
+                let toward = to / max(dist, 1e-6);
+                var seen = exp(-fog_depth(p, toward, dist, m.x, m.y, m.z));
+                if (l == 0u) { seen *= fog_visibility(p); }
+                light_in += lights[l].radiance.xyz * fog_light_solid_angle(p, lights[l]) * fog_phase(dot(toward, dir), m.w) * seen;
+            }
+            let passes = exp(-tau);
+            gathered += through * fog.albedo.xyz * light_in * (1.0 - passes);
+            through *= passes;
+        }
+        froxels[(i * fd.y + gid.y) * fd.x + gid.x] = vec4<f32>(gathered, through);
+        before = after;
+    }
+}
+
+// Froxel column `(x, y)`'s value at fractional slice `s` (−1: the eye,
+// nothing gathered, all let through).
+fn fog_column(x: u32, y: u32, s: f32) -> vec4<f32> {
+    let fd = fog.fdims;
+    let s0 = floor(s);
+    let f = s - s0;
+    var a = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (s0 >= 0.0) { a = froxels[(u32(s0) * fd.y + y) * fd.x + x]; }
+    var b = a;
+    if (s0 + 1.0 >= 0.0) { b = froxels[(min(u32(s0 + 1.0), fd.z - 1u) * fd.y + y) * fd.x + x]; }
+    return mix(a, b, f);
+}
+
+@compute @workgroup_size(8, 8)
+fn hw_fog_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = u32(camera.params.x);
+    let h = u32(camera.params.y);
+    if (gid.x >= w || gid.y >= h) { return; }
+    let pixel = gid.y * w + gid.x;
+    let fd = fog.fdims;
+    var d = bitcast<f32>(vis[pixel].z);
+    if (vis[pixel].x == NONE) { d = fog.froxel.y; }
+    d = clamp(d, 0.0, fog.froxel.y);
+    // The fractional slice whose far end is at d (slice i's far end at
+    // fog_slice_depth(i + 1)).
+    var s = -1.0;
+    if (d > fog.froxel.x) { s = log(d / fog.froxel.x) / log(fog.froxel.y / fog.froxel.x) * fog.froxel.z - 1.0; }
+    let tile = f32(fd.w);
+    let fx = clamp((f32(gid.x) + 0.5) / tile - 0.5, 0.0, f32(fd.x - 1u));
+    let fy = clamp((f32(gid.y) + 0.5) / tile - 0.5, 0.0, f32(fd.y - 1u));
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, fd.x - 1u);
+    let y1 = min(y0 + 1u, fd.y - 1u);
+    let tx = fx - f32(x0);
+    let ty = fy - f32(y0);
+    let v = mix(mix(fog_column(x0, y0, s), fog_column(x1, y0, s), tx), mix(fog_column(x0, y1, s), fog_column(x1, y1, s), tx), ty);
+    let c = colors[pixel];
+    colors[pixel] = vec4<f32>(c.xyz * v.w + v.xyz, c.w);
+}
+
 // M13 gate 4: per pixel, a ray through its top-left corner, recording
 // (the object hit or NONE, 1 if that object is large for the coverage maps,
 // its distance's bits, 0) for `m13_coverage_near`.

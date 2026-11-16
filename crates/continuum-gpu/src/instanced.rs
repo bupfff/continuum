@@ -87,6 +87,10 @@ enum CameraDispatch {
     AaScatter,
     /// A workgroup per 16 pixels listed again (stage 1), words 24–26.
     AaAgain,
+    /// Fog (M18): a workgroup per 8 × 8 cells of each layer of the sun's
+    /// visibility grid; per 8 × 8 froxel columns.
+    FogGrid,
+    FogColumns,
 }
 
 /// How a bake pass is dispatched: workgroups, or from the dispatch-sizes
@@ -481,6 +485,12 @@ pub struct InstancedRenderer {
     auto_exposure: Option<crate::AutoExposure>,
     meter: crate::exposure::Meter,
     metered_at: std::cell::Cell<Option<Instant>>,
+    /// The sky's radiance the fog scatters (M18), and whether this frame
+    /// traces the sun's visibility grid again.
+    fog_sky: Vec3,
+    fog_trace: bool,
+    /// Lights moved so far (`set_light`).
+    light_moves: u32,
     /// Time the caller waited for the GPU since the last frame
     /// ([`Self::wait`]): the cache's frame period counts it (M5 gate 14), as
     /// a frame call counts its own wait.
@@ -820,8 +830,10 @@ impl InstancedRenderer {
             ),
             "moving spots are not supported"
         );
-        // The M13 colour pass's cached visibility of the lights is stale.
+        // The M13 colour pass's cached visibility of the lights is stale,
+        // and the fog's (M18).
         self.m13_sun_stale = true;
+        self.light_moves = self.light_moves.wrapping_add(1);
         let gpu = LightGpu::from(&light);
         let buffer = &self
             .scene
@@ -1752,6 +1764,34 @@ impl InstancedRenderer {
                 camera_dispatch.insert(after + k, dispatch);
             }
         }
+        // Fog (M18), with hardware camera rays and no movers: after shading
+        // and anti-aliasing (before the error probes).
+        let fog = cache.as_ref().is_some_and(|o| o.fog.is_some())
+            && hw.as_ref().is_some_and(|hw| hw.movers.is_none())
+            && !pixel_cones
+            && passes
+                .iter()
+                .any(|(_, keep)| keep.as_slice() == VC_SHADE_BINDINGS);
+        if fog {
+            let at = passes
+                .iter()
+                .position(|(_, keep)| keep.as_slice() == HW_VC_ERROR_SHARES_BINDINGS)
+                .unwrap_or(passes.len());
+            for (k, (name, dispatch)) in [
+                ("hw_fog_visibility", CameraDispatch::FogGrid),
+                ("hw_fog_froxels", CameraDispatch::FogColumns),
+                ("hw_fog_apply", CameraDispatch::Screen),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                passes.insert(
+                    at + k,
+                    (kernel.entry(name), kernel.entry_bindings(name, false)),
+                );
+                camera_dispatch.insert(at + k, dispatch);
+            }
+        }
         let cache = cache.map(|options| Cache {
             state: VirtualCache::new(
                 &device,
@@ -1808,6 +1848,10 @@ impl InstancedRenderer {
             binds: Vec::new(),
         });
         let mut cache = cache;
+        if !fog && let Some(c) = &mut cache {
+            // Without the passes, no fog in shading either.
+            c.state.drop_fog();
+        }
         if hw_edges && let Some(c) = &mut cache {
             c.state.set_hardware_edges(blend);
         }
@@ -1873,6 +1917,9 @@ impl InstancedRenderer {
             auto_exposure: None,
             meter,
             metered_at: std::cell::Cell::new(None),
+            fog_sky: kernel.sky(),
+            fog_trace: true,
+            light_moves: 0,
             waited: std::cell::Cell::new(Duration::ZERO),
             texture_box: true,
             movers,
@@ -2472,6 +2519,21 @@ impl InstancedRenderer {
             (CameraDispatch::AaAgain, Some(cache)) => {
                 pass.dispatch_workgroups_indirect(cache.state.buffer(66), 96)
             }
+            (CameraDispatch::FogGrid, _) => {
+                // Kept unless its cells or the light moved.
+                if self.fog_trace {
+                    let [gx, gy, gz] = crate::fog::GRID;
+                    pass.dispatch_workgroups(gx.div_ceil(8), gy.div_ceil(8), gz)
+                }
+            }
+            (CameraDispatch::FogColumns, _) => {
+                let t = crate::fog::TILE;
+                pass.dispatch_workgroups(
+                    self.width.div_ceil(t).div_ceil(8),
+                    self.height.div_ceil(t).div_ceil(8),
+                    1,
+                )
+            }
             (CameraDispatch::Tiles, _) => {
                 pass.dispatch_workgroups(self.width.div_ceil(64), self.height.div_ceil(64), 1)
             }
@@ -2648,6 +2710,15 @@ impl InstancedRenderer {
         cam.forward[3] = self.texture_box as u32 as f32;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
+        if let Some(c) = &mut self.cache {
+            self.fog_trace = c.state.write_fog(
+                &self.queue,
+                camera.eye,
+                self.fog_sky,
+                (self.width, self.height),
+                self.light_moves,
+            );
+        }
         let dims = DisplayDims {
             size: [self.width, self.height],
             flags: [self.display_mode(), self.scale],
@@ -2907,6 +2978,15 @@ impl InstancedRenderer {
         cam.forward[3] = self.texture_box as u32 as f32;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
+        if let Some(c) = &mut self.cache {
+            self.fog_trace = c.state.write_fog(
+                &self.queue,
+                camera.eye,
+                self.fog_sky,
+                (self.width, self.height),
+                self.light_moves,
+            );
+        }
         let dims = DisplayDims {
             size: [self.width, self.height],
             flags: [self.display_mode(), self.scale],

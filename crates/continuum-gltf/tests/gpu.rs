@@ -1182,6 +1182,92 @@ fn auto_exposure_shows_the_middle_at_the_key() {
     assert!((used / want - 1.0).abs() < 1e-3, "{used} against {want}");
 }
 
+/// Fog (M18): a dense, shallow layer veils the scene (its pixels' spread
+/// falls well below the clear image's) without darkening it to black, and
+/// a layer with no density changes nothing. Needs hardware ray queries (no fog
+/// without).
+#[test]
+fn fog_veils_the_scene() {
+    let s = scene(DVec3::ZERO);
+    let render = |fog: Option<continuum_gpu::Fog>| {
+        let mut r = renderer(
+            kernel(),
+            &s,
+            DVec3::ZERO,
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                anti_aliasing: false,
+                fog,
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        (r.read_colors(), r.hardware_rays())
+    };
+    let (clear, hardware) = render(None);
+    if !hardware {
+        eprintln!("no hardware ray queries: no fog");
+        return;
+    }
+    // Dense enough to hide the scene 6 m away (5% let through), shallow
+    // enough for the sun to light it (a deep dense layer is dark, rightly).
+    let dense = continuum_gpu::Fog {
+        density: 0.5,
+        top: 4.0,
+        ..Default::default()
+    };
+    let (foggy, _) = render(Some(dense));
+    let (thin, _) = render(Some(continuum_gpu::Fog {
+        density: 0.0,
+        top: 10.0,
+        ..Default::default()
+    }));
+    let spread = |img: &Image| {
+        let n = (3 * img.len()) as f64;
+        let mean = img.iter().flatten().map(|&x| x as f64).sum::<f64>() / n;
+        (img.iter()
+            .flatten()
+            .map(|&x| (x as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n)
+            .sqrt()
+    };
+    dump("fog_clear", &clear);
+    dump("fog_dense", &foggy);
+    // The fog's own light (single scattering of this sun through the
+    // layer) is about 2% of the sun's irradiance: dimmer than lit
+    // surfaces, not black.
+    let mean = foggy.iter().flatten().sum::<f32>() / (3 * foggy.len()) as f32;
+    assert!(
+        foggy.iter().flatten().all(|c| c.is_finite() && *c >= 0.0),
+        "non-finite fog"
+    );
+    assert!(mean > 0.01, "fog is black: mean {mean}");
+    let unchanged = difference(&thin, &clear);
+    eprintln!(
+        "fog: spread {:.4} against {:.4} clear; no density: {unchanged:?}",
+        spread(&foggy),
+        spread(&clear)
+    );
+    assert!(
+        spread(&foggy) < 0.5 * spread(&clear),
+        "dense fog does not veil"
+    );
+    assert!(
+        unchanged.relative_rmse < 1e-4,
+        "fog of no density changes the image: {unchanged:?}"
+    );
+}
+
 /// Emission adds to what a surface reflects, exactly, in the cached path
 /// (pixel by pixel: one ray a pixel, as anti-aliased edges mix surfaces).
 #[test]

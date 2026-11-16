@@ -132,6 +132,7 @@ struct Frame<'a> {
 mod coverage_maps;
 mod cutout;
 mod exposure;
+mod fog;
 mod hierarchy;
 mod hw;
 mod instanced;
@@ -144,6 +145,7 @@ mod vcache;
 
 pub use cutout::cut_out;
 pub use exposure::{AutoExposure, ToneMap};
+pub use fog::Fog;
 pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
 pub use renderer::{Renderer, RendererOptions};

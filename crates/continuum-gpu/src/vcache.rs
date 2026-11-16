@@ -251,6 +251,11 @@ pub struct CacheOptions {
     /// taken up within 90% of the budget and given up past it, so a view
     /// near the budget keeps its choice from frame to frame.
     pub aa_rays: f32,
+    /// Fog with light shafts (M18; None: clear air): camera rays through a
+    /// medium in a layer, the sun's light scattered with its shadows, the
+    /// other lights' and the sky's without; surfaces lit through it. With
+    /// hardware ray queries and no movers.
+    pub fog: Option<crate::Fog>,
     /// The error while flying, reported (M4 gate 13): pixels a frame (up to
     /// 4,096; 0: off) shaded both as shown and with each light's share and
     /// the sky's computed at the pixel's own point, from which
@@ -315,6 +320,7 @@ impl Default for CacheOptions {
             edge_samples: 4,
             anti_aliasing: false,
             aa_rays: 1.0,
+            fog: None,
             error_probes: 0,
             glossy_rays: true,
             self_spacing: 0.01,
@@ -467,6 +473,8 @@ struct VcParams {
     ledger: [u32; 4],
     indirect: [u32; 4],
     extra: [u32; 4],
+    /// Fog (M18): extinction at height 0, falloff, top, 1 if on.
+    fog: [f32; 4],
 }
 
 /// Per-chart tables shared by every object with a geometry: the chart's size
@@ -1031,6 +1039,9 @@ pub(crate) struct VirtualCache {
     /// Anti-aliasing on the default path (M15): the pixels' normals, the
     /// edge list and its colours (107), its counters (110).
     aa: bool,
+    /// Fog (M18): the visibility grid's corner and the first light's centre
+    /// it was traced for.
+    fog_key: Option<[f32; 6]>,
     append_pages: u32,
     alloc_frame: Vec<u32>,
     appended: f32,
@@ -1525,6 +1536,7 @@ impl VirtualCache {
             slot_retries: vec![0; options.pages as usize],
             extra_samples: false,
             aa: false,
+            fog_key: None,
             sky_rebaked: 0,
             mover_ids: HashMap::new(),
             append_pages,
@@ -1624,6 +1636,35 @@ impl VirtualCache {
                         usage: wgpu::BufferUsages::STORAGE
                             | wgpu::BufferUsages::COPY_SRC
                             | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                ));
+            }
+        }
+        if let Some(fog) = self.options.fog {
+            // Fog (M18): its parameters, the sun's visibility grid, the
+            // froxels.
+            let _ = fog;
+            let [gx, gy, gz] = crate::fog::GRID;
+            let froxels = width.div_ceil(crate::fog::TILE) as u64
+                * height.div_ceil(crate::fog::TILE) as u64
+                * crate::fog::SLICES as u64;
+            self.buffers.retain(|(b, _)| !(112..=114).contains(b));
+            for (binding, label, size) in [
+                (
+                    112,
+                    "fog params",
+                    std::mem::size_of::<crate::fog::FogParams>() as u64,
+                ),
+                (113, "fog visibility", (gx * gy * gz) as u64 * 4),
+                (114, "froxels", froxels * 16),
+            ] {
+                self.buffers.push((
+                    binding,
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
                 ));
@@ -1923,6 +1964,9 @@ impl VirtualCache {
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
+            fog: self.options.fog.map_or([0.0; 4], |f| {
+                [f.density.max(0.0), f.height_falloff.max(0.0), f.top, 1.0]
+            }),
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.log.push(CacheStats {
@@ -2239,6 +2283,43 @@ impl VirtualCache {
         } else {
             self.options.sky_sample_cost
         }
+    }
+
+    /// Fog (M18): this frame's parameters for an eye at `eye`, the sky's
+    /// radiance `sky`, a `width × height` image, after `light_moves` moves
+    /// of lights. Whether the sun's visibility grid must be traced again:
+    /// its cells moved (the eye crossed one) or a light did, or the first
+    /// frame; it is kept otherwise (the scene is static with fog).
+    pub(crate) fn write_fog(
+        &mut self,
+        queue: &wgpu::Queue,
+        eye: Vec3,
+        sky: Vec3,
+        (width, height): (u32, u32),
+        light_moves: u32,
+    ) -> bool {
+        let Some(fog) = self.options.fog else {
+            return false;
+        };
+        let params = crate::fog::FogParams::new(&fog, eye, sky, width, height);
+        queue.write_buffer(self.buffer(112), 0, bytemuck::bytes_of(&params));
+        let key = [
+            params.origin[0],
+            params.origin[1],
+            params.origin[2],
+            f32::from_bits(light_moves),
+            0.0,
+            0.0,
+        ];
+        let changed = self.fog_key != Some(key);
+        self.fog_key = Some(key);
+        changed
+    }
+
+    /// No fog after all (its passes cannot run): shading lights surfaces
+    /// in clear air.
+    pub(crate) fn drop_fog(&mut self) {
+        self.options.fog = None;
     }
 
     /// Anti-aliasing on the default path (M15) runs.

@@ -224,7 +224,42 @@ pub fn render_instanced_lights(
     work: &Path,
 ) -> io::Result<Reference> {
     render_instanced_inner(
-        scene, origin, lights, sky, None, camera, size, samples, bounces, seed, work,
+        scene, origin, lights, sky, None, None, camera, size, samples, bounces, seed, work,
+    )
+}
+
+/// [`render_instanced_lights`] in fog (M18): a box of `extent` around the
+/// origin's column (horizontally), from `bottom` to the fog's top, holding
+/// Volume Scatter and Volume Absorption nodes for its extinction, albedo
+/// and anisotropy (the density falling with height where it does), single
+/// scattering (no volume bounces).
+#[allow(clippy::too_many_arguments)]
+pub fn render_instanced_fog(
+    scene: &InstancedScene,
+    origin: DVec3,
+    lights: &[Light],
+    sky: Vec3,
+    fog: (&continuum_gpu::Fog, f32, f32),
+    camera: Camera,
+    size: (u32, u32),
+    samples: u32,
+    bounces: u32,
+    seed: u32,
+    work: &Path,
+) -> io::Result<Reference> {
+    render_instanced_inner(
+        scene,
+        origin,
+        lights,
+        sky,
+        None,
+        Some(fog),
+        camera,
+        size,
+        samples,
+        bounces,
+        seed,
+        work,
     )
 }
 
@@ -249,6 +284,7 @@ pub fn render_instanced_environment(
         lights,
         Vec3::ZERO,
         Some(environment),
+        None,
         camera,
         size,
         samples,
@@ -297,6 +333,7 @@ fn render_instanced_inner(
     lights: &[Light],
     sky: Vec3,
     environment: Option<&continuum_gpu::Environment>,
+    fog: Option<(&continuum_gpu::Fog, f32, f32)>,
     camera: Camera,
     (width, height): (u32, u32),
     samples: u32,
@@ -560,8 +597,25 @@ fn render_instanced_inner(
             }
         })
         .collect();
+    // Fog (M18): {density, falloff, top, bottom, extent, albedo, g}, or null.
+    let fog_json = match fog {
+        Some((f, bottom, extent)) => format!(
+            r#"{{"density": {}, "falloff": {}, "top": {}, "bottom": {}, "extent": {}, "albedo": [{}, {}, {}], "g": {}}}"#,
+            f.density,
+            f.height_falloff,
+            f.top,
+            bottom,
+            extent,
+            f.albedo.x,
+            f.albedo.y,
+            f.albedo.z,
+            f.anisotropy
+        ),
+        None => "null".to_string(),
+    };
     let job = format!(
         r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "transmission": [{}], "volumes": [{}], "specular": [{}], "clearcoat": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+  "fog": {fog_json},
   "lights": {lights_json},
   "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},

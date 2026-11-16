@@ -2712,7 +2712,46 @@ struct VcParams {
     // anti-aliasing (M15), the extra rays a frame may trace per pixel, on
     // average (f32 bits)
     extra: vec4<u32>,
+    // Fog (M18): extinction at height 0, its falloff with height, the
+    // layer's top, 1 if on.
+    fog: vec4<f32>,
 };
+
+// Fog (M18): the extinction at height `z` of a layer with extinction
+// `sigma` at 0 falling off by `k` per unit, none above `top`.
+fn fog_density(z: f32, sigma: f32, k: f32, top: f32) -> f32 {
+    if (z >= top) { return 0.0; }
+    if (k <= 0.0) { return sigma; }
+    return sigma * exp(-k * max(z, 0.0));
+}
+
+// The optical depth along the segment from `p` along unit `d` for `len`,
+// through that layer (exact for an even layer and for the falloff above
+// 0).
+fn fog_depth(p0: vec3<f32>, d: vec3<f32>, len0: f32, sigma: f32, k: f32, top: f32) -> f32 {
+    var p = p0;
+    var len = len0;
+    if (p.z >= top) {
+        if (d.z >= 0.0) { return 0.0; }
+        let enter = (p.z - top) / -d.z;
+        if (enter >= len) { return 0.0; }
+        p += d * enter;
+        len -= enter;
+    }
+    if (d.z > 1e-6) { len = min(len, (top - p.z) / d.z); }
+    if (k <= 0.0) { return sigma * len; }
+    let a = k * d.z * len;
+    if (abs(a) < 1e-4) { return sigma * exp(-k * max(p.z + 0.5 * d.z * len, 0.0)) * len; }
+    return sigma * (exp(-k * max(p.z, 0.0)) - exp(-k * max(p.z + d.z * len, 0.0))) / (k * d.z);
+}
+
+// What reaches `p` of light `l` through the fog (1 without fog).
+fn fog_light_transmit(p: vec3<f32>, l: LightRect) -> f32 {
+    if (vc.fog.w < 0.5) { return 1.0; }
+    let to = light_center(l) - p;
+    let dist = length(to);
+    return exp(-fog_depth(p, to / max(dist, 1e-6), dist, vc.fog.x, vc.fog.y, vc.fog.z));
+}
 
 const PAGE: u32 = 8u;
 const PAGE_STRIDE: u32 = 9u;
@@ -5481,7 +5520,8 @@ fn vc_light_terms(exact: bool, f: ShownPage, point: vec3<f32>, normal: vec3<f32>
                 }
                 // Shadowed pixels need no unshadowed light.
                 if (share > 0.0) {
-                    let open = unshadowed_rect(point, normal, lights[l]);
+                    // Through the fog (M18).
+                    let open = unshadowed_rect(point, normal, lights[l]) * fog_light_transmit(point, lights[l]);
                     e += lights[l].radiance.xyz * share * open;
                     if (pbr) {
                         spec += lights[l].radiance.xyz * share * open * specular_light(point, normal, -dir, lights[l], base, mat);
@@ -5509,7 +5549,7 @@ fn vc_light_terms(exact: bool, f: ShownPage, point: vec3<f32>, normal: vec3<f32>
     } else {
         // Unshadowed light from each light.
         for (var l = 0u; l < count; l++) {
-            e += lights[l].radiance.xyz * unshadowed_rect(point, normal, lights[l]);
+            e += lights[l].radiance.xyz * unshadowed_rect(point, normal, lights[l]) * fog_light_transmit(point, lights[l]);
         }
         // The sky above the horizon, with the ground below it: a
         // guess until a page arrives.

@@ -973,6 +973,54 @@ map and adaptation as gate 1.
 against Cycles' volumes), bloom, depth of field and motion blur (against
 Cycles' camera), upscaling.
 
+#### Fog with light shafts (M18 design, 2026-11-15)
+
+Fog gives large outdoor worlds their depth. `Fog` (`RendererOptions::fog`,
+`CacheOptions::fog`): a layer with extinction `density` at height 0
+falling as exp(−falloff·z), none above `top`, scattering `albedo` of what
+it removes with Henyey and Greenstein's phase.
+- **The sun's visibility** in the air: a world-space grid around the eye
+  (128 × 128 cells across, 32 up to the top), snapped to its cells so a
+  cell keeps its place as the eye moves, each cell's centre traced toward
+  the first light by a hardware ray (any hit blocks). Kept while the eye
+  stays in its cells and no light moves (the cache's rule: computed once,
+  kept until it could have changed); fog needs a static scene (no movers).
+- **Per frame:** froxel columns (8 × 8 pixels, 64 slices spaced
+  geometrically to the fog's range, until 1% of light is left) integrated
+  front to back: each slice's optical depth exact (`fog_depth`, clipped at
+  the top; sampling density at slice midpoints banded where rays leave the
+  layer, development), the light gathered at the middle of its part in the
+  layer: the first light's through its visibility (trilinear) and the fog
+  on its way, the other lights' unshadowed, the sky's (its radiance times
+  one half). No jitter and no reuse between frames.
+- **Applied** after shading and anti-aliasing: each pixel's colour times
+  what the fog lets through to its hit, plus the light gathered (bilinear
+  between columns, linear between slices). Surfaces get each light dimmed
+  by the fog on its way (`fog_light_transmit` in the shading).
+- **Not:** fog seen in reflections and through glass layers, its glow lit
+  by surfaces (single scattering of lights and sky only), shadows of other
+  lights in the fog, anti-aliased edges fogged per sample (the pixel's
+  centre's depth), movers.
+
+The Cycles reference: a box (500 m across, from 1 m below the ground to
+the top) holding Volume Scatter and Volume Absorption at the same density
+with the albedo as colour (the density driven by height where it falls),
+single scattering (no volume bounces).
+
+**Development** (`fog_dev`, 640×360, Cycles 1,024 samples, ours 4×4, the
+textured scene with M10 G16's panes as thin glass): an even layer (0.05
+per metre, top 6 m) 9.56% from Cycles against 43.91% without fog (0.218×);
+a view from beside the brick block with the density falling (0.08 at the
+ground, 0.3 per metre) 5.65% against 37.44% (0.151×). The rest is mostly
+the panes' tinted shadows (Cycles') and the sky's horizon. Cost at
+1280×720: 0.80 ms (1.19×) with the grid kept (its tracing about 0.3 ms
+when it moves).
+
+**Gate M18 G1** (`m18_gate1`), the bars set with the development numbers
+above known: (1) fog adds at most 1.0 ms to the warm frame at 1280×720
+(even view, five interleaved rounds); (2) in each view, within 12% of
+Cycles and at most 0.35× the error without fog.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

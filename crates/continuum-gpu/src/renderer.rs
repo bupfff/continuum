@@ -124,6 +124,9 @@ pub struct RendererOptions {
     /// over half a second. It multiplies [`Renderer::set_exposure`]'s
     /// factor; [`Renderer::read_colors`] stays unscaled. None: off.
     pub auto_exposure: Option<crate::AutoExposure>,
+    /// Fog with light shafts (M18; None: clear air), with the cache,
+    /// hardware ray queries and no movers. See [`crate::Fog`].
+    pub fog: Option<crate::Fog>,
 }
 
 impl Default for RendererOptions {
@@ -143,6 +146,7 @@ impl Default for RendererOptions {
             anti_aliasing: true,
             tone_map: crate::ToneMap::PbrNeutral,
             auto_exposure: Some(crate::AutoExposure::default()),
+            fog: None,
         }
     }
 }
@@ -243,6 +247,9 @@ impl Renderer {
             && placed <= 64;
         let mut cache_options = options.cache_options;
         cache_options.anti_aliasing |= options.anti_aliasing && !sub_pixel;
+        if options.fog.is_some() {
+            cache_options.fog = options.fog;
+        }
         if sub_pixel {
             kernel.set_prefilter(8.0);
             kernel.set_hardware_rays(true);
