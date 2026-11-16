@@ -256,6 +256,19 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   queries; blur through glass layers uses the first surface's depth, and
   apertures have no blades. `InstancedRenderer::depth_of_field_highlights`
   reports the last frame's highlights.
+- **Motion blur** (`RendererOptions::motion_blur`, `MotionBlur`; M21
+  gate 1): off by default. A shutter open for `shutter` (0.5) of the time
+  since the previous poses, centred on the frame, as Cycles' default:
+  `Renderer` takes the last frame's camera and `set_transform` poses as
+  the previous ones; `InstancedRenderer` takes them from
+  `set_previous_camera` and `set_instance_previous_transform` (unset:
+  still). Motion is taken as constant; smears longer than `max_blur` (10%
+  of the image's height) are clamped. Gathered each frame after depth of
+  field, into `read_colors`. 0.07–0.34× a still image's error from the
+  shutter sampled outright in four views, 0.6–1.4 ms at 720p. With
+  hardware ray queries. Not seen: shadows of moving objects on still
+  surfaces (they do not smear), deforming geometry, moving lights, motion
+  through glass.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **Anti-aliasing, on by default** (`RendererOptions::anti_aliasing`; M15

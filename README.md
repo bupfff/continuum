@@ -195,6 +195,10 @@ Selected numbers (1280×720, Apple M4, release builds):
   lights blurred into clean discs; 0.03–0.13× a pinhole's error from the
   lens sampled outright, as close to Cycles' lens as that is, 1.8–2.5 ms
   at 720p.
+- **Motion blur:** a shutter centred on the frame, from the camera's and
+  moving objects' motion since the last frame; 0.07–0.34× a still image's
+  error from the shutter sampled outright, within 1.1× of its distance
+  from Cycles, 0.6–1.4 ms at 720p.
 - **glTF 2.0** import and export, with cameras, lights and animations.
 - **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
   entities moving its objects.

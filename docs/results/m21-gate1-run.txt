@@ -1,0 +1,19 @@
+M21 gate 1: 640x360, timed at 1280x720, adapter Apple M4
+1. cost, (a) trucking sideways: +1.426 ms (at most 1.7): PASS (rounds, without/with ms: 2.727/4.170 2.723/4.174 2.773/4.197 2.763/4.186 2.753/4.180)
+1. cost, (b) turning: +1.301 ms (at most 1.7): PASS (rounds, without/with ms: 2.778/4.085 2.772/4.073 2.772/4.070 2.776/4.070 2.777/4.084)
+1. cost, (c) boulders crossing: +0.553 ms (at most 0.8): PASS (rounds, without/with ms: 2.901/3.456 2.906/3.454 2.900/3.454 2.901/3.456 2.918/3.442)
+1. cost, (d) dollying while turning, foliage: +1.233 ms (reported) (rounds, without/with ms: 2.892/4.125 2.891/4.137 2.885/4.116 2.883/4.124 2.884/4.117)
+2. (a) trucking sideways: from the sampled shutter 1.04%, the still image 14.35% (0.072x, at most 0.35x): PASS
+3. (a) trucking sideways: from Cycles (17 s, METAL) 8.22%, the sampled shutter 8.24% (0.998x, at most 1.12x), the still image 17.40%; means against Cycles: ours -2.41%, sampled shutter -2.41%, still -2.41% (ours took 9 s): PASS
+4. (a) trucking sideways: the mean of ours -0.004% from the sampled shutter's (within 1%): PASS
+2. (b) turning: from the sampled shutter 2.12%, the still image 11.22% (0.189x, at most 0.35x): PASS
+3. (b) turning: from Cycles (14 s, METAL) 8.39%, the sampled shutter 8.15% (1.030x, at most 1.12x), the still image 15.50%; means against Cycles: ours -2.46%, sampled shutter -2.41%, still -2.40% (ours took 10 s): PASS
+4. (b) turning: the mean of ours -0.057% from the sampled shutter's (within 1%): PASS
+2. (c) boulders crossing: from the sampled shutter 1.30%, the still image 4.78% (0.271x, at most 0.35x): PASS
+3. (c) boulders crossing: from Cycles (14 s, METAL) 7.46%, the sampled shutter 7.28% (1.026x, at most 1.12x), the still image 9.28%; means against Cycles: ours -2.46%, sampled shutter -2.43%, still -2.44% (ours took 33 s): PASS
+4. (c) boulders crossing: the mean of ours -0.025% from the sampled shutter's (within 1%): PASS
+2. (d) dollying while turning, foliage: from the sampled shutter 5.42%, the still image 15.82% (0.343x, at most 0.35x): PASS
+3. (d) dollying while turning, foliage: from Cycles (28 s, METAL) 9.71%, the sampled shutter 8.85% (1.097x, at most 1.12x), the still image 19.20%; means against Cycles: ours -2.86%, sampled shutter -2.97%, still -2.97% (ours took 12 s): PASS
+4. (d) dollying while turning, foliage: the mean of ours +0.112% from the sampled shutter's (within 1%): PASS
+views that did not settle within 20,000 frames: 0
+Verdict: 1 PASS, 2 PASS, 3 PASS, 4 PASS: PASS
