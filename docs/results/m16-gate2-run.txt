@@ -1,0 +1,5 @@
+M16 gate 2: 1280x720, adapter Apple M4
+1. speed: transmissive / opaque panes 1.217x (at most 1.3x): PASS (rounds, ms: 4.37/3.65 4.37/3.60 4.39/3.61 4.45/3.59 4.35/3.56)
+2. accuracy against Cycles (69 s, METAL): 5.08% (at most 7%; panes opaque 85.41%, as blending 13.90%); over the 241769 pixels transmission changes: 7.92% against blending's 22.91% (0.346x, at most 0.5x; opaque 142.46%); means over them: ours +2.90%, blending +14.92%, opaque +91.77%: PASS
+views that did not settle within 20,000 frames: 0
+Verdict: 1 PASS, 2 PASS: PASS
