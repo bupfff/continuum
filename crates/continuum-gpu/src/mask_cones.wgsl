@@ -1827,7 +1827,7 @@ fn bounce_emission_at(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32>
 // orthogonalized against `n`. Read at the mip matching the pixel's
 // footprint.
 fn mapped_normal(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: vec3<f32>) -> vec3<f32> {
-    let layer = materials[2u * m].w >> 16u;
+    let layer = materials[3u * m].w >> 16u;
     if (layer == 0u) { return n; }
     let b = barycentric(m, t, p);
     let t0 = tri_tex[3u * t];
@@ -2853,19 +2853,22 @@ const LIT_MARK: u32 = 0x10000000u;
 const MISSING_CAP: u32 = 16384u;
 // Per object, its material (M10 gate 2): metallic and roughness; roughness
 // below zero is Lambertian.
-// Per object, two entries: metallic and roughness (f32 bits; roughness
+// Per object, three entries: metallic and roughness (f32 bits; roughness
 // below zero: Lambertian), its emitted radiance as half floats (r, g; b),
 // its normal map's layer plus one in w's high half; then its
-// metallic-roughness texture's layer plus one (0: none).
+// metallic-roughness texture's layer plus one (0: none), its emissive
+// texture's, its blending or transmission factor and mode; then (M16) its
+// dielectric reflectance at normal incidence (r, g; b) and grazing
+// incidence, and its clear coat's factor and roughness (half floats).
 @group(0) @binding(76) var<storage, read> materials: array<vec4<u32>>;
 
 fn material_of(m: u32) -> vec2<f32> {
-    let v = materials[2u * m];
+    let v = materials[3u * m];
     return vec2<f32>(bitcast<f32>(v.x), bitcast<f32>(v.y));
 }
 
 fn emission_of(m: u32) -> vec3<f32> {
-    let v = materials[2u * m];
+    let v = materials[3u * m];
     return vec3<f32>(unpack2x16float(v.z), unpack2x16float(v.w).x);
 }
 
@@ -2892,7 +2895,7 @@ fn emission_textured(m: u32, t: u32, p: vec3<f32>, factor: vec3<f32>, layer: u32
 
 // `emission_textured` with the layer from the materials buffer.
 fn emission_at(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
-    return emission_textured(m, t, p, emission_of(m), materials[2u * m + 1u].y, footprint);
+    return emission_textured(m, t, p, emission_of(m), materials[3u * m + 1u].y, footprint);
 }
 
 // Object `m`'s material at world point `p` on triangle `t` (seen at
@@ -2901,7 +2904,7 @@ fn emission_at(m: u32, t: u32, p: vec3<f32>, footprint: f32) -> vec3<f32> {
 // blue), read at the mip matching the pixel's footprint.
 fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: vec3<f32>) -> vec2<f32> {
     let mat = material_of(m);
-    let layer = materials[2u * m + 1u].x;
+    let layer = materials[3u * m + 1u].x;
     if (layer == 0u || mat.y < 0.0) { return mat; }
     let b = barycentric(m, t, p);
     let t0 = tri_tex[3u * t];
@@ -5258,7 +5261,7 @@ fn vc_aa_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
 // alpha-blended (M10 gate 16; its factor in its material's second word's
 // z, w 1), then the factor times its base color texture's alpha.
 fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
-    let mat = materials[2u * m + 1u];
+    let mat = materials[3u * m + 1u];
     if (mat.w != 1u) { return 1.0; }
     var a = bitcast<f32>(mat.z);
     let layer = object_texture[m];
@@ -5274,20 +5277,20 @@ fn hw_opacity(m: u32, t: u32, p: vec3<f32>) -> f32 {
 // Object `m`'s transmission factor (M16; its material's second word's z,
 // w 2, or 3 for a volume), 0 if none.
 fn transmission_of(m: u32) -> f32 {
-    let mat = materials[2u * m + 1u];
+    let mat = materials[3u * m + 1u];
     if (mat.w != 2u && mat.w != 3u) { return 0.0; }
     return bitcast<f32>(mat.z);
 }
 
 // Whether object `m` is solid transmissive glass (M16, a volume).
 fn is_volume(m: u32) -> bool {
-    return materials[2u * m + 1u].w == 3u;
+    return materials[3u * m + 1u].w == 3u;
 }
 
 // Whether camera rays may see through object `m`: alpha blending (M10
 // gate 16) or transmission (M16).
 fn sees_through(m: u32) -> bool {
-    return materials[2u * m + 1u].w != 0u;
+    return materials[3u * m + 1u].w != 0u;
 }
 
 var<workgroup> fallback_count: atomic<u32>;
@@ -5482,6 +5485,14 @@ fn vc_light_terms(exact: bool, f: ShownPage, point: vec3<f32>, normal: vec3<f32>
                     e += lights[l].radiance.xyz * share * open;
                     if (pbr) {
                         spec += lights[l].radiance.xyz * share * open * specular_light(point, normal, -dir, lights[l], base, mat);
+                        // A clear coat's own specular (M16): index 1.5,
+                        // its roughness, the unmapped normal.
+                        if (shade_coat.x > 0.0) {
+                            let kept = shade_spec;
+                            shade_spec = vec4<f32>(0.04, 0.04, 0.04, 1.0);
+                            vc_coat_spec += lights[l].radiance.xyz * share * open * specular_light(point, shade_coat_n, -dir, lights[l], vec3<f32>(0.0), vec2<f32>(0.0, shade_coat.y));
+                            shade_spec = kept;
+                        }
                     }
                 }
             } else {
@@ -5605,6 +5616,22 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     // Emission (with its texture, M10 gate 14) for the pixel's footprint.
     let glow_footprint = select(1.0, camera.eye.w, camera.eye.w > 0.0) * sub_share * hit.distance * 2.0 * camera.params.z / camera.params.y / max(abs(dot(hit.normal, dir)), 0.2);
     let glow = emission_at(hit.mesh, hit.tri, surface, glow_footprint);
+    // M16: the surface's dielectric reflectance (glass's unless set) and
+    // clear coat, for `specular_light` and `vc_light_terms`.
+    let lobe = materials[3u * hit.mesh + 2u];
+    shade_spec = vec4<f32>(0.04, 0.04, 0.04, 1.0);
+    if (lobe.x != 0u || lobe.y != 0u) {
+        shade_spec = vec4<f32>(unpack2x16float(lobe.x), unpack2x16float(lobe.y));
+    }
+    shade_coat = vec2<f32>(0.0);
+    vc_coat_spec = vec3<f32>(0.0);
+    if (pbr) {
+        let coat = unpack2x16float(lobe.z);
+        if (coat.x > 0.0) {
+            shade_coat = coat;
+            shade_coat_n = shading_normal(hit.mesh, hit.tri, surface, -dir);
+        }
+    }
     let terms = vc_light_terms(false, f, point, normal, base, mat, dir);
     var e = terms[0];
     var spec = terms[1];
@@ -5632,8 +5659,9 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     // diffuse part less what the specular layer reflects.
     let nv = max(dot(normal, -dir), 1e-4);
     let ab = env_brdf(nv, mat.y);
-    let f0 = mix(vec3<f32>(0.04), base, mat.x);
-    let albedo_spec = f0 * ab.x + ab.y;
+    let f0 = mix(shade_spec.xyz, base, mat.x);
+    let f90 = mix(shade_spec.w, 1.0, mat.x);
+    let albedo_spec = f0 * ab.x + f90 * ab.y;
     if (vc.indirect.z == 0u && max(albedo_spec.x, max(albedo_spec.y, albedo_spec.z)) > 0.005) {
         // A shading or mapped normal can turn the mirror direction below the
         // surface itself; it is kept just above it instead (as Cycles'
@@ -5646,12 +5674,35 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         if (up < 0.01) { refl = normalize(refl + hit.normal * (0.01 - up)); }
         spec += albedo_spec * reflected_light(point, refl, mat.y);
     }
-    let unreflected = base * (1.0 - mat.x) * (1.0 - (0.04 * ab.x + ab.y));
+    // The dielectric part's diffuse share: less what its specular layer
+    // reflects (its reflectance's largest channel, as glTF's).
+    let dielectric = max(shade_spec.x, max(shade_spec.y, shade_spec.z)) * ab.x + shade_spec.w * ab.y;
+    let unreflected = base * (1.0 - mat.x) * (1.0 - dielectric);
     // Transmission (M16): of the light the specular layer does not reflect,
     // its factor passes through (tinted), the rest is diffuse.
     vc_transmit = unreflected * transmission;
     let diffuse = unreflected * (1.0 - transmission);
-    return diffuse * e / 3.14159265 + spec + glow;
+    var under = diffuse * e / 3.14159265 + spec;
+    // A clear coat (M16): its own specular from lights (`vc_light_terms`)
+    // and reflection, over what lies under it, dimmed by what it reflects
+    // (its directional albedo, index 1.5).
+    if (shade_coat.x > 0.0) {
+        let nc = shade_coat_n;
+        let abc = env_brdf(max(dot(nc, -dir), 1e-4), shade_coat.y);
+        let fc = 0.04 * abc.x + abc.y;
+        var coat = vc_coat_spec;
+        if (vc.indirect.z == 0u) {
+            var refl = reflect(dir, nc);
+            let up = dot(refl, hit.normal);
+            if (up < 0.01) { refl = normalize(refl + hit.normal * (0.01 - up)); }
+            coat += fc * reflected_light(point, refl, shade_coat.y);
+        }
+        under = under * (1.0 - shade_coat.x * fc) + shade_coat.x * coat;
+        vc_transmit *= 1.0 - shade_coat.x * fc;
+    }
+    shade_spec = vec4<f32>(0.04, 0.04, 0.04, 1.0);
+    shade_coat = vec2<f32>(0.0);
+    return under + glow;
 }
 
 // --- Environment light (M5 gate 11): sky radiance varying with direction. ---
@@ -5754,6 +5805,15 @@ fn env_brdf(nv: f32, roughness: f32) -> vec2<f32> {
 // material's roughness, times the energy normalization (α/α′)² with α′
 // widened by the light's angular radius. (Evaluating D and V at α′ as well
 // lowered a small light's peak twice: M10 gate 10.)
+// M16: a dielectric's reflectance at normal incidence (rgb) and grazing
+// incidence (w) for `specular_light` (glass's unless `vc_hit_color` sets
+// its surface's); the clear coat (factor, roughness) and its normal that
+// `vc_light_terms` adds the specular of to `vc_coat_spec`.
+var<private> shade_spec: vec4<f32> = vec4<f32>(0.04, 0.04, 0.04, 1.0);
+var<private> shade_coat: vec2<f32> = vec2<f32>(0.0);
+var<private> shade_coat_n: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
+var<private> vc_coat_spec: vec3<f32> = vec3<f32>(0.0);
+
 fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: vec3<f32>, mat: vec2<f32>) -> vec3<f32> {
     let refl = reflect(-v, n);
     var aim = light_center(r);
@@ -5787,8 +5847,10 @@ fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: 
     let a = max(mat.y * mat.y, 1e-3);
     let wide = min(a + 0.5 * radius / max(length(light_center(r) - p), 1e-6), 1.0);
     let norm = (a / wide) * (a / wide);
-    let f0 = mix(vec3<f32>(0.04), base, mat.x);
-    return ggx_d(max(dot(n, h), 0.0), a) * smith_visibility(nv, nl, a) * fresnel(f0, max(dot(v, h), 0.0)) * norm;
+    let f0 = mix(shade_spec.xyz, base, mat.x);
+    let f90 = mix(shade_spec.w, 1.0, mat.x);
+    let vh = clamp(1.0 - max(dot(v, h), 0.0), 0.0, 1.0);
+    return ggx_d(max(dot(n, h), 0.0), a) * smith_visibility(nv, nl, a) * (f0 + (vec3<f32>(f90) - f0) * pow(vh, 5.0)) * norm;
 }
 
 // The light arriving at `p` along `refl`: what the cache holds for the

@@ -317,6 +317,9 @@ struct Primitive {
     transmission: Option<f32>,
     /// Its volume (M16), if transmissive with a thickness.
     volume: Option<continuum_gpu::Volume>,
+    /// Its dielectric reflectance and clear coat (M16), if set.
+    specular: Option<continuum_gpu::Specular>,
+    clearcoat: Option<continuum_gpu::Clearcoat>,
     /// Its alpha cutoff (over its base color texture's alpha).
     alpha_cutoff: Option<f32>,
     /// Its vertex colors per triangle corner (`COLOR_0`, M10 gate 17).
@@ -490,6 +493,35 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                     t.transmission_factor().clamp(0.0, 1.0)
                 })
                 .filter(|&t| t > 0.0 && blend.is_none());
+            // A dielectric's reflectance (M16, `KHR_materials_ior` and
+            // `KHR_materials_specular`) and a clear coat
+            // (`KHR_materials_clearcoat`; its textures not yet), for
+            // surfaces with a material.
+            let ior = material.ior().unwrap_or(1.5);
+            let spec = material.specular();
+            let specular = (surface.is_some() && (ior != 1.5 || spec.is_some())).then(|| {
+                continuum_gpu::Specular {
+                    ior,
+                    factor: spec.as_ref().map_or(1.0, |s| s.specular_factor()),
+                    color: spec
+                        .as_ref()
+                        .map_or(Vec3::ONE, |s| Vec3::from_array(s.specular_color_factor())),
+                }
+            });
+            let clearcoat = material
+                .extension_value("KHR_materials_clearcoat")
+                .filter(|_| surface.is_some())
+                .map(|v| continuum_gpu::Clearcoat {
+                    factor: v
+                        .get("clearcoatFactor")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.0) as f32,
+                    roughness: v
+                        .get("clearcoatRoughnessFactor")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.0) as f32,
+                })
+                .filter(|c| c.factor > 0.0);
             let volume = material
                 .volume()
                 .filter(|v| transmission.is_some() && v.thickness_factor() > 0.0)
@@ -602,6 +634,8 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 blend,
                 transmission,
                 volume,
+                specular,
+                clearcoat,
                 alpha_cutoff,
                 colors: colors.is_some().then_some(corner_colors),
                 deform,
@@ -1082,6 +1116,8 @@ fn push_geometry(
     scene.geometry_blend.push(p.blend);
     scene.geometry_transmission.push(p.transmission);
     scene.geometry_volumes.push(p.volume);
+    scene.geometry_specular.push(p.specular);
+    scene.geometry_clearcoat.push(p.clearcoat);
     scene.geometries.len() - 1
 }
 
@@ -1171,6 +1207,8 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_blend.push(p.blend);
     scene.geometry_transmission.push(p.transmission);
     scene.geometry_volumes.push(p.volume);
+    scene.geometry_specular.push(p.specular);
+    scene.geometry_clearcoat.push(p.clearcoat);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -1290,6 +1328,8 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let mut transmission_used = false;
     let mut volume_used = false;
     let mut ior_used = false;
+    let mut specular_used = false;
+    let mut clearcoat_used = false;
     let mut mesh_of: HashMap<(usize, [u32; 3]), usize> = HashMap::new();
     let mut nodes: Vec<String> = Vec::new();
     let (c, c_inv) = axes();
@@ -1410,6 +1450,30 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                     }
                 }
             }
+            // A dielectric's reflectance and a clear coat (M16), for
+            // surfaces with a material (the volume's index wins).
+            if scene.geometry_materials.get(i.geometry).copied().flatten().is_some() {
+                if let Some(sp) = scene.geometry_specular.get(i.geometry).copied().flatten() {
+                    let volume_ior = transmission.is_some()
+                        && scene.geometry_volumes.get(i.geometry).copied().flatten().is_some();
+                    if sp.ior != 1.5 && !volume_ior {
+                        ior_used = true;
+                        extensions.push(format!(r#""KHR_materials_ior":{{"ior":{:?}}}"#, sp.ior));
+                    }
+                    specular_used = true;
+                    extensions.push(format!(
+                        r#""KHR_materials_specular":{{"specularFactor":{:?},"specularColorFactor":[{:?},{:?},{:?}]}}"#,
+                        sp.factor, sp.color.x, sp.color.y, sp.color.z
+                    ));
+                }
+                if let Some(c) = scene.geometry_clearcoat.get(i.geometry).copied().flatten() {
+                    clearcoat_used = true;
+                    extensions.push(format!(
+                        r#""KHR_materials_clearcoat":{{"clearcoatFactor":{:?},"clearcoatRoughnessFactor":{:?}}}"#,
+                        c.factor, c.roughness
+                    ));
+                }
+            }
             let glow = if extensions.is_empty() {
                 glow
             } else {
@@ -1491,6 +1555,8 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
         (transmission_used, "\"KHR_materials_transmission\""),
         (volume_used, "\"KHR_materials_volume\""),
         (ior_used, "\"KHR_materials_ior\""),
+        (specular_used, "\"KHR_materials_specular\""),
+        (clearcoat_used, "\"KHR_materials_clearcoat\""),
     ]
     .iter()
     .filter(|(on, _)| *on)

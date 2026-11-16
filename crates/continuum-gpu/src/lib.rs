@@ -1804,11 +1804,31 @@ impl MaskConeKernel {
         let materials: Vec<[u32; 4]> = scene
             .instances
             .iter()
-            .map(|i| -> [u32; 8] {
+            .map(|i| -> [u32; 12] {
                 // Its normal map's and metallic-roughness texture's
                 // layers plus one (0: none).
                 let layer = layer_of(&scene.geometry_normal_maps, i);
                 let mr = layer_of(&scene.geometry_metallic_roughness, i);
+                // Glass's reflectance (none set) as zeros, so the shader
+                // keeps 0.04 exactly.
+                let (f0, f90) = match scene.geometry_specular.get(i.geometry).copied().flatten() {
+                    Some(sp) => {
+                        let (f0, f90) = sp.f0_f90();
+                        (f0.to_array().map(half_bits), half_bits(f90))
+                    }
+                    None => ([0, 0, 0], 0),
+                };
+                let coat = scene
+                    .geometry_clearcoat
+                    .get(i.geometry)
+                    .copied()
+                    .flatten()
+                    .map_or([0, 0], |c| {
+                        [
+                            half_bits(c.factor.clamp(0.0, 1.0)),
+                            half_bits(c.roughness.clamp(0.0, 1.0)),
+                        ]
+                    });
                 let [metallic, roughness] =
                     match scene.geometry_materials.get(i.geometry).copied().flatten() {
                         Some(m) => [m.metallic, m.roughness.clamp(0.0, 1.0)],
@@ -1848,11 +1868,31 @@ impl MaskConeKernel {
                     } else {
                         0
                     },
+                    // M16: the dielectric reflectance at normal and grazing
+                    // incidence (zeros: glass's), then the clear coat's
+                    // factor and roughness (half floats).
+                    f0[0] | f0[1] << 16,
+                    f0[2] | f90 << 16,
+                    coat[0] | coat[1] << 16,
+                    0,
                 ]
             })
-            .chain(std::iter::once([0, (-1.0f32).to_bits(), 0, 0, 0, 0, 0, 0]))
-            .flat_map(|[a, b, c, d, mr, glow, blend, blended]| {
-                [[a, b, c, d], [mr, glow, blend, blended]]
+            .chain(std::iter::once([
+                0,
+                (-1.0f32).to_bits(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]))
+            .flat_map(|[a, b, c, d, mr, glow, blend, blended, s0, s1, s2, s3]| {
+                [[a, b, c, d], [mr, glow, blend, blended], [s0, s1, s2, s3]]
             })
             .collect();
         let mut tex: Vec<[f32; 2]> = Vec::new();
@@ -3227,6 +3267,16 @@ pub struct InstancedScene {
     /// Shadows pass two of its surfaces, untinted by the attenuation.
     /// Ignored without transmission.
     pub geometry_volumes: Vec<Option<Volume>>,
+    /// Each geometry's dielectric reflectance if it differs from glass's
+    /// (empty: none; M16; glTF's `KHR_materials_ior` and
+    /// `KHR_materials_specular`). Needs a material
+    /// (`geometry_materials`).
+    pub geometry_specular: Vec<Option<Specular>>,
+    /// Each geometry's clear coat, if any (empty: none; M16; glTF's
+    /// `KHR_materials_clearcoat`): a smooth dielectric layer (index 1.5)
+    /// over its material, reflecting lights and its surroundings, dimming
+    /// what lies under it by what it reflects. Needs a material.
+    pub geometry_clearcoat: Vec<Option<Clearcoat>>,
     /// Each geometry's normal map, if any (empty: none; M10 gate 5): an
     /// index into `textures` of a tangent-space normal map (linear, OpenGL's
     /// convention as glTF specifies: green toward the image's top), read
@@ -3644,6 +3694,51 @@ pub struct Material {
     /// 0 for a dielectric, 1 for a metal (between: a blend).
     pub metallic: f32,
     /// Perceptual roughness, 0 (a mirror) to 1.
+    pub roughness: f32,
+}
+
+/// A dielectric surface's reflectance (M16; glTF's `KHR_materials_ior` and
+/// `KHR_materials_specular`): at normal incidence ((ior − 1) / (ior + 1))²
+/// times `color`, at most 1, times `factor`; at grazing incidence
+/// `factor`. Metals keep their base colour's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Specular {
+    /// Index of refraction (1.5: 4% at normal incidence).
+    pub ior: f32,
+    /// Scales the reflectance (glTF's `specularFactor`).
+    pub factor: f32,
+    /// Tints the reflectance at normal incidence (glTF's
+    /// `specularColorFactor`, linear).
+    pub color: Vec3,
+}
+
+impl Default for Specular {
+    fn default() -> Self {
+        Specular {
+            ior: 1.5,
+            factor: 1.0,
+            color: Vec3::ONE,
+        }
+    }
+}
+
+impl Specular {
+    /// Reflectance at normal incidence, and at grazing incidence.
+    pub fn f0_f90(&self) -> (Vec3, f32) {
+        let r = (self.ior - 1.0) / (self.ior + 1.0);
+        (
+            (self.color * r * r).min(Vec3::ONE) * self.factor,
+            self.factor,
+        )
+    }
+}
+
+/// A clear coat (M16; glTF's `KHR_materials_clearcoat`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clearcoat {
+    /// How much of the coat there is, 0 to 1.
+    pub factor: f32,
+    /// Its perceptual roughness, 0 (a mirror) to 1.
     pub roughness: f32,
 }
 

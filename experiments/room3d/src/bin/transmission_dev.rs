@@ -68,7 +68,12 @@ fn main() -> std::io::Result<()> {
     // `solids`: the glass sphere and block (volumes); the third image is
     // the same glass drawn thin, not as blending.
     let solids = std::env::args().any(|a| a == "solids");
-    let (t, single) = if solids {
+    // `lobes`: M16's surface lobes (clear coat, index and tinted
+    // reflectance); "opaque" is then the same scene without them.
+    let lobes = std::env::args().any(|a| a == "lobes");
+    let (t, single) = if lobes {
+        (Textured::new().with_lobes(), Textured::new().with_lobes())
+    } else if solids {
         (
             Textured::new().with_glass_solids(),
             Textured::new().with_glass_solids(),
@@ -82,6 +87,10 @@ fn main() -> std::io::Result<()> {
     kernel.set_sky(t.sky);
     let mut opaque = t.scene.clone();
     opaque.geometry_transmission.clear();
+    if lobes {
+        opaque.geometry_specular.clear();
+        opaque.geometry_clearcoat.clear();
+    }
     let mut blended = t.scene.clone();
     if solids {
         blended.geometry_volumes.clear();
@@ -186,7 +195,9 @@ fn main() -> std::io::Result<()> {
         samples,
         1,
         1,
-        &out_dir.join(if solids {
+        &out_dir.join(if lobes {
+            "transmission_dev_lobes_cycles"
+        } else if solids {
             "transmission_dev_solids_cycles"
         } else {
             "transmission_dev_cycles"
@@ -236,12 +247,12 @@ fn main() -> std::io::Result<()> {
         |img: &[[f32; 3]]| -> Vec<[f32; 3]> { img.iter().map(|p| p.map(|c| c.min(cap))).collect() };
     let rc = clamp(&reference.pixels);
     println!(
-        "clamped at 4x the mean: ours {:.2}%, opaque {:.2}%, other {:.2}%; over the changed pixels: ours {:.2}%, other {:.2}%; pixels above the cap: ours {}, Cycles {}",
+        "clamped at 4x the mean: ours {:.2}%, opaque {:.2}%, other {:.2}%; over the changed pixels: ours {:.2}%, opaque {:.2}%; pixels above the cap: ours {}, Cycles {}",
         100.0 * relative_rmse(&clamp(&ours), &rc),
         100.0 * relative_rmse(&clamp(&flat), &rc),
         100.0 * relative_rmse(&clamp(&blend), &rc),
         100.0 * relative_rmse(&keep(&clamp(&ours)), &keep(&rc)),
-        100.0 * relative_rmse(&keep(&clamp(&blend)), &keep(&rc)),
+        100.0 * relative_rmse(&keep(&clamp(&flat)), &keep(&rc)),
         ours.iter().filter(|p| p.iter().any(|&c| c > cap)).count(),
         reference
             .pixels
@@ -262,7 +273,13 @@ fn main() -> std::io::Result<()> {
                 room3d::to_rgb(Vec3::from_array(*p)),
             );
         }
-        let tag = if solids { "solids_" } else { "" };
+        let tag = if lobes {
+            "lobes_"
+        } else if solids {
+            "solids_"
+        } else {
+            ""
+        };
         image.save(&out_dir.join(format!("transmission_dev_{tag}{name}.png")))
     };
     save("ours", &ours)?;

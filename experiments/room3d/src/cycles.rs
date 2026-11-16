@@ -435,6 +435,27 @@ fn render_instanced_inner(
             },
         )
         .collect();
+    // Each geometry's dielectric reflectance (M16): [ior, factor, r, g, b],
+    // or null; its clear coat: [factor, roughness], or null.
+    let specular: Vec<String> = (0..scene.geometries.len())
+        .map(
+            |g| match scene.geometry_specular.get(g).copied().flatten() {
+                Some(sp) => format!(
+                    "[{}, {}, {}, {}, {}]",
+                    sp.ior, sp.factor, sp.color.x, sp.color.y, sp.color.z
+                ),
+                None => "null".to_string(),
+            },
+        )
+        .collect();
+    let clearcoat: Vec<String> = (0..scene.geometries.len())
+        .map(
+            |g| match scene.geometry_clearcoat.get(g).copied().flatten() {
+                Some(c) => format!("[{}, {}]", c.factor, c.roughness),
+                None => "null".to_string(),
+            },
+        )
+        .collect();
     // Each geometry's normal map (M10 gate 5): a texture's path, or null.
     let normal_maps: Vec<String> = (0..scene.geometries.len())
         .map(
@@ -540,7 +561,7 @@ fn render_instanced_inner(
         })
         .collect();
     let job = format!(
-        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "transmission": [{}], "volumes": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
+        r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "transmission": [{}], "volumes": [{}], "specular": [{}], "clearcoat": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "lights": {lights_json},
   "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},
@@ -555,6 +576,8 @@ fn render_instanced_inner(
         blend.join(", "),
         transmission.join(", "),
         volumes.join(", "),
+        specular.join(", "),
+        clearcoat.join(", "),
         colors.join(", "),
         extensions.join(", "),
         instances.to_string_lossy(),

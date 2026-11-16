@@ -57,6 +57,18 @@ for g, path in enumerate(job["geometries"]):
         bsdf.inputs["Metallic"].default_value = material[0]
         bsdf.inputs["Roughness"].default_value = material[1]
         bsdf.inputs["IOR"].default_value = 1.5
+        # M16: a dielectric's reflectance (index, factor as Specular IOR
+        # Level's twice, tint at normal incidence) and a clear coat.
+        sp = (job.get("specular") or [None] * len(job["geometries"]))[g]
+        if sp is not None:
+            bsdf.inputs["IOR"].default_value = sp[0]
+            bsdf.inputs["Specular IOR Level"].default_value = 0.5 * sp[1]
+            bsdf.inputs["Specular Tint"].default_value = (sp[2], sp[3], sp[4], 1.0)
+        cc = (job.get("clearcoat") or [None] * len(job["geometries"]))[g]
+        if cc is not None:
+            bsdf.inputs["Coat Weight"].default_value = cc[0]
+            bsdf.inputs["Coat Roughness"].default_value = cc[1]
+            bsdf.inputs["Coat IOR"].default_value = 1.5
     else:
         bsdf = nodes.new("ShaderNodeBsdfDiffuse")
         bsdf.inputs["Roughness"].default_value = 0.0

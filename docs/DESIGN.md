@@ -892,8 +892,39 @@ Cycles clamped, 0.371× thin glass's error over the glass's pixels. Solid
 glass stays on (it is accurate; its cost is about 1.2 ms at 720p where it
 covers a ninth of the image); speed levers are in the results file.
 
-**Then in material breadth:** clearcoat and sheen, the index of refraction
-and specular extensions for surfaces, a second texture coordinate set.
+**Surface lobes (design and development 2026-11-15):** a dielectric's
+reflectance (`InstancedScene::geometry_specular`, `Specular`: index,
+factor, tint; glTF's `KHR_materials_ior` and `KHR_materials_specular`)
+and a clear coat (`geometry_clearcoat`, `Clearcoat`: factor, roughness;
+`KHR_materials_clearcoat`), imported and saved. The material record is
+three words a geometry now (the shading pass has no room for another
+buffer), the third holding the reflectance at normal and grazing
+incidence (zeros keep glass's 0.04 exactly) and the coat. Shading: the
+specular layer's F0 and F90 from it (split sum and `specular_light`), the
+diffuse share less its largest channel's directional albedo (glTF's); the
+coat's own specular from each light at its roughness and the unmapped
+normal, plus a reflection ray, over what lies under it dimmed by its
+directional albedo (index 1.5). The Cycles reference: the Principled
+BSDF's IOR, Specular IOR Level (half the factor) and Specular Tint, and
+its Coat Weight and Roughness (Coat IOR 1.5).
+Development (`transmission_dev lobes`, 640×360, Cycles 1,024 samples; the
+textured scene's boulders under a smooth coat, the block of index 2.0
+tinted, `Textured::with_lobes`): with every channel clamped at 4× the
+image's mean (the coat's sun highlights) 4.05% from Cycles against
+5.31% ignoring the lobes; over the pixels they change 5.50% against 9.49%
+(0.58×), the rest on the coated boulders; 1.18× the frame.
+
+**Gate M16 G4** (`m16_gate4`): the textured scene with the lobes,
+1280×720, bounce light on, ours 4×4 against Cycles at 4,096 samples; the
+bars below were set with the development numbers above known. Criteria:
+1. **Speed** (timed first, five interleaved rounds): the warm frame at
+   most 1.25× the same scene without the lobes.
+2. **Accuracy,** every channel of both images clamped at 4× the
+   reference's mean: within 6% of Cycles, and over the pixels the lobes
+   change at most 0.65× the error of ignoring them.
+
+**Then in material breadth:** sheen (Cycles' sheen model differs from
+glTF's), a second texture coordinate set.
 
 ## 3.5 What the 2D phase (M0) taught us
 

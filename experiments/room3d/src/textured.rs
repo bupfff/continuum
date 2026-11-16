@@ -286,6 +286,8 @@ impl Textured {
             geometry_blend: Vec::new(),
             geometry_transmission: Vec::new(),
             geometry_volumes: Vec::new(),
+            geometry_specular: Vec::new(),
+            geometry_clearcoat: Vec::new(),
             geometry_normal_maps: Vec::new(),
             geometry_metallic_roughness: Vec::new(),
             geometry_alpha_cutoff: Vec::new(),
@@ -513,6 +515,46 @@ impl Textured {
             position: DVec3::new(1.2, 3.5, 0.0),
             albedo: Vec3::ONE,
         });
+        self
+    }
+
+    /// M16's surface lobes: the ground rough (0.6); the boulders a rough
+    /// dielectric (0.6) under a smooth clear coat (factor 1, roughness
+    /// 0.05); the brick block of index 2.0 with its reflectance tinted
+    /// (1, 0.75, 0.5), roughness 0.3.
+    pub fn with_lobes(mut self) -> Textured {
+        use continuum_gpu::{Clearcoat, Material, Specular};
+        self.scene.geometry_materials = vec![
+            Some(Material {
+                metallic: 0.0,
+                roughness: 0.6,
+            }),
+            Some(Material {
+                metallic: 0.0,
+                roughness: 0.6,
+            }),
+            Some(Material {
+                metallic: 0.0,
+                roughness: 0.3,
+            }),
+        ];
+        self.scene.geometry_clearcoat = vec![
+            None,
+            Some(Clearcoat {
+                factor: 1.0,
+                roughness: 0.05,
+            }),
+            None,
+        ];
+        self.scene.geometry_specular = vec![
+            None,
+            None,
+            Some(Specular {
+                ior: 2.0,
+                factor: 1.0,
+                color: Vec3::new(1.0, 0.75, 0.5),
+            }),
+        ];
         self
     }
 

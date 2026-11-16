@@ -40,6 +40,8 @@ fn showcase() -> (InstancedScene, Vec<Light>, continuum_gpu::Camera) {
         geometry_blend: Vec::new(),
         geometry_transmission: Vec::new(),
         geometry_volumes: Vec::new(),
+        geometry_specular: Vec::new(),
+        geometry_clearcoat: Vec::new(),
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),

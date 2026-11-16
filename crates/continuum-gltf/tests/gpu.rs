@@ -109,6 +109,8 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_blend: Vec::new(),
         geometry_transmission: Vec::new(),
         geometry_volumes: Vec::new(),
+        geometry_specular: Vec::new(),
+        geometry_clearcoat: Vec::new(),
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),
@@ -462,6 +464,23 @@ fn gltf_round_trip_keeps_materials() {
     s.geometry_emissive_textures = vec![Some(0), None, None];
     s.geometry_blend = vec![None, Some(0.4), None];
     s.geometry_transmission = vec![None, None, Some(0.8)];
+    s.geometry_specular = vec![
+        Some(continuum_gpu::Specular {
+            ior: 1.8,
+            factor: 0.9,
+            color: Vec3::new(1.0, 0.8, 0.6),
+        }),
+        None,
+        None,
+    ];
+    s.geometry_clearcoat = vec![
+        None,
+        Some(continuum_gpu::Clearcoat {
+            factor: 0.7,
+            roughness: 0.1,
+        }),
+        None,
+    ];
     s.geometry_volumes = vec![
         None,
         None,
@@ -542,6 +561,12 @@ fn gltf_round_trip_keeps_materials() {
         let volume =
             |scene: &InstancedScene, g: usize| scene.geometry_volumes.get(g).copied().flatten();
         assert_eq!(volume(&s, a.geometry), volume(&imported, b.geometry));
+        let specular =
+            |scene: &InstancedScene, g: usize| scene.geometry_specular.get(g).copied().flatten();
+        assert_eq!(specular(&s, a.geometry), specular(&imported, b.geometry));
+        let coat =
+            |scene: &InstancedScene, g: usize| scene.geometry_clearcoat.get(g).copied().flatten();
+        assert_eq!(coat(&s, a.geometry), coat(&imported, b.geometry));
         let wrap = |scene: &InstancedScene, g: usize| {
             scene.geometry_textures.get(g).copied().flatten().map(|t| {
                 scene
