@@ -138,7 +138,7 @@ impl DofPasses {
         });
         let tiles_n = size.0.div_ceil(16) as u64 * size.1.div_ceil(16) as u64;
         // Highlights: the list's length and each tile's; the list (4,096
-        // entries of 32 bytes); 64 indices per tile.
+        // entries of 32 bytes); 256 indices per tile.
         let hl_count = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dof highlight counts"),
             size: (tiles_n + 1) * 4,
@@ -155,7 +155,7 @@ impl DofPasses {
         });
         let hl_tiles = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dof highlight tiles"),
-            size: (tiles_n * 64 * 4).max(16),
+            size: (tiles_n * 256 * 4).max(16),
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -202,15 +202,23 @@ impl DofPasses {
         self.size == size && self.rings == rings_for(max_px)
     }
 
-    /// Binds the camera, colour and visibility buffers (after they are made
-    /// or remade).
+    /// Binds the camera, colour, visibility and light buffers (after they
+    /// are made or remade; without a light list, an empty one).
     pub(crate) fn bind(
         &mut self,
         device: &wgpu::Device,
         camera: &wgpu::Buffer,
         colors: &wgpu::Buffer,
         vis: &wgpu::Buffer,
+        lights: Option<&wgpu::Buffer>,
     ) {
+        let none = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dof no lights"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let lights = lights.unwrap_or(&none);
         let level = |k: u32, count: Option<u32>| {
             self.levels.create_view(&wgpu::TextureViewDescriptor {
                 base_mip_level: k,
@@ -258,6 +266,7 @@ impl DofPasses {
                 (13, wgpu::BindingResource::TextureView(&first[3])),
                 (14, self.hl_count.as_entire_binding()),
                 (15, self.hl.as_entire_binding()),
+                (17, lights.as_entire_binding()),
             ],
         );
         let bin = group(
@@ -289,30 +298,31 @@ impl DofPasses {
                 (4, self.tiles.as_entire_binding()),
             ],
         );
-        let gather_entries = |pipeline| {
-            group(
-                pipeline,
-                &[
-                    (0, camera.as_entire_binding()),
-                    (1, colors.as_entire_binding()),
-                    (3, self.params.as_entire_binding()),
-                    (4, self.tiles.as_entire_binding()),
-                    (6, wgpu::BindingResource::TextureView(&all)),
-                    (7, wgpu::BindingResource::Sampler(&sampler)),
-                    (8, self.base.as_entire_binding()),
-                    (9, self.out.as_entire_binding()),
-                    (14, self.hl_count.as_entire_binding()),
-                    (15, self.hl.as_entire_binding()),
-                    (16, self.hl_tiles.as_entire_binding()),
-                ],
-            )
+        // The colours only for the last pass, which writes them.
+        let gather_entries = |pipeline, last: bool| {
+            let mut entries = vec![
+                (0, camera.as_entire_binding()),
+                (3, self.params.as_entire_binding()),
+                (4, self.tiles.as_entire_binding()),
+                (6, wgpu::BindingResource::TextureView(&all)),
+                (7, wgpu::BindingResource::Sampler(&sampler)),
+                (8, self.base.as_entire_binding()),
+                (9, self.out.as_entire_binding()),
+                (14, self.hl_count.as_entire_binding()),
+                (15, self.hl.as_entire_binding()),
+                (16, self.hl_tiles.as_entire_binding()),
+            ];
+            if last {
+                entries.push((1, colors.as_entire_binding()));
+            }
+            group(pipeline, &entries)
         };
         self.binds = Some(DofBinds {
             prepare,
             bin,
             down,
             dilate,
-            gather: std::array::from_fn(|k| gather_entries(&self.gather[k])),
+            gather: std::array::from_fn(|k| gather_entries(&self.gather[k], k == 2)),
         });
     }
 
@@ -337,7 +347,7 @@ impl DofPasses {
             bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
         (
             words[0],
-            words[1..].iter().filter(|&&n| n > 64).count() as u32,
+            words[1..].iter().filter(|&&n| n > 256).count() as u32,
         )
     }
 

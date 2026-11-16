@@ -1144,6 +1144,42 @@ their tile's mean (the rest scatter from the coarse levels), and a pixel
 that sees a light takes its blur from the surface behind the light (14.4
 px against about 8).
 
+**For gate 2** (development on gate 1's night view, now known):
+- **A seen light's depth:** a pixel that sees a light (`vis.w`) takes the
+  light's distance along its ray; a bright pixel beside one (its
+  anti-aliased edge) takes the light's radius.
+- **Highlights by size and contrast:** 4× brighter than the tile's mean
+  (so covering at most about a quarter of it) and 8× brighter than its
+  background (the mean of its pixels at or below the mean), in focus or
+  not; the excess is over the background. Bilinear reads of the levels
+  blend a bright in-focus source's radius with its neighbours' and spread
+  it; drawn exactly, it stays sharp.
+- **A highlight adds light, not coverage:** its excess goes into its
+  group's colour on the surface its pixel already covers (as a tap it was
+  counted twice and normalized away: the image 7.6% too dark in the test).
+- **A disc's soft edge no wider than the disc:** an in-focus pixel no
+  longer leaks 6% into each neighbour. The centre tap's colour comes from
+  level 0.
+
+Development: the night view 0.025× the pinhole's error from the sampled
+lens (121.1% against 4818.9%; gate 1's code 0.284×) and 0.472× the sampled
+lens's error from Cycles (50.75% against 107.60%: the sampled lens's
+256 copies of the light make a rougher disc than ours); the image's light
+0.5% below the sampled lens's (−3.33% against −2.84% from Cycles). The day
+views unchanged: 0.134×/0.129×/0.158× (with foliage), 1.025×/1.053×/1.077×.
+Cost at 1280×720: +1.78 ms (9.1 m), +1.91 ms (5 m), +2.49 ms (night; 3,347
+highlights, no tile over its list). The test keeps the image's light to
+0.9983 with the seen light sharp at its own depth.
+
+**Gate M20 G2** (`m20_gate2`), the bars set with the development numbers
+above known: (1) depth of field adds at most 2.2 ms at 1280×720 in the
+two day views and at most 2.8 ms in the night view; (2) in each of four
+views (gate 1's three and one not used in development: M10 gate 2's
+materials, the boulders metallic, focused at 3 m), within 0.2× the
+pinhole's error from the sampled lens; (3) in each, at most 1.12× the
+sampled lens's error from Cycles; (4) in each, the image's mean within 1%
+of the sampled lens's.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

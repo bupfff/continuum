@@ -2492,7 +2492,8 @@ impl InstancedRenderer {
             return;
         }
         let mut passes = crate::dof::DofPasses::new(&self.device, size, max_px);
-        passes.bind(&self.device, &self.camera_buf, &self.colors, vis);
+        let lights = self.scene.iter().find(|(b, _)| *b == 52).map(|(_, b)| b);
+        passes.bind(&self.device, &self.camera_buf, &self.colors, vis, lights);
         self.dof_passes = Some(passes);
     }
 

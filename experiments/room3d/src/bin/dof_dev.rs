@@ -164,9 +164,18 @@ fn main() -> std::io::Result<()> {
     if std::env::var_os("DOF_FOLIAGE").is_some() {
         t = t.with_foliage();
     }
+    // `night`: M20 gate 1's view (c), the glowing panel, foliage and the
+    // night lights (the point light seen), focused at 3 m.
+    if view == "night" {
+        t = Textured::new().with_foliage().with_glow();
+    }
     kernel.set_sky(t.sky);
     let lens = DepthOfField {
-        focus_distance: if view == "near" { 5.0 } else { 9.1 },
+        focus_distance: match view.as_str() {
+            "near" => 5.0,
+            "night" => 3.0,
+            _ => 9.1,
+        },
         aperture_radius: env("DOF_APERTURE", 0.1),
         ..Default::default()
     };

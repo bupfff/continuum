@@ -62,17 +62,54 @@ const RING_TAPS: u32 = 16u;
 
 // Pixel `p`'s signed radius (pixels): from its hit's distance along its
 // camera ray (the sky at infinity), clamped to the largest.
-fn radius_at(p: vec2<u32>) -> f32 {
+// The scene's lights (as the camera passes see them, `vis.w` naming the one
+// a pixel sees, plus one).
+struct LightRect {
+    corner: vec4<f32>,
+    edge_u: vec4<f32>,
+    edge_v: vec4<f32>,
+    radiance: vec4<f32>,
+};
+@group(0) @binding(17) var<storage, read> lights: array<LightRect>;
+
+// The distance along `dir` to light `l` (as `mask_cones.wgsl`'s
+// `rect_distance`).
+fn light_distance(l: LightRect, eye: vec3<f32>, dir: vec3<f32>) -> f32 {
+    if (l.corner.w > 1.5) {
+        let oc = eye - l.corner.xyz;
+        let b = dot(oc, dir);
+        let c = dot(oc, oc) - l.edge_u.x * l.edge_u.x;
+        let disc = b * b - c;
+        if (c <= 0.0 || disc < 0.0) { return 3.4e38; }
+        let t = -b - sqrt(disc);
+        return select(3.4e38, t, t > 0.0);
+    }
+    let n = cross(l.edge_u.xyz, l.edge_v.xyz);
+    let facing = dot(dir, n);
+    if (facing >= 0.0) { return 3.4e38; }
+    let t = dot(l.corner.xyz - eye, n) / facing;
+    return select(3.4e38, t, t > 0.0);
+}
+
+// Pixel `p`'s signed radius (pixels): from its hit's distance along its
+// camera ray, or the light's it sees (the sky at infinity), clamped to the
+// largest; and whether it sees a light.
+fn radius_at(p: vec2<u32>) -> vec2<f32> {
     let w = u32(camera.params.x);
     let v = vis[p.y * w + p.x];
     let aspect = camera.params.x / camera.params.y;
     let sx = ((f32(p.x) + 0.5 + camera.right.w) / camera.params.x * 2.0 - 1.0) * camera.params.z * aspect;
     let sy = (1.0 - (f32(p.y) + 0.5 + camera.up.w) / camera.params.y * 2.0) * camera.params.z;
-    var inv_z = 0.0;
-    if (v.x != 0xffffffffu) {
-        inv_z = sqrt(1.0 + sx * sx + sy * sy) / max(bitcast<f32>(v.z), 1e-6);
+    let len = sqrt(1.0 + sx * sx + sy * sy);
+    var t = 3.4e38;
+    if (v.x != 0xffffffffu) { t = bitcast<f32>(v.z); }
+    if (v.w != 0u && v.w <= arrayLength(&lights)) {
+        let dir = (camera.forward.xyz + camera.right.xyz * sx + camera.up.xyz * sy) / len;
+        t = min(t, light_distance(lights[v.w - 1u], camera.eye.xyz, dir));
     }
-    return clamp(dof.lens.x * (dof.lens.y - inv_z), -dof.lens.z, dof.lens.z);
+    var inv_z = 0.0;
+    if (t < 3.0e38) { inv_z = len / max(t, 1e-6); }
+    return vec2<f32>(clamp(dof.lens.x * (dof.lens.y - inv_z), -dof.lens.z, dof.lens.z), f32(v.w != 0u));
 }
 
 // Four texels as one: the colours' mean, and the radius of the least
@@ -91,16 +128,20 @@ fn merge4(a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32>) -> vec4<f32> {
 @group(0) @binding(12) var level3: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(13) var level4: texture_storage_2d<rgba16float, write>;
 
-// Highlights: pixels HL_RATIO times brighter than their tile's mean,
-// blurred by at least HL_BLUR pixels. Their excess over the tile's mean
-// colour leaves the levels (whose sparse taps would scatter it into
+// Highlights: small bright sources, pixels HL_SMALL times brighter than
+// their tile's mean (so covering at most about 1 / HL_SMALL of it) and
+// HL_RATIO times brighter than its background (the mean of its pixels at or
+// below the mean), in focus or not (their bilinear reads would spread a
+// bright source by a radius between its and its neighbours'). Their excess
+// over the
+// background leaves the levels (whose sparse taps would scatter it into
 // blotches) and every pixel its disc covers adds it back exactly: from a
 // list of at most HL_ALL, binned into lists per tile of at most HL_CAP (a
 // tile with more reads the whole list).
 const HL_RATIO: f32 = 8.0;
-const HL_BLUR: f32 = 2.0;
+const HL_SMALL: f32 = 4.0;
 const HL_ALL: u32 = 4096u;
-const HL_CAP: u32 = 64u;
+const HL_CAP: u32 = 256u;
 // The list's length, then each tile's.
 @group(0) @binding(14) var<storage, read_write> hl_count: array<atomic<u32>>;
 // The list: pairs (x, y, c, 0) and (excess, 0).
@@ -116,6 +157,8 @@ var<workgroup> wg_a: array<vec4<f32>, 256>;
 var<workgroup> wg_b: array<vec4<f32>, 64>;
 var<workgroup> wg_reach: array<vec2<f32>, 256>;
 var<workgroup> wg_sum: array<vec4<f32>, 256>;
+// Each pixel's radius if it sees a light (else a large number).
+var<workgroup> wg_light: array<f32, 256>;
 
 // 2 × 2 of a `n`-wide square in `wg_a` (or `wg_b`) merged, for texel
 // (x, y) of the level below.
@@ -144,9 +187,11 @@ fn dof_prepare(
     let h = u32(camera.params.y);
     let size = vec2<u32>(dof.padded.xy);
     let p = min(gid.xy, vec2<u32>(w - 1u, h - 1u));
-    let c = radius_at(p);
+    let rl = radius_at(p);
+    var c = rl.x;
     var col = min(colors[p.y * w + p.x].xyz, vec3<f32>(65000.0));
     let inside = gid.x < w && gid.y < h;
+    wg_light[li] = select(1e30, c, rl.y > 0.5);
     var reach = vec2<f32>(0.0);
     if (inside) { reach = vec2<f32>(max(-c, 0.0), max(c, 0.0)); }
     wg_reach[li] = reach;
@@ -159,12 +204,36 @@ fn dof_prepare(
         }
         workgroupBarrier();
     }
-    // A highlight against its tile's mean.
-    let mean = wg_sum[0].xyz / max(wg_sum[0].w, 1.0);
-    if (inside && abs(c) >= HL_BLUR && luminance(col) > HL_RATIO * luminance(mean) + 1e-6) {
+    // A highlight against its tile's background.
+    let mean = luminance(wg_sum[0].xyz / max(wg_sum[0].w, 1.0));
+    workgroupBarrier();
+    let lum = luminance(col);
+    wg_sum[li] = select(vec4<f32>(0.0), vec4<f32>(col, 1.0), inside && lum <= mean);
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+        if (li < s) { wg_sum[li] += wg_sum[li + s]; }
+        workgroupBarrier();
+    }
+    let background = wg_sum[0].xyz / max(wg_sum[0].w, 1.0);
+    // A bright pixel beside one that sees a light (its anti-aliased edge,
+    // part light and part what lies behind) takes the light's radius: its
+    // brightness is the light's.
+    if (rl.y < 0.5 && lum > HL_RATIO * luminance(background) + 1e-6) {
+        var nearest = 1e30;
+        for (var j = -1; j <= 1; j++) {
+            for (var i = -1; i <= 1; i++) {
+                let q = vec2<i32>(lid.xy) + vec2<i32>(i, j);
+                if (q.x < 0 || q.y < 0 || q.x > 15 || q.y > 15) { continue; }
+                let lc = wg_light[u32(q.y) * 16u + u32(q.x)];
+                if (lc < 1e29 && abs(lc - c) < abs(nearest - c)) { nearest = lc; }
+            }
+        }
+        if (nearest < 1e29) { c = nearest; }
+    }
+    if (inside && lum > HL_SMALL * mean && lum > HL_RATIO * luminance(background) + 1e-6) {
         let slot = atomicAdd(&hl_count[0], 1u);
         if (slot < HL_ALL) {
-            let excess = max(col - mean, vec3<f32>(0.0));
+            let excess = max(col - background, vec3<f32>(0.0));
             col -= excess;
             hl[2u * slot] = vec4<f32>(vec2<f32>(gid.xy), c, 0.0);
             hl[2u * slot + 1u] = vec4<f32>(excess, 0.0);
@@ -269,7 +338,9 @@ struct Gather {
 // Without branches: each group takes its share by a 0/1 factor.
 fn gather_tap(g: ptr<function, Gather>, col: vec3<f32>, c: f32, d: f32, area: f32, inv_s: f32, cp: f32, tol: f32) {
     let r = max(abs(c), R_PIXEL);
-    let cover = clamp((r - d) * inv_s + 0.5, 0.0, 1.0);
+    // The edge no softer than the disc is wide: a pixel's own disc covers
+    // no neighbour.
+    let cover = clamp((r - d) * max(inv_s, 1.0 / r) + 0.5, 0.0, 1.0);
     let wgt = area * cover / (PI * r * r);
     let in_front = select(0.0, 1.0, c < cp - tol);
     let behind = select(0.0, 1.0, c > cp + tol);
@@ -281,6 +352,22 @@ fn gather_tap(g: ptr<function, Gather>, col: vec3<f32>, c: f32, d: f32, area: f3
     (*g).fill += vec4<f32>(col * f, f);
 }
 
+// A highlight's excess: light added on a surface its pixel already covers,
+// so in its group's colour without coverage of its own (occluded as the
+// group is).
+fn gather_light(g: ptr<function, Gather>, excess: vec3<f32>, c: f32, d: f32, cp: f32, tol: f32) {
+    let r = max(abs(c), R_PIXEL);
+    let cover = clamp((r - d) * max(1.0, 1.0 / r) + 0.5, 0.0, 1.0);
+    let light = excess * (cover / (PI * r * r));
+    if (c < cp - tol) {
+        (*g).front += vec4<f32>(light, 0.0);
+    } else if (c > cp + tol) {
+        (*g).back += vec4<f32>(light, 0.0);
+    } else {
+        (*g).own += vec4<f32>(light, 0.0);
+    }
+}
+
 // Pixel `p`'s colour through the lens, its tile reaching `reach` (in
 // front, behind). Nothing behind shows through an in-focus pixel (its own
 // tap covers it), so it gathers only as far as what is in front reaches.
@@ -288,10 +375,8 @@ fn gather_at(p: vec2<u32>, reach: vec2<f32>) -> vec3<f32> {
     let w = u32(camera.params.x);
     let own_texel = base_at(p);
     let cp = own_texel.w;
-    // In focus, the exact colour; blurred, level 0's (a highlight's excess
-    // comes from its list).
-    var centre = colors[p.y * w + p.x].xyz;
-    if (abs(cp) >= HL_BLUR) { centre = own_texel.xyz; }
+    // Level 0's colour (a highlight's excess comes from its list).
+    let centre = own_texel.xyz;
     var r_max = max(reach.x, reach.y);
     if (abs(cp) < R_PIXEL) { r_max = max(reach.x, 1.0); }
     let tol = max(1.0, 0.15 * abs(cp));
@@ -343,7 +428,7 @@ fn gather_at(p: vec2<u32>, reach: vec2<f32>) -> vec3<f32> {
         let at = hl[2u * e];
         let d = distance(vec2<f32>(p), at.xy);
         if (d <= abs(at.z) + 1.0) {
-            gather_tap(&g, hl[2u * e + 1u].xyz, at.z, d, 1.0, 1.0, cp, tol);
+            gather_light(&g, hl[2u * e + 1u].xyz, at.z, d, cp, tol);
         }
     }
     // In front over its own surface over what is behind.
