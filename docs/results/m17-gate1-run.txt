@@ -1,0 +1,6 @@
+M17 gate 1: 1280x720, adapter Apple M4
+1. cost: auto-exposure adds 0.168 ms (at most 0.15): FAIL (rounds, with/without ms: 2.862/2.695 2.867/2.708 2.875/2.707 2.902/2.706 2.917/2.738)
+2. day (exposure 0.5002): PBR Neutral against Blender's: mean 0.423/255 (at most 1), 99th percentile 0.92/255 (at most 3), largest 1.9/255: PASS; AgX approximation against Blender's AgX: mean 11.50/255, 99th 15.6/255, largest 18.9/255
+2. night (exposure 0.5654): PBR Neutral against Blender's: mean 0.319/255 (at most 1), 99th percentile 1.21/255 (at most 3), largest 4.9/255: PASS; AgX approximation against Blender's AgX: mean 6.63/255, 99th 16.8/255, largest 20.8/255
+3. adaptation: exposure 0.5002 before the drop, 0.9890 4 s after (1172 frames); largest overshoot 0.000% (at most 0.5%), off by 0.432% at 2.5 s (at most 2%): PASS
+Verdict: 1 FAIL, 2 PASS, 3 PASS: FAIL
