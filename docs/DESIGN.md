@@ -1330,12 +1330,28 @@ moving objects the same way, by the form factors they can change.
   bake's residency differs: direct light alone moving is 0.44–0.83% off,
   and 0.0000% at rest). Moving frames 42 ms at 640×360 (movers' own cost
   without bounce 38.7 ms).
-- **Left:** the 50 pages at rest are pages whose hits were re-baked after
-  them (a dependency the ledger does not track: a drain pass after the
-  first, or charging a page when its hits re-bake); the gate's criteria
-  (verify_bounce's pages over ε while moving and at rest, the image
-  against the same renderer re-baked in place, the cost of moving frames);
-  movers under a sky (331 ms) first or alongside.
+- **The 50 left at rest are the cache's own:** the same scene settled
+  without any motion has 137 pages over ε (largest change 77% of the
+  largest value): bounce samples baked against coarse hits are never baked
+  again when finer hits arrive. That belongs to "quicker to settle" (item
+  5), not to the ledger.
+- **The image:** at the end of the motion, the image against the same
+  renderer with every bounce sample re-baked in place
+  (`InstancedRenderer::rebake_bounce`, no history between them): ours
+  1.050%, without re-bakes 2.298% (0.457×). Moving frames 42.6 ms against
+  38.7 ms with bounce light off (1.10×).
+
+**Gate M22 G1** (`m22_gate1`), the bars set with the development numbers
+above known; sun only (movers under a sky are their own gap), a fixed bake
+budget, 640×360. Flights: (a) six boulders at 0.02 m a frame for 120
+frames (developed); (b) not used in development: twelve boulders at 0.04 m
+a frame for 120 frames. In each: (1) at every 30th frame, pages over ε
+(against `verify_bounce`) at most 0.7× a renderer whose ledger never
+re-bakes; (2) at the end of the motion, the image's distance from its
+bounce re-baked in place at most 0.6× that renderer's; (3) on a second
+flight, stopped and settled, every charge drained and at most as many
+pages over ε as the scene settled without motion; (4) moving frames'
+median at most 1.2× the same flight with bounce light off.
 
 ## 3.5 What the 2D phase (M0) taught us
 

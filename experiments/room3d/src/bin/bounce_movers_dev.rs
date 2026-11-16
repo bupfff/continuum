@@ -144,6 +144,11 @@ fn main() -> std::io::Result<()> {
             "at rest before moving: ours {:.4}% from a fresh bake (movers built there)",
             100.0 * relative_rmse(&ours.read_colors(), &reference)
         );
+        let c = ours.verify_bounce(eps);
+        println!(
+            "  bounce re-baked in place at rest before moving: {} pages, {} changed, {} over eps, largest change {:.3e} (of {:.3e})",
+            c.pages, c.changed, c.over_epsilon, c.largest_change, c.largest_value
+        );
     }
     let mut times = Vec::new();
     for f in 1..=frames {
@@ -193,6 +198,26 @@ fn main() -> std::io::Result<()> {
                 100.0 * relative_rmse(&stale.read_colors(), &reference),
             );
         }
+    }
+    // The image the ledger shows against the same renderer with every
+    // bounce sample re-baked in place (no history between them), for ours
+    // and the renderer without re-bakes, at the end of the motion.
+    {
+        let image_vs_rebaked = |r: &mut InstancedRenderer| {
+            r.finish();
+            let shown = r.read_colors();
+            r.rebake_bounce(eps);
+            r.frame(t.camera, &target);
+            r.finish();
+            relative_rmse(&shown, &r.read_colors())
+        };
+        let (o, st) = (image_vs_rebaked(&mut ours), image_vs_rebaked(&mut stale));
+        println!(
+            "end of motion, the image against its bounce re-baked in place: ours {:.3}%, without re-bakes {:.3}% ({:.3}x)",
+            100.0 * o,
+            100.0 * st,
+            o / st
+        );
     }
     times.sort_by(f64::total_cmp);
     times.push(0.0);

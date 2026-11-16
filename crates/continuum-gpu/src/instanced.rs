@@ -3372,6 +3372,17 @@ impl InstancedRenderer {
     /// does not change the flight it measures). `epsilon`: bounce light's
     /// threshold, as `CacheOptions::bounce_epsilon`.
     pub fn verify_bounce(&mut self, epsilon: f32) -> BounceCheck {
+        self.check_bounce(epsilon, true)
+    }
+
+    /// Diagnostics (M22): [`Self::verify_bounce`] without restoring: every
+    /// resident page's bounce samples stay re-baked from the direct light
+    /// the cache holds now (a reference for the image the ledger shows).
+    pub fn rebake_bounce(&mut self, epsilon: f32) -> BounceCheck {
+        self.check_bounce(epsilon, false)
+    }
+
+    fn check_bounce(&mut self, epsilon: f32, restore: bool) -> BounceCheck {
         let Some(cache) = &mut self.cache else {
             return BounceCheck::default();
         };
@@ -3399,8 +3410,10 @@ impl InstancedRenderer {
                 .expect("GPU poll failed");
         }
         let after = cache.state.read_buffer(device, 73);
-        self.queue.write_buffer(cache.state.buffer(73), 0, &before);
-        self.queue.write_buffer(cache.state.buffer(61), 0, &info);
+        if restore {
+            self.queue.write_buffer(cache.state.buffer(73), 0, &before);
+            self.queue.write_buffer(cache.state.buffer(61), 0, &info);
+        }
         self.queue.write_buffer(cache.state.buffer(40), 0, &used);
         let (b, a): (&[u32], &[u32]) =
             (bytemuck::cast_slice(&before), bytemuck::cast_slice(&after));
