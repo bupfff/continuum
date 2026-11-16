@@ -489,6 +489,12 @@ pub struct InstancedRenderer {
     /// Depth of field (M20), and its passes once set.
     dof: Option<crate::DepthOfField>,
     dof_passes: Option<crate::dof::DofPasses>,
+    /// Motion blur (M21), its passes once set, the previous camera, and
+    /// each mover's previous placement (None: where it is).
+    motion: Option<crate::MotionBlur>,
+    motion_passes: Option<crate::motion::MotionPasses>,
+    camera_before: Option<Camera>,
+    movers_before: Vec<Option<crate::hierarchy::Placement>>,
     bloom_passes: crate::exposure::BloomPasses,
     meter: crate::exposure::Meter,
     metered_at: std::cell::Cell<Option<Instant>>,
@@ -1935,6 +1941,10 @@ impl InstancedRenderer {
             upscale: crate::Upscale::Nearest,
             dof: None,
             dof_passes: None,
+            motion: None,
+            motion_passes: None,
+            camera_before: None,
+            movers_before: Vec::new(),
             bloom_passes,
             meter,
             metered_at: std::cell::Cell::new(None),
@@ -2474,6 +2484,78 @@ impl InstancedRenderer {
         self.vis = Some(vis);
         self.dof_passes = None;
         self.make_dof();
+        self.motion_passes = None;
+        self.make_motion();
+    }
+
+    /// Makes and binds motion blur's passes if it is on and they do not fit
+    /// the image (M21).
+    fn make_motion(&mut self) {
+        let (Some(_), Some(vis)) = (self.motion, &self.vis) else {
+            return;
+        };
+        let size = (self.width, self.height);
+        if self.motion_passes.as_ref().is_some_and(|p| p.fits(size)) {
+            return;
+        }
+        let find = |b: u32| self.scene.iter().find(|(x, _)| *x == b).map(|(_, buf)| buf);
+        let (Some(meshes), Some(xforms)) = (find(3), find(30)) else {
+            return;
+        };
+        let mut mover_of = vec![0u32; (xforms.size() / 64) as usize];
+        let mut movers = 0;
+        if let Some(m) = &self.movers {
+            movers = m.tree.objects.len();
+            for (k, &x) in m.tree.objects.iter().enumerate() {
+                if let Some(slot) = mover_of.get_mut(x as usize) {
+                    *slot = k as u32 + 1;
+                }
+            }
+        }
+        let mut passes = crate::motion::MotionPasses::new(&self.device, size, &mover_of, movers);
+        passes.bind(
+            &self.device,
+            &self.camera_buf,
+            &self.colors,
+            vis,
+            meshes,
+            xforms,
+        );
+        self.motion_passes = Some(passes);
+    }
+
+    /// Records motion blur's passes (M21), if on, after the camera's (and
+    /// depth of field's): the previous camera and movers' placements first.
+    fn encode_motion(&self, encoder: &mut wgpu::CommandEncoder, camera: &Camera) {
+        let (Some(blur), Some(passes)) = (&self.motion, &self.motion_passes) else {
+            return;
+        };
+        let before = camera_uniform(
+            self.camera_before.unwrap_or(*camera),
+            self.width,
+            self.height,
+            self.radiance,
+        );
+        self.queue
+            .write_buffer(&passes.before, 0, bytemuck::bytes_of(&before));
+        let mut moved = false;
+        if let Some(m) = &self.movers
+            && !m.placements.is_empty()
+        {
+            let rows: Vec<[[f32; 4]; 4]> = m
+                .placements
+                .iter()
+                .enumerate()
+                .map(|(k, p)| {
+                    let b = self.movers_before.get(k).copied().flatten().unwrap_or(*p);
+                    moved |= b.rotation != p.rotation || b.translation != p.translation;
+                    b.rows()
+                })
+                .collect();
+            self.queue
+                .write_buffer(&passes.moved, 0, bytemuck::cast_slice(&rows));
+        }
+        passes.encode(&self.queue, encoder, blur, moved);
     }
 
     /// Makes and binds depth of field's passes if it is on and they do not
@@ -2741,6 +2823,44 @@ impl InstancedRenderer {
             .map(|p| p.highlights(&self.device, &self.queue))
     }
 
+    /// Motion blur (M21; off by default), from the next frame: a shutter of
+    /// `shutter` times the motion since [`Self::set_previous_camera`] and
+    /// [`Self::set_instance_previous_transform`] (none set: no motion),
+    /// gathered into the colours (`read_colors` returns them blurred). With
+    /// hardware ray queries.
+    pub fn set_motion_blur(&mut self, blur: Option<crate::MotionBlur>) {
+        self.motion = blur.filter(|_| self.hw.is_some());
+        self.make_motion();
+    }
+
+    /// The camera the motion blur's motion starts from (M21): usually the
+    /// previous frame's. It stays until set again.
+    pub fn set_previous_camera(&mut self, camera: Option<Camera>) {
+        self.camera_before = camera;
+    }
+
+    /// Where movable instance `instance` was (M21), for motion blur: usually
+    /// its previous frame's placement. It stays until set again; unset, the
+    /// instance is taken as still.
+    pub fn set_instance_previous_transform(
+        &mut self,
+        instance: usize,
+        rotation: Mat3,
+        position: DVec3,
+    ) {
+        let movers = self.movers.as_ref().expect("a renderer with movers");
+        let &k = movers
+            .index
+            .get(&instance)
+            .unwrap_or_else(|| panic!("instance {instance} is not movable"));
+        let mut before = movers.placements[k];
+        before.rotation = rotation;
+        before.translation = (position - movers.origin).as_vec3();
+        let n = movers.placements.len();
+        self.movers_before.resize(n, None);
+        self.movers_before[k] = Some(before);
+    }
+
     /// Depth of field (M20; off by default), from the next frame: a thin
     /// lens's blur gathered from the frame's colours and depths, written
     /// into the colours (`read_colors` returns them blurred). With hardware
@@ -2918,6 +3038,7 @@ impl InstancedRenderer {
             encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, 32);
         }
         self.encode_dof(&mut encoder, &camera);
+        self.encode_motion(&mut encoder, &camera);
         self.encode_camera_end(&mut encoder);
         if let Some(stream) = &self.stream {
             stream.encode_feedback(&mut encoder, (self.width, self.height));
@@ -3169,6 +3290,7 @@ impl InstancedRenderer {
             cache.state.encode_readback(&mut encoder);
         }
         self.encode_dof(&mut encoder, &camera);
+        self.encode_motion(&mut encoder, &camera);
         self.encode_meter(&mut encoder);
         crate::live::encode_display(
             &mut encoder,

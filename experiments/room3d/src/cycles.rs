@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use continuum::glam::{DVec3, Vec3};
+use continuum::glam::{DVec3, Mat3, Vec3};
 use continuum::mesh::Surface;
 use continuum_gpu::{Camera, Emitter, InstancedScene, Light, RectLight};
 
@@ -224,7 +224,8 @@ pub fn render_instanced_lights(
     work: &Path,
 ) -> io::Result<Reference> {
     render_instanced_inner(
-        scene, origin, lights, sky, None, None, None, camera, size, samples, bounces, seed, work,
+        scene, origin, lights, sky, None, None, None, None, camera, size, samples, bounces, seed,
+        work,
     )
 }
 
@@ -254,6 +255,7 @@ pub fn render_instanced_fog(
         sky,
         None,
         Some(fog),
+        None,
         None,
         camera,
         size,
@@ -285,6 +287,7 @@ pub fn render_instanced_environment(
         lights,
         Vec3::ZERO,
         Some(environment),
+        None,
         None,
         None,
         camera,
@@ -321,6 +324,51 @@ pub fn render_instanced_dof(
         None,
         None,
         Some(lens),
+        None,
+        camera,
+        size,
+        samples,
+        bounces,
+        seed,
+        work,
+    )
+}
+
+/// Motion for a Cycles reference (M21): the shutter (a share of the
+/// motion since the poses before), the camera before, and the moving
+/// instances' rotations and positions before (their scales unchanged).
+pub struct CyclesMotion {
+    pub shutter: f32,
+    pub camera_before: Camera,
+    pub movers: Vec<(usize, Mat3, DVec3)>,
+}
+
+/// [`render_instanced_lights`] with motion blur (M21): the camera and the
+/// moving instances keyed before, now and as far again past now, linearly,
+/// and the shutter centred on now.
+#[allow(clippy::too_many_arguments)]
+pub fn render_instanced_motion(
+    scene: &InstancedScene,
+    origin: DVec3,
+    lights: &[Light],
+    sky: Vec3,
+    motion: &CyclesMotion,
+    camera: Camera,
+    size: (u32, u32),
+    samples: u32,
+    bounces: u32,
+    seed: u32,
+    work: &Path,
+) -> io::Result<Reference> {
+    render_instanced_inner(
+        scene,
+        origin,
+        lights,
+        sky,
+        None,
+        None,
+        None,
+        Some(motion),
         camera,
         size,
         samples,
@@ -371,6 +419,7 @@ fn render_instanced_inner(
     environment: Option<&continuum_gpu::Environment>,
     fog: Option<(&continuum_gpu::Fog, f32, f32)>,
     lens: Option<&continuum_gpu::DepthOfField>,
+    motion: Option<&CyclesMotion>,
     camera: Camera,
     (width, height): (u32, u32),
     samples: u32,
@@ -658,10 +707,37 @@ fn render_instanced_inner(
             l.focus_distance, l.aperture_radius
         )
     });
+    // Motion blur (M21): {shutter, camera, movers}, or null.
+    let motion_json = motion.map_or("null".to_string(), |m| {
+        let movers: Vec<String> = m
+            .movers
+            .iter()
+            .map(|(k, r, p)| {
+                let rows = r.transpose().to_cols_array();
+                let q = (*p - origin).as_vec3();
+                format!(
+                    r#"{{"instance": {k}, "rotation": {:?}, "position": [{}, {}, {}]}}"#,
+                    rows, q.x, q.y, q.z
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"shutter": {}, "camera": {{"eye": [{}, {}, {}], "target": [{}, {}, {}]}}, "movers": [{}]}}"#,
+            m.shutter,
+            m.camera_before.eye.x,
+            m.camera_before.eye.y,
+            m.camera_before.eye.z,
+            m.camera_before.target.x,
+            m.camera_before.target.y,
+            m.camera_before.target.z,
+            movers.join(", ")
+        )
+    });
     let job = format!(
         r#"{{"geometries": [{}], "textures": [{}], "materials": [{}], "normal_maps": [{}], "alpha": [{}], "emission": [{}], "emission_textures": [{}], "blend": [{}], "transmission": [{}], "volumes": [{}], "specular": [{}], "clearcoat": [{}], "colors": [{}], "extensions": [{}], "instances": {:?}, "exr": {:?}, "out": {:?},
   "fog": {fog_json},
   "dof": {dof_json},
+  "motion": {motion_json},
   "lights": {lights_json},
   "sky": {},{sky_map}
   "camera": {{"eye": {}, "target": {}, "fov": {}}},

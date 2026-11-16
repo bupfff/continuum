@@ -1186,6 +1186,66 @@ error; from Cycles 1.025×/1.053×/0.472×/1.001× the sampled lens's; the
 means within 0.5% of the sampled lens's. The new view (metallic boulders,
 the sun in them) passed as the developed ones did.
 
+#### Motion blur (M21 design, 2026-11-16)
+
+A shutter (`MotionBlur`: the shutter as a share of the motion since the
+previous poses, 0.5 by default, centred on the frame as Cycles' default;
+the longest smear, 10% of the image's height; `RendererOptions::motion_blur`,
+off by default; hardware ray queries). The motion is the camera's and the
+rigid movers' since the poses given as the previous ones
+(`InstancedRenderer::set_previous_camera`,
+`set_instance_previous_transform`; `Renderer` gives the last frame's),
+taken as constant. Gathered each frame after depth of field, nothing kept
+between frames, into the colours. A post-process filter in the family of
+McGuire et al. 2012 ("A reconstruction filter for plausible motion blur")
+and Guertin et al. 2014 (sampling along the tile's fastest motion and the
+pixel's own); its weights are depth of field's coverage made 1-D. No
+novelty is claimed.
+- **Prepare** (16 × 16 tiles): each pixel's hit point taken back through
+  its mover's transform before (if it is a mover's) and projected by the
+  camera before; its segment V is the shutter times its motion on the
+  image (the sky by direction only), clamped; colour, view depth and V as
+  halves; each tile's longest V, dilated to the tiles half of it reaches.
+- **Gather:** taps along the tile's fastest motion and, where it differs
+  by more than about 11°, along the pixel's own, a pixel's step apart on
+  the line's major axis, as far as half the segment. A tap covers the
+  pixel when the pixel lies on the tap's own segment (along, with a soft
+  end; across, within a pixel), weighted by the line it stands for over
+  its segment's length; depth of field's three groups (in front, its own
+  surface, behind, 3% of depth apart), composite and fill.
+- **Not:** shadows and reflections of moving objects on still surfaces
+  (the surface does not move), deforming geometry and moving lights,
+  motion curving within the shutter, layers seen through glass.
+
+References as depth of field's: (1) the shutter sampled outright in our
+renderer (64 instants evenly across it, the camera and movers placed at
+each, settled, sub-pixel offsets cycling through 4 × 4); (2) Cycles' motion
+blur (the camera and moving instances keyed before, now and as far again,
+linearly; moving instances each drawn by a holder of its own).
+
+**Development** (`motion_dev`, 640×360, the textured scene, sun and sky,
+shutter 0.5): the camera trucking sideways 0.4 m a frame 1.04% from the
+sampled shutter against the still image's 14.35% (0.072×; 0.173× with the
+longest smear at 5%, which clamped the near ground); turning 2° a frame
+2.12% against 11.22% (0.189×); six boulders crossing at 0.5 m a frame,
+the camera still, 1.30% against 4.78% (0.271×; their shadows on the
+ground do not smear). Means within 0.06% of the sampled shutter's.
+Against Cycles (1,024 samples) 8.23%, 8.40% and 7.46%, where the sampled
+shutter is 8.25%, 8.16% and 7.28% (0.998×, 1.029×, 1.025×). Cost at
+1280×720: +1.44 ms (trucking), +1.30 ms (turning), +0.54 ms (boulders: only
+tiles near them). The GPU test: a still camera leaves the image
+bit-identical; a sideways one smears detail across (0.734 kept, 0.787
+down), the light kept to 0.9908.
+
+**Gate M21 G1** (`m21_gate1`), the bars set with the development numbers
+above known: (1) motion blur adds at most 1.7 ms at 1280×720 when trucking
+and turning and at most 0.8 ms with the boulders; (2) in each of four views
+(the three above and one not used in development: dollying forward 0.5 m
+a frame while turning 1°, with foliage), within 0.35× the still image's
+error from the sampled shutter; (3) in each, at most 1.12× the sampled
+shutter's error from Cycles (4,096 samples); (4) in each, the image's mean
+within 1% of the sampled shutter's.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

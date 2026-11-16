@@ -139,6 +139,7 @@ mod hw;
 mod instanced;
 mod lightmap;
 mod live;
+mod motion;
 mod renderer;
 mod stream;
 mod tangents;
@@ -150,6 +151,7 @@ pub use exposure::{AutoExposure, Bloom, ToneMap, Upscale};
 pub use fog::Fog;
 pub use lightmap::Lightmap;
 pub use live::{LiveRenderer, MAX_MOVING, MAX_SWEPT, PROBE_RESOLUTION};
+pub use motion::MotionBlur;
 pub use renderer::{Renderer, RendererOptions};
 #[doc(hidden)]
 pub use stream::lighting_package_bytes;

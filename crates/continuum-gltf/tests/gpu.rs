@@ -1357,6 +1357,108 @@ fn depth_of_field_blurs_what_is_out_of_focus() {
     assert!((light - 1.0).abs() < 0.02, "light not kept: {light}");
 }
 
+/// Motion blur (M21): a camera that has not moved leaves the image as it
+/// was; one that moved sideways since the last frame smears detail across
+/// (the checker's edges) and keeps the image's light.
+#[test]
+fn motion_blur_smears_along_the_motion() {
+    let s = scene(DVec3::ZERO);
+    let render = |before: Camera| {
+        let mut r = renderer(
+            kernel(),
+            &s,
+            DVec3::ZERO,
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                motion_blur: Some(continuum_gpu::MotionBlur::default()),
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        // The frame before from `before`, then this one.
+        r.render(before, &view);
+        r.render(camera(), &view);
+        (r.read_colors(), r.hardware_rays())
+    };
+    let (still, hardware) = render(camera());
+    if !hardware {
+        eprintln!("no hardware ray queries: no motion blur");
+        return;
+    }
+    let shift = Vec3::new(1.0, 0.0, 0.0);
+    let (moved, _) = render(Camera {
+        eye: camera().eye - shift,
+        target: camera().target - shift,
+        ..camera()
+    });
+    let (plain, _) = {
+        let mut r = renderer(
+            kernel(),
+            &s,
+            DVec3::ZERO,
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera(), &view);
+            frames += 1;
+        }
+        r.render(camera(), &view);
+        (r.read_colors(), ())
+    };
+    dump("motion_still", &still);
+    dump("motion_moved", &moved);
+    // Detail across and down: mean absolute steps between neighbours.
+    let detail = |img: &Image, across: bool| {
+        let (mut sum, mut n) = (0.0f64, 0.0);
+        for y in 0..HEIGHT - 1 {
+            for x in 0..WIDTH - 1 {
+                let a = img[(y * WIDTH + x) as usize];
+                let b = if across {
+                    img[(y * WIDTH + x + 1) as usize]
+                } else {
+                    img[((y + 1) * WIDTH + x) as usize]
+                };
+                sum += (0..3).map(|k| (a[k] - b[k]).abs() as f64).sum::<f64>();
+                n += 1.0;
+            }
+        }
+        sum / n
+    };
+    let mean =
+        |img: &Image| img.iter().flatten().map(|&x| x as f64).sum::<f64>() / (3 * img.len()) as f64;
+    let across = detail(&moved, true) / detail(&plain, true);
+    let down = detail(&moved, false) / detail(&plain, false);
+    let light = mean(&moved) / mean(&plain);
+    eprintln!("motion blur: detail kept across {across:.3}, down {down:.3}; light {light:.4}");
+    assert_eq!(still, plain, "a still camera changes the image");
+    assert!(across < 0.75, "no smear across: {across}");
+    // A sideways smear softens the perspective checker's slanted edges too,
+    // so detail down drops some; across drops most.
+    assert!(
+        down > across + 0.03,
+        "smeared down as much as across: {down} against {across}"
+    );
+    assert!((light - 1.0).abs() < 0.02, "light not kept: {light}");
+}
+
 /// Bloom (M19): with a float target (linear light, no exposure), the
 /// target holds (1 − strength) of each pixel plus strength of the image at
 /// a quarter of its size (4 × 4 means) blurred by the Gaussian across and

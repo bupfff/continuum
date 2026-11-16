@@ -31,9 +31,41 @@ scene = bpy.context.scene
 raw = np.fromfile(job["instances"], dtype="<f4").reshape(-1, 17)
 geometry_of = raw[:, 0].astype(np.int64)
 
+# Motion blur (M21): "motion" holds the shutter, the camera before and the
+# moving instances' transforms before ("movers": instance, rotation row by
+# row, position). Moving instances are drawn each by a holder of its own
+# whose transform is keyframed at frames 1 (before), 2 (now) and 3 (as far
+# again), linearly; frame 2 is rendered with the shutter centred on it.
+motion = job.get("motion")
+movers = {m["instance"]: m for m in (motion or {}).get("movers", [])}
+moving = np.zeros(len(raw), dtype=bool)
+for k in movers:
+    moving[k] = True
+if motion:
+    bpy.context.preferences.edit.keyframe_new_interpolation_type = "LINEAR"
+    scene.frame_set(2)
+
+
+def keyframe_transform(obj, before, now):
+    """Keys `obj`'s location and rotation at frames 1, 2 and 3 from the
+    world matrices `before` and `now` (and `now` past it by as much)."""
+    for frame, m in ((1, before), (2, now)):
+        obj.matrix_world = m
+        obj.keyframe_insert("location", frame=frame)
+        obj.keyframe_insert("rotation_euler", frame=frame)
+    loc = 2.0 * now.to_translation() - before.to_translation()
+    e0, e1 = before.to_euler("XYZ"), now.to_euler("XYZ")
+    obj.location = loc
+    obj.rotation_euler = (2 * e1.x - e0.x, 2 * e1.y - e0.y, 2 * e1.z - e0.z)
+    obj.keyframe_insert("location", frame=3)
+    obj.keyframe_insert("rotation_euler", frame=3)
+    obj.matrix_world = now
+
+
 for g, path in enumerate(job["geometries"]):
-    mine = raw[geometry_of == g]
-    if len(mine) == 0:
+    every = raw[geometry_of == g]
+    mine = raw[(geometry_of == g) & ~moving]
+    if len(every) == 0:
         continue
     before = set(scene.objects)
     bpy.ops.wm.obj_import(filepath=path, forward_axis="Y", up_axis="Z")
@@ -340,6 +372,28 @@ for g, path in enumerate(job["geometries"]):
     a.data.foreach_set("color", rgba.ravel())
     holder = bpy.data.objects.new(f"instances_{g}", points)
     scene.collection.objects.link(holder)
+    holders = [holder]
+    # Each moving instance of this geometry: one point at the origin (its
+    # scale and albedo), its holder carrying its rotation and position.
+    for k in np.nonzero((geometry_of == g) & moving)[0]:
+        row = raw[k]
+        one = bpy.data.meshes.new(f"mover_points_{k}")
+        one.vertices.add(1)
+        a = one.attributes.new("rot", "FLOAT_VECTOR", "POINT")
+        a.data.foreach_set("vector", [0.0, 0.0, 0.0])
+        a = one.attributes.new("scl", "FLOAT", "POINT")
+        a.data.foreach_set("value", [float(row[10])])
+        a = one.attributes.new("albedo", "FLOAT_COLOR", "POINT")
+        a.data.foreach_set("color", [float(row[14]), float(row[15]), float(row[16]), 1.0])
+        mover = bpy.data.objects.new(f"mover_{k}", one)
+        scene.collection.objects.link(mover)
+        def placed(r, t):
+            m = Matrix(np.asarray(r, dtype=np.float64).reshape(3, 3).tolist()).to_4x4()
+            m.translation = Vector(t)
+            return m
+        b = movers[int(k)]
+        keyframe_transform(mover, placed(b["rotation"], b["position"]), placed(row[1:10], row[11:14]))
+        holders.append(mover)
 
     tree = bpy.data.node_groups.new(f"instance_{g}", "GeometryNodeTree")
     tree.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
@@ -365,8 +419,9 @@ for g, path in enumerate(job["geometries"]):
     links.new(euler.outputs["Rotation"], inst.inputs["Rotation"])
     links.new(scl.outputs["Attribute"], inst.inputs["Scale"])
     links.new(inst.outputs["Instances"], gout.inputs["Geometry"])
-    mod = holder.modifiers.new("instances", "NODES")
-    mod.node_group = tree
+    for h in holders:
+        mod = h.modifiers.new("instances", "NODES")
+        mod.node_group = tree
 
 # The lights: quads facing edge_u x edge_v that emit only from their fronts,
 # or spheres ("sphere": center, "radius", "spot": null or a cone), each a
@@ -461,6 +516,30 @@ camera.matrix_world = Matrix(
     )
 )
 scene.camera = camera
+if motion:
+    # The camera keyed before, now and as far again; the shutter centred.
+    b = motion["camera"]
+    be, bt = Vector(b["eye"]), Vector(b["target"])
+    bf = (bt - be).normalized()
+    br = bf.cross(Vector((0.0, 0.0, 1.0))).normalized()
+    bu = br.cross(bf)
+    then = Matrix(
+        (
+            (br.x, bu.x, -bf.x, be.x),
+            (br.y, bu.y, -bf.y, be.y),
+            (br.z, bu.z, -bf.z, be.z),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+    )
+    keyframe_transform(camera, then, camera.matrix_world.copy())
+    scene.render.use_motion_blur = True
+    scene.render.motion_blur_shutter = motion["shutter"]
+    for owner in (scene.render, scene.cycles):
+        if hasattr(owner, "motion_blur_position"):
+            owner.motion_blur_position = "CENTER"
+    if hasattr(scene.render, "rolling_shutter_type"):
+        scene.render.rolling_shutter_type = "NONE"
+    scene.frame_set(2)
 dof = job.get("dof")
 if dof:
     # Depth of field (M20): a thin lens with a circular aperture; Cycles'

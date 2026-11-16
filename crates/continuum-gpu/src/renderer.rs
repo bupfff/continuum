@@ -136,6 +136,10 @@ pub struct RendererOptions {
     /// Depth of field (M20; None by default: a pinhole), with hardware ray
     /// queries. See [`crate::DepthOfField`].
     pub depth_of_field: Option<crate::DepthOfField>,
+    /// Motion blur (M21; None by default), with hardware ray queries: the
+    /// motion since the previous frame's camera and transforms. See
+    /// [`crate::MotionBlur`].
+    pub motion_blur: Option<crate::MotionBlur>,
 }
 
 impl Default for RendererOptions {
@@ -159,6 +163,7 @@ impl Default for RendererOptions {
             bloom: Some(crate::Bloom::default()),
             upscale: crate::Upscale::CatmullRom,
             depth_of_field: None,
+            motion_blur: None,
         }
     }
 }
@@ -172,6 +177,11 @@ impl Default for RendererOptions {
 pub struct Renderer {
     kernel: MaskConeKernel,
     inner: InstancedRenderer,
+    /// For motion blur (M21): the last frame's camera, and the movers'
+    /// transforms then and now.
+    last_camera: Option<Camera>,
+    placed_then: std::collections::HashMap<usize, (Mat3, DVec3)>,
+    placed_now: std::collections::HashMap<usize, (Mat3, DVec3)>,
 }
 
 impl Renderer {
@@ -312,7 +322,14 @@ impl Renderer {
         inner.set_bloom(options.bloom);
         inner.set_upscale(options.upscale);
         inner.set_depth_of_field(options.depth_of_field);
-        Renderer { kernel, inner }
+        inner.set_motion_blur(options.motion_blur);
+        Renderer {
+            kernel,
+            inner,
+            last_camera: None,
+            placed_then: Default::default(),
+            placed_now: Default::default(),
+        }
     }
 
     /// Moves (and re-colors) light `index`, one of
@@ -341,11 +358,31 @@ impl Renderer {
     pub fn set_transform(&mut self, instance: usize, rotation: Mat3, position: DVec3) {
         self.inner
             .set_instance_transform(instance, rotation, position);
+        self.placed_now.insert(instance, (rotation, position));
+    }
+
+    /// Motion blur's motion (M21): from the last frame's camera and
+    /// transforms to this frame's.
+    fn set_motion(&mut self, camera: Camera) {
+        self.inner.set_previous_camera(self.last_camera);
+        self.last_camera = Some(camera);
+        for (&instance, &now) in &self.placed_now {
+            let (rotation, position) = self.placed_then.get(&instance).copied().unwrap_or(now);
+            self.inner
+                .set_instance_previous_transform(instance, rotation, position);
+        }
+        self.placed_then.clone_from(&self.placed_now);
+    }
+
+    /// Motion blur (M21; None: off), from the next frame.
+    pub fn set_motion_blur(&mut self, blur: Option<crate::MotionBlur>) {
+        self.inner.set_motion_blur(blur);
     }
 
     /// Renders a frame seen from `camera` into `target` (a texture of the
     /// format and size given). Returns without waiting for the GPU.
     pub fn render(&mut self, camera: Camera, target: &wgpu::TextureView) {
+        self.set_motion(camera);
         self.inner.frame(camera, target);
     }
 
@@ -354,6 +391,7 @@ impl Renderer {
     /// their own passes (the Bevy plugin): this submits the frame's compute
     /// work now, and the engine draws the result later in its own encoder.
     pub fn compute(&mut self, camera: Camera) {
+        self.set_motion(camera);
         self.inner.frame_compute(camera);
     }
 
