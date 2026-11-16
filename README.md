@@ -161,10 +161,11 @@ Selected numbers (1280×720, Apple M4, release builds):
 - **Sky:** a uniform sky, or an environment image (`.hdr`, `.png`).
 - **Materials:** glTF metallic-roughness with glossy reflections, normal
   maps, emission (which lights its surroundings), emissive textures, vertex
-  colors, alpha cutouts, alpha blending, thin transmissive glass
+  colors, alpha cutouts, alpha blending, transmissive glass, thin
   (`KHR_materials_transmission`: full reflections, tinted light through,
-  5.08% from Cycles), double-sided faces, texture transforms and wrap
-  modes.
+  5.08% from Cycles) or solid (`KHR_materials_volume`: refraction in and
+  out, absorption, total internal reflection; 8.3% from Cycles),
+  double-sided faces, texture transforms and wrap modes.
 - **Indirect light**, in the cache: one bounce by default, more on request
   (`CacheOptions::bounces`; a closed room goes from 45% to 6.5% of Cycles'
   fully bounced image with eight).
@@ -202,9 +203,10 @@ Honest about where it stands:
   about a second) until it stops.
 - **Bounce light** is one bounce by default (more on request), not yet
   with moving objects; several bounces are untried with streaming.
-- **Transparency** needs hardware ray queries. Glass is thin (no
-  refraction through thick glass yet), sharp even when rough, and its
-  shadows are grey rather than tinted.
+- **Transparency** needs hardware ray queries. Glass is sharp even when
+  rough, its shadows are grey rather than tinted and carry no caustics,
+  and solid glass costs about 1.4× the frame where it covers a ninth of
+  the image.
 - **Fanless laptops** slow down under minutes of sustained load.
 - **Streaming is new:** it needs hardware ray queries; streamed lighting
   works with lights, a sky and bounce light but not yet with moving

@@ -196,8 +196,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   With hardware ray queries, the cache and no movers, pixels see a few
   layers through; shadows keep what passes at each triangle's angle to
   the light, untinted. 5.08% from Cycles on two panes, 1.22× the frame
-  with a quarter of the image behind glass. Thick glass (a volume) is
-  drawn thin, rough glass sharp; a transmission texture is ignored
+  with a quarter of the image behind glass. **Solid glass**
+  (`InstancedScene::geometry_volumes`, `Volume`; glTF's
+  `KHR_materials_volume` with `KHR_materials_ior`; M16 gate 3): camera
+  rays refract into closed glass, cross it dimmed by its attenuation,
+  reflect at total internal reflection, refract out and go on; a surface
+  touching the glass is seen at the contact; shadows pass two surfaces.
+  8.34% from Cycles (highlights clamped) on a sphere and a block, at about
+  1.4× the frame where glass covers a ninth of the image. Rough glass is
+  sharp; a transmission texture is ignored
   (`ImportStats::transmission_ignored`). Without ray queries or with
   movers, glass is opaque.
 - **Materials, normal maps and emission are in the cached path only;**
