@@ -191,14 +191,29 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   movers or moving lights.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
-- **One ray per pixel for visibility,** so distant detail aliases.
-  Textures are box-filtered over each pixel's footprint (M7 gate 2), which
-  halves their error against the area-integrated image.
+- **Anti-aliasing, on by default** (`RendererOptions::anti_aliasing`; M15
+  gate 1), with hardware ray queries and the cache: pixels at an edge (a
+  neighbour sees another object, a light, the sky, or a surface off the
+  pixel's own plane) trace four more rays through their square, and four
+  more where those disagree; each ray that meets another surface than the
+  pixel's own is shaded from the cache, and the pixel shows the average.
+  Nothing comes from earlier frames. Against a 16×16 supersampled image,
+  edges come to 0.31× one ray's error on a textured scene with foliage and
+  0.38× on the million-boulder field, and the frame-to-frame change in a
+  slow turn to 0.30× and 0.42× one ray's error; it adds 1.26 ms (1.45×)
+  and 2.77 ms (2.07×) at 1280×720 on an M4. The work is bounded by
+  `CacheOptions::aa_rays` (a ray a pixel of the image on average, by
+  default): with more edges, four rays, then two or one. Works with movers
+  and deforming geometry; blended pixels keep their layers. Without
+  hardware ray queries, one ray a pixel.
+- **Detail smaller than a pixel** still aliases far away (no pixel centre
+  meets it). Textures are box-filtered over each pixel's footprint (M7
+  gate 2), which halves their error against the area-integrated image.
   `RendererOptions::pixel_cones` (off by default) traces a cone through each
   pixel instead; it is experimental and far from real time on large scenes
   (M7 gate 1: 105 ms per frame on a small textured scene).
-  `CacheOptions::edge_rays` (off) adds four rays at silhouette pixels; it
-  halves the error far away. With hardware ray queries it costs 1.29× the
+  `CacheOptions::edge_rays` (off; M15's anti-aliasing replaces it) adds
+  four rays at silhouette pixels; it halves the error far away. With hardware ray queries it costs 1.29× the
   frame on a textured scene and 3× on dense geometry from far away, where
   half the pixels are edges (M7 gate 4; compute rays 24×).
   `CacheOptions::edge_samples` 2 traces one diagonal pair instead of four

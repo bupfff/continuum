@@ -151,6 +151,7 @@ Selected numbers (1280×720, Apple M4, release builds):
 | A view with a sky, from an empty cache | warm in 166–400 frames (cones: 1,827–15,905) | M5 G13 |
 | Light bouncing around a closed room | 6.5% from Cycles with 8 bounces (45% with one) | M10 G25 |
 | Changing a light's color | free and exact: nothing is re-computed | M5 G6 |
+| Anti-aliasing at edges, in a slow turn | 0.31–0.38× one ray's error; frame-to-frame 0.30–0.42× | M15 G1 |
 
 ## What it can do today
 
@@ -169,6 +170,11 @@ Selected numbers (1280×720, Apple M4, release builds):
 - **Animated characters:** glTF skins and morph targets, posed as Blender
   poses them (within a micrometre); any mesh the application deforms each
   frame. Lighting near a deforming object catches up within a budget.
+- **Anti-aliasing,** on by default, with nothing taken from past frames:
+  edge pixels trace up to eight more rays, shaded where they meet another
+  surface. Edges come within a third of one ray's error from the
+  supersampled image and stay steady as the camera moves (1.45× the frame
+  on a textured scene with foliage at 720p).
 - **glTF 2.0** import and export, with cameras, lights and animations.
 - **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
   entities moving its objects.
@@ -181,7 +187,10 @@ Honest about where it stands:
 - **Measured on Apple Silicon (Metal) only.** CI checks correctness on Linux
   (Vulkan, software adapter) and that the shaders compile for Windows
   (DX12). NVIDIA, AMD and real Windows GPUs are untested.
-- **One ray per pixel,** so distant detail aliases (shimmering far away).
+- **Detail smaller than a pixel** still shimmers far away: anti-aliasing
+  smooths edges, but a field of tiny distant objects needs the
+  experimental sub-pixel path (static scenes), and there anti-aliasing
+  costs about 2× the frame.
 - **The sky warms in a few hundred frames** (hardware rays); with moving
   objects, streamed detail or glass it falls back to a slower path that
   takes thousands of frames.

@@ -1,0 +1,26 @@
+M15 gate 1: 1280x720, adapter Apple M4
+textured scene with foliage: 1. cost: one ray 2.80 ms, anti-aliased 4.05 ms: adds 1.26 ms (at most 3.3; 1.449x): PASS; M7 quarters 4.19 ms (1.499x, measured after)
+   listed 32328 edge pixels (3.51%), 4 samples a pixel in stage 0, 193864 traced (0.210 a pixel), 40350 shaded (20.8%), 16190 pixels done after stage 0
+field standing: 1. cost: one ray 2.58 ms, anti-aliased 5.35 ms: adds 2.77 ms (at most 3.3; 2.071x): PASS; M7 quarters 4.44 ms (1.719x, measured after)
+   listed 71828 edge pixels (7.79%), 4 samples a pixel in stage 0, 447388 traced (0.485 a pixel), 130678 shaded (29.2%), 31809 pixels done after stage 0
+   (textured scene with foliage: frame 0 done, 76 s)
+   (textured scene with foliage: frame 1 done, 147 s)
+   (textured scene with foliage: frame 2 done, 219 s)
+   (textured scene with foliage: frame 3 done, 293 s)
+   (textured scene with foliage: frame 4 done, 378 s)
+   (textured scene with foliage: frame 5 done, 465 s)
+textured scene with foliage: 2. edges (1.98% of pixels): one ray 23.75%, anti-aliased 7.42% (0.312x, at most 0.5x): PASS; M7 quarters 9.31% (0.392x)
+textured scene with foliage: 3. elsewhere: one ray 3.307%, anti-aliased 3.129% (0.946x, at most 1x): PASS; M7 quarters 3.258%; the whole image: 4.682% / 3.269% / 3.482%
+textured scene with foliage: 4. motion (6 frames, 3.34% of pixels edges in some frame): change off the reference's: one ray 23.16%, anti-aliased 6.97% (0.301x, at most 0.5x): PASS; M7 quarters 10.24% (0.442x); change over the reference's: 2.16 / 1.15 / 1.33
+   (textured scene with foliage quality in 465 s)
+   (field standing: frame 0 done, 86 s)
+   (field standing: frame 1 done, 169 s)
+   (field standing: frame 2 done, 251 s)
+   (field standing: frame 3 done, 335 s)
+   (field standing: frame 4 done, 419 s)
+   (field standing: frame 5 done, 505 s)
+field standing: 2. edges (4.17% of pixels): one ray 54.28%, anti-aliased 20.54% (0.378x, at most 0.5x): PASS; M7 quarters 21.54% (0.397x)
+field standing: 3. elsewhere: one ray 4.925%, anti-aliased 3.548% (0.720x, at most 1x): PASS; M7 quarters 4.281%; the whole image: 12.091% / 5.448% / 6.077%
+field standing: 4. motion (6 frames, 5.49% of pixels edges in some frame): change off the reference's: one ray 56.84%, anti-aliased 23.76% (0.418x, at most 0.5x): PASS; M7 quarters 22.65% (0.399x); change over the reference's: 2.95 / 1.55 / 1.52
+   (field standing quality in 505 s)
+Verdict: PASS
