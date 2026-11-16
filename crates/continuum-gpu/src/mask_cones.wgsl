@@ -5039,8 +5039,9 @@ fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocati
 // (three words) and, for each of `hw_aa`'s two stages, its shaded samples'
 // first record << 4 | their count; the pixels listed again for stage 1
 // (their places in the list); a header (records
-// to shade, stage 0's samples per pixel, 1 if stage 1 ran, one unused);
-// the records of samples to
+// to shade, stage 0's samples per pixel, 1 if stage 1 ran, and the last
+// frame's choices: stage 0's samples | 8 if stage 1 ran, kept from frame to
+// frame); the records of samples to
 // shade (up to half the pixels' worth), eight words each: the listed
 // pixel's place, the sample | light seen + 1 << 4, the object, triangle and
 // distance bits hit, then the colour shaded.

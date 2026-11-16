@@ -247,7 +247,9 @@ pub struct CacheOptions {
     /// With `anti_aliasing`: the extra rays a frame may trace, per pixel of
     /// the image on average. Edge pixels trace four samples (two, or one,
     /// where four would exceed it), then those whose four did not all see
-    /// their own surface four more if the frame's total fits.
+    /// their own surface four more if the frame's total fits. A choice is
+    /// taken up within 90% of the budget and given up past it, so a view
+    /// near the budget keeps its choice from frame to frame.
     pub aa_rays: f32,
     /// The error while flying, reported (M4 gate 13): pixels a frame (up to
     /// 4,096; 0: off) shaded both as shown and with each light's share and
@@ -312,7 +314,7 @@ impl Default for CacheOptions {
             deforming_budget: 512,
             edge_samples: 4,
             anti_aliasing: false,
-            aa_rays: 0.5,
+            aa_rays: 1.0,
             error_probes: 0,
             glossy_rays: true,
             self_spacing: 0.01,

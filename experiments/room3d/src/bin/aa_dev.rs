@@ -3,7 +3,7 @@
 //! (`textured`, the default), the field at standing height (`field`) or
 //! from 150 m up (`field150`). Not a gate.
 //!
-//! `AA_W`/`AA_H` set the size (640×360); `AA_RAYS` the ray budget (0.5);
+//! `AA_W`/`AA_H` set the size (640×360); `AA_RAYS` the ray budget (1.0);
 //! `AA_REF=0` skips the 16×16 reference (timings and counters only);
 //! `AA_SAVE=dir` writes the images.
 
@@ -44,7 +44,7 @@ fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
 fn main() {
     let w: u32 = env("AA_W", 640);
     let h: u32 = env("AA_H", 360);
-    let rays: f32 = env("AA_RAYS", 0.5);
+    let rays: f32 = env("AA_RAYS", 1.0);
     let reference_on = env("AA_REF", 1u32) == 1;
     let save_dir = std::env::var("AA_SAVE").ok();
     let view = std::env::args().nth(1).unwrap_or_else(|| "textured".into());

@@ -376,6 +376,14 @@ fn aa_budget() -> f32 {
     return bitcast<f32>(vc.extra.w) * camera.params.x * camera.params.y;
 }
 
+// Whether `rays` fit the budget for a choice the last frame made (`was`)
+// or did not: a choice is taken up only within 90% of the budget and given
+// up only past all of it, so a view near the budget does not switch it
+// from frame to frame.
+fn aa_fits(rays: f32, was: bool) -> bool {
+    return rays <= aa_budget() * select(0.9, 1.0, was);
+}
+
 // After shading: stage 0's samples per listed pixel (4, or 2 or 1 where
 // the frame's ray budget does not cover 4), and `hw_aa`'s dispatch (a
 // workgroup per 64 samples, in the dispatch arguments' words 12–14).
@@ -383,11 +391,11 @@ fn aa_budget() -> f32 {
 @compute @workgroup_size(1)
 fn hw_aa_args() {
     let count = aa_count();
-    let budget = aa_budget();
+    let last = aa_data[aa_header() + 3u] & 7u;
     var k = 1u;
-    if (f32(count) * 4.0 <= budget) {
+    if (aa_fits(f32(count) * 4.0, last >= 4u)) {
         k = 4u;
-    } else if (f32(count) * 2.0 <= budget) {
+    } else if (aa_fits(f32(count) * 2.0, last >= 2u)) {
         k = 2u;
     }
     atomicStore(&aa_state[1], k);
@@ -672,8 +680,12 @@ fn hw_aa_again_movers(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invo
 fn hw_aa_args_again() {
     var n = min(atomicLoad(&aa_state[6]), aa_cap());
     let k = atomicLoad(&aa_state[1]);
-    if (f32(aa_count() * k + 4u * n) > aa_budget()) { n = 0u; }
+    let last = aa_data[aa_header() + 3u];
+    if (!aa_fits(f32(aa_count() * k + 4u * n), (last & 8u) != 0u)) { n = 0u; }
     aa_data[aa_header() + 2u] = select(0u, 1u, n > 0u);
+    // This frame's choices, for the next: stage 0's samples, 8 if stage 1
+    // ran.
+    aa_data[aa_header() + 3u] = k | select(0u, 8u, n > 0u);
     dispatch_args[24] = (n + 15u) / 16u;
     dispatch_args[25] = 1u;
     dispatch_args[26] = 1u;

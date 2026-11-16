@@ -701,9 +701,14 @@ on by default), with hardware camera rays:
   it). Taking a neighbour's colour where it saw the same surface was
   cheaper but left 1.12–1.13× the error at edges (development).
 - **Budget.** At most `CacheOptions::aa_rays` extra rays a frame per pixel
-  of the image on average (0.5): stage 0 takes four samples a pixel, or
-  two or one where four would exceed it; stage 1 runs if the frame's total
-  fits. The list holds up to half the pixels.
+  of the image on average (1.0: at most about double the camera rays):
+  stage 0 takes four samples a pixel, or two or one where four would
+  exceed it; stage 1 runs if the frame's total fits. A choice is taken up
+  within 90% of the budget and given up past all of it, so a view near
+  the budget does not switch from frame to frame. The list holds up to
+  half the pixels. (Development: at half a ray a pixel the field standing
+  falls to two samples a pixel at 640×360, 0.54× one ray's error at
+  edges.)
 - **Back faces.** Metal's ray queries ignore back-face culling (M10 G8),
   so camera rays re-trace past back faces with a candidate loop. Inline
   in the sample pass that loop made it a third slower though 1–2% of

@@ -109,8 +109,8 @@ pub struct RendererOptions {
     /// the sky, or a surface off the pixel's own plane) average up to eight
     /// more rays through their square, each shaded from the cache where it
     /// sees another surface than the pixel's own. Within a ray budget
-    /// (`CacheOptions::aa_rays`, half a ray a pixel on average): edges take
-    /// four rays, eight where those disagree and the frame's total fits.
+    /// (`CacheOptions::aa_rays`, a ray a pixel on average): edges take four
+    /// rays, eight where those disagree and the frame's total fits.
     /// Error at edges about a third of one ray's, and steady in motion;
     /// about 1.45× the frame on a textured scene with foliage at 1280×720
     /// (`docs/results/m15-gate1.md`). Not with the sub-pixel path, which
