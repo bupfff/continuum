@@ -5036,11 +5036,22 @@ fn vc_shade_layers(i: u32, pixel: u32, at: vec3<u32>, n: u32) {
         }
         let hit = hit_from(e.xyz, dir);
         let last = j + 1u == min(n, 4u) && j > 0u;
-        if (j == 0u && transmission_of(e.x) <= 0.0) {
-            // The pixel's own blended hit, as the shading pass shaded it.
-            let a = hw_opacity(e.x, e.y, camera.eye.xyz + dir * hit.distance);
-            sum = colors[pixel].xyz * a;
-            through = vec3<f32>(1.0 - a);
+        if (j == 0u) {
+            let own = colors[pixel];
+            if (transmission_of(e.x) > 0.0) {
+                // The pixel's own transmissive hit, as the shading pass
+                // shaded it, and what it passes (M16 gate 2: shading it
+                // again here cost a quarter of the frame where glass
+                // covered a quarter of the image).
+                sum = own.xyz;
+                through = unpack4x8unorm(bitcast<u32>(own.w)).xyz;
+            } else {
+                // The pixel's own blended hit, as the shading pass shaded
+                // it.
+                let a = hw_opacity(e.x, e.y, camera.eye.xyz + dir * hit.distance);
+                sum = own.xyz * a;
+                through = vec3<f32>(1.0 - a);
+            }
             continue;
         }
         let c = vc_hit_color(dir, hit, false);
@@ -5271,11 +5282,18 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
         let hit = recorded_hit(pixel, dir);
         // A ray that misses everything sees the sky.
         var color = sky_seen(dir);
+        // The colour's fourth word: 1, or for a transmissive hit (M16) what
+        // it passes, 8 bits a channel, for the layers behind it
+        // (`vc_shade_layers`).
+        var passes = 1.0;
         if (vis[pixel].w != 0u) {
             let l = lights[vis[pixel].w - 1u];
             color = l.radiance.xyz * spot_falloff(l, -dir);
         } else if (hit.mesh != NONE) {
             color = vc_hit_color(dir, hit, is_sample);
+            if (transmission_of(hit.mesh) > 0.0) {
+                passes = bitcast<f32>(pack4x8unorm(vec4<f32>(vc_transmit, 0.0)));
+            }
         }
         // At a silhouette, four rays through the pixel's quarters (M7 gate
         // 3), textures read for half a pixel.
@@ -5302,7 +5320,7 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
             vc_request_priority = priority;
             color = sum * 0.25;
         }
-        colors[pixel] = vec4<f32>(color, 1.0);
+        colors[pixel] = vec4<f32>(color, passes);
     }
     if (is_sample && vc_request_priority > 0u) {
         vc_request(vc_request_key, vc_request_priority);
