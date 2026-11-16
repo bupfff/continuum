@@ -31,7 +31,7 @@ impl ToneMap {
 
 /// Auto-exposure (M17): each frame the display's exposure is the one that
 /// shows the frame's middle luminances (the mean of log2 luminance between
-/// two percentiles) at `key`, approached over `seconds` (an exponential
+/// two percentiles, at every other pixel in each direction) at `key`, approached over `seconds` (an exponential
 /// adaptation, as an eye or a camera; only this one number carries from
 /// frame to frame). It multiplies any exposure set by hand.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,7 +161,8 @@ impl Meter {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.histogram);
         pass.set_bind_group(0, h, &[]);
-        pass.dispatch_workgroups(size.0.div_ceil(16), size.1.div_ceil(16), 1);
+        // Every other pixel in each direction.
+        pass.dispatch_workgroups(size.0.div_ceil(32), size.1.div_ceil(32), 1);
         pass.set_pipeline(&self.resolve);
         pass.set_bind_group(0, r, &[]);
         pass.dispatch_workgroups(1, 1, 1);

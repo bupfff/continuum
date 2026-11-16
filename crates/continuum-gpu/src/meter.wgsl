@@ -1,5 +1,6 @@
-// Auto-exposure (M17): a histogram of the frame's log2 luminance
-// (`meter_histogram`), then the exposure that brings the mean of its
+// Auto-exposure (M17): a histogram of the frame's log2 luminance at every
+// other pixel in each direction (`meter_histogram`; every pixel cost 0.17
+// ms at 720p, M17 gate 1), then the exposure that brings the mean of its
 // middle (between two percentiles) to the key, adapted over time toward
 // that (`meter_resolve`). The display multiplies colours by it.
 
@@ -32,8 +33,9 @@ var<workgroup> local_hist: array<atomic<u32>, 64>;
 fn meter_histogram(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     if (li < 64u) { atomicStore(&local_hist[li], 0u); }
     workgroupBarrier();
-    if (gid.x < params.size.x && gid.y < params.size.y) {
-        let c = colors[gid.y * params.size.x + gid.x].xyz;
+    let at = 2u * gid.xy;
+    if (at.x < params.size.x && at.y < params.size.y) {
+        let c = colors[at.y * params.size.x + at.x].xyz;
         let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
         atomicAdd(&local_hist[bin_of(l)], 1u);
     }
