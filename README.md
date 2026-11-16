@@ -181,6 +181,9 @@ Selected numbers (1280×720, Apple M4, release builds):
   surface. Edges come within a third of one ray's error from the
   supersampled image and stay steady as the camera moves (1.45× the frame
   on a textured scene with foliage at 720p).
+- **Fog with light shafts:** a layer of fog, even or thinning with
+  height, lit by the sun through its shadows and by the sky; within 6–10%
+  of Cycles' volumes, 0.8 ms at 720p.
 - **Display:** Khronos PBR Neutral tone mapping (within half a level in
   255 of Blender's view of it) or an AgX approximation, and
   auto-exposure that adapts like a camera (0.08 ms at 720p).

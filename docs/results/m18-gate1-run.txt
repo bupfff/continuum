@@ -1,0 +1,6 @@
+M18 gate 1: 1280x720, adapter Apple M4
+1. cost: fog adds 0.802 ms (at most 1.0): PASS (rounds, with/without ms: 5.024/4.241 5.007/4.205 5.015/4.210 5.011/4.219 5.139/4.235)
+2. (a) even layer (417 s, METAL): 9.58% from Cycles (at most 12%), without fog 44.29% (0.216x, at most 0.35x); means: ours +1.43%, without +25.71%: PASS
+2. (b) falling with height, from beside (463 s, METAL): 5.51% from Cycles (at most 12%), without fog 37.69% (0.146x, at most 0.35x); means: ours -1.20%, without -9.59%: PASS
+views that did not settle within 20,000 frames: 0
+Verdict: 1 PASS, 2 PASS: PASS

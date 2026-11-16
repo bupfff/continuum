@@ -214,6 +214,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   from its index, tinted and scaled. 3.64% from Cycles (highlights
   clamped), 1.13× the frame on a scene of coated boulders. The coat's
   textures and normal map are not imported; sheen is not supported.
+- **Fog** (`RendererOptions::fog`, `Fog`; M18 gate 1): a layer with an
+  extinction at height 0 falling with height (or even), a top, an albedo
+  and an anisotropy. Camera rays lose light to it and gather what it
+  scatters: the first light's through its shadows (light shafts, from a
+  grid of its visibility around the eye, 128 × 128 × 32 cells, traced
+  again when the eye crosses a cell or a light moves), the other lights'
+  unshadowed, the sky's; surfaces are lit through it. 9.58% and 5.51% from
+  Cycles' volumes on two views, 0.8 ms at 720p. With the cache, hardware
+  ray queries and no movers; not in reflections or through glass layers.
 - **Display** (M17 gate 2): `RendererOptions::tone_map` (Khronos PBR
   Neutral by default, within 0.45/255 of Blender's view on average;
   `ToneMap::Agx`, an approximation of the original AgX, not Blender 5.2's;
