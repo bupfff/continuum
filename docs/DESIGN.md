@@ -1353,6 +1353,17 @@ flight, stopped and settled, every charge drained and at most as many
 pages over ε as the scene settled without motion; (4) moving frames'
 median at most 1.2× the same flight with bounce light off.
 
+**Gate 1 failed** (`docs/results/m22-gate1.md`) on cost in both flights
+(2.163× and 2.075× bounce light off: the re-bakes double the moving frame;
+the development figure had compared runs with different bake budgets) and
+on the new flight's first check (0.805× against 0.7×; later checks
+0.47–0.64×). The image (0.365×, 0.513×) and rest (every charge drained;
+123 and 25 pages over ε against 158 and 169 for a still scene) pass.
+**For gate 2:** cheaper re-bakes (fewer rays for pages a mover barely
+changed, re-bakes only for pages pixels read, charges that weigh what a
+mover can block by its distance from the page's own surface rather than
+its box), and the own pages' fill race.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -1760,11 +1771,11 @@ estimates, and gates fail often, so treat them as ranges.
 **Start here (updated 2026-11-16, fifteenth session).** The state in one
 place, for a new conversation. **Now:** items 1–4 of the user's order are
 done through M21 (atmosphere and post: M17–M21 passed); item 5, lighting
-gaps, is under way with M22, bounce light with movers, in development (§3.4
-"Bounce light with movers": the ledger built, `verify_bounce` measuring
-it, 50 of 2,429 pages over ε at rest; next a drain pass for hits re-baked
-later, then the gate; movers under a sky cost 331 ms a frame, a gap of its
-own). Then the rest of item 5 (bounce on by default and quicker to settle,
+gaps, is under way with M22, bounce light with movers (§3.4 "Bounce light
+with movers"): G1 failed on cost (the ledger's re-bakes double the moving
+frame) and one check of its new flight; image and rest passed; next,
+cheaper re-bakes for G2. Movers under a sky cost 331 ms a frame, a gap of
+its own. Then the rest of item 5 (bounce on by default and quicker to settle,
 emissive surfaces as lights, receivers next to large lights). Read this block, then the milestone table
 (§6) and the results files it names. Item 1 of "Next, in order" below (the
 design for M13's far field, §3.4) and items 2.1–2.3 are done (M4 G13 and

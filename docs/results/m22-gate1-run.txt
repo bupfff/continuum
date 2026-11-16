@@ -1,0 +1,17 @@
+M22 gate 1: 640x360, 120 moving frames, adapter Apple M4
+1. (a) six boulders at 0.02 m a frame frame 30: pages over eps 260 of 2411 against 494 without re-bakes (0.526x, at most 0.7x): PASS; largest change 1.031e-5 of 2.575e-5, largest charge 390.00, missed 0
+1. (a) six boulders at 0.02 m a frame frame 60: pages over eps 306 of 2413 against 586 without re-bakes (0.522x, at most 0.7x): PASS; largest change 9.358e-6 of 2.575e-5, largest charge 780.00, missed 0
+1. (a) six boulders at 0.02 m a frame frame 90: pages over eps 289 of 2419 against 587 without re-bakes (0.492x, at most 0.7x): PASS; largest change 1.335e-5 of 2.575e-5, largest charge 1170.00, missed 0
+1. (a) six boulders at 0.02 m a frame frame 120: pages over eps 300 of 2414 against 657 without re-bakes (0.457x, at most 0.7x): PASS; largest change 1.037e-5 of 2.575e-5, largest charge 1560.00, missed 0
+2. (a) six boulders at 0.02 m a frame: the image from its bounce re-baked in place 0.795%, without re-bakes 2.175% (0.365x, at most 0.6x): PASS
+4. (a) six boulders at 0.02 m a frame: moving frames' median 44.02 ms, with bounce light off 20.35 ms (2.163x, at most 1.2x): FAIL
+3. (a) six boulders at 0.02 m a frame: stopped and settled, pages over eps 123 of 2404 (largest charge 0.000, largest change 6.080e-6 of 2.575e-5), the scene settled without motion 158 of 2501: PASS
+1. (b) twelve boulders at 0.04 m a frame frame 30: pages over eps 463 of 2385 against 575 without re-bakes (0.805x, at most 0.7x): FAIL; largest change 2.450e-5 of 2.658e-5, largest charge 750.00, missed 0
+1. (b) twelve boulders at 0.04 m a frame frame 60: pages over eps 484 of 2416 against 793 without re-bakes (0.610x, at most 0.7x): PASS; largest change 1.699e-5 of 2.182e-5, largest charge 1500.00, missed 0
+1. (b) twelve boulders at 0.04 m a frame frame 90: pages over eps 551 of 2397 against 860 without re-bakes (0.641x, at most 0.7x): PASS; largest change 1.878e-5 of 2.211e-5, largest charge 2250.00, missed 0
+1. (b) twelve boulders at 0.04 m a frame frame 120: pages over eps 440 of 2402 against 930 without re-bakes (0.473x, at most 0.7x): PASS; largest change 1.448e-5 of 2.480e-5, largest charge 3000.00, missed 0
+2. (b) twelve boulders at 0.04 m a frame: the image from its bounce re-baked in place 1.239%, without re-bakes 2.414% (0.513x, at most 0.6x): PASS
+4. (b) twelve boulders at 0.04 m a frame: moving frames' median 69.36 ms, with bounce light off 33.43 ms (2.075x, at most 1.2x): FAIL
+3. (b) twelve boulders at 0.04 m a frame: stopped and settled, pages over eps 25 of 2450 (largest charge 0.000, largest change 4.590e-6 of 2.480e-5), the scene settled without motion 169 of 2485: PASS
+renderers that did not settle within 20,000 frames: 0
+Verdict: 1 FAIL, 2 PASS, 3 PASS, 4 FAIL: FAIL
