@@ -864,6 +864,15 @@ on the smooth sphere decide it; with every channel clamped at 4× the
 image's mean 8.40% (thin 21.94%, opaque 87.86%), over the glass's pixels
 16.73% against thin's 44.43%; 1.09–1.33× the frame with them opaque.
 Left: the block's shadow (Cycles' is green from the attenuation).
+At 1280×720 that first version cost 1.62×. Since, before gate 3's run:
+the layers are traced in a pass of their own (`hw_layers`, over the
+records the visibility pass lists a workgroup at a time; traced in the
+visibility pass, their ray queries slowed it for every pixel), a surface
+touching the glass is found by one opaque query that sees only opaque
+objects (see-through objects lose instance mask bit 1), and the ray on
+leaves just outside the far surface (from inside, its back face sent
+every ray through the back-face loop): 1.344× at 1280×720 in
+development, the panes 1.257×.
 
 **Gate M16 G3** (`m16_gate3`): the textured scene with the glass sphere
 and block (`Textured::with_glass_solids`), 1280×720, bounce light on, ours

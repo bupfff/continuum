@@ -635,6 +635,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_aa_again_movers",
     "hw_aa_args_shade",
     "hw_aa_retrace",
+    "hw_layers",
     "hw_aa_scatter",
 ];
 
@@ -708,8 +709,11 @@ pub(crate) const M13_BIN_RAYS_BINDINGS: &[u32] = &[
 ];
 /// `hw_visibility_blend` (M10 gate 19): visibility, listing the layers
 /// behind alpha-blended hits.
-pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] =
-    &[2, 3, 6, 24, 30, 31, 32, 42, 52, 55, 56, 57, 58, 76, 81, 111];
+pub(crate) const HW_VISIBILITY_BLEND_BINDINGS: &[u32] = &[2, 3, 6, 30, 31, 32, 42, 52, 76, 81];
+/// `hw_layers` (M16 gate 3): the layers behind see-through hits, traced for
+/// the records the visibility pass listed.
+pub(crate) const HW_LAYERS_BINDINGS: &[u32] =
+    &[2, 3, 6, 24, 30, 32, 42, 55, 56, 57, 58, 76, 81, 111];
 /// `vc_args_edges` (M10 gate 19): `vc_shade_edges`'s dispatch from the
 /// list's count.
 pub(crate) const VC_ARGS_EDGES_BINDINGS: &[u32] = &[42, 66, 81];

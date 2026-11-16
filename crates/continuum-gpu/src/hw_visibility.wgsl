@@ -176,6 +176,11 @@ fn hw_trace(eye: vec3<f32>, dir: vec3<f32>, t_min: f32) -> vec3<u32> {
 fn list_extra(pixel: u32, samples: array<vec4<u32>, 4>, n: u32, own_weight: f32, quarters: u32) {
     let i = atomicAdd(&vc_stats[15], 1u);
     if (5u * i + 4u >= arrayLength(&edge_hits)) { return; }
+    put_extra(i, pixel, samples, n, own_weight, quarters);
+}
+
+// `list_extra` at record `i` (one the visibility pass listed).
+fn put_extra(i: u32, pixel: u32, samples: array<vec4<u32>, 4>, n: u32, own_weight: f32, quarters: u32) {
     for (var j = 0u; j < n; j++) { edge_hits[5u * i + j] = samples[j]; }
     edge_hits[5u * i + 4u] = vec4<u32>(pixel, bitcast<u32>(own_weight), n, quarters);
 }
@@ -186,15 +191,18 @@ fn list_extra(pixel: u32, samples: array<vec4<u32>, 4>, n: u32, own_weight: f32,
 // own hit first, then up to three behind it. The ray traces on through
 // blended and transmissive surfaces, front faces only (thin glass: straight
 // on), while they let enough through; the shading pass weighs each layer.
-fn list_layers(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
-    if (own.x == NONE) { return; }
+fn list_layers(i: u32, pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
     if (is_volume(own.x)) {
-        list_volume(pixel, eye, dir, own);
+        list_volume(i, pixel, eye, dir, own);
         return;
     }
     let tr = transmission_of(own.x);
     let first = hw_opacity(own.x, own.y, eye + dir * bitcast<f32>(own.z));
-    if (first >= 1.0 && tr <= 0.0) { return; }
+    if (first >= 1.0 && tr <= 0.0) {
+        // Opaque after all (a blended texel at full alpha).
+        edge_hits[5u * i + 4u] = vec4<u32>(pixel, 0u, 0u, NOTHING);
+        return;
+    }
     var samples: array<vec4<u32>, 4>;
     samples[0] = vec4<u32>(own, 0u);
     var n = 1u;
@@ -216,7 +224,7 @@ fn list_layers(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
         }
         t = bitcast<f32>(hit.z);
     }
-    list_extra(pixel, samples, n, 1.0, LAYERED);
+    put_extra(i, pixel, samples, n, 1.0, LAYERED);
 }
 
 // Per object, its volume if it is solid glass (M16): attenuation colour and
@@ -249,21 +257,18 @@ fn hw_trace_any(origin: vec3<f32>, dir: vec3<f32>) -> vec3<u32> {
     return vec3<u32>(o.x, cam_tri(o.x, o.y, hit.primitive_index), bitcast<u32>(hit.t));
 }
 
-// Another object than `m` within distance `reach` along a ray from
-// `origin` (object, triangle, distance bits; NONE if none): what a ray
-// inside glass `m` meets touching its surface.
-fn hw_other_within(origin: vec3<f32>, dir: vec3<f32>, reach: f32, m: u32) -> vec3<u32> {
+// An object camera rays do not see through within distance `reach` along
+// a ray from `origin` (object, triangle, distance bits; NONE if none):
+// what a ray inside solid glass meets touching its surface (see-through
+// objects lack the structure's instance mask bit 1).
+fn hw_other_within(origin: vec3<f32>, dir: vec3<f32>, reach: f32) -> vec3<u32> {
     var rq: ray_query;
-    rayQueryInitialize(&rq, scene_as, RayDesc(0x2u, 0xffu, 0.0, reach, origin, dir));
-    var best = vec3<u32>(NONE, NONE, bitcast<u32>(3.4e38));
-    while (rayQueryProceed(&rq)) {
-        let c = rayQueryGetCandidateIntersection(&rq);
-        let o = hw_object(c.instance_custom_data, c.geometry_index);
-        if (o.x != m && c.t < bitcast<f32>(best.z)) {
-            best = vec3<u32>(o.x, cam_tri(o.x, o.y, c.primitive_index), bitcast<u32>(c.t));
-        }
-    }
-    return best;
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x1u, 0x2u, 0.0, reach, origin, dir));
+    rayQueryProceed(&rq);
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind == 0u) { return vec3<u32>(NONE, NONE, bitcast<u32>(3.4e38)); }
+    let o = hw_object(hit.instance_custom_data, hit.geometry_index);
+    return vec3<u32>(o.x, cam_tri(o.x, o.y, hit.primitive_index), bitcast<u32>(hit.t));
 }
 
 // The nearest front face along a ray from `origin` (not the eye):
@@ -297,7 +302,7 @@ fn hw_trace_from(origin: vec3<f32>, dir: vec3<f32>) -> vec3<u32> {
 // pass's. Another object met inside (resting on the glass, or within it)
 // is seen from there with no surface between. A ray still inside after
 // three reflections passes straight on from the pixel's hit instead.
-fn list_volume(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
+fn list_volume(i: u32, pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
     let m = own.x;
     let t0 = bitcast<f32>(own.z);
     let p0 = eye + dir * t0;
@@ -321,7 +326,7 @@ fn list_volume(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
             // A surface touching the glass's own (the ground under it) meets
             // the ray first: no air between them.
             if (h.x == m) {
-                let touching = hw_other_within(origin, d, t * (1.0 + 1e-4) + surface_offset(t0 + t), m);
+                let touching = hw_other_within(origin, d, t * (1.0 + 1e-4) + surface_offset(t0 + t));
                 if (touching.x != NONE) {
                     h = touching;
                     t = bitcast<f32>(h.z);
@@ -347,10 +352,9 @@ fn list_volume(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
             }
             far *= 1.0 - fresnel_dielectric(dot(d, ne), 1.0 / ior);
             out = normalize(refracted);
-            // Just inside the far surface: the ray on skips it (a back face
-            // from there) and meets what lies beyond, even a surface
-            // touching it (glass resting on the ground).
-            exit = pe - out * surface_offset(t0 + t);
+            // Just past the far surface (a surface touching it, the ground
+            // under the glass, was met above).
+            exit = pe + out * surface_offset(t0 + t);
             through = true;
             break;
         }
@@ -367,23 +371,68 @@ fn list_volume(pixel: u32, eye: vec3<f32>, dir: vec3<f32>, own: vec3<u32>) {
     samples[1] = vec4<u32>(behind, pack4x8unorm(vec4<f32>(far, 0.0)));
     samples[2] = vec4<u32>(bitcast<vec3<u32>>(exit), 0u);
     samples[3] = vec4<u32>(bitcast<vec3<u32>>(out), 0u);
-    list_extra(pixel, samples, 4u, 1.0, VOLUMED);
+    put_extra(i, pixel, samples, 4u, 1.0, VOLUMED);
 }
 
 // `hw_visibility` with alpha blending (M10 gate 19): a pixel whose hit is
 // blended lists its layers here, in the pass that found the hit, rather
 // than in a full-screen pass after it.
+// The extra samples' list's place for a workgroup's see-through pixels
+// (`hw_visibility_blend`): they are listed together, so `hw_layers`'s
+// workgroups trace nearby rays.
+var<workgroup> layers_count: atomic<u32>;
+var<workgroup> layers_base: u32;
+
 @compute @workgroup_size(8, 8)
-fn hw_visibility_blend(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn hw_visibility_blend(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
-    if (gid.x >= w || gid.y >= h) { return; }
-    let dir = camera_dir(gid);
-    let eye = camera.eye.xyz;
-    let hit = hw_trace(eye, dir, 0.0);
-    let pixel = gid.y * w + gid.x;
-    vis[pixel] = vec4<u32>(hit, seen_light(eye, dir, bitcast<f32>(hit.z)));
-    list_layers(pixel, eye, dir, hit);
+    let inside = gid.x < w && gid.y < h;
+    var listed = false;
+    var hit = vec3<u32>(NONE);
+    var pixel = 0u;
+    if (inside) {
+        let dir = camera_dir(gid);
+        let eye = camera.eye.xyz;
+        hit = hw_trace(eye, dir, 0.0);
+        pixel = gid.y * w + gid.x;
+        let seen = seen_light(eye, dir, bitcast<f32>(hit.z));
+        vis[pixel] = vec4<u32>(hit, seen);
+        // A hit camera rays see through is listed with its own hit alone,
+        // the layers traced by `hw_layers` (M16 gate 3: traced here, they
+        // slowed this pass for every pixel).
+        listed = hit.x != NONE && seen == 0u && sees_through(hit.x);
+    }
+    var local = 0u;
+    if (listed) { local = atomicAdd(&layers_count, 1u); }
+    workgroupBarrier();
+    if (li == 0u) {
+        let n = atomicLoad(&layers_count);
+        layers_base = 0u;
+        if (n > 0u) { layers_base = atomicAdd(&vc_stats[15], n); }
+    }
+    workgroupBarrier();
+    let i = layers_base + local;
+    if (listed && 5u * i + 4u < arrayLength(&edge_hits)) {
+        edge_hits[5u * i] = vec4<u32>(hit, 0u);
+        edge_hits[5u * i + 4u] = vec4<u32>(pixel, 0u, 1u, PENDING);
+    }
+}
+
+// After the visibility pass: each record it listed (PENDING) gets its
+// layers (`list_layers`), one invocation per record of the extra samples'
+// list (dispatched as `vc_shade_edges`).
+@compute @workgroup_size(64)
+fn hw_layers(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    let count = min(atomicLoad(&vc_stats[15]), arrayLength(&edge_hits) / 5u);
+    if (i >= count) { return; }
+    let head = edge_hits[5u * i + 4u];
+    if (head.w != PENDING) { return; }
+    let w = u32(camera.params.x);
+    let pixel = head.x;
+    let at = vec3<u32>(pixel % w, pixel / w, 0u);
+    list_layers(i, pixel, camera.eye.xyz, camera_dir(at), edge_hits[5u * i].xyz);
 }
 
 // After `hw_visibility` (or `hw_visibility_blend`), with silhouette rays

@@ -5031,6 +5031,10 @@ const LAYERED: u32 = 0xfffeu;
 // passes (its far surface's share and its attenuation, 8 bits a channel);
 // the point the ray left the glass; the direction it left in.
 const VOLUMED: u32 = 0xfffdu;
+// ... of a record the visibility pass listed for `hw_layers` to fill.
+const PENDING: u32 = 0xfffcu;
+// ... of a record with nothing to add (a blended texel at full alpha).
+const NOTHING: u32 = 0xfffbu;
 
 // A record of a ray refracted through solid glass (M16): the pixel's own
 // surface as the shading pass shaded it, plus what lies behind, lit from
@@ -5130,6 +5134,7 @@ fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocati
         vc_shade_volume(i, pixel);
         return;
     }
+    if (head.w == NOTHING || head.w == PENDING) { return; }
     // The pixel's own sample, then each listed one, by its weight.
     var sum = colors[pixel].xyz * bitcast<f32>(head.y);
     for (var j = 0u; j < min(head.z, 4u); j++) {

@@ -133,6 +133,46 @@ fn main() -> std::io::Result<()> {
         }
         (sum, times[15])
     };
+    if std::env::args().any(|a| a == "profile") {
+        for (name, scene) in [("glass", &t.scene), ("opaque", &opaque)] {
+            let mut r = InstancedRenderer::with_cache_lights(
+                &kernel,
+                format,
+                w,
+                h,
+                1,
+                &t.lights,
+                scene,
+                t.origin,
+                CacheOptions {
+                    indirect: true,
+                    ..Default::default()
+                },
+            );
+            settle(&mut r, t.camera, &target);
+            let mut per: Vec<Vec<f64>> = Vec::new();
+            for _ in 0..30 {
+                let p = r.frame_profiled(t.camera, &target);
+                for (k, d) in p.passes.iter().enumerate().filter(|(_, d)| !d.is_zero()) {
+                    if per.len() <= k {
+                        per.push(Vec::new());
+                    }
+                    per[k].push(d.as_secs_f64() * 1000.0);
+                }
+            }
+            for v in &mut per {
+                v.sort_by(f64::total_cmp);
+            }
+            println!(
+                "{name}: camera passes (median ms, each waited for): {:?}; edge pixels {}",
+                per.iter()
+                    .map(|v| (v[15] * 1000.0).round() / 1000.0)
+                    .collect::<Vec<_>>(),
+                r.cache_stats().map_or(0, |s| s.edge_pixels)
+            );
+        }
+        return Ok(());
+    }
     let (ours, t_ours) = render(&t.scene);
     let (flat, t_flat) = render(&opaque);
     let (blend, t_blend) = render(&blended);

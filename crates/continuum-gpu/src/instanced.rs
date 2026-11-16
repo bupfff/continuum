@@ -17,7 +17,7 @@ use crate::stream::{
 use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
-    HW_EDGES_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
+    HW_EDGES_BINDINGS, HW_LAYERS_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
     HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS,
     HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu,
     M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS,
@@ -1594,6 +1594,15 @@ impl InstancedRenderer {
                 if cache.as_ref().is_some_and(|o| o.edge_rays) {
                     list.push((kernel.entry("hw_edges"), HW_EDGES_BINDINGS.to_vec()));
                 }
+                if blend {
+                    // The layers behind see-through hits, for the records
+                    // listed so far (M16 gate 3).
+                    list.push((
+                        kernel.entry("vc_args_edges"),
+                        VC_ARGS_EDGES_BINDINGS.to_vec(),
+                    ));
+                    list.push((kernel.entry("hw_layers"), HW_LAYERS_BINDINGS.to_vec()));
+                }
                 list.push((kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()));
                 list.push((
                     kernel.entry("vc_args_edges"),
@@ -1665,6 +1674,7 @@ impl InstancedRenderer {
                     b if b == VC_ERROR_PROBES_BINDINGS => CameraDispatch::Probes,
                     b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
                     b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
+                    b if b == HW_LAYERS_BINDINGS => CameraDispatch::Listed,
                     b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
                     b if b == M13_BIN_ARGS_BINDINGS => CameraDispatch::One,
                     b if b == M13_BIN_RAYS_BINDINGS => CameraDispatch::M13Rays,

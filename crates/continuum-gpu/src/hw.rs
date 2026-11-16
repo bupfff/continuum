@@ -716,7 +716,13 @@ pub(crate) fn build(
         }
         let Some(b) = &blas[o.geometry] else { continue };
         if !is_movable[k] {
-            let mask = if sizes[k] > 64.0 * median { 0xff } else { 0xfe };
+            let mut mask: u8 = if sizes[k] > 64.0 * median { 0xff } else { 0xfe };
+            // M16: objects camera rays see through (blending,
+            // transmission) lose bit 1, so a ray with cull mask 2 sees only
+            // opaque ones (what touches solid glass from inside).
+            if o.clear != 0.0 {
+                mask &= !0x2;
+            }
             tlas[slots[k] as usize] =
                 Some(wgpu::TlasInstance::new(b, transforms[k], k as u32, mask));
         }
