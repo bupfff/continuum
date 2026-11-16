@@ -232,6 +232,16 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   `Renderer::set_exposure`, and `read_colors` stays linear). A float
   target gets linear light times the exposure, for an engine's own tone
   map.
+- **Bloom and upscaling** (M19 gate 1): `RendererOptions::bloom`
+  (`Bloom`, on by default: strength 0.04, radius 2% of the image's
+  height) mixes a blur of the image at a quarter of its size into the
+  display, in linear light before exposure, keeping the image's light;
+  0.26 ms at 720p. `RendererOptions::upscale` (`Upscale::CatmullRom` by
+  default, `Bilinear`, `Nearest`) draws an image rendered below the
+  target's size (a render scale above 1) up to it: Catmull and Rom's
+  bicubic clamped to its four nearest pixels' range, 0.87× the nearest
+  pixel's error at half size for 0.29 ms. Both act at display only:
+  `read_colors` stays linear, at the rendered size and unbloomed.
 - **Materials, normal maps and emission are in the cached path only;**
   the per-pixel path (`RendererOptions::cache` off) shades Lambertian.
 - **Anti-aliasing, on by default** (`RendererOptions::anti_aliasing`; M15

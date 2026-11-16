@@ -1,0 +1,5 @@
+M19 gate 1: 1280x720, adapter Apple M4
+2. bloom's cost: +0.262 ms (at most 0.3): PASS (rounds, native/bloom/nearest/Catmull-Rom ms: 2.946/3.217/1.204/1.494 2.944/3.218/1.208/1.499 2.953/3.215/1.206/1.493 3.001/3.215/1.208/1.502 2.997/3.206/1.200/1.495)
+1. bloom's image: 4.72e-8 from the CPU's (at most 1e-3), total light 1.00000 of the unbloomed (within 1%): PASS
+3. upscaling from 640x360: Catmull-Rom 10.65% from the native render, nearest 12.25% (0.870x, at most 0.9x), bilinear 11.19%; Catmull-Rom +0.291 ms over nearest (at most 0.35), its frame 0.506x native (at most 0.55); bilinear's frame 1.208 ms: PASS
+Verdict: 1 PASS, 2 PASS, 3 PASS: PASS

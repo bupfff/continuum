@@ -187,6 +187,10 @@ Selected numbers (1280×720, Apple M4, release builds):
 - **Display:** Khronos PBR Neutral tone mapping (within half a level in
   255 of Blender's view of it) or an AgX approximation, and
   auto-exposure that adapts like a camera (0.08 ms at 720p).
+- **Bloom and upscaling:** a soft glow around bright light that keeps the
+  image's light (0.26 ms at 720p), and rendering below the display's size
+  drawn up by a clamped bicubic (half size: half the frame, 0.87× the
+  error of the nearest pixel).
 - **glTF 2.0** import and export, with cameras, lights and animations.
 - **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
   entities moving its objects.
