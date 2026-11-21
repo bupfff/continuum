@@ -5011,12 +5011,19 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     let top = vc_top_mip(hc, hit.mesh);
     let ratio = footprint * vc.params.x / object_scale(hit.mesh);
     var want = 0u;
-    if (ratio > 1.0) { want = min(u32(round(log2(ratio))), top); }
+    if (ratio > 1.0) { want = u32(round(log2(ratio))); }
+    // Settling bounce light (M22 gate 3, `CacheOptions::bounce_settles`):
+    // hits read one mip coarser than the bin's footprint (a quarter of the
+    // pages to want), and never a coarser one for long.
+    let settles = (vc.extra.y & 0x100u) != 0u;
+    want = min(want + select(0u, 1u, settles), top);
     var slot = NONE;
     var r: PageRef;
+    var found = want;
     for (var q = want; q <= top; q++) {
         r = vc_page(hit.mesh, hc, uv, q);
         slot = vc_find_any(r.key);
+        found = q;
         if (slot != NONE) { break; }
     }
     // With more bounces (M10 gate 25), the page hit should hold one fewer.
@@ -5024,6 +5031,14 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     if (slot == NONE) {
         vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY | wanted_bits);
         return w;
+    }
+    // Read at a coarser page than wanted (M22, bounce light that settles):
+    // the wanted one is requested and the sample retried once it may have
+    // arrived (counted with the bins short of bounces); else it would keep
+    // the coarse light after the finer page came.
+    if (settles && found > want) {
+        vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY | wanted_bits);
+        ind_short += w;
     }
     // A page bounce rays read is in use (as reflections' hits): kept, and
     // its stale texels re-baked under movers rather than evicted, which

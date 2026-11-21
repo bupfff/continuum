@@ -229,6 +229,14 @@ pub struct CacheOptions {
     /// listed (the rest wait, still charged). At rest the drain takes what
     /// the budget leaves. 0.75 by default.
     pub bounce_share: f32,
+    /// Bounce light that settles (M22 gate 3): bounce rays read their hits'
+    /// light one mip coarser than a bin's footprint, and a bin that finds
+    /// only a coarser page asks for its page and re-bakes the sample once
+    /// it may have arrived, so a settled scene's bounce light matches a
+    /// fresh bake. Off, the first page resident at or coarser than the
+    /// footprint is read and kept (finer pages arriving later never reach
+    /// it). On by default.
+    pub bounce_settles: bool,
     /// Anti-aliasing at silhouettes (M7 gates 3–4): pixels whose neighbours
     /// see another object or depth average four rays through their
     /// quarters. With hardware camera rays (and no movers) the rays are ray
@@ -329,6 +337,7 @@ impl Default for CacheOptions {
             indirect_sample_cost: 8,
             bounce_epsilon: 0.01,
             bounce_share: 0.75,
+            bounce_settles: true,
             edge_rays: false,
             deforming_budget: 512,
             edge_samples: 4,
@@ -2028,11 +2037,12 @@ impl VirtualCache {
                 },
             ],
             // x: 1 if bounce samples gather emission (M10 gate 11).
-            // y: bounces (M10 gate 25).
+            // y: bounces (M10 gate 25), bit 8 settling bounce light (M22
+            // gate 3).
             // z: probe pixels (M4 gate 13).
             extra: [
                 (self.options.indirect && self.options.emission_bounce) as u32,
-                self.options.bounces.clamp(1, 8),
+                self.options.bounces.clamp(1, 8) | (self.options.bounce_settles as u32) << 8,
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
@@ -2365,7 +2375,7 @@ impl VirtualCache {
         ];
         params.extra = [
             self.options.emission_bounce as u32,
-            self.options.bounces.clamp(1, 8),
+            self.options.bounces.clamp(1, 8) | (self.options.bounce_settles as u32) << 8,
             0,
             0,
         ];

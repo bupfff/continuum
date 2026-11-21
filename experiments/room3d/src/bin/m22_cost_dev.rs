@@ -129,7 +129,28 @@ fn main() {
                     }
                 }
                 for (i, d) in p.passes.iter().enumerate() {
-                    *passes.entry(["camera 0", "camera 1", "camera 2", "camera 3", "camera 4", "camera 5", "camera 6", "camera 7", "camera 8", "camera 9", "camera 10", "camera 11", "camera 12", "camera 13", "camera 14", "camera 15"][i]).or_insert(0.0) += d.as_secs_f64() * 1000.0;
+                    *passes
+                        .entry(
+                            [
+                                "camera 0",
+                                "camera 1",
+                                "camera 2",
+                                "camera 3",
+                                "camera 4",
+                                "camera 5",
+                                "camera 6",
+                                "camera 7",
+                                "camera 8",
+                                "camera 9",
+                                "camera 10",
+                                "camera 11",
+                                "camera 12",
+                                "camera 13",
+                                "camera 14",
+                                "camera 15",
+                            ][i],
+                        )
+                        .or_insert(0.0) += d.as_secs_f64() * 1000.0;
                 }
                 *passes.entry("bake (all)").or_insert(0.0) += p.bake.as_secs_f64() * 1000.0;
                 *passes.entry("planning").or_insert(0.0) += p.planning.as_secs_f64() * 1000.0;
