@@ -1,43 +1,39 @@
 //! Continuum viewer: fly through a scene in real time.
 //!
-//! Direct light from the area light is baked into a world-space lighting cache
-//! (one mask cone per texel) at startup; each frame is a camera ray per pixel
-//! plus a cache lookup, on the GPU. Objects move through the scene: they are
-//! shaded per pixel, and each frame re-bakes exactly the cache blocks they can
-//! reach, so their soft shadows stay exact. Probes add one bounce of indirect
-//! light, gathered each frame through cached G-buffers (probes on moving
-//! objects are traced from scratch).
+//! A panel (H hides it) picks the scene: the showcase (a gallery), a field
+//! of boulders (10,000 to a million: about ten billion triangles at the
+//! most), or a glTF file (Open…, or drop a `.glb` / `.gltf` on the window).
+//! It shows the frame rate, the GPU and its memory, and whether the
+//! lighting has settled, and changes how instanced scenes (the field, glTF
+//! files) render: bounce light, anti-aliasing, the sky, the render scale
+//! (rebuilding the renderer), the tone map, bloom and exposure (at once),
+//! and vsync. Problems show in the panel, or in a dialog when they stop the
+//! viewer (launched from the Finder there is no terminal).
 //!
 //! The field and glTF scenes go through the library's front door,
 //! `continuum_gpu::Renderer`; the showcase and the room through the
-//! lightmap path (`LiveRenderer`), which supports moving objects.
+//! lightmap path (`LiveRenderer`), which bakes direct light into a
+//! world-space cache at startup and moves objects through it.
 //!
-//! Scenes: `--scene showcase` (the default: a gallery with a sculpture,
-//! columns and an arch), `--scene room` (the M2 test room), or `--scene field`
-//! (a million instanced boulders, about ten billion triangles, lit by a sun
-//! through a view-dependent lighting cache baked as you look around;
-//! `--boulders N` to change the count, `--scale N` to render at 1/N of the
-//! window, `--sky` to add a blue-white sky (experimental: slow to warm up),
-//! `--no-cache` for a mask cone per pixel every frame). `--gltf file.glb`
-//! (or `.gltf`) flies through your own scene the same way: lit by the file's
-//! lights or else a sun (`--sky` adds the sky), from the file's camera or one
-//! framed around the scene, over a grey ground (`--no-ground` to leave it
-//! out; `--emitters-as-lights` makes emissive rectangles area lights); a
-//! file's first animation plays (P pauses it; not with a sky, as
-//! movers and a sky do not mix in the cache yet). `--env sky.hdr` (or a
-//! `.png`) lights the field or a glTF scene with
-//! an equirectangular environment image in place of the uniform sky
-//! (Blender's orientation; `--env-strength K` scales it), and `--env
-//! gradient` with a horizon-to-zenith gradient (M5 gate 12's sky).
+//! Command line, all optional: a `.glb`/`.gltf` path (or `--gltf file`) or
+//! `--scene showcase|room|field` (`--boulders N`); `--no-bounce`, `--no-aa`,
+//! `--sky`, `--scale N` (render at 1/N of the window), `--vsync`,
+//! `--exposure K`, `--no-cache` (a mask cone per pixel every frame),
+//! `--no-panel`; for glTF files `--no-ground` and `--emitters-as-lights`
+//! (emissive rectangles as area lights); `--env sky.hdr` (or a `.png`, or
+//! `gradient`; `--env-strength K`) lights the field or a glTF scene with an
+//! environment image. A file's first animation plays (P pauses it; not with
+//! a sky, as movers and a sky do not mix in the cache yet).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
-//! Shift to move faster, C to play the camera path, P to pause moving objects,
-//! V to toggle vsync, `[` and `]` to change the exposure a stop at a time
-//! (`--exposure K` to start at K; instanced scenes), Esc to quit. `--frames N` renders N frames (along the
-//! camera path, if the scene has one), prints timings, and exits.
+//! Shift to move faster, C to play the camera path (showcase), P to pause
+//! moving objects, V for vsync, `[` and `]` for exposure a stop at a time,
+//! H for the panel, Esc to quit. `--frames N` renders N frames, prints
+//! timings and exits (`--screenshot out.png` saves the last one;
+//! `VIEWER_SELFTEST=1` scripts a scene load, a rebuild and a failed load).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -216,15 +212,12 @@ impl World {
 
     /// The glTF file at `path`, lit by a sun 30° up, over a grey ground
     /// unless `ground` is false. The render origin is the scene's center.
-    fn gltf(path: &Path, ground: bool, emitters: bool) -> World {
+    fn gltf(path: &Path, ground: bool, emitters: bool) -> Result<World, String> {
         let start = Instant::now();
-        let imported = continuum_gltf::load(path).unwrap_or_else(|e| {
-            eprintln!("Could not load {}: {e}", path.display());
-            std::process::exit(1);
-        });
+        let imported = continuum_gltf::load(path)
+            .map_err(|e| format!("Could not load {}: {e}", path.display()))?;
         if imported.scene.instances.is_empty() {
-            eprintln!("{} has no triangles to show.", path.display());
-            std::process::exit(1);
+            return Err(format!("{} has no triangles to show.", path.display()));
         }
         println!(
             "Imported {} in {:.2} s: {} triangles in {} instances of {} geometries, {} charts, {} textures{}.",
@@ -324,7 +317,7 @@ impl World {
             .iter()
             .map(|i| scene.geometries[i.geometry].triangles.len() as u64)
             .sum();
-        World {
+        Ok(World {
             name: "glTF",
             surfaces: Vec::new(),
             albedo: Vec::new(),
@@ -350,7 +343,7 @@ impl World {
             environment: None,
             animations,
             exposure: 1.0,
-        }
+        })
     }
 
     fn room() -> World {
@@ -457,7 +450,88 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    backend: Backend,
+    adapter_name: String,
+    /// None until the first scene is built.
+    backend: Option<Backend>,
+    ui: Ui,
+}
+
+/// The overlay panel: egui's context, its window input and its painter.
+struct Ui {
+    ctx: egui::Context,
+    state: egui_winit::State,
+    renderer: egui_wgpu::Renderer,
+}
+
+/// What the panel changes. Bounce light, anti-aliasing, the sky and the
+/// render scale rebuild the renderer; the rest apply at once.
+#[derive(Clone, Copy, PartialEq)]
+struct Settings {
+    bounce: bool,
+    anti_aliasing: bool,
+    sky: bool,
+    scale: u32,
+    bloom: bool,
+    tone_map: continuum_gpu::ToneMap,
+    vsync: bool,
+}
+
+impl Settings {
+    /// The settings a renderer is built with.
+    fn build_key(&self) -> (bool, bool, bool, u32) {
+        (self.bounce, self.anti_aliasing, self.sky, self.scale)
+    }
+}
+
+/// A scene to show.
+#[derive(Clone)]
+enum SceneChoice {
+    Showcase,
+    Room,
+    Field(usize),
+    Gltf(PathBuf),
+}
+
+impl SceneChoice {
+    fn load(&self, ground: bool, emitters: bool) -> Result<World, String> {
+        Ok(match self {
+            SceneChoice::Showcase => World::showcase(),
+            SceneChoice::Room => World::room(),
+            SceneChoice::Field(n) => World::field(*n),
+            SceneChoice::Gltf(path) => World::gltf(path, ground, emitters)?,
+        })
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            SceneChoice::Showcase => "Showcase (a gallery)".into(),
+            SceneChoice::Room => "Room".into(),
+            SceneChoice::Field(n) => format!("Boulder field ({} boulders)", thousands(*n)),
+            SceneChoice::Gltf(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |f| f.to_string_lossy().into(),
+            ),
+        }
+    }
+}
+
+/// `n` with commas between thousands.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Work the next frames do, after one frame shows that it is coming.
+enum Pending {
+    Load(SceneChoice),
+    Rebuild,
 }
 
 /// The lightmap renderer with moving objects (the showcase and the room), or
@@ -472,13 +546,6 @@ impl Backend {
         match self {
             Backend::Live(r) => r.resize(width, height),
             Backend::Instanced(r) => r.resize(width, height),
-        }
-    }
-
-    /// Sets the display's exposure (instanced scenes).
-    fn set_exposure(&mut self, factor: f32) {
-        if let Backend::Instanced(r) = self {
-            r.set_exposure(factor);
         }
     }
 
@@ -519,6 +586,11 @@ impl Backend {
 struct App {
     gpu: Option<Gpu>,
     world: World,
+    scene: SceneChoice,
+    /// The glTF flags (`--no-ground`, `--emitters-as-lights`).
+    ground: bool,
+    emitters: bool,
+    settings: Settings,
     /// Animation time in 60 Hz frames.
     time: f32,
     paused: bool,
@@ -529,32 +601,49 @@ struct App {
     drag: Option<PhysicalPosition<f64>>,
     last: Instant,
     frame_times: Vec<f32>,
+    /// Frames per second and milliseconds a frame, over the last 30.
+    rate: (f32, f32),
     frames_left: Option<u32>,
     all_times: Vec<f32>,
+    /// Work to do, and whether a frame has shown that it is coming.
+    pending: Option<(Pending, bool)>,
+    /// The last problem or note, shown in the panel.
+    message: Option<String>,
+    show_panel: bool,
+    /// Boulders for the field's button.
+    boulders: usize,
+    /// The settings the renderer was built with.
+    built: (bool, bool, bool, u32),
+    /// `--screenshot`: the last frame's image, written as a PNG.
+    screenshot: Option<PathBuf>,
 }
 
 impl App {
-    fn init(event_loop: &ActiveEventLoop, world: &World) -> Gpu {
+    fn init(event_loop: &ActiveEventLoop, screenshot: bool) -> Gpu {
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Continuum")
+                        .with_title("Continuum Viewer")
                         .with_inner_size(LogicalSize::new(1280, 720)),
                 )
-                .expect("window"),
+                .expect("Could not open a window."),
         );
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance.create_surface(window.clone()).expect("surface");
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("Could not draw into the window.");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
-        .expect("adapter");
+        .expect(
+            "No suitable GPU found. Continuum needs a GPU with compute shaders; it is tested on Apple silicon Macs.",
+        );
         let (device, queue) =
             pollster::block_on(adapter.request_device(&continuum_gpu::device_descriptor(&adapter)))
-                .expect("device");
+                .expect("The GPU refused the features Continuum needs.");
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -564,7 +653,11 @@ impl App {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: if screenshot {
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            },
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -575,9 +668,44 @@ impl App {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
+        let ctx = egui::Context::default();
+        let state = egui_winit::State::new(
+            ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            Some(device.limits().max_texture_dimension_2d as usize),
+        );
+        let renderer =
+            egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
+        Gpu {
+            window,
+            surface,
+            config,
+            device,
+            queue,
+            adapter_name: adapter.get_info().name,
+            backend: None,
+            ui: Ui {
+                ctx,
+                state,
+                renderer,
+            },
+        }
+    }
 
-        let kernel =
-            MaskConeKernel::with_device(device.clone(), queue.clone(), adapter.get_info().name);
+    /// The renderer for `world` with `settings`, into the window's format
+    /// and size.
+    fn build(gpu: &Gpu, world: &mut World, settings: &Settings) -> Backend {
+        let kernel = MaskConeKernel::with_device(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            gpu.adapter_name.clone(),
+        );
+        let config = &gpu.config;
+        world.sky = settings.sky;
+        world.scale = settings.scale;
         if let Some(scene) = &world.instanced {
             let start = Instant::now();
             let options = RendererOptions {
@@ -589,11 +717,15 @@ impl App {
                 environment: world.environment.clone().filter(|_| world.cache),
                 movable: world.animated_instances(),
                 deforming: world.deforming_geometries(),
+                anti_aliasing: settings.anti_aliasing,
+                bounce: settings.bounce,
+                bloom: settings.bloom.then(continuum_gpu::Bloom::default),
+                tone_map: settings.tone_map,
                 ..Default::default()
             };
             let mut renderer = Renderer::new(
                 kernel,
-                format,
+                config.format,
                 (config.width, config.height),
                 &scene.scene,
                 scene.origin,
@@ -623,14 +755,7 @@ impl App {
                     "compute"
                 }
             );
-            return Gpu {
-                window,
-                surface,
-                config,
-                device,
-                queue,
-                backend: Backend::Instanced(Box::new(renderer)),
-            };
+            return Backend::Instanced(Box::new(renderer));
         }
         let meshes: Vec<_> = world.surfaces.iter().map(|s| s.triangles.clone()).collect();
         let first_mover = world.first_mover;
@@ -640,7 +765,7 @@ impl App {
         let start = Instant::now();
         let renderer = LiveRenderer::new(
             &kernel,
-            format,
+            config.format,
             config.width,
             config.height,
             world.light,
@@ -661,14 +786,173 @@ impl App {
             config.width,
             config.height
         );
-        Gpu {
-            window,
-            surface,
-            config,
-            device,
-            queue,
-            backend: Backend::Live(Box::new(renderer)),
+        Backend::Live(Box::new(renderer))
+    }
+
+    /// Does the pending work, if a frame has already shown it coming.
+    fn do_pending(&mut self) {
+        let Some((work, shown)) = self.pending.take() else {
+            return;
+        };
+        if !shown {
+            self.pending = Some((work, true));
+            return;
         }
+        let Some(gpu) = &mut self.gpu else { return };
+        match work {
+            Pending::Load(choice) => match choice.load(self.ground, self.emitters) {
+                Ok(world) => {
+                    // Free the old scene's GPU memory before the new one's.
+                    gpu.backend = None;
+                    self.world = world;
+                    self.world.exposure = 1.0;
+                    self.scene = choice;
+                    self.camera = FlyCamera::looking_at(self.world.start.0, self.world.start.1);
+                    self.time = 0.0;
+                    self.path = None;
+                    gpu.backend = Some(Self::build(gpu, &mut self.world, &self.settings));
+                    self.built = self.settings.build_key();
+                    self.message = None;
+                    gpu.window
+                        .set_title(&format!("Continuum Viewer — {}", self.scene.describe()));
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    self.message = Some(e);
+                }
+            },
+            Pending::Rebuild => {
+                gpu.backend = None;
+                gpu.backend = Some(Self::build(gpu, &mut self.world, &self.settings));
+                self.built = self.settings.build_key();
+            }
+        }
+        self.frame_times.clear();
+    }
+
+    /// The panel; returns what to do (work for the next frames).
+    fn panel(&mut self, ctx: &egui::Context) -> Option<Pending> {
+        let mut work = None;
+        let gpu = self.gpu.as_ref().expect("the window");
+        let instanced = self.world.instanced.is_some();
+        let settled = match &gpu.backend {
+            Some(Backend::Instanced(r)) => Some(r.is_settled(32)),
+            _ => None,
+        };
+        let gpu_mb = match &gpu.backend {
+            Some(Backend::Instanced(r)) => Some(r.gpu_bytes() as f64 / 1e6),
+            _ => None,
+        };
+        let loading = self.pending.is_some();
+        egui::Window::new("Continuum")
+            .default_pos([12.0, 12.0])
+            .resizable(false)
+            .collapsible(true)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(self.scene.describe()).strong());
+                ui.label(format!(
+                    "{:.0} fps ({:.1} ms) at {}×{}",
+                    self.rate.0, self.rate.1, gpu.config.width, gpu.config.height
+                ));
+                ui.small(match gpu_mb {
+                    Some(mb) => format!("{} · {mb:.0} MB on the GPU", gpu.adapter_name),
+                    None => gpu.adapter_name.clone(),
+                });
+                if let Some(done) = settled {
+                    ui.small(if done {
+                        "Lighting settled"
+                    } else {
+                        "Lighting settling…"
+                    });
+                }
+                if loading {
+                    ui.colored_label(egui::Color32::YELLOW, "Loading…");
+                }
+                if let Some(m) = &self.message {
+                    ui.colored_label(egui::Color32::from_rgb(255, 120, 100), m);
+                }
+                ui.separator();
+                ui.label("Scene");
+                ui.horizontal(|ui| {
+                    if ui.button("Showcase").clicked() {
+                        work = Some(Pending::Load(SceneChoice::Showcase));
+                    }
+                    if ui.button("Boulder field").clicked() {
+                        work = Some(Pending::Load(SceneChoice::Field(self.boulders)));
+                    }
+                    egui::ComboBox::from_id_salt("boulders")
+                        .selected_text(thousands(self.boulders))
+                        .show_ui(ui, |ui| {
+                            for n in [10_000, 100_000, 1_000_000] {
+                                ui.selectable_value(&mut self.boulders, n, thousands(n));
+                            }
+                        });
+                });
+                if ui.button("Open a glTF file…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("glTF", &["glb", "gltf"])
+                        .pick_file()
+                {
+                    work = Some(Pending::Load(SceneChoice::Gltf(path)));
+                }
+                ui.small("…or drop a .glb or .gltf file on the window.");
+                ui.separator();
+                egui::CollapsingHeader::new("Rendering")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if !instanced {
+                            ui.small("These apply to the boulder field and glTF scenes.");
+                        }
+                        ui.add_enabled_ui(instanced, |ui| {
+                            let s = &mut self.settings;
+                            ui.checkbox(&mut s.bounce, "Bounce light");
+                            ui.checkbox(&mut s.anti_aliasing, "Anti-aliasing");
+                            ui.checkbox(&mut s.sky, "Sky");
+                            egui::ComboBox::from_label("Render scale")
+                                .selected_text(format!("1/{}", s.scale))
+                                .show_ui(ui, |ui| {
+                                    for k in 1..=4 {
+                                        ui.selectable_value(&mut s.scale, k, format!("1/{k}"));
+                                    }
+                                });
+                            let name = |t: continuum_gpu::ToneMap| match t {
+                                continuum_gpu::ToneMap::PbrNeutral => "PBR Neutral",
+                                continuum_gpu::ToneMap::Agx => "AgX",
+                                continuum_gpu::ToneMap::Reinhard => "Reinhard",
+                            };
+                            egui::ComboBox::from_label("Tone map")
+                                .selected_text(name(s.tone_map))
+                                .show_ui(ui, |ui| {
+                                    for t in [
+                                        continuum_gpu::ToneMap::PbrNeutral,
+                                        continuum_gpu::ToneMap::Agx,
+                                        continuum_gpu::ToneMap::Reinhard,
+                                    ] {
+                                        ui.selectable_value(&mut s.tone_map, t, name(t));
+                                    }
+                                });
+                            ui.checkbox(&mut s.bloom, "Bloom");
+                            let mut stops = self.world.exposure.log2();
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut stops, -6.0..=6.0)
+                                        .text("Exposure (stops)"),
+                                )
+                                .changed()
+                            {
+                                self.world.exposure = stops.exp2();
+                            }
+                        });
+                        ui.checkbox(&mut self.settings.vsync, "Vsync");
+                    });
+                egui::CollapsingHeader::new("Controls").show(ui, |ui| {
+                    ui.small("W A S D: move · Q / E: down, up · Shift: faster");
+                    ui.small("Drag: look around");
+                    ui.small("P: pause animations · C: camera path (showcase)");
+                    ui.small("[ and ]: exposure · V: vsync · H: hide this panel · Esc: quit");
+                });
+            });
+        work
     }
 
     fn update(&mut self, dt: f32) {
@@ -710,7 +994,11 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_none() {
-            let gpu = Self::init(event_loop, &self.world);
+            let mut gpu = Self::init(event_loop, self.screenshot.is_some());
+            gpu.backend = Some(Self::build(&gpu, &mut self.world, &self.settings));
+            self.built = self.settings.build_key();
+            gpu.window
+                .set_title(&format!("Continuum Viewer — {}", self.scene.describe()));
             gpu.window.request_redraw();
             self.gpu = Some(gpu);
             self.last = Instant::now();
@@ -718,8 +1006,20 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        // The panel first: what it takes, the camera does not.
+        let mut consumed = false;
+        if let Some(gpu) = &mut self.gpu {
+            consumed = gpu.ui.state.on_window_event(&gpu.window, &event).consumed;
+        }
+        let typing = self
+            .gpu
+            .as_ref()
+            .is_some_and(|g| g.ui.ctx.egui_wants_keyboard_input());
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::DroppedFile(path) => {
+                self.pending = Some((Pending::Load(SceneChoice::Gltf(path)), false));
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu
                     && size.width > 0
@@ -727,7 +1027,9 @@ impl ApplicationHandler for App {
                 {
                     (gpu.config.width, gpu.config.height) = (size.width, size.height);
                     gpu.surface.configure(&gpu.device, &gpu.config);
-                    gpu.backend.resize(size.width, size.height);
+                    if let Some(b) = &mut gpu.backend {
+                        b.resize(size.width, size.height);
+                    }
                 }
             }
             WindowEvent::KeyboardInput {
@@ -740,9 +1042,12 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => match state {
-                ElementState::Pressed => {
+                ElementState::Pressed if !typing => {
                     if code == KeyCode::Escape {
                         event_loop.exit();
+                    }
+                    if code == KeyCode::KeyH && !repeat {
+                        self.show_panel = !self.show_panel;
                     }
                     if code == KeyCode::KeyP && !repeat {
                         self.paused = !self.paused;
@@ -754,29 +1059,17 @@ impl ApplicationHandler for App {
                         };
                     }
                     // Exposure, a stop at a time (instanced scenes).
-                    let stop = match code {
-                        KeyCode::BracketRight => Some(2.0),
-                        KeyCode::BracketLeft => Some(0.5),
-                        _ => None,
-                    };
-                    if let Some(f) = stop
-                        && let Some(gpu) = &mut self.gpu
-                    {
-                        self.world.exposure *= f;
-                        gpu.backend.set_exposure(self.world.exposure);
+                    match code {
+                        KeyCode::BracketRight => self.world.exposure *= 2.0,
+                        KeyCode::BracketLeft => self.world.exposure *= 0.5,
+                        _ => {}
                     }
-                    if code == KeyCode::KeyV
-                        && !repeat
-                        && let Some(gpu) = &mut self.gpu
-                    {
-                        gpu.config.present_mode = match gpu.config.present_mode {
-                            wgpu::PresentMode::AutoNoVsync => wgpu::PresentMode::AutoVsync,
-                            _ => wgpu::PresentMode::AutoNoVsync,
-                        };
-                        gpu.surface.configure(&gpu.device, &gpu.config);
+                    if code == KeyCode::KeyV && !repeat {
+                        self.settings.vsync = !self.settings.vsync;
                     }
                     self.keys.insert(code);
                 }
+                ElementState::Pressed => {}
                 ElementState::Released => {
                     self.keys.remove(&code);
                 }
@@ -788,7 +1081,7 @@ impl ApplicationHandler for App {
             } => {
                 if state == ElementState::Released {
                     self.drag = None;
-                } else {
+                } else if !consumed {
                     self.drag = Some(PhysicalPosition::new(f64::NAN, f64::NAN));
                 }
             }
@@ -803,83 +1096,259 @@ impl ApplicationHandler for App {
                     self.drag = Some(position);
                 }
             }
-            WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let dt = (now - self.last).as_secs_f32();
-                self.last = now;
-                self.update(dt.min(0.1));
-                let moved = self.world.movers(self.time);
-                let changes: Vec<_> = moved.iter().map(|(m, s)| (*m, s)).collect();
-                let (poses, shapes) = if self.paused {
-                    (Vec::new(), Vec::new())
-                } else {
-                    (
-                        self.world.animation_pose(self.time),
-                        self.world.deforming_poses(self.time),
-                    )
-                };
-                let fov = self.world.fov;
-                let Some(gpu) = &mut self.gpu else { return };
-                gpu.backend.update_surfaces(&changes);
-                gpu.backend.set_transforms(&poses);
-                gpu.backend.set_vertices(shapes);
-                let texture = match gpu.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(t)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-                    _ => {
-                        gpu.surface.configure(&gpu.device, &gpu.config);
-                        gpu.window.request_redraw();
-                        return;
-                    }
-                };
-                let view = texture.texture.create_view(&Default::default());
-                gpu.backend.frame(self.camera.camera(fov), &view);
-                gpu.queue.present(texture);
-
-                self.frame_times.push(dt * 1000.0);
-                self.all_times.push(dt * 1000.0);
-                if self.frame_times.len() == 30 {
-                    let avg = self.frame_times.iter().sum::<f32>() / 30.0;
-                    let vsync = if gpu.config.present_mode == wgpu::PresentMode::AutoVsync {
-                        "on"
-                    } else {
-                        "off"
-                    };
-                    gpu.window.set_title(&format!(
-                        "Continuum ({}) — {:.0} fps ({avg:.1} ms) at {}×{} — vsync {vsync} — WASD/QE move, drag to look, C camera path, P pause, V vsync",
-                        self.world.name,
-                        1000.0 / avg,
-                        gpu.config.width,
-                        gpu.config.height
-                    ));
-                    self.frame_times.clear();
-                }
-                if let Some(left) = &mut self.frames_left {
-                    *left = left.saturating_sub(1);
-                    // Exercise a moving camera: the path if there is one.
-                    if self.world.showcase.is_none() {
-                        self.camera.yaw += 0.01;
-                    }
-                    if *left == 0 {
-                        let times = &self.all_times[self.all_times.len().min(10)..];
-                        let mut sorted = times.to_vec();
-                        sorted.sort_by(f32::total_cmp);
-                        println!(
-                            "{} frames at {}×{}: median {:.2} ms, worst {:.2} ms (first 10 frames skipped).",
-                            times.len(),
-                            gpu.config.width,
-                            gpu.config.height,
-                            sorted[sorted.len() / 2],
-                            sorted[sorted.len() - 1]
-                        );
-                        event_loop.exit();
-                        return;
-                    }
-                }
-                gpu.window.request_redraw();
-            }
+            WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
         }
+    }
+}
+
+impl App {
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        // `VIEWER_SELFTEST=1` (development, with `--frames`): what the panel's
+        // clicks do, scripted: load the field, turn bounce light off (a
+        // rebuild), then a missing file (an error in the panel).
+        if std::env::var_os("VIEWER_SELFTEST").is_some() {
+            match self.all_times.len() {
+                60 => self.pending = Some((Pending::Load(SceneChoice::Field(10_000)), false)),
+                150 => self.settings.bounce = false,
+                240 => {
+                    let missing = PathBuf::from("/nonexistent/scene.glb");
+                    self.pending = Some((Pending::Load(SceneChoice::Gltf(missing)), false));
+                }
+                _ => {}
+            }
+        }
+        self.do_pending();
+        let now = Instant::now();
+        let dt = (now - self.last).as_secs_f32();
+        self.last = now;
+        self.update(dt.min(0.1));
+        let moved = self.world.movers(self.time);
+        let changes: Vec<_> = moved.iter().map(|(m, s)| (*m, s)).collect();
+        let (poses, shapes) = if self.paused {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                self.world.animation_pose(self.time),
+                self.world.deforming_poses(self.time),
+            )
+        };
+        let fov = self.world.fov;
+        let camera = self.camera.camera(fov);
+        // The panel's frame, before the scene's: its changes apply now.
+        let Some(gpu) = &mut self.gpu else { return };
+        let raw = gpu.ui.state.take_egui_input(&gpu.window);
+        let ctx = gpu.ui.ctx.clone();
+        let mut work = None;
+        let show = self.show_panel;
+        let output = ctx.run_pass(raw, |ctx| {
+            if show {
+                work = self.panel(ctx);
+            }
+        });
+        let Some(gpu) = &mut self.gpu else { return };
+        // The panel's textures (its font first) now, so a frame skipped
+        // below loses none.
+        for (id, deltas) in &output.textures_delta.set {
+            for delta in deltas {
+                gpu.ui
+                    .renderer
+                    .update_texture(&gpu.device, &gpu.queue, *id, delta);
+            }
+        }
+        gpu.ui
+            .state
+            .handle_platform_output(&gpu.window, output.platform_output);
+        if let Some(w) = work {
+            self.pending = Some((w, false));
+        }
+        // Settings that need a new renderer (instanced scenes).
+        if self.pending.is_none()
+            && self.world.instanced.is_some()
+            && self.settings.build_key() != self.built
+        {
+            self.pending = Some((Pending::Rebuild, false));
+        }
+        // Settings that apply at once.
+        let present = if self.settings.vsync {
+            wgpu::PresentMode::AutoVsync
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        if gpu.config.present_mode != present {
+            gpu.config.present_mode = present;
+            gpu.surface.configure(&gpu.device, &gpu.config);
+        }
+        if let Some(Backend::Instanced(r)) = &mut gpu.backend {
+            r.set_exposure(self.world.exposure);
+            r.set_tone_map(self.settings.tone_map);
+            r.set_bloom(self.settings.bloom.then(continuum_gpu::Bloom::default));
+        }
+        if let Some(b) = &mut gpu.backend {
+            b.update_surfaces(&changes);
+            b.set_transforms(&poses);
+            b.set_vertices(shapes);
+        }
+        let texture = match gpu.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => {
+                gpu.surface.configure(&gpu.device, &gpu.config);
+                gpu.window.request_redraw();
+                return;
+            }
+        };
+        let view = texture.texture.create_view(&Default::default());
+        if let Some(b) = &mut gpu.backend {
+            b.frame(camera, &view);
+        }
+        // The panel over the scene.
+        let jobs = gpu
+            .ui
+            .ctx
+            .tessellate(output.shapes, output.pixels_per_point);
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [gpu.config.width, gpu.config.height],
+            pixels_per_point: output.pixels_per_point,
+        };
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let mut buffers =
+            gpu.ui
+                .renderer
+                .update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen);
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("panel"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            gpu.ui
+                .renderer
+                .render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        let last_frame = self.frames_left == Some(1);
+        let shot = match (&self.screenshot, last_frame) {
+            (Some(_), true) => Some(capture(&gpu.device, &mut encoder, &texture.texture)),
+            _ => None,
+        };
+        buffers.push(encoder.finish());
+        gpu.queue.submit(buffers);
+        for id in &output.textures_delta.free {
+            gpu.ui.renderer.free_texture(id);
+        }
+        if let (Some(path), Some(shot)) = (&self.screenshot, shot) {
+            save_capture(&gpu.device, shot, gpu.config.format, path);
+        }
+        gpu.queue.present(texture);
+
+        self.frame_times.push(dt * 1000.0);
+        self.all_times.push(dt * 1000.0);
+        if self.frame_times.len() == 30 {
+            let avg = self.frame_times.iter().sum::<f32>() / 30.0;
+            self.rate = (1000.0 / avg, avg);
+            self.frame_times.clear();
+        }
+        if let Some(left) = &mut self.frames_left {
+            *left = left.saturating_sub(1);
+            // Exercise a moving camera (the path if there is one), but not
+            // for a screenshot.
+            if self.world.showcase.is_none() && self.screenshot.is_none() {
+                self.camera.yaw += 0.01;
+            }
+            if *left == 0 {
+                let times = &self.all_times[self.all_times.len().min(10)..];
+                let mut sorted = times.to_vec();
+                sorted.sort_by(f32::total_cmp);
+                println!(
+                    "{} frames at {}×{}: median {:.2} ms, worst {:.2} ms (first 10 frames skipped).",
+                    times.len(),
+                    gpu.config.width,
+                    gpu.config.height,
+                    sorted[sorted.len() / 2],
+                    sorted[sorted.len() - 1]
+                );
+                event_loop.exit();
+                return;
+            }
+        }
+        gpu.window.request_redraw();
+    }
+}
+
+/// A frame's image being copied out (`--screenshot`): the buffer and the
+/// texture's size and padded row length.
+struct Capture {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    row: u32,
+}
+
+fn capture(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    texture: &wgpu::Texture,
+) -> Capture {
+    let (width, height) = (texture.width(), texture.height());
+    let row = (width * 4).div_ceil(256) * 256;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("screenshot"),
+        size: (row * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(height),
+            },
+        },
+        texture.size(),
+    );
+    Capture {
+        buffer,
+        width,
+        height,
+        row,
+    }
+}
+
+fn save_capture(device: &wgpu::Device, c: Capture, format: wgpu::TextureFormat, path: &Path) {
+    let slice = c.buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| ());
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the GPU");
+    let data = slice
+        .get_mapped_range()
+        .expect("the screenshot's buffer, mapped");
+    let bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    let mut image = flatland::img::Image::new(c.width as usize, c.height as usize, [0; 3]);
+    for y in 0..c.height as usize {
+        for x in 0..c.width as usize {
+            let i = y * c.row as usize + 4 * x;
+            let p = [data[i], data[i + 1], data[i + 2]];
+            image.set(x, y, if bgra { [p[2], p[1], p[0]] } else { p });
+        }
+    }
+    match image.save(path) {
+        Ok(()) => println!("Saved {}.", path.display()),
+        Err(e) => eprintln!("Could not save {}: {e}", path.display()),
     }
 }
 
@@ -947,30 +1416,55 @@ fn load_environment(world: &World, spec: &str, strength: f32) -> Environment {
 }
 
 fn main() {
+    // Problems in a window as well as on the terminal: launched from the
+    // Finder there is no terminal.
+    std::panic::set_hook(Box::new(|info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "Continuum Viewer stopped.".into());
+        eprintln!(
+            "{message} ({})",
+            info.location().map_or(String::new(), |l| l.to_string())
+        );
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Continuum Viewer")
+            .set_description(&message)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }));
     let arg = |name: &str| std::env::args().skip_while(|a| a != name).nth(1);
+    let has = |name: &str| std::env::args().any(|a| a == name);
     let frames_left: Option<u32> = arg("--frames").and_then(|n| n.parse().ok());
-    let world = match (arg("--gltf"), arg("--scene").as_deref()) {
-        (Some(path), _) => World::gltf(
-            Path::new(&path),
-            !std::env::args().any(|a| a == "--no-ground"),
-            std::env::args().any(|a| a == "--emitters-as-lights"),
-        ),
-        (None, None | Some("showcase")) => World::showcase(),
-        (None, Some("room")) => World::room(),
-        (None, Some("field")) => World::field(
-            arg("--boulders")
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(1_000_000),
-        ),
+    let boulders = arg("--boulders")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1_000_000);
+    // A file path alone (as an app opening a document) shows that file.
+    let lone = std::env::args()
+        .skip(1)
+        .find(|a| a.ends_with(".glb") || a.ends_with(".gltf"));
+    let scene = match (arg("--gltf").or(lone), arg("--scene").as_deref()) {
+        (Some(path), _) => SceneChoice::Gltf(PathBuf::from(path)),
+        (None, None | Some("showcase")) => SceneChoice::Showcase,
+        (None, Some("room")) => SceneChoice::Room,
+        (None, Some("field")) => SceneChoice::Field(boulders),
         (None, Some(other)) => {
             eprintln!("Unknown scene {other:?}: use showcase, room or field, or --gltf <file>.");
             std::process::exit(2);
         }
     };
-    let mut world = world;
-    world.scale = arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1);
-    world.cache = !std::env::args().any(|a| a == "--no-cache");
-    world.sky = std::env::args().any(|a| a == "--sky");
+    let (ground, emitters) = (!has("--no-ground"), has("--emitters-as-lights"));
+    let (scene, mut world, message) = match scene.load(ground, emitters) {
+        Ok(world) => (scene, world, None),
+        Err(e) => {
+            eprintln!("{e}");
+            (SceneChoice::Showcase, World::showcase(), Some(e))
+        }
+    };
+    world.cache = !has("--no-cache");
     world.exposure = arg("--exposure")
         .and_then(|k| k.parse().ok())
         .unwrap_or(1.0);
@@ -980,6 +1474,16 @@ fn main() {
             .unwrap_or(1.0);
         world.environment = Some(load_environment(&world, &spec, strength));
     }
+    let settings = Settings {
+        bounce: !has("--no-bounce"),
+        anti_aliasing: !has("--no-aa"),
+        sky: has("--sky"),
+        scale: arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1),
+        bloom: true,
+        tone_map: continuum_gpu::ToneMap::PbrNeutral,
+        vsync: has("--vsync"),
+    };
+    world.sky = settings.sky;
     if let Some(a) = &world.animations {
         let moving = world.animated_instances().len();
         let deforming = world.deforming_geometries().len();
@@ -1010,6 +1514,10 @@ fn main() {
     let mut app = App {
         gpu: None,
         world,
+        scene,
+        ground,
+        emitters,
+        settings,
         time: 0.0,
         paused: false,
         path,
@@ -1018,8 +1526,15 @@ fn main() {
         drag: None,
         last: Instant::now(),
         frame_times: Vec::new(),
+        rate: (0.0, 0.0),
         frames_left,
         all_times: Vec::new(),
+        pending: None,
+        message,
+        show_panel: !has("--no-panel"),
+        boulders,
+        built: settings.build_key(),
+        screenshot: arg("--screenshot").map(PathBuf::from),
     };
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.run_app(&mut app).expect("event loop");
