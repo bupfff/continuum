@@ -1449,6 +1449,22 @@ gate 2's rehearsal mode):**
   direct-light cost (14 ms of a 20 ms frame here), which every renderer
   pays.
 
+**Bounce light with moving lights, tried (2026-11-20, development, not
+kept).** With the refusal removed, while a light moves every page with
+bounce samples re-baked them in turn within `bounce_share` (pages pixels
+read most recently first), and once more after it stopped. On the
+textured scene, sun only, its sun swinging 0.1° a frame for 60 frames at
+640×360 with a fixed budget: the image 0.065% from its bounce re-baked in
+place (9.4% without the sweeps), settled after stopping with 0.47% of
+pages over ε (largest change 10.5% of the largest value), moving frames
+23.0 ms against 23.2 ms with bounce light off. **But the moving light's
+direct light breaks with bounce light on**, sweeps or not: the ledger's
+own check finds 340–478 pages beyond their certified bound (changes up to
+1.0), and its texel re-bakes fall from about 40,000 a frame to 10,600
+without sweeps. With bounce light off: none. That is why it was refused;
+the cause (how bounce light's pages or passes interfere with the moving
+lights' ledger) comes first.
+
 #### Bounce light that settles (M22 gate 3 design, 2026-11-20)
 
 Item 5's "quicker to settle": a settled still scene's bounce light was not
@@ -1950,7 +1966,8 @@ conversation or after a compaction; history lives in git and
   through the ledger, but its gate (G2) is parked: cost and quality sit on
   its bars at ε 1% (§3.4 "Development for gate 2", levers listed).
 - **Next:** (1) the rest of item 5: bounce light with moving lights
-  (refused now), emissive surfaces as lights (M10 G23), receivers next to
+  (refused now: with it on, the moving lights' direct-light ledger breaks;
+  find why first, §3.4 "Bounce light with moving lights, tried"), emissive surfaces as lights (M10 G23), receivers next to
   large lights (M5 G14; rays for wide windows tried and set aside,
   `wide_rays` off: §8 "Wide light cones" says what to find first). (2) Settling
   with bounce is 2.3–3× the frames without (its own work under the time
