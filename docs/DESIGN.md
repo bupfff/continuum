@@ -1975,6 +1975,11 @@ conversation or after a compaction; history lives in git and
   sky re-bakes), the movers' own direct light (14 ms of a 20 ms frame in
   M22's flights), deforming 1.6–1.95× (M12 G2), solid glass 1.378× (M16
   G3).
+- **Easy to try (the user, 2026-11-21; done):** v0.3.0 is released with a
+  macOS download (Apple silicon), the viewer has a panel (scenes, Open /
+  drag and drop, settings, frame rate, lighting settled), and the README
+  opens with "Is it right for you?" and a quick start. The user is
+  seeking funds for the NVIDIA test (item 6).
 - **Pitfalls:** compare renderers at a fixed bake budget
   (`frame_target_ms` 0) and wait for every renderer's frame before timing
   the next (M22 G1); this device's GPU timestamps arrive out of order, so
