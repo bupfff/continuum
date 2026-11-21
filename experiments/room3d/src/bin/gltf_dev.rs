@@ -400,7 +400,9 @@ fn main() {
         assert!(status.success(), "Blender failed");
         let bytes = std::fs::read(&raw).expect("the reference");
         let reference: Vec<[f32; 3]> = bytes
-            .chunks_exact(12)
+            .as_chunks::<12>()
+            .0
+            .iter()
             .map(|c| {
                 std::array::from_fn(|k| f32::from_le_bytes(c[4 * k..4 * k + 4].try_into().unwrap()))
             })
