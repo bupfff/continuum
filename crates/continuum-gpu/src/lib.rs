@@ -93,9 +93,10 @@ pub struct MaskConeKernel {
     /// The environment's radiance as nine spherical harmonics coefficients,
     /// if set (M5 gate 11).
     environment: std::cell::Cell<Option<[[f32; 4]; 9]>>,
-    /// The environment's image for what rays see of it (M5 gate 12): sRGB
-    /// over its peak radiance, and that peak.
-    environment_image: std::cell::RefCell<Option<(Texture, f32)>>,
+    /// The environment's image for what rays see of it (M5 gate 12): its
+    /// RGBM mip levels at `TEXTURE_SIZE` over its peak radiance, and that
+    /// peak.
+    environment_image: std::cell::RefCell<Option<(Vec<Vec<u8>>, f32)>>,
     pixel_cones: std::cell::Cell<bool>,
     prefilter: std::cell::Cell<f32>,
     sky: std::cell::Cell<Vec3>,
@@ -212,17 +213,49 @@ impl Environment {
         Environment { width, height, rgb }
     }
 
-    /// Its image over its peak radiance as sRGB bytes, and the peak (for
-    /// what rays see of it: limited dynamic range; M5 gate 12).
-    fn texture(&self) -> (Texture, f32) {
+    /// Its image resampled to `size` × `size` (area-averaged) with mip
+    /// levels averaged from radiance, each encoded RGBM over its peak
+    /// radiance (sRGB colour times the alpha byte times the peak), and that
+    /// peak: what rays see of it. (Plain sRGB over the peak, before, lost
+    /// everything but the sun of an outdoor HDRI and banded a studio's.)
+    fn rgbm_levels(&self, size: u32) -> (Vec<Vec<u8>>, f32) {
         let peak = self
             .rgb
             .iter()
             .flat_map(|p| p.iter().copied())
             .fold(0.0f32, f32::max)
             .max(1e-12);
-        let encode = |c: f32| {
-            let c = (c / peak).clamp(0.0, 1.0);
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        let at = |x: i64, y: i64| {
+            let x = x.rem_euclid(w as i64) as u32;
+            let y = y.clamp(0, h as i64 - 1) as u32;
+            Vec3::from_array(self.rgb[(y * w + x) as usize])
+        };
+        let bilinear = |u: f32, v: f32| {
+            let (x, y) = (u * w as f32 - 0.5, v * h as f32 - 0.5);
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            (at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx) * (1.0 - fy)
+                + (at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx) * fy
+        };
+        let (kx, ky) = (w.div_ceil(size).max(1), h.div_ceil(size).max(1));
+        let mut level: Vec<Vec3> = (0..size * size)
+            .map(|i| {
+                let (x, y) = ((i % size) as f32, (i / size) as f32);
+                let mut sum = Vec3::ZERO;
+                for sy in 0..ky {
+                    for sx in 0..kx {
+                        let u = (x + (sx as f32 + 0.5) / kx as f32) / size as f32;
+                        let v = (y + (sy as f32 + 0.5) / ky as f32) / size as f32;
+                        sum += bilinear(u, v);
+                    }
+                }
+                sum / (kx * ky) as f32
+            })
+            .collect();
+        let srgb = |c: f32| {
+            let c = c.clamp(0.0, 1.0);
             let s = if c <= 0.003_130_8 {
                 12.92 * c
             } else {
@@ -230,19 +263,140 @@ impl Environment {
             };
             (s * 255.0).round() as u8
         };
-        let rgba = self
+        let encode = |level: &[Vec3]| -> Vec<u8> {
+            level
+                .iter()
+                .flat_map(|c| {
+                    let m = (c.max_element() / peak).clamp(0.0, 1.0);
+                    let a = (m * 255.0).ceil().max(1.0) / 255.0;
+                    let k = 1.0 / (a * peak);
+                    [
+                        srgb(c.x * k),
+                        srgb(c.y * k),
+                        srgb(c.z * k),
+                        (a * 255.0).round() as u8,
+                    ]
+                })
+                .collect()
+        };
+        let mut levels = vec![encode(&level)];
+        let mut side = size;
+        while side > 1 {
+            let next = side / 2;
+            level = (0..next * next)
+                .map(|i| {
+                    let (x, y) = (2 * (i % next), 2 * (i / next));
+                    (level[(y * side + x) as usize]
+                        + level[(y * side + x + 1) as usize]
+                        + level[((y + 1) * side + x) as usize]
+                        + level[((y + 1) * side + x + 1) as usize])
+                        * 0.25
+                })
+                .collect();
+            side = next;
+            levels.push(encode(&level));
+        }
+        (levels, peak)
+    }
+
+    /// Takes an outdoor environment's sun out of its image: the pixels
+    /// joined to the brightest one that reach 5% of its radiance, if they
+    /// span at most 0.005 sr (a cap about 2.3° across) and hold at least a
+    /// fifth of the image's light (`∫ L dω` over the sphere). They are
+    /// filled with the mean of the pixels around them. Returns the unit
+    /// direction toward the sun (z up) and its irradiance on a surface
+    /// facing it (`∫ L dω` over those pixels), for a sun light
+    /// ([`Light::sun`]) whose shadows the renderer computes exactly
+    /// (spherical harmonics, the environment's diffuse light, would smear
+    /// it over the sky). None for a studio's or overcast sky.
+    pub fn take_sun(&mut self) -> Option<(Vec3, Vec3)> {
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        if self.rgb.len() < (w * h) as usize {
+            return None;
+        }
+        let luminance = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let cell = std::f32::consts::TAU / w as f32 * std::f32::consts::PI / h as f32;
+        let solid = |y: u32| {
+            let e = (0.5 - (y as f32 + 0.5) / h as f32) * std::f32::consts::PI;
+            cell * e.cos()
+        };
+        let (peak_at, peak) = self
             .rgb
             .iter()
-            .flat_map(|p| [encode(p[0]), encode(p[1]), encode(p[2]), 255])
-            .collect();
-        (
-            Texture {
-                width: self.width,
-                height: self.height,
-                rgba,
-            },
-            peak,
-        )
+            .enumerate()
+            .map(|(i, &c)| (i, luminance(c)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        if peak <= 0.0 {
+            return None;
+        }
+        let total: f32 = (0..w * h)
+            .map(|i| luminance(self.rgb[i as usize]) * solid(i / w))
+            .sum();
+        // The region: flood fill from the peak over pixels above 5% of it.
+        let threshold = 0.05 * peak;
+        let mut inside = vec![false; (w * h) as usize];
+        let mut stack = vec![peak_at as u32];
+        inside[peak_at] = true;
+        let mut region = Vec::new();
+        let neighbours = |i: u32| {
+            let (x, y) = (i % w, i / w);
+            let mut n = vec![((x + 1) % w) + y * w, ((x + w - 1) % w) + y * w];
+            if y > 0 {
+                n.push(i - w);
+            }
+            if y + 1 < h {
+                n.push(i + w);
+            }
+            n
+        };
+        while let Some(i) = stack.pop() {
+            region.push(i);
+            if region.len() > 4096 {
+                return None;
+            }
+            for n in neighbours(i) {
+                if !inside[n as usize] && luminance(self.rgb[n as usize]) >= threshold {
+                    inside[n as usize] = true;
+                    stack.push(n);
+                }
+            }
+        }
+        let area: f32 = region.iter().map(|&i| solid(i / w)).sum();
+        let mut irradiance = Vec3::ZERO;
+        let mut toward = Vec3::ZERO;
+        for &i in &region {
+            let c = Vec3::from_array(self.rgb[i as usize]) * solid(i / w);
+            irradiance += c;
+            toward += Self::direction(w, h, i % w, i / w) * luminance(c.to_array());
+        }
+        let share = (0.2126 * irradiance.x + 0.7152 * irradiance.y + 0.0722 * irradiance.z)
+            / total.max(1e-12);
+        if area > 0.005 || share < 0.2 || toward.length_squared() == 0.0 {
+            return None;
+        }
+        // Fill it with the mean of the pixels bordering it.
+        let mut ring = Vec3::ZERO;
+        let mut count = 0.0;
+        for &i in &region {
+            for n in neighbours(i) {
+                if !inside[n as usize] {
+                    ring += Vec3::from_array(self.rgb[n as usize]);
+                    count += 1.0;
+                }
+            }
+        }
+        let fill = if count > 0.0 {
+            ring / count
+        } else {
+            Vec3::ZERO
+        };
+        // Its own light, less what the fill leaves in its place.
+        let mut left = Vec3::ZERO;
+        for &i in &region {
+            left += fill * solid(i / w);
+            self.rgb[i as usize] = fill.to_array();
+        }
+        Some((toward.normalize(), (irradiance - left).max(Vec3::ZERO)))
     }
 
     /// The unit direction through pixel `(x, y)`'s centre.
@@ -1090,8 +1244,8 @@ impl MaskConeKernel {
                 "                    share = vc_bilinear(f.slot, f.r, l);\n                    if (l == 0u) { g12_share0 = share; }\n",
             ),
             (
-                "            e += sky_scale(normal) * vc_bilinear(f.slot, f.r, count);\n",
-                "            g12_sky_value = vc_bilinear(f.slot, f.r, count);\n            e += sky_scale(normal) * g12_sky_value;\n",
+                "            sky = sky_scale(normal) * vc_bilinear(f.slot, f.r, count);\n",
+                "            g12_sky_value = vc_bilinear(f.slot, f.r, count);\n            sky = sky_scale(normal) * g12_sky_value;\n",
             ),
         ] {
             assert!(kernel.contains(from), "{from} not found");
@@ -1291,7 +1445,7 @@ impl MaskConeKernel {
                 let (sh, mean) = e.sh9();
                 self.environment.set(Some(sh));
                 self.set_sky(mean);
-                *self.environment_image.borrow_mut() = Some(e.texture());
+                *self.environment_image.borrow_mut() = Some(e.rgbm_levels(TEXTURE_SIZE));
             }
             None => {
                 self.environment.set(None);
@@ -1305,8 +1459,13 @@ impl MaskConeKernel {
     pub(crate) fn textures_with_environment(&self, textures: &[Texture]) -> (Vec<Texture>, u32) {
         let mut all = textures.to_vec();
         match &*self.environment_image.borrow() {
-            Some((t, _)) => {
-                all.push(t.clone());
+            Some(_) => {
+                // A stand-in: `layered` writes the environment's own levels.
+                all.push(Texture {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4],
+                });
                 (all, textures.len() as u32)
             }
             None => (all, hierarchy::NONE),
@@ -2513,12 +2672,23 @@ impl MaskConeKernel {
         textures: &[Texture],
         normal_maps: &[u32],
     ) -> SceneTextures {
-        let (view, sampler) = self.layered(textures, false);
+        self.scene_textures_with_environment(textures, normal_maps, hierarchy::NONE)
+    }
+
+    /// [`Self::scene_textures`] with the environment's image at base color
+    /// layer `environment` (NONE: none).
+    pub(crate) fn scene_textures_with_environment(
+        &self,
+        textures: &[Texture],
+        normal_maps: &[u32],
+        environment: u32,
+    ) -> SceneTextures {
+        let (view, sampler) = self.layered(textures, false, environment);
         let maps: Vec<Texture> = normal_maps
             .iter()
             .map(|&k| textures[k as usize].clone())
             .collect();
-        let (normals, _) = self.layered(&maps, true);
+        let (normals, _) = self.layered(&maps, true, hierarchy::NONE);
         SceneTextures {
             view,
             sampler,
@@ -2529,7 +2699,12 @@ impl MaskConeKernel {
 
     /// Textures resampled into one layered texture with mip levels (sRGB, or
     /// `linear`); a 1×1 layer without any (white, or a flat normal).
-    fn layered(&self, textures: &[Texture], linear: bool) -> (wgpu::TextureView, wgpu::Sampler) {
+    fn layered(
+        &self,
+        textures: &[Texture],
+        linear: bool,
+        environment: u32,
+    ) -> (wgpu::TextureView, wgpu::Sampler) {
         let size = if textures.is_empty() { 1 } else { TEXTURE_SIZE };
         let levels = size.ilog2() + 1;
         let layers = textures.len().max(1) as u32;
@@ -2565,8 +2740,15 @@ impl MaskConeKernel {
         } else {
             textures.iter().collect()
         };
+        let environment_image = self.environment_image.borrow();
         for (layer, t) in sources.iter().enumerate() {
-            for (level, pixels) in texture_levels(t, size, linear).iter().enumerate() {
+            let levels = match &*environment_image {
+                Some((levels, _)) if layer as u32 == environment && size == TEXTURE_SIZE => {
+                    levels.clone()
+                }
+                _ => texture_levels(t, size, linear),
+            };
+            for (level, pixels) in levels.iter().enumerate() {
                 let side = size >> level;
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {

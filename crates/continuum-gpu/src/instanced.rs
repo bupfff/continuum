@@ -2045,8 +2045,9 @@ impl InstancedRenderer {
             lights: lights.len(),
             textures: {
                 // The environment's image after the scene's (M5 gate 12).
-                let (all, _) = kernel.textures_with_environment(&scene.textures);
-                let mut t = kernel.scene_textures(&all, &scene.linear_textures());
+                let (all, layer) = kernel.textures_with_environment(&scene.textures);
+                let mut t =
+                    kernel.scene_textures_with_environment(&all, &scene.linear_textures(), layer);
                 t.coverage = kernel.take_coverage_texture();
                 t
             },

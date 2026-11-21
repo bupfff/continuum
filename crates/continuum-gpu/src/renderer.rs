@@ -54,6 +54,11 @@ pub struct RendererOptions {
     /// `sky`: an equirectangular image above the horizon. See
     /// [`crate::MaskConeKernel::set_environment`].
     pub environment: Option<crate::Environment>,
+    /// With an `environment`: its sun, if it has one (the bright spot of an
+    /// outdoor HDRI, [`crate::Environment::take_sun`]), taken out of the
+    /// image and added as a sun light, whose soft shadows are computed
+    /// exactly (if a light fits under [`crate::MAX_LIGHTS`]). On by default.
+    pub sun_from_environment: bool,
     /// The cache's tuning.
     pub cache_options: CacheOptions,
     /// Anti-aliasing (experimental, M7): each pixel traces a mask cone
@@ -159,6 +164,7 @@ impl Default for RendererOptions {
             cache: true,
             sky: None,
             environment: None,
+            sun_from_environment: true,
             cache_options: CacheOptions::default(),
             pixel_cones: false,
             movable: Vec::new(),
@@ -214,19 +220,35 @@ impl Renderer {
     ) -> Renderer {
         // Prefiltered coverage at one bin, and sky cones eight times coarser
         // (M5 gates 3–4): the settings every measurement since uses.
+        // An environment's sun as a light of its own.
+        let mut all_lights = lights.to_vec();
+        let environment = options.environment.as_ref().map(|e| {
+            let mut e = e.clone();
+            if options.sun_from_environment
+                && all_lights.len() < crate::MAX_LIGHTS
+                && let Some((toward, irradiance)) = e.take_sun()
+            {
+                let (lo, hi) = scene_bounds(scene, origin);
+                let radius = ((hi - lo).length() * 0.5).max(1.0) as f64;
+                all_lights.push(Light::sun(
+                    (lo + hi) * 0.5,
+                    toward.as_dvec3(),
+                    50.0 * radius,
+                    irradiance,
+                ));
+            }
+            e
+        });
         // No lights (an environment alone): a dark one stands in, as the
         // paths read the first light.
-        let dark;
-        let lights = if lights.is_empty() {
-            dark = [Light::sun(Vec3::ZERO, DVec3::Z, 1e3, Vec3::ZERO)];
-            &dark[..]
-        } else {
-            lights
-        };
+        if all_lights.is_empty() {
+            all_lights.push(Light::sun(Vec3::ZERO, DVec3::Z, 1e3, Vec3::ZERO));
+        }
+        let lights = &all_lights[..];
         kernel.set_prefilter(1.0);
         kernel.set_sky_prefilter(8.0);
         kernel.set_sky(options.sky.unwrap_or(Vec3::ZERO));
-        kernel.set_environment(options.environment.as_ref());
+        kernel.set_environment(environment.as_ref());
         kernel.set_pixel_cones(options.pixel_cones);
         // Sub-pixel detail (M13): the path the gates measured (profile stage
         // 20 with pixel cones, hardware rays, prefiltered coverage at eight
@@ -510,6 +532,7 @@ impl Renderer {
                 s.requests == 0
                     && s.pages_baked == 0
                     && s.rebaked_pages == 0
+                    && s.sky_rebaked == 0
                     && s.indirect_samples == 0
             })
     }
@@ -576,5 +599,41 @@ impl Renderer {
     /// The kernel, for its device and adapter.
     pub fn kernel(&self) -> &MaskConeKernel {
         &self.kernel
+    }
+}
+
+/// The bounds of `scene`'s instances relative to `origin`.
+fn scene_bounds(scene: &InstancedScene, origin: DVec3) -> (Vec3, Vec3) {
+    let boxes: Vec<(Vec3, Vec3)> = scene
+        .geometries
+        .iter()
+        .map(|g| {
+            g.triangles.iter().flatten().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), &p| (lo.min(p), hi.max(p)),
+            )
+        })
+        .collect();
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for i in &scene.instances {
+        let (a, b) = boxes[i.geometry];
+        if a.x > b.x {
+            continue;
+        }
+        for k in 0..8 {
+            let corner = Vec3::new(
+                if k & 1 == 0 { a.x } else { b.x },
+                if k & 2 == 0 { a.y } else { b.y },
+                if k & 4 == 0 { a.z } else { b.z },
+            );
+            let p = i.rotation * (corner * i.scale) + (i.position - origin).as_vec3();
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+    }
+    if lo.x > hi.x {
+        (Vec3::ZERO, Vec3::ZERO)
+    } else {
+        (lo, hi)
     }
 }

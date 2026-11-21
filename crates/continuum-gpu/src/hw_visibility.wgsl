@@ -1350,7 +1350,7 @@ fn hw_vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invo
     var missing = 0.0;
     if (job.listed && job.surf.ok) {
         for (var b = li; b < IND_BINS; b += 64u) {
-            let dir = normalize(bin_world(job.surf.normal, bin_local(b, IND_R)));
+            let dir = turned_bin(job.surf.normal, b, hemicube_spin(vec3<u32>(job.e.x, job.e.y, job.e.z ^ (job.k * 0x9E3779B1u))));
             let hit = hw_bounce_hit(job.surf.apex, dir, job.e.x);
             missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum, job.bounces);
         }
@@ -1387,7 +1387,7 @@ fn hw_vc_bake_indirect_movers(@builtin(workgroup_id) wg: vec3<u32>, @builtin(loc
     var missing = 0.0;
     if (job.listed && job.surf.ok) {
         for (var b = li; b < IND_BINS; b += 64u) {
-            let dir = normalize(bin_world(job.surf.normal, bin_local(b, IND_R)));
+            let dir = turned_bin(job.surf.normal, b, hemicube_spin(vec3<u32>(job.e.x, job.e.y, job.e.z ^ (job.k * 0x9E3779B1u))));
             let hit = hw_bounce_hit_movers(job.surf.apex, dir, job.e.x);
             missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum, job.bounces);
         }
@@ -1505,10 +1505,14 @@ fn hw_vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     let s = vc_surface(t.m, t.c, t.n, t.texel);
     let on = listed && t.inside && s.ok;
     var value = 0.0;
+    // The hemicube turned by an angle of the texel's own (`turned_bin`):
+    // fixed directions made Sponza's floor under its roof opening a sharp
+    // strip one tile wide, 45% over Cycles.
+    let spin = hemicube_spin(vec3<u32>(t.e.x, t.e.y, t.e.z ^ (t.texel.x * 0x9E3779B1u) ^ (t.texel.y * 0x85EBCA77u)));
     if (on) {
         for (var q = 0u; q < 32u; q++) {
             let b = 32u * f + q;
-            let dir = normalize(bin_world(s.normal, bin_local(b, IND_R)));
+            let dir = turned_bin(s.normal, b, spin);
             // The uniform sky lies above the horizon.
             if (dir.z > 0.0 && hw_sky_open(s.apex, dir)) { value += hemicube_weight(b); }
         }

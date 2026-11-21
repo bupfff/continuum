@@ -2523,6 +2523,23 @@ fn bin_local(bin: u32, r: u32) -> vec3<f32> {
     }
 }
 
+// Hemicube bin `b`'s direction (`IND_R`) about normal `n`, the hemicube
+// turned about it by `spin` radians: each bin keeps its weight, and texels
+// or samples turned differently share no fixed directions (192 fixed ones
+// stepped across narrow patches of sky as sharp strips: Sponza's floor).
+fn turned_bin(n: vec3<f32>, b: u32, spin: f32) -> vec3<f32> {
+    let l = bin_local(b, IND_R);
+    let c = cos(spin);
+    let s = sin(spin);
+    return normalize(bin_world(n, vec3<f32>(l.x * c - l.y * s, l.x * s + l.y * c, l.z)));
+}
+
+// A turn of the hemicube of its own for key `k` (stable: the same at every
+// re-bake).
+fn hemicube_spin(k: vec3<u32>) -> f32 {
+    return 6.2831853 * f32(vc_hash(k)) / 4294967296.0;
+}
+
 fn bin_world(n: vec3<f32>, local: vec3<f32>) -> vec3<f32> {
     var a = vec3<f32>(0.0, 0.0, 1.0);
     if (abs(n.z) > 0.9) { a = vec3<f32>(1.0, 0.0, 0.0); }
@@ -5172,7 +5189,7 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     var missing = 0.0;
     if (job.listed && job.surf.ok) {
         for (var b = li; b < IND_BINS; b += 64u) {
-            let dir = normalize(bin_world(job.surf.normal, bin_local(b, IND_R)));
+            let dir = turned_bin(job.surf.normal, b, hemicube_spin(vec3<u32>(job.e.x, job.e.y, job.e.z ^ (job.k * 0x9E3779B1u))));
             lit_missing = NONE;
             let hit = primary_hit(job.surf.apex, dir);
             // A ray that met an absent lighting level (M14 gate 8): its bin
@@ -5730,13 +5747,16 @@ fn vc_light_terms(exact: bool, f: ShownPage, point: vec3<f32>, normal: vec3<f32>
                 e += lights[l].radiance.xyz * vc_bilinear(f.slot, f.r, l);
             }
         }
+        var sky = vec3<f32>(0.0);
         if (exact) {
-            e += sky_scale(normal) * err_probe_sky;
+            sky = sky_scale(normal) * err_probe_sky;
         } else if (f.guess) {
-            e += sky_open(normal);
+            sky = sky_open(normal);
         } else {
-            e += sky_scale(normal) * vc_bilinear(f.slot, f.r, count);
+            sky = sky_scale(normal) * vc_bilinear(f.slot, f.r, count);
         }
+        e += sky;
+        vc_sky_part = sky;
     } else {
         // Unshadowed light from each light.
         for (var l = 0u; l < count; l++) {
@@ -5745,6 +5765,7 @@ fn vc_light_terms(exact: bool, f: ShownPage, point: vec3<f32>, normal: vec3<f32>
         // The sky above the horizon, with the ground below it: a
         // guess until a page arrives.
         e += sky_open(normal);
+        vc_sky_part = sky_open(normal);
     }
     return array<vec3<f32>, 2>(e, spec);
 }
@@ -5823,6 +5844,18 @@ fn vc_error_probes(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local
 // of the light behind it, per channel (0 for anything else): its factor of
 // the light it does not reflect, tinted by its base colour.
 var<private> vc_transmit: vec3<f32> = vec3<f32>(0.0);
+// The sky's part of the irradiance `vc_light_terms` last gave.
+var<private> vc_sky_part: vec3<f32> = vec3<f32>(0.0);
+
+// Rough reflections: from roughness `ROUGH_FROM` up, a surface's reflected
+// light blends from its mirror ray's toward the mean radiance of what lights
+// it besides the lights (its sky and bounce light over π, from the cache,
+// which knows what it sees), wholly at `ROUGH_TO` and beyond, where no ray
+// is traced: a wide lobe sees about what a Lambertian surface does, and one
+// ray through it found the sky through Sponza's roof opening as a bright
+// streak down the floor.
+const ROUGH_FROM: f32 = 0.45;
+const ROUGH_TO: f32 = 0.8;
 
 // Where `vc_hit_color`'s ray starts if not at the eye (w 1; M16: the point
 // a ray refracted through glass leaves it).
@@ -5867,8 +5900,10 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
     var e = terms[0];
     var spec = terms[1];
     if (!f.found || f.guess) { vc_fell_back = true; }
+    var bounce = vec3<f32>(0.0);
     if (f.found && vc.indirect.y == 1u) {
-        e += indirect_light(f.slot, f.r);
+        bounce = indirect_light(f.slot, f.r);
+        e += bounce;
         // A page shown without bounce samples (baked for a hit): ask for
         // them.
         if (unpack2x16float(indirect[indirect_at(f.slot, 0u, 0u)].y).y == 0.0) {
@@ -5900,10 +5935,15 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         // A shading or mapped normal can turn the mirror direction below the
         // surface itself; it is kept just above it instead (as Cycles'
         // ensure_valid_reflection does).
-        var refl = reflect(dir, normal);
-        let up = dot(refl, hit.normal);
-        if (up < 0.01) { refl = normalize(refl + hit.normal * (0.01 - up)); }
-        spec += albedo_spec * reflected_light(point, refl, mat.y);
+        let rough = smoothstep(ROUGH_FROM, ROUGH_TO, mat.y);
+        var seen = (vc_sky_part + bounce) / 3.14159265;
+        if (rough < 1.0) {
+            var refl = reflect(dir, normal);
+            let up = dot(refl, hit.normal);
+            if (up < 0.01) { refl = normalize(refl + hit.normal * (0.01 - up)); }
+            seen = mix(reflected_light(point, refl, mat.y), seen, rough);
+        }
+        spec += albedo_spec * seen;
     }
     // The dielectric part's diffuse share: less what its specular layer
     // reflects (its reflectance's largest channel, as glTF's).
@@ -5988,11 +6028,18 @@ fn sky_scale(n: vec3<f32>) -> vec3<f32> {
 // gate 12; light.objects.w its layer, sky_sh[0].w its peak), else through
 // its spherical harmonics (none below the horizon).
 fn sky_seen(d: vec3<f32>) -> vec3<f32> {
+    return sky_seen_level(d, 0.0);
+}
+
+// `sky_seen` from the image's mip `level` (blurred, for rough reflections).
+// The image is RGBM: colour times alpha times the peak (`Environment`).
+fn sky_seen_level(d: vec3<f32>, level: f32) -> vec3<f32> {
     if (!environment_on()) { return light.sky.xyz; }
     if (light.objects.w != NONE) {
         let u = (3.14159265 - atan2(d.y, d.x)) / 6.2831853;
         let v = 0.5 - asin(clamp(d.z, -1.0, 1.0)) / 3.14159265;
-        return textureSampleLevel(base_color, base_sampler, vec2<f32>(u, v), i32(light.objects.w), 0.0).xyz * light.sky_sh[0].w;
+        let t = textureSampleLevel(base_color, base_sampler, vec2<f32>(u, v), i32(light.objects.w), level);
+        return t.xyz * t.w * light.sky_sh[0].w;
     }
     if (d.z < 0.0) { return vec3<f32>(0.0); }
     let y = sh9(d);
@@ -6134,7 +6181,13 @@ fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: 
 // width there), or the sky.
 fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
     let hit = shading_hit(p, refl);
-    if (hit.mesh == NONE) { return sky_seen(refl); }
+    if (hit.mesh == NONE) {
+        // The lobe's width (about 2α radians) in the image's texels (2π
+        // around): its mip.
+        let a = roughness * roughness;
+        let texels = 2.0 * a * f32(textureDimensions(base_color).x) / 6.2831853;
+        return sky_seen_level(refl, log2(max(texels, 1.0)));
+    }
     let q = p + refl * hit.distance;
     // The lobe's width there: about α radians.
     let footprint = hit.distance * max(roughness * roughness, 0.002);

@@ -2058,8 +2058,11 @@ fn sky_later_settles_to_the_same_image() {
         eprintln!("bounce {indirect}: settled in {whole_frames} and {later_frames} frames; {d:?}");
         assert_finite_and_lit(&later);
         // Bounce light's samples depend on what is resident when they are
-        // baked, which varies run to run (about 2e-4 here).
-        let bound = if indirect { 2e-3 } else { 1e-4 };
+        // baked, which varies run to run (about 2e-4 here). Which pages are
+        // resident at a coarser mip once settled varies too: up to 8.8e-5
+        // under a parallel test run, and 1.8e-4 since sky rays turn per
+        // texel (2026-11-21), whose pages at different mips differ more.
+        let bound = if indirect { 2e-3 } else { 4e-4 };
         assert!(d.relative_rmse < bound, "bounce {indirect}: {d:?}");
     }
 }

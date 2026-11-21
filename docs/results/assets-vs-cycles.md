@@ -66,3 +66,51 @@ through the glass in Cycles. A fair reference needs thin glass in Cycles
 
 Sponza 36 ms (after hardware reflection rays; 116 ms before), FlightHelmet
 17–18 ms, ABeautifulGame 15 ms, ToyCar 32 ms, DamagedHelmet 4.6 ms.
+
+## HDR environments (DamagedHelmet, Poly Haven HDRIs at 1k, CC0)
+
+Before: the visible environment was 8-bit sRGB over its peak (an outdoor
+HDRI's sky went black beside its sun; a studio's banded), and an outdoor
+HDRI's sun lit only through the spherical harmonics (no shadow). Now: the
+image is RGBM (8-bit colour times an 8-bit multiplier over the peak, mips
+averaged from radiance), rough reflections read a mip by roughness, and
+`Renderer` takes an outdoor HDRI's sun out of the image as a sun light
+(`Environment::take_sun`: kloofendal_48d_partly_cloudy_puresky's at 48°,
+irradiance about 4; none found in two studio HDRIs or venice_sunset).
+
+| HDRI | Mean, ours / Cycles | Clamped relative RMSE | Pixels off > 10% |
+|---|---|---|---|
+| kloofendal_48d_partly_cloudy_puresky | 0.2121 / 0.2128 | 5.11% | 3.72% |
+| studio_small_09 | 0.6812 / 0.6799 | 6.69% | 2.49% |
+
+## Rough reflections and the hardware sky rays (Sponza)
+
+- Rough surfaces' reflections blend from the mirror ray toward their
+  cached sky and bounce light over π (roughness 0.45 → 0.8; no ray at
+  all from 0.8). DamagedHelmet unchanged (8.09%, 2.72%); FlightHelmet
+  3.38% → 3.17% (pixels off 2.06% → 1.80%).
+- Sponza (viewer's courtyard view, 640×360, ours 2×2 supersampled, a
+  fixed bake budget, Cycles 2,048 samples; Cycles is still noisy here, the
+  image's mean being 0.005):
+
+| Sponza | Sun and sky: clamped RMSE, pixels off | HDRI |
+|---|---|---|
+| Before | 71.6%, 58.6% | 69.5%, 51.2% |
+| Rough reflections blended | 68.7%, 55.7% | |
+| Sky rays turned per texel | 65.4%, 42.3% | 59.0%, 33.3% |
+| Bounce rays turned per sample too | 65.1%, 41.2% | |
+
+- The bright strip down Sponza's floor (one tile wide, sharp-edged) was
+  the hardware sky bake's 192 fixed directions (hemicube bin centres, the
+  same at every texel): from a narrow courtyard the open sky is a few bins
+  wide and stepped across them. Direct sky alone (no bounce, no
+  reflections): floor centre 0.0239 → 0.0148, side 0.0113 → 0.0131,
+  against Cycles' 0.0165 and 0.0145 (Cycles' include direct specular).
+  Each texel now turns the hemicube about its normal by an angle of its
+  own (every bin keeps its weight).
+- Left: Sponza's arches' undersides and the lion head stay brighter than
+  Cycles', curtains darker; not yet explained.
+- Found: with hardware rays off (the compute path's sky cones), Sponza's
+  direct sky is nearly black (0.0003 at the floor centre, with or without
+  object prefiltering and with meshes combined by the maximum). Not the
+  default anywhere with ray queries; to look into.

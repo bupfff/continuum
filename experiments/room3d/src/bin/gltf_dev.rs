@@ -68,6 +68,7 @@ fn main() {
         env.rgb
             .iter_mut()
             .for_each(|c| c.iter_mut().for_each(|x| *x *= k));
+        println!("environment sun: {:?}", env.clone().take_sun());
         env
     });
     // Suns added here (toward the sun, irradiance), for Cycles.
@@ -123,6 +124,15 @@ fn main() {
     }
     let t = Instant::now();
     let kernel = MaskConeKernel::new().expect("GPU");
+    // `GD_SKY_MAX=1`: sky cones combine meshes' coverage by the maximum
+    // (a diagnostic).
+    if std::env::var("GD_HW").as_deref() == Ok("0") {
+        kernel.set_hardware_rays(false);
+    }
+    if std::env::var("GD_OBJECT_PREFILTER").as_deref() == Ok("0") {
+        kernel.set_object_prefilter(false);
+    }
+    kernel.set_sky_combination_max(std::env::var("GD_SKY_MAX").as_deref() == Ok("1"));
     println!("kernel {:.2} s", t.elapsed().as_secs_f64());
     let t = Instant::now();
     // `GD_BUDGET`: a fixed bake budget (texels a frame) instead of the time
