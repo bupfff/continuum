@@ -2235,6 +2235,8 @@ fn skinned_gltf_alone_plays() {
         RendererOptions {
             cache_options: CacheOptions {
                 frame_target_ms: 0.0,
+                // A small pool: software adapters bind at most 128 MB.
+                pages: 1 << 15,
                 ..Default::default()
             },
             deforming: imported.deforming(),
