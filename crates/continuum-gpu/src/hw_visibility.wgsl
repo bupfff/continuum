@@ -4441,3 +4441,24 @@ fn g12_lean_at(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3
 fn g12_lean_quarter(m: u32, t: u32, p: vec3<f32>, dist: f32, dir: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, pixel: u32, fx: f32, fy: f32) -> vec4<f32> {
     return vec4<f32>(0.0);
 }
+
+// --- The cache's shading with hardware rays (glossy reflections) ---
+//
+// `vc_shade`, `vc_shade_edges` and `vc_aa_shade` with `shading_hit` through
+// ray queries (`hw_trace_from`) instead of the compute hierarchy, for
+// scenes without movers (whose structure these rays do not see).
+
+@compute @workgroup_size(8, 8)
+fn hw_vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    vc_shade_at(gid, li);
+}
+
+@compute @workgroup_size(8, 8)
+fn hw_vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    vc_shade_edges_at(wid, li);
+}
+
+@compute @workgroup_size(64)
+fn hw_vc_aa_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    vc_aa_shade_at(gid, li);
+}

@@ -492,8 +492,11 @@ impl Renderer {
         let latest = self.stats().map_or(0, |s| s.frame as usize).min(log.len());
         // (Nor re-baking for movers, nor deforming geometry's lighting
         // lagging its pose: M12 gate 3.)
+        // Nor skies waiting to re-bake on objects that moved (they wait
+        // longer than a short window).
         latest >= frames
             && self.inner.deforming_lag() == 0
+            && !self.inner.skies_pending()
             && log[latest - frames..latest].iter().all(|s| {
                 s.requests == 0
                     && s.pages_baked == 0

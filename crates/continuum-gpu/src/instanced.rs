@@ -19,19 +19,19 @@ use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_EDGES_BINDINGS, HW_LAYERS_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
     HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS, HW_VC_BAKE_SKY_BINDINGS, HW_VC_BAKE_WIDE_BINDINGS,
-    HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS,
-    HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu, M13_BIN_ARGS_BINDINGS,
-    M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS, M13_COVERAGE_BINDINGS,
-    M13_MAPS_BINDINGS, M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS,
-    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS,
-    M13_SHADE_ARGS_BINDINGS, M13_SHADE_BACKGROUND_BINDINGS, M13_SHADE_MISSES_BINDINGS,
-    M13_SHADE_RAYS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
-    SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS,
-    VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_BOUNCE_BINDINGS,
-    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
-    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
-    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
-    uniform_buffer,
+    HW_VC_ERROR_SHARES_BINDINGS, HW_VC_SHADE_BINDINGS, HW_VC_SHADE_EDGES_BINDINGS,
+    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS,
+    InstancedScene, Light, LightGpu, M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS,
+    M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS, M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS,
+    M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS, M13_PAGE_BAKE_BINDINGS,
+    M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS, M13_SHADE_ARGS_BINDINGS,
+    M13_SHADE_BACKGROUND_BINDINGS, M13_SHADE_MISSES_BINDINGS, M13_SHADE_RAYS_BINDINGS,
+    M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
+    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
+    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_BOUNCE_BINDINGS, VC_ERROR_PROBES_BINDINGS,
+    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
+    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS,
+    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -1093,6 +1093,12 @@ impl InstancedRenderer {
         [words[0], words[1], words[2], words[3], words[4], words[5]]
     }
 
+    /// Whether skies wait to re-bake (pages on moved objects wait
+    /// `SKY_SETTLE` frames after their last move).
+    pub(crate) fn skies_pending(&self) -> bool {
+        self.cache.as_ref().is_some_and(|c| c.state.skies_pending())
+    }
+
     /// The most frames any light's lighting near deforming geometry lags its
     /// pose (M12 gate 2; 0 with `CacheOptions::deforming_budget` 0 or
     /// nothing deforming).
@@ -1592,6 +1598,29 @@ impl InstancedRenderer {
             keep.push(31);
             keep
         };
+        // The cache's shading with its reflection rays through ray queries
+        // (not with movers, whose structure they do not trace).
+        let hw_shade = hw.as_ref().is_some_and(|hw| hw.movers.is_none())
+            && cache.as_ref().is_none_or(|o| o.hardware_shading);
+        let shading = if hw_shade {
+            (kernel.entry("hw_vc_shade"), HW_VC_SHADE_BINDINGS.to_vec())
+        } else {
+            (kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec())
+        };
+        let shading_edges = if hw_shade {
+            (
+                kernel.entry("hw_vc_shade_edges"),
+                HW_VC_SHADE_EDGES_BINDINGS.to_vec(),
+            )
+        } else {
+            (
+                kernel.entry("vc_shade_edges"),
+                VC_SHADE_EDGES_BINDINGS.to_vec(),
+            )
+        };
+        let is_shade = |b: &[u32]| b == VC_SHADE_BINDINGS || b == HW_VC_SHADE_BINDINGS;
+        let is_shade_edges =
+            |b: &[u32]| b == VC_SHADE_EDGES_BINDINGS || b == HW_VC_SHADE_EDGES_BINDINGS;
         let mut passes = match (cache.is_some(), visibility) {
             // M13: the scalar coverage walk in its own entry point (profile
             // stage 14), so it does not run at the pixel-cone entry's
@@ -1726,15 +1755,12 @@ impl InstancedRenderer {
                     ));
                     list.push((kernel.entry("hw_layers"), HW_LAYERS_BINDINGS.to_vec()));
                 }
-                list.push((kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()));
+                list.push(shading.clone());
                 list.push((
                     kernel.entry("vc_args_edges"),
                     VC_ARGS_EDGES_BINDINGS.to_vec(),
                 ));
-                list.push((
-                    kernel.entry("vc_shade_edges"),
-                    VC_SHADE_EDGES_BINDINGS.to_vec(),
-                ));
+                list.push(shading_edges.clone());
                 list
             }
             (true, v) => vec![
@@ -1744,7 +1770,7 @@ impl InstancedRenderer {
                         COMPUTE_VISIBILITY_BINDINGS.to_vec(),
                     )
                 }),
-                (kernel.entry("vc_shade"), VC_SHADE_BINDINGS.to_vec()),
+                shading.clone(),
             ],
         };
         // The error while flying, reported (M4 gate 13): probe pixels after
@@ -1796,7 +1822,7 @@ impl InstancedRenderer {
                     b if b == HW_VC_ERROR_SHARES_BINDINGS => CameraDispatch::ProbeGroups,
                     b if b == VC_ERROR_PROBES_BINDINGS => CameraDispatch::Probes,
                     b if b == VC_ARGS_EDGES_BINDINGS => CameraDispatch::One,
-                    b if b == VC_SHADE_EDGES_BINDINGS => CameraDispatch::Listed,
+                    b if is_shade_edges(b) => CameraDispatch::Listed,
                     b if b == HW_LAYERS_BINDINGS => CameraDispatch::Listed,
                     b if b == M13_ROOTS_BINDINGS => CameraDispatch::Tiles,
                     b if b == M13_BIN_ARGS_BINDINGS => CameraDispatch::One,
@@ -1819,24 +1845,19 @@ impl InstancedRenderer {
         let aa = cache.as_ref().is_some_and(|o| o.anti_aliasing)
             && hw.is_some()
             && !pixel_cones
-            && passes
-                .iter()
-                .any(|(_, keep)| keep.as_slice() == VC_SHADE_BINDINGS);
+            && passes.iter().any(|(_, keep)| is_shade(keep));
         if aa {
             let pass =
                 |name: &'static str| (kernel.entry(name), kernel.entry_bindings(name, false));
             let shade = passes
                 .iter()
-                .position(|(_, keep)| keep.as_slice() == VC_SHADE_BINDINGS)
+                .position(|(_, keep)| is_shade(keep))
                 .expect("a shading pass");
             passes.insert(shade, pass("hw_aa_list"));
             camera_dispatch.insert(shade, CameraDispatch::Screen);
             let after = passes
                 .iter()
-                .rposition(|(_, keep)| {
-                    keep.as_slice() == VC_SHADE_BINDINGS
-                        || keep.as_slice() == VC_SHADE_EDGES_BINDINGS
-                })
+                .rposition(|(_, keep)| is_shade(keep) || is_shade_edges(keep))
                 .expect("a shading pass")
                 + 1;
             let movers = hw.as_ref().is_some_and(|hw| hw.movers.is_some());
@@ -1857,7 +1878,14 @@ impl InstancedRenderer {
                 ),
                 ("hw_aa_args_shade", CameraDispatch::One),
                 ("hw_aa_retrace", CameraDispatch::AaShade),
-                ("vc_aa_shade", CameraDispatch::AaShade),
+                (
+                    if hw_shade {
+                        "hw_vc_aa_shade"
+                    } else {
+                        "vc_aa_shade"
+                    },
+                    CameraDispatch::AaShade,
+                ),
                 ("hw_aa_scatter", CameraDispatch::AaScatter),
             ]
             .into_iter()
@@ -1872,9 +1900,7 @@ impl InstancedRenderer {
         let fog = cache.as_ref().is_some_and(|o| o.fog.is_some())
             && hw.as_ref().is_some_and(|hw| hw.movers.is_none())
             && !pixel_cones
-            && passes
-                .iter()
-                .any(|(_, keep)| keep.as_slice() == VC_SHADE_BINDINGS);
+            && passes.iter().any(|(_, keep)| is_shade(keep));
         if fog {
             let at = passes
                 .iter()

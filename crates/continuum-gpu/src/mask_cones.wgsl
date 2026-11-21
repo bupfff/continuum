@@ -5334,6 +5334,11 @@ fn vc_shade_layers(i: u32, pixel: u32, at: vec3<u32>, n: u32) {
 
 @compute @workgroup_size(8, 8)
 fn vc_shade_edges(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    vc_shade_edges_at(wid, li);
+}
+
+// `vc_shade_edges`'s work (shared with `hw_vc_shade_edges`).
+fn vc_shade_edges_at(wid: vec3<u32>, li: u32) {
     lane = li;
     let w = u32(camera.params.x);
     // Dispatched for the list alone (`vc_args_edges`, M10 gate 19).
@@ -5443,6 +5448,11 @@ fn aa_sample(k: u32, j: u32) -> u32 {
 // sky or the light seen. One invocation per record.
 @compute @workgroup_size(64)
 fn vc_aa_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    vc_aa_shade_at(gid, li);
+}
+
+// `vc_aa_shade`'s work (shared with `hw_vc_aa_shade`).
+fn vc_aa_shade_at(gid: vec3<u32>, li: u32) {
     lane = li;
     if (gid.x >= aa_data[aa_header()]) { return; }
     let k = aa_data[aa_header() + 1u];
@@ -5537,6 +5547,12 @@ fn vc_request(k: vec3<u32>, priority: u32) {
 // coarsest, if none), so pages arrive coarse to fine and the CPU never walks.
 @compute @workgroup_size(8, 8)
 fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    vc_shade_at(gid, li);
+}
+
+// `vc_shade`'s work (shared with `hw_vc_shade`, whose rays run through
+// hardware ray queries).
+fn vc_shade_at(gid: vec3<u32>, li: u32) {
     lane = li;
     let w = u32(camera.params.x);
     let h = u32(camera.params.y);
@@ -5578,7 +5594,7 @@ fn vc_shade(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
             var sum = vec3<f32>(0.0);
             for (var q = 0u; q < 4u; q++) {
                 let sd = camera_dir_at(gid, (f32(q & 1u) - 0.5) * 0.5, (f32(q >> 1u) - 0.5) * 0.5);
-                let sh = primary_hit(camera.eye.xyz, sd);
+                let sh = shading_hit(camera.eye.xyz, sd);
                 if (sh.mesh == NONE) {
                     sum += sky_seen(sd);
                 } else {
@@ -6072,7 +6088,7 @@ fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: 
 // surface it meets (its diffuse light, read at the mip matching the lobe's
 // width there), or the sky.
 fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
-    let hit = primary_hit(p, refl);
+    let hit = shading_hit(p, refl);
     if (hit.mesh == NONE) { return sky_seen(refl); }
     let q = p + refl * hit.distance;
     // The lobe's width there: about α radians.
@@ -6120,6 +6136,16 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
     return bounce_albedo(hit.mesh, hit.tri, q, footprint) * (1.0 - metal) * e / 3.14159265 + emission_at(hit.mesh, hit.tri, q, footprint);
 }
 
+
+// The nearest front face along a ray cast while shading (glossy
+// reflections; the compute path's silhouette rays): through the compute
+// hierarchy here, through hardware ray queries in the hardware module's
+// shading passes (`hw_vc_shade` and its kin; `MaskConeKernel::hw_source`
+// swaps the body), where Sponza's reflections took 97 ms of a 122 ms
+// frame through the hierarchy.
+fn shading_hit(p: vec3<f32>, dir: vec3<f32>) -> Hit {
+    return primary_hit(p, dir);
+}
 
 // --- Pixel cones (M7): primary visibility through each pixel's square. ---
 //

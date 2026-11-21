@@ -309,6 +309,11 @@ pub struct CacheOptions {
     /// on by default).
     #[doc(hidden)]
     pub glossy_rays: bool,
+    /// Experiments only: rays cast while shading (glossy reflections)
+    /// through hardware ray queries where the camera's are (on by
+    /// default); off, through the compute hierarchy.
+    #[doc(hidden)]
+    pub hardware_shading: bool,
     /// With a sky: the spacing (in each geometry's own units) of the grid on
     /// which its own sky occlusion is baked once, for all its instances (M5
     /// gate 5). Sky texels then walk only the other objects. 0: off. Only
@@ -370,6 +375,7 @@ impl Default for CacheOptions {
             fog: None,
             error_probes: 0,
             glossy_rays: true,
+            hardware_shading: true,
             self_spacing: 0.01,
             sky_later: true,
             light_ratio: true,
@@ -3409,6 +3415,11 @@ impl VirtualCache {
         }
         self.page_sky.push([first, samples | stride << 24]);
         samples
+    }
+
+    /// Whether skies wait to re-bake.
+    pub(crate) fn skies_pending(&self) -> bool {
+        !self.sky_due.is_empty()
     }
 
     fn plan(&mut self, device: &wgpu::Device, requests: Vec<([u32; 3], u32)>) {

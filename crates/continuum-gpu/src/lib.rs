@@ -617,6 +617,9 @@ const ENTRY_POINTS: &[&str] = &[
 /// The hardware-ray module's entry points (`hw_visibility.wgsl`).
 const HW_ENTRY_POINTS: &[&str] = &[
     "hw_visibility",
+    "hw_vc_shade",
+    "hw_vc_shade_edges",
+    "hw_vc_aa_shade",
     "hw_visibility_movers",
     "hw_visibility_blend",
     "hw_edges",
@@ -752,6 +755,17 @@ pub(crate) const VC_FILL_BINDINGS: &[u32] = &[
 pub(crate) const VC_SHADE_BINDINGS: &[u32] = &[
     79, 0, 2, 3, 6, 7, 8, 9, 10, 23, 24, 25, 26, 30, 31, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52,
     55, 56, 57, 58, 62, 73, 76,
+];
+/// `hw_vc_shade`: `vc_shade` with its reflection rays through ray queries:
+/// no compute hierarchy (9, 10, 25, 26), the acceleration structure (32).
+pub(crate) const HW_VC_SHADE_BINDINGS: &[u32] = &[
+    0, 2, 3, 6, 7, 8, 23, 24, 30, 31, 32, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58,
+    62, 73, 76, 79,
+];
+/// `hw_vc_shade_edges`: `vc_shade_edges` likewise.
+pub(crate) const HW_VC_SHADE_EDGES_BINDINGS: &[u32] = &[
+    0, 2, 3, 6, 7, 8, 23, 24, 30, 32, 33, 35, 36, 37, 39, 40, 41, 42, 45, 52, 55, 56, 57, 58, 62,
+    73, 76, 79, 81,
 ];
 /// `vc_shade_edges` (M7 gate 4): the cache's shading of listed edge
 /// pixels.
@@ -1003,11 +1017,7 @@ impl MaskConeKernel {
         let module = if name.starts_with("hw_") {
             assert!(self.ray_queries, "no ray queries on this device");
             self.hw_module.get_or_init(|| {
-                let hw_source = format!(
-                    "enable wgpu_ray_query;\n{}\n{}",
-                    self.source,
-                    include_str!("hw_visibility.wgsl")
-                );
+                let hw_source = self.hw_source();
                 self.device
                     .create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("hw_visibility"),
@@ -1038,6 +1048,24 @@ impl MaskConeKernel {
         }
         self.pipelines.borrow_mut().insert(name, pipeline.clone());
         pipeline
+    }
+
+    /// The hardware-ray module's source: the kernel with rays cast while
+    /// shading (`shading_hit`) through ray queries, then
+    /// `hw_visibility.wgsl`.
+    #[doc(hidden)]
+    pub fn hw_source(&self) -> String {
+        let compute = "fn shading_hit(p: vec3<f32>, dir: vec3<f32>) -> Hit {\n    return primary_hit(p, dir);\n}";
+        assert!(self.source.contains(compute), "shading_hit not found");
+        let kernel = self.source.replacen(
+            compute,
+            "fn shading_hit(p: vec3<f32>, dir: vec3<f32>) -> Hit {\n    return hit_from(hw_trace_from(p, dir), dir);\n}",
+            1,
+        );
+        format!(
+            "enable wgpu_ray_query;\n{kernel}\n{}",
+            include_str!("hw_visibility.wgsl")
+        )
     }
 
     /// The hardware-ray source with the sub-pixel pass (M13) lit by the
@@ -1160,12 +1188,10 @@ impl MaskConeKernel {
     pub fn entry_bindings(&self, name: &str, vc: bool) -> Vec<u32> {
         let source = if vc {
             self.hw_vc_source()
+        } else if name.starts_with("hw_") {
+            self.hw_source()
         } else {
-            format!(
-                "enable wgpu_ray_query;\n{}\n{}",
-                self.source,
-                include_str!("hw_visibility.wgsl")
-            )
+            self.source.clone()
         };
         let module = naga::front::wgsl::parse_str(&source).expect("parse");
         let info = naga::valid::Validator::new(

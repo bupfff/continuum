@@ -105,6 +105,12 @@ fn main() {
     let kernel = MaskConeKernel::new().expect("GPU");
     println!("kernel {:.2} s", t.elapsed().as_secs_f64());
     let t = Instant::now();
+    // `GD_BUDGET`: a fixed bake budget (texels a frame) instead of the time
+    // budget, for comparing renders.
+    let budget: u32 = std::env::var("GD_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let mut r = Renderer::new(
         kernel,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -119,6 +125,13 @@ fn main() {
             anti_aliasing: std::env::var("GD_AA").as_deref() != Ok("0"),
             cache_options: continuum_gpu::CacheOptions {
                 glossy_rays: std::env::var("GD_GLOSSY").as_deref() != Ok("0"),
+                hardware_shading: std::env::var("GD_HW_SHADE").as_deref() != Ok("0"),
+                frame_target_ms: if budget > 0 { 0.0 } else { 14.0 },
+                bake_budget: if budget > 0 {
+                    budget
+                } else {
+                    continuum_gpu::CacheOptions::default().bake_budget
+                },
                 ..Default::default()
             },
             ..Default::default()

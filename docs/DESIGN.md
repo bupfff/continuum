@@ -1994,20 +1994,20 @@ conversation or after a compaction; history lives in git and
   8,000–75,000 requests a frame. Not from M22 G3 (the same with
   `bounce_settles` off). The viewer turns bounce off for the field;
   `Renderer`'s default needs a rule for such scenes.
-- **Real-world files (item 2, 2026-11-21, in progress):** Sponza's alpha
-  cutouts (ivy, flowers) made 24.9 million triangles and 6.7 GB; the cut
-  now traces contours, simplifies them to 0.2 cell and fills them as
-  monotone pieces within each triangle, keeping the triangle's chart: 3.0
-  million triangles, 18,899 charts (666,277 if re-charted), 1.3 GB, the
-  renderer built in 8.7 s (was about 70). Next and highest: glossy
-  reflection rays run through the compute hierarchy in `vc_shade`,
-  `vc_aa_shade` and `vc_shade_edges` (66 + 31 ms of Sponza's 122 ms frames
-  at 1280×720; 23 ms with `glossy_rays` off): give them `hw_` twins
-  (bodies shared, a `shading_hit` that the hardware module swaps for
-  `hw_trace_from`, compute hierarchy bindings 0, 9, 10, 25, 26 out and 32
-  in, so the 29-buffer limit holds), then compare images. `gltf_dev`
-  times and profiles any file (`GD_*` options in its doc). ToyCar's path
-  under the assets folder is wrong; find it before timing it.
+- **Real-world files (item 2, 2026-11-21, in progress; the user wants
+  game assets and complex scenes tested more and made to look their
+  best):** Sponza's alpha cutouts (ivy, flowers) made 24.9 million
+  triangles and 6.7 GB; the cut now traces contours, simplifies them to
+  0.2 cell and fills them as monotone pieces within each triangle, keeping
+  the triangle's chart: 3.0 million triangles, 18,899 charts, 1.3 GB, built
+  in 8.7 s (was about 70). Glossy reflection rays now run through ray
+  queries (`hw_vc_shade`, `hw_vc_shade_edges`, `hw_vc_aa_shade`; the
+  compute hierarchy without movers no longer): Sponza's settled frame 116
+  → 36 ms at 1280×720 (shading 69 → 17 ms, the anti-aliasing samples' 34 →
+  8 ms), the image the same (mean difference 0.007 of 255). Next: the
+  other Khronos models and larger scenes (Bistro), each looked at against
+  Cycles; reflection rays for rough surfaces still cost 12 ms in Sponza.
+  `gltf_dev` loads, times, profiles and renders any file (`GD_*` options).
 - **Pitfalls:** compare renderers at a fixed bake budget
   (`frame_target_ms` 0) and wait for every renderer's frame before timing
   the next (M22 G1); this device's GPU timestamps arrive out of order, so
