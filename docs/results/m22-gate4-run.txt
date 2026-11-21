@@ -1,0 +1,9 @@
+M22 gate 4: 1280x720
+1. (a) day: warm frame 4.14 ms with bounce, 3.87 ms without: median ratio 1.069x over 5 rounds (at most 1.2x): PASS
+3. (a) day: settled in 290 frames (1.8 s) with bounce, 120 (0.6 s) without: 2.42x (at most 3x): PASS; GPU memory 657 MB and 469 MB
+1. (b) night: warm frame 4.51 ms with bounce, 4.04 ms without: median ratio 1.117x over 5 rounds (at most 1.2x): PASS
+3. (b) night: settled in 1570 frames (11.9 s) with bounce, 898 (6.3 s) without: 1.75x (at most 3x): PASS; GPU memory 1337 MB and 1148 MB
+2. (b) night: from Cycles over surfaces 7.43% with bounce, 19.13% without (0.388x, at most 0.5x): PASS
+1. (c) materials, far side: warm frame 8.79 ms with bounce, 8.31 ms without: median ratio 1.057x over 5 rounds (at most 1.2x): PASS
+3. (c) materials, far side: settled in 817 frames (8.2 s) with bounce, 257 (2.5 s) without: 3.18x (at most 3x): FAIL; GPU memory 657 MB and 469 MB
+Verdict (criteria 1-3; the control runs on its own): 1 PASS, 2 PASS, 3 FAIL: FAIL

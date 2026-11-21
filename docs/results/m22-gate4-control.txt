@@ -1,0 +1,11 @@
+1. 36864 unique rocks, lighting levels on demand, built in 140.1 s; a uniform sky (0.05) and bounce light
+1. flight 0: mean 9.15 ms, p99 15.60 ms, worst 20.42 ms (at most 16.7, 16.7, 33.3): PASS (warmed first for 1200 frames); frames over 16.7 ms: 8; bake budget 6784 on average (cap 6784), 59.5 pages baked a frame
+1. flight 1: mean 8.94 ms, p99 14.45 ms, worst 18.76 ms (at most 16.7, 16.7, 33.3): PASS (warmed first for 1200 frames); frames over 16.7 ms: 3; bake budget 1605 on average (cap 1605), 17.3 pages baked a frame
+1. flight 2: mean 9.06 ms, p99 14.35 ms, worst 18.95 ms (at most 16.7, 16.7, 33.3): PASS (warmed first for 1200 frames); frames over 16.7 ms: 2; bake budget 4674 on average (cap 4674), 50.8 pages baked a frame
+1. the frame budget: PASS
+2. standing: warm in 198 frames reading back every 20th, 143 undisturbed (1.38×; at most 1.25×): FAIL
+2. 10 m up: warm in 400 frames reading back every 20th, 280 undisturbed (1.43×; at most 1.25×): FAIL
+2. 40 m up: warm in 479 frames reading back every 20th, 320 undisturbed (1.50×; at most 1.25×): FAIL
+2. 150 m up: warm in 291 frames reading back every 20th, 195 undisturbed (1.49×; at most 1.25×): FAIL
+2. the caller's stalls: FAIL
+Verdict: 1 PASS, 2 FAIL → FAIL
