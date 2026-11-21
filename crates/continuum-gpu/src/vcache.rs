@@ -259,7 +259,7 @@ pub struct CacheOptions {
     /// (M12 gate 2; `RendererOptions::deforming`), decided by the user on
     /// 2026-11-15: lighting near a deforming object updates light by light,
     /// in turn, as often as this allows (each light at least every
-    /// [`DEFORMING_MAX_LAG`] frames), while its shape is current every
+    /// 120 frames), while its shape is current every
     /// frame. Exactness costs about 10× the frame when such an object is
     /// large on screen (M12 gate 1). 0: every light, every frame (exact,
     /// as rigid movers are).
