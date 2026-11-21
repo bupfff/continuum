@@ -214,6 +214,15 @@ impl Renderer {
     ) -> Renderer {
         // Prefiltered coverage at one bin, and sky cones eight times coarser
         // (M5 gates 3–4): the settings every measurement since uses.
+        // No lights (an environment alone): a dark one stands in, as the
+        // paths read the first light.
+        let dark;
+        let lights = if lights.is_empty() {
+            dark = [Light::sun(Vec3::ZERO, DVec3::Z, 1e3, Vec3::ZERO)];
+            &dark[..]
+        } else {
+            lights
+        };
         kernel.set_prefilter(1.0);
         kernel.set_sky_prefilter(8.0);
         kernel.set_sky(options.sky.unwrap_or(Vec3::ZERO));

@@ -1,10 +1,14 @@
 //! Development (files people use): loads a glTF file and builds `Renderer`
-//! with its defaults at 1280×720, timing each step and listing the largest
+//! with its defaults at `GD_W`×`GD_H` (1280×720; times `GD_SS` per axis,
+//! averaged down for the images), timing each step and listing the largest
 //! GPU buffers; then renders `GD_FRAMES` (120) frames, each waited for, from
 //! `GD_EYE` toward `GD_TARGET` (`x,y,z` from the scene's center; else the
 //! file's camera or the viewer's), saving the last to `GD_OUT` (a PNG,
 //! linear colors times `GD_EXPOSURE`, clamped). `GD_CUTOUTS=1` only cuts the
-//! alpha cutouts and counts triangles. Not a gate.
+//! alpha cutouts and counts triangles. `GD_CYCLES=<samples>` also renders
+//! the file in Cycles through Blender's own importer (`GD_BOUNCES`, 4),
+//! saves it beside `GD_OUT` (`.cycles.png`) and prints the relative RMSE.
+//! Not a gate.
 //!
 //! `cargo run --release -p room3d --bin gltf_dev -- scene.gltf`
 
@@ -53,7 +57,22 @@ fn main() {
     let origin = (lo + hi) * 0.5;
     let radius = ((hi - lo).length() * 0.5).max(1e-3);
     let mut lights = imported.lights(origin, 0.05);
-    if lights.is_empty() {
+    // `GD_ENV`: an environment image (an HDRI) lights the scene instead of
+    // the sun and sky, times `GD_ENV_STRENGTH` (1).
+    let environment = std::env::var_os("GD_ENV").map(|p| {
+        let mut env = continuum_gltf::load_environment(Path::new(&p)).expect("the environment");
+        let k: f32 = std::env::var("GD_ENV_STRENGTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
+        env.rgb
+            .iter_mut()
+            .for_each(|c| c.iter_mut().for_each(|x| *x *= k));
+        env
+    });
+    // Suns added here (toward the sun, irradiance), for Cycles.
+    let mut suns: Vec<(Vec3, Vec3)> = Vec::new();
+    if lights.is_empty() && environment.is_none() && std::env::var("GD_SUN").as_deref() != Ok("0") {
         let toward = continuum::glam::DVec3::new(-0.6, -0.3, 0.75);
         lights.push(Light::sun(
             Vec3::ZERO,
@@ -61,6 +80,7 @@ fn main() {
             radius * 50.0,
             Vec3::splat(3.0),
         ));
+        suns.push((toward.normalize().as_vec3(), Vec3::splat(3.0)));
     }
     if std::env::var_os("GD_CUTOUTS").is_some() {
         let t = Instant::now();
@@ -111,16 +131,24 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let num = |name: &str, default: u32| -> u32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let (w, h, ss) = (num("GD_W", 1280), num("GD_H", 720), num("GD_SS", 1).max(1));
     let mut r = Renderer::new(
         kernel,
         wgpu::TextureFormat::Rgba8UnormSrgb,
-        (1280, 720),
+        (w * ss, h * ss),
         &imported.scene,
         origin,
         &lights,
         RendererOptions {
-            sky: (std::env::var("GD_SKY").as_deref() != Ok("0"))
+            sky: (environment.is_none() && std::env::var("GD_SKY").as_deref() != Ok("0"))
                 .then_some(Vec3::new(0.6, 0.75, 1.0) * 0.3),
+            environment,
             bounce: std::env::var("GD_BOUNCE").as_deref() != Ok("0"),
             anti_aliasing: std::env::var("GD_AA").as_deref() != Ok("0"),
             cache_options: continuum_gpu::CacheOptions {
@@ -188,8 +216,8 @@ fn main() {
         .create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
-                width: 1280,
-                height: 720,
+                width: w * ss,
+                height: h * ss,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -273,12 +301,26 @@ fn main() {
         let b: Vec<String> = bake.iter().map(|(k, t)| format!("{k} {t:.2}")).collect();
         println!("bake passes (ms): {}", b.join(", "));
     }
-    if let Some(out) = std::env::var_os("GD_OUT") {
-        let exposure: f32 = std::env::var("GD_EXPOSURE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1.0);
-        let colors = r.read_colors();
+    let exposure: f32 = std::env::var("GD_EXPOSURE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
+    let colors = r.read_colors();
+    // Averaged down `ss` × `ss` (Cycles averages each pixel's area).
+    let ours: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            let mut sum = [0.0f32; 3];
+            for dy in 0..ss {
+                for dx in 0..ss {
+                    let c = colors[((y * ss + dy) * w * ss + x * ss + dx) as usize];
+                    (0..3).for_each(|k| sum[k] += c[k]);
+                }
+            }
+            sum.map(|v| v / (ss * ss) as f32)
+        })
+        .collect();
+    let save = |image: &[[f32; 3]], path: &std::path::Path| {
         let srgb = |x: f32| {
             let x = (x * exposure).clamp(0.0, 1.0);
             let s = if x <= 0.0031308 {
@@ -288,14 +330,130 @@ fn main() {
             };
             (s * 255.0 + 0.5) as u8
         };
-        let bytes: Vec<u8> = colors.iter().flat_map(|c| c.map(srgb)).collect();
-        let file = std::fs::File::create(&out).expect("the image");
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1280, 720);
+        let bytes: Vec<u8> = image.iter().flat_map(|c| c.map(srgb)).collect();
+        let file = std::fs::File::create(path).expect("the image");
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         encoder
             .write_header()
-            .and_then(|mut w| w.write_image_data(&bytes))
+            .and_then(|mut wr| wr.write_image_data(&bytes))
             .expect("the PNG");
+    };
+    let out = std::env::var_os("GD_OUT").map(std::path::PathBuf::from);
+    if let Some(out) = &out {
+        save(&ours, out);
+    }
+    if let Ok(samples) = std::env::var("GD_CYCLES") {
+        let work = std::env::temp_dir().join(format!("gltf_dev_cycles_{}", std::process::id()));
+        std::fs::create_dir_all(&work).expect("a work folder");
+        let v = |x: Vec3| format!("[{}, {}, {}]", x.x, x.y, x.z);
+        let suns: Vec<String> = suns
+            .iter()
+            .map(|&(toward, irradiance)| {
+                format!(
+                    "{{\"toward\": {}, \"irradiance\": {}, \"angle\": 0.5}}",
+                    v(toward),
+                    v(irradiance)
+                )
+            })
+            .collect();
+        let env_path = std::env::var("GD_ENV").ok();
+        let strength: f32 = std::env::var("GD_ENV_STRENGTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
+        let raw = work.join("reference.f32");
+        let job = format!(
+            "{{\"gltf\": {:?}, \"origin\": [{}, {}, {}], \"camera\": {{\"eye\": {}, \"target\": {}, \"fov\": {}}}, \"size\": [{w}, {h}], \"samples\": {samples}, \"bounces\": {}, \"environment\": {}, \"strength\": {strength}, \"sky\": {}, \"suns\": [{}], \"distribution\": {:?}, \"out\": {:?}}}",
+            path,
+            origin.x,
+            origin.y,
+            origin.z,
+            v(eye),
+            v(target),
+            fov,
+            num("GD_BOUNCES", 4),
+            env_path.map_or("null".to_string(), |p| format!("{p:?}")),
+            if std::env::var("GD_SKY").as_deref() == Ok("0") || std::env::var_os("GD_ENV").is_some()
+            {
+                v(Vec3::ZERO)
+            } else {
+                v(Vec3::new(0.6, 0.75, 1.0) * 0.3)
+            },
+            suns.join(", "),
+            std::env::var("GD_DISTRIBUTION").unwrap_or_default(),
+            raw.to_string_lossy()
+        );
+        let job_path = work.join("job.json");
+        std::fs::write(&job_path, job).expect("the job");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("cycles/render_gltf_reference.py");
+        let t = Instant::now();
+        let status = std::process::Command::new("/Applications/Blender.app/Contents/MacOS/Blender")
+            .args(["-b", "--factory-startup", "-noaudio", "--python"])
+            .arg(&script)
+            .arg("--")
+            .arg(&job_path)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("Blender");
+        assert!(status.success(), "Blender failed");
+        let bytes = std::fs::read(&raw).expect("the reference");
+        let reference: Vec<[f32; 3]> = bytes
+            .chunks_exact(12)
+            .map(|c| {
+                std::array::from_fn(|k| f32::from_le_bytes(c[4 * k..4 * k + 4].try_into().unwrap()))
+            })
+            .collect();
+        println!(
+            "cycles {:.0} s: relative RMSE {:.4}; mean ours {:.4}, cycles {:.4}",
+            t.elapsed().as_secs_f64(),
+            room3d::cycles::relative_rmse(&ours, &reference),
+            ours.iter()
+                .map(|c| (c[0] + c[1] + c[2]) as f64)
+                .sum::<f64>()
+                / (3 * ours.len()) as f64,
+            reference
+                .iter()
+                .map(|c| (c[0] + c[1] + c[2]) as f64)
+                .sum::<f64>()
+                / (3 * reference.len()) as f64
+        );
+        // Highlights clamped at 4x the reference's mean (sun glints on
+        // smooth metal dominate otherwise), and the share of pixels off by
+        // more than 10% of the mean.
+        let mean = reference.iter().flatten().map(|&x| x as f64).sum::<f64>()
+            / (3 * reference.len()) as f64;
+        let cap = (4.0 * mean) as f32;
+        let clamp = |v: &[[f32; 3]]| v.iter().map(|c| c.map(|x| x.min(cap))).collect::<Vec<_>>();
+        let (oc, rc) = (clamp(&ours), clamp(&reference));
+        let off = oc
+            .iter()
+            .zip(&rc)
+            .filter(|(a, b)| (0..3).any(|k| ((a[k] - b[k]) as f64).abs() > 0.1 * mean))
+            .count();
+        println!(
+            "clamped at 4x the mean: relative RMSE {:.4}; pixels off by > 10% of the mean: {:.2}%",
+            room3d::cycles::relative_rmse(&oc, &rc),
+            100.0 * off as f64 / oc.len() as f64
+        );
+        if let Some(out) = &out {
+            save(&reference, &out.with_extension("cycles.png"));
+            // The difference, ours minus Cycles: red brighter, blue darker,
+            // full scale at half the mean.
+            let diff: Vec<[f32; 3]> = oc
+                .iter()
+                .zip(&rc)
+                .map(|(a, b)| {
+                    let d = ((a[0] + a[1] + a[2]) - (b[0] + b[1] + b[2]))
+                        / 3.0
+                        / (0.5 * mean as f32)
+                        / exposure;
+                    [d.max(0.0), 0.0, (-d).max(0.0)]
+                })
+                .collect();
+            save(&diff, &out.with_extension("diff.png"));
+        }
+        let _ = std::fs::remove_dir_all(&work);
     }
 }
