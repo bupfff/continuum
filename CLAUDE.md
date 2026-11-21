@@ -50,22 +50,53 @@
 - Gate workflow:
   1. Write the gate's binary as a stub whose doc comment states the pass
      criterion, and commit it before implementing or running.
-  2. Run it once at full size. Development runs on smaller scenes are fine
-     but must be disclosed.
-  3. Record pass or fail with exact numbers in `docs/results/<gate>.md`.
-     Never tune and re-run after a near miss; fixes go into a new gate.
-     Save the run's output as it runs (`| tee`), and give the binary a
-     development mode run once before the gate (a shader that fails to
-     compile would otherwise cost the gate its only run).
-  4. Update the milestone table, §3.6–3.8 and the README, and commit.
+  2. Give the binary a rehearsal mode that runs every criterion exactly as
+     the gate measures it (full size, the same baselines and bake-budget
+     mode, timing interleaved in one process) on fewer frames or views.
+     Rehearse before the gate: a missed bar means more development, not a
+     gate run, and a shader that fails to compile shows up here.
+     Development on smaller scenes is fine but never stands in for the
+     rehearsal, and is disclosed.
+  3. Run the gate once at full size, saving its output as it runs (`|
+     tee`, under a time limit). Record pass or fail with exact numbers in
+     `docs/results/<gate>.md`. Never tune and re-run after a near miss;
+     fixes go into a new gate.
+  4. Per gate, update only the results file and the milestone table, in
+     one commit with a one-line subject (verdict and key numbers; details
+     live in the results file). README, GUIDE and DESIGN §3.6–3.8 are
+     brought current once a session or at a milestone's end.
+  5. Park after two failed gates on the same criterion: write the levers
+     left into DESIGN, then take the next item, unless the criterion is
+     one of the four landmarks (DESIGN §3.8) or the user says otherwise.
 
   Commits end with "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>".
+- Session habits (agreed with the user 2026-11-20):
+  - DESIGN §3.8's "Start here" stays about 200 words: the state, the next
+    three items, current pitfalls. History lives in git and
+    `docs/results/`.
+  - One milestone per conversation where possible; in a long run, bring
+    "Start here" current at each milestone so a compaction or a fresh
+    start loses nothing.
+  - While a gate holds the laptop, only read and write: the next design
+    and stub, the results draft, literature checks (network only).
+    Schedule a check on the run instead of ending the turn idle.
+- Metal pitfalls: at most 29 storage buffers a stage (`vc_shade` is at
+  it); ray queries run about 50× slower when tmin skips a long grazing
+  path (start rays at the box entry); real-frame pass times come from
+  Instruments (`xcrun xctrace record --template 'Metal System Trace'`,
+  table `metal-gpu-intervals`), and traces fill the disk (delete them
+  after export).
 - Cycles references (Blender 5.2 at `/Applications`; `room3d::cycles`):
   - Cycles always averages each pixel's area (at least a one-pixel box), so
     compare our renders supersampled (4×4), never one sample per pixel.
   - Keep small bright emitters within about 1 km: Cycles loses 1.9% of a
     0.5° sun at 3 km.
   - Use `render_instanced` for large instanced scenes.
+  - Glass needs transmission bounces (one bounce renders it black); clamp
+    highlight pixels at 4× the mean for smooth glass. Blender 5.2 removed
+    `material.cycles.homogeneous_volume`. `cycles.rs` reuses a cached EXR
+    while the job's JSON is unchanged: delete its directory after changing
+    a script. Blender's glTF importer maps t seconds to frame t × fps.
 - Design rules that are easy to forget: no rasterization anywhere (hard cases get
   slower paths inside the paradigm); no blending of previous frames for image
   quality; wgpu and compute only; every performance or quality claim is measured

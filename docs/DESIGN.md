@@ -1790,134 +1790,28 @@ estimates, and gates fail often, so treat them as ranges.
 | 5 | Library API, Bevy plugin, examples, documentation | Something people can use. **Done:** `Renderer`, a glTF-to-PNG example, `docs/GUIDE.md`, the viewer's instanced scenes on `Renderer`, rustdoc for the public API (`missing_docs` warns), experiment-only items hidden from the docs; a Bevy 0.20 plugin (`bevy_continuum`, on Bevy's own device; not gated) | 2 (done) |
 | 6 | Windows/NVIDIA: CI (WARP, lavapipe), a cloud GPU benchmark run | The day-one platform requirement. **CI done:** Linux (lavapipe) passes every test; Windows compiles every shader with DXC, but WARP cannot run the kernel (`docs/results/ci-portability.md`). The cloud GPU benchmark is prepared (`docs/BENCHMARK.md`: the gates' timing parts in one headless binary, a setup script, an M4 baseline); not yet run on NVIDIA | 1–2 (1 spent) |
 
-### 3.8 Next steps, in order (updated 2026-11-16, fifteenth session)
+### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-16, fifteenth session).** The state in one
-place, for a new conversation. **Now:** items 1–4 of the user's order are
-done through M21 (atmosphere and post: M17–M21 passed); item 5, lighting
-gaps, is under way with M22, bounce light with movers (§3.4 "Bounce light
-with movers"): G1 failed on cost (the ledger's re-bakes double the moving
-frame) and one check of its new flight; image and rest passed. Since:
-tighter sound charges (telescoped, swept), but the re-bakes' cost stays;
-next, partial re-bakes of the bins a move changed, or thresholds scaled by
-bounce's share of a page (§3.4, "Development after gate 1"). Movers under a sky cost 331 ms a frame, a gap of
-its own. Then the rest of item 5 (bounce on by default and quicker to settle,
-emissive surfaces as lights, receivers next to large lights). Read this block, then the milestone table
-(§6) and the results files it names. Item 1 of "Next, in order" below (the
-design for M13's far field, §3.4) and items 2.1–2.3 are done (M4 G13 and
-M14 G15 passed; M14 G14, several bounces with streaming, failed one view's
-convergence check with a disclosed confound). **M13 gates 5 and 6 passed**
-in the eleventh session (gate 6: coverage pages for far hierarchy nodes;
-settled 0.212× / 0.135× one ray's coverage error in 16.12 / 17.11 ms,
-`docs/results/m13-gate6.md`) and **gate 7** (pages keep up with a 10 m/s
-flight: 1.191× the settled frame against 1.2×, `docs/results/m13-gate7.md`)
-and **gate 8** (the coverage pass in about 9 ms settled in both views,
-`docs/results/m13-gate8.md`). **Gate 9** (colour in the same structures)
-**failed** (0.652×/0.547× one ray's colour error against 0.5×; 26.5/22.1
-ms against 15; `docs/results/m13-gate9.md`). Run, recorded and redesigned
-with the user's go-ahead (2026-11-13). **Gate 10** (twelfth session)
-**passed colour and failed speed** (0.383×/0.465× against 0.5×; 16.05/18.03
-ms against 15; `docs/results/m13-gate10.md`, development in
-`docs/results/m13-gate10-development.md`). **Gate 11 passed** (0.335×/0.386×
-one ray's colour error, 13.85/14.69 ms settled; `docs/results/m13-gate11.md`,
-development in `docs/results/m13-gate11-development.md`): the gates' bars
-for Landmark 3 (coverage 10 ms, colour 15 ms) are met settled on the
-field's views; the landmark's "about 10 ms" with colour is not. §3.4's
-"Into the renderer" (design written 2026-11-14) brings the sub-pixel path
-under the renderer's lighting cache: **gate 12 passed colour and failed
-speed** (0.435×/0.414× one ray's error against the renderer's own
-supersampled shading; 17.80/18.77 ms against 16.7, on a machine whose
-control ran 8–16% slow; gate 11's path in the same state 15.82/16.96 ms,
-so the cache's lighting costs about 2 ms; `docs/results/m13-gate12.md`,
-development in `docs/results/m13-gate12-development.md`). **Gate 13
-passed**, standing narrowly: the cache-lit path at 1.045×/1.014× gate 11's
-frame timed interleaved in one process (bar 1.05×), colour 0.436×/0.414×
-(`docs/results/m13-gate13.md`; the run started by accident, disclosed).
-The path is now `RendererOptions::sub_pixel` (§3.4, "The option").
-**Gate 14 passed** (thirteenth session): lights seen directly are drawn by
-the bins they cover (0.145×/0.205× one ray's error near them, 1.001×/0.999×
-the frame; `docs/results/m13-gate14.md`). Its low view hid the sun behind
-a near boulder, so small instances in front of a light are not yet
-measured.
-**Since (thirteenth session, development):** small instances and pages lit
-by the sky by their normal (0.395×/0.388×/0.351× one ray's error from
-0.437×/0.414×/0.428×, `docs/results/m13-small-instances-development.md`);
-a light seen through small instances 0.319× in development. Found: a
-stall in the lighting cache for receivers within centimetres of a large
-light (§8, "Wide light cones": 12–24 s frames).
-**M5 G14 (fourteenth session, 2026-11-15) failed on accuracy only:** the
-stall is fixed by guards (frames at most 32.8 ms from an empty cache, M5
-G6's scene bit-identical), but receivers centimetres from the large light
-are 4.10% from Cycles against 3% (`docs/results/m5-gate14.md`).
-**Since (the user's order, 2026-11-15): M12 deforming geometry.** The
-design is §3.4 "Deforming geometry". G1 failed on cost only: exact,
-1.08% from Cycles, but 9.6–10.1× the still frame
-(`docs/results/m12-gate1.md`).
-**Since:** the user chose lag within budget (2026-11-15). M12 G2's lag
-works (exact once stopped, 0.15–4.7% around the object while deforming)
-but development at full size still costs 1.6–1.95× the still frame
-(`docs/results/m12-gate2-development.md`; gate not run).
-**M12 G3 passed (2026-11-15):** glTF skins and morph targets posed within
-0.0004 mm of Blender's own evaluation and played through the renderer
-(`docs/results/m12-gate3.md`); the viewer plays them.
-**M15 G1 passed (2026-11-15):** anti-aliasing on the default path, on by
-default in `Renderer` (§3.4 "Anti-aliasing on the default path";
-`docs/results/m15-gate1.md`): edges 0.31–0.38× one ray's error, 0.30–0.42×
-its frame-to-frame error in a slow turn, 1.26–2.77 ms added at 720p.
-**M16 G2 passed (2026-11-15):** thin transmissive glass
-(`KHR_materials_transmission`), 5.08% from Cycles at 1.217× the frame
-(`docs/results/m16-gate2.md`; G1 failed on speed, 1.389×). **G3** (solid
-glass, refraction through volumes) failed on speed only (1.378×; 8.34%
-from Cycles); **G4 passed** (a dielectric's reflectance and a clear coat:
-1.134×, 0.461× the error of ignoring them).
-**M17 G2 passed (2026-11-15):** the display's tone map (Khronos PBR
-Neutral, `Renderer`'s default, within 0.45/255 of Blender's view on
-average) and auto-exposure (0.078 ms at 720p, no overshoot;
-`docs/results/m17-gate2.md`; G1 failed on the meter's cost).
-**M18 G1 passed (2026-11-16):** fog with light shafts (a layer, even or
-falling with height; the sun's visibility in the air kept in a world-space
-grid; froxels integrated each frame): 9.58%/5.51% from Cycles, 0.80 ms at
-720p (`docs/results/m18-gate1.md`).
-**M19 G1 passed (2026-11-16):** bloom (a quarter-size blur mixed in
-linear light, the light kept; 0.26 ms at 720p) and upscaling (Catmull-Rom,
-0.87× nearest's error from half size, 0.51× the native frame), both on by
-default in `Renderer` (`docs/results/m19-gate1.md`). **Next in atmosphere
-and post:** depth of field, then motion blur (against Cycles' camera).
-**M20 G1 failed (2026-11-16):** depth of field passes on the day views
-(+1.66–1.75 ms at 720p; 0.13× the pinhole's error from the lens sampled in
-our renderer, within 1.06× of that lens's distance from Cycles) but a seen
-point light at night blurs into a blocky shape (`docs/results/m20-gate1.md`):
-highlights judged against their tile's mean, and a seen light blurred by
-the depth behind it. **M20 G2 passed (2026-11-16)** with those fixed:
-0.025–0.134× the pinhole's error from the sampled lens in four views,
-within 1.06× of its distance from Cycles, the image's light within 0.5%,
-+1.79–2.49 ms at 720p (`docs/results/m20-gate2.md`).
-**M21 G1 passed (2026-11-16):** motion blur (each pixel's segment from its
-motion since the previous camera and movers, gathered along two lines as
-1-D coverage): 0.072–0.343× the still image's error from the shutter
-sampled in our renderer in four views, within 1.10× of its distance from
-Cycles, +0.55–1.43 ms at 720p (`docs/results/m21-gate1.md`). Item 4,
-atmosphere and post, is done. **Next (the user's order):** item 5,
-lighting gaps: bounce by default and quicker to settle, emissive surfaces
-as lights, receivers next to large lights (M5 G14's rays).
-**Next (the user's order, 2026-11-15):** item 3, material breadth, goes
-on: volumes (refraction through closed glass), clearcoat, sheen, the
-index of refraction and specular extensions, a second texture coordinate
-set, subsurface, glossy beyond one ray, cheaper blending; then
-atmosphere and post, lighting gaps, platforms; the rest of the deforming
-cost waits
-(coarser receivers while an object deforms, cheaper stale passes) (M12 G3's
-files:
-`experiments/room3d/cycles/make_skinned_test.py` makes a test file in
-Blender, `compare_skinned_pose.py` checks a pose against Blender's own
-skinning), then the rest of item 1 (development after gate 11: a 10 m/s
-flight 150 m up runs 1.37× settled because the sun cache misses where the
-view moves); then the showcase (item 4). The machine now runs with
-external displays (control 119.7/104.9 ms against 110.8/91.0 in gate 11's
-state): judge speed against a path timed in the same process, and keep
-the disk free for traces (it filled during gate 13's development). Real-frame pass times come from Instruments
-(`xcrun xctrace record --template 'Metal System Trace'`, table
-`metal-gpu-intervals`); profile mode (`M13_PROFILE=1`) times passes alone.
+**Start here (updated 2026-11-20, sixteenth session).** For a new
+conversation or after a compaction; history lives in git and
+`docs/results/`, the plan below.
+- **Now:** item 5 of the user's order (lighting gaps): M22, bounce light
+  with movers (§3.4 "Bounce light with movers"). G1 failed on cost only:
+  the ledger re-bakes about 210 pages a frame (9 × 192 rays each), 2.16× /
+  2.08× the moving frame without bounce (bar 1.2×); image and rest passed.
+  Tighter charges since did not lower it.
+- **Next:** (1) M22 G2: cheaper re-bakes (only the hemicube bins a move
+  changed, or thresholds scaled by bounce's share of a page's light),
+  rehearsed at full size first. (2) The rest of item 5: bounce on by
+  default and quicker to settle (samples baked against coarse hits are
+  never re-baked), emissive surfaces as lights (M10 G23), receivers next
+  to large lights (M5 G14: hardware rays for wide windows). (3) Parked
+  costs: movers under a sky 331 ms a frame (M9 G3's sky re-bakes),
+  deforming 1.6–1.95× (M12 G2), solid glass 1.378× (M16 G3).
+- **Pitfalls:** compare renderers at a fixed bake budget
+  (`frame_target_ms` 0); time at full size, interleaved in one process,
+  against a path timed in the same run (external displays make controls
+  8–16% slow).
 
 - **Decided 2026-11-15 (the user): toward a full engine, in the order a
   user would hit the gaps.**
