@@ -1388,6 +1388,43 @@ its box), and the own pages' fill race.
   (§3.1: "scaled by how much the result contributes"): a sunlit page's
   bounce change matters far less than a shadowed one's.
 
+**Development for gate 2 (2026-11-20; `m22_cost_dev`, `m22_trace_dev`,
+gate 2's rehearsal mode):**
+- **Gate 1's cost was mistimed** (`docs/results/m22-gate1.md`, the
+  addendum): the renderer without re-bakes was not waited for, and its GPU
+  work ran into the next timed frame of ours. Waited for, the same flights
+  measured 1.18× and 1.145× bounce off, not 2.16× and 2.08×; the "cost did
+  not fall" above was measured the same way.
+- **The stall at frame 30:** pages only bounce rays read were invalidated
+  under moving shadows (no pixel read them) and evicted, so the next
+  re-bakes' rays missed them: incomplete samples (up to 1,490 a frame),
+  retries and requests that took the budget, and frames re-baking almost
+  nothing (45–153 samples against about 2,400). Pages over ε at frame 30
+  were 1.45–1.54× a renderer without re-bakes. A page bounce rays read is
+  now in use (as reflections' hits are), so its stale texels re-bake:
+  incomplete samples near 0, frame 30 at 0.32×. (Marking that use apart,
+  so the ledger lists only pages pixels read, saved 8% of re-bakes but
+  left more pages over ε: 0.38× at frame 30; dropped.)
+- **Moved shadows are charged by each mover's shadow regions** (per light,
+  old and new, telescoped and swept as its boxes), not by one box around
+  every page a moved shadow may reach; by itself little change (the
+  stall dominated). Neither shadow charges nor three times tighter mover
+  spheres changed the volume: about 2,400 bounce samples a frame fill the
+  budget either way.
+- **The ledger's share of the budget** (`CacheOptions::bounce_share`):
+  re-bakes in a frame something moved take at most that share of the
+  bake budget, in the order listed. Largest charges first did worse
+  (pages next to a mover take a large charge again each frame and starve
+  the rest: 0.89× against 0.42× at frame 30 with share 0.5). Flight (a):
+  share 1.0 1.17× bounce off, pages over ε 0.29× at frames 30 and 60;
+  share 0.5 1.10×, 0.42–0.44×. Flight (c) 1.22× and 1.11×.
+- **Passes over every slot dispatch only the slots in use** (the highest
+  taken, not the pool's 524,288): the bounce ledger and the stale pass
+  each took about 0.57 ms visiting empty slots.
+- **Where the moving frame goes** (flight (a), profiled): the movers'
+  direct light re-baked (stale texels) about 14 ms of 20; the ledger's
+  re-bakes about 1 µs a bounce sample (192 rays and gathers).
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.

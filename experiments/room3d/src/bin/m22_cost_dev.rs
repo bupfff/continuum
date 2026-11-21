@@ -106,6 +106,10 @@ fn main() {
         assert!(settle(r, t.camera, &target), "not settled");
     }
     let gate1_order = std::env::var_os("CD_GATE1_ORDER").is_some();
+    // `CD_PROFILE=1`: before each of ours' timed frames, one profiled frame
+    // (its passes each submitted and waited for alone), summed by pass.
+    let profile = std::env::var_os("CD_PROFILE").is_some();
+    let mut passes: std::collections::BTreeMap<&str, f64> = Default::default();
     let order: [usize; 3] = if gate1_order { [0, 2, 1] } else { [0, 1, 2] };
     let mut times = [Vec::new(), Vec::new(), Vec::new()];
     let mut sums = [[0f64; 6]; 3];
@@ -116,6 +120,19 @@ fn main() {
             for &m in &movers {
                 let i = &t.scene.instances[m];
                 r.set_instance_transform(m, i.rotation, i.position + step * at);
+            }
+            if profile && k == 0 {
+                let p = r.frame_profiled(t.camera, &target);
+                for (label, d) in p.bake_passes {
+                    if !label.is_empty() {
+                        *passes.entry(label).or_insert(0.0) += d.as_secs_f64() * 1000.0;
+                    }
+                }
+                for (i, d) in p.passes.iter().enumerate() {
+                    *passes.entry(["camera 0", "camera 1", "camera 2", "camera 3", "camera 4", "camera 5", "camera 6", "camera 7", "camera 8", "camera 9", "camera 10", "camera 11", "camera 12", "camera 13", "camera 14", "camera 15"][i]).or_insert(0.0) += d.as_secs_f64() * 1000.0;
+                }
+                *passes.entry("bake (all)").or_insert(0.0) += p.bake.as_secs_f64() * 1000.0;
+                *passes.entry("planning").or_insert(0.0) += p.planning.as_secs_f64() * 1000.0;
             }
             let s = Instant::now();
             r.frame(t.camera, &target);
@@ -148,5 +165,10 @@ fn main() {
             sums[k][1] / n,
             sums[k][2] / n
         );
+    }
+    for (label, ms) in &passes {
+        if *ms > 0.0 {
+            println!("profiled {label:24} {:7.3} ms a frame", ms / n);
+        }
     }
 }

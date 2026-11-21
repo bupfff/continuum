@@ -227,7 +227,7 @@ pub struct CacheOptions {
     /// Bounce light with movers (M22): the share of the bake budget the
     /// ledger's re-bakes may take in a frame something moved, in the order
     /// listed (the rest wait, still charged). At rest the drain takes what
-    /// the budget leaves. 0.5 by default.
+    /// the budget leaves. 0.75 by default.
     pub bounce_share: f32,
     /// Anti-aliasing at silhouettes (M7 gates 3–4): pixels whose neighbours
     /// see another object or depth average four rays through their
@@ -328,7 +328,7 @@ impl Default for CacheOptions {
             emission_bounce: true,
             indirect_sample_cost: 8,
             bounce_epsilon: 0.01,
-            bounce_share: 0.5,
+            bounce_share: 0.75,
             edge_rays: false,
             deforming_budget: 512,
             edge_samples: 4,
@@ -1082,6 +1082,10 @@ pub(crate) struct VirtualCache {
     /// it was allocated in, whichever is later.
     last_used: Vec<u32>,
     free: Vec<u32>,
+    /// One past the highest slot ever taken: passes over every slot (the
+    /// movers' stale pass, the ledgers) dispatch this many, not the pool's
+    /// size (slots are taken lowest first, freed ones again first).
+    slot_extent: u32,
     bake_list: Vec<[u32; 4]>,
     jobs: Vec<[u32; 2]>,
     texels: u32,
@@ -1597,6 +1601,7 @@ impl VirtualCache {
             slot_key: vec![[EMPTY; 3]; options.pages as usize],
             last_used: vec![0; options.pages as usize],
             free: (0..options.pages).rev().collect(),
+            slot_extent: 0,
             bake_list: Vec::new(),
             jobs: Vec::new(),
             texels: 0,
@@ -2190,9 +2195,9 @@ impl VirtualCache {
         self.append_pages * PAGE_TEXELS * self.lights
     }
 
-    /// Slots the pool holds.
-    pub(crate) fn pages(&self) -> u32 {
-        self.options.pages
+    /// One past the highest slot ever taken (at least 1).
+    pub(crate) fn slot_extent(&self) -> u32 {
+        self.slot_extent.max(1)
     }
 
     /// Diagnostics: resident slots whose pages shading may read (not
@@ -3429,6 +3434,7 @@ impl VirtualCache {
                 self.free.push(slot);
                 continue;
             };
+            self.slot_extent = self.slot_extent.max(slot + 1);
             self.map.insert(k, (slot, entry));
             self.slot_key[slot as usize] = k;
             self.last_used[slot as usize] = self.frame;

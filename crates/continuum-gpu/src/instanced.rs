@@ -150,7 +150,7 @@ impl Cache {
                 list.push(("ledger reset", &passes[4], &binds[4], groups(counts[3])));
             }
             if moved {
-                list.push(("stale", &passes[0], &binds[0], slots(self.state.pages())));
+                list.push(("stale", &passes[0], &binds[0], slots(self.state.slot_extent())));
                 list.push(("stale args", &passes[1], &binds[1], Dispatch::Groups(1, 1)));
                 list.push(("stale texels", &passes[2], &binds[2], Dispatch::Indirect(0)));
             }
@@ -161,11 +161,11 @@ impl Cache {
                     "bounce ledger",
                     &passes[6],
                     &binds[6],
-                    slots(self.state.pages()),
+                    slots(self.state.slot_extent()),
                 ));
             }
             if lit {
-                list.push(("ledger", &passes[5], &binds[5], slots(self.state.pages())));
+                list.push(("ledger", &passes[5], &binds[5], slots(self.state.slot_extent())));
             }
             if indirect {
                 list.push(("bake args", &passes[3], &binds[3], Dispatch::Groups(1, 1)));
