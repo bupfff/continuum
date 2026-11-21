@@ -146,6 +146,9 @@ mod tangents;
 mod vcache;
 
 pub use cutout::cut_out;
+/// GPU buffers by binding and size in bytes, largest first (diagnostics).
+#[doc(hidden)]
+pub type BufferSizes = Vec<(u32, u64)>;
 pub use dof::DepthOfField;
 pub use exposure::{AutoExposure, Bloom, ToneMap, Upscale};
 pub use fog::Fog;

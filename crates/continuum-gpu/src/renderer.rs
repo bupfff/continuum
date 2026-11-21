@@ -402,6 +402,18 @@ impl Renderer {
         self.inner.frame(camera, target);
     }
 
+    /// Diagnostics: [`Renderer::render`] with each pass submitted and
+    /// waited for alone, timed.
+    #[doc(hidden)]
+    pub fn render_profiled(
+        &mut self,
+        camera: Camera,
+        target: &wgpu::TextureView,
+    ) -> crate::FrameProfile {
+        self.set_motion(camera);
+        self.inner.frame_profiled(camera, target)
+    }
+
     /// [`Renderer::render`] without drawing: the frame's colors stay in the
     /// renderer, for [`Renderer::encode_display`]. For engines that order
     /// their own passes (the Bevy plugin): this submits the frame's compute
@@ -507,6 +519,13 @@ impl Renderer {
     pub fn read_colors(&mut self) -> Vec<[f32; 3]> {
         self.inner.finish();
         self.inner.read_colors()
+    }
+
+    /// Diagnostics: GPU memory by buffer (binding, bytes), the scene's then
+    /// the cache's, largest first.
+    #[doc(hidden)]
+    pub fn memory_report(&self) -> (crate::BufferSizes, crate::BufferSizes) {
+        self.inner.memory_report()
     }
 
     /// GPU memory the scene and the cache hold, in bytes.

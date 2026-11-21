@@ -3103,13 +3103,18 @@ struct PageRef {
     coarsest: bool,
 };
 
+// A page key's second word: the global chart in the low 24 bits, the mip
+// above (scenes split into more than 65,536 charts, as Sponza's 187,825).
+const KEY_MIP_SHIFT: u32 = 24u;
+const KEY_CHART_MASK: u32 = 0xffffffu;
+
 fn vc_page(m: u32, c: u32, uv: vec2<f32>, mip: u32) -> PageRef {
     let n = vc_grid(c, m, mip);
     let t = clamp(uv * vec2<f32>(n) - vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(n - vec2<u32>(1u)));
     let base = vec2<u32>(floor(t));
     let page = base / PAGE;
     var r: PageRef;
-    r.key = vec3<u32>(m, c | (mip << 16u), page.x | (page.y << 16u));
+    r.key = vec3<u32>(m, c | (mip << KEY_MIP_SHIFT), page.x | (page.y << 16u));
     r.base = base - page * PAGE;
     r.frac = t - floor(t);
     r.coarsest = n.x == 1u && n.y == 1u;
@@ -3214,8 +3219,8 @@ fn page_texel(page_index: u32, k: u32) -> PageTexel {
     var t: PageTexel;
     t.e = bake_list[page_index];
     t.m = t.e.x;
-    t.c = t.e.y & 0xffffu;
-    let mip = t.e.y >> 16u;
+    t.c = t.e.y & KEY_CHART_MASK;
+    let mip = t.e.y >> KEY_MIP_SHIFT;
     let page = vec2<u32>(t.e.z & 0xffffu, t.e.z >> 16u);
     t.n = vc_grid(t.c, t.m, mip);
     t.texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
@@ -3553,8 +3558,8 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
         // (M14 gate 4), missing until baked again.
         atomicStore(&slot_stale[e.w], select(0u, 3u, kind == 2.0));
     }
-    let c = e.y & 0xffffu;
-    let mip = e.y >> 16u;
+    let c = e.y & KEY_CHART_MASK;
+    let mip = e.y >> KEY_MIP_SHIFT;
     let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
     let n = vc_grid(c, e.x, mip);
     let o = e.w * PAGE_TEXELS;
@@ -3874,9 +3879,9 @@ fn charge_sky(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>, page: Box3, 
 fn sky_rebake(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>) -> bool {
     let stride = bitcast<u32>(sky_ledger[2u * s + 1u].w);
     if (stride == 0u) { return false; }
-    let mip = key.y >> 16u;
+    let mip = key.y >> KEY_MIP_SHIFT;
     let page = vec2<u32>(key.z & 0xffffu, key.z >> 16u);
-    let n = vc_grid(key.y & 0xffffu, key.x, mip);
+    let n = vc_grid(key.y & KEY_CHART_MASK, key.x, mip);
     let inside = min(n - min(page * PAGE, n), vec2<u32>(PAGE_STRIDE));
     let listed = min(inside + vec2<u32>(1u), vec2<u32>(PAGE_STRIDE));
     let count = ((listed.x + stride - 1u) / stride) * ((listed.y + stride - 1u) / stride);
@@ -4105,8 +4110,8 @@ fn vc_stale_texels(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (s == NONE) { return; }
     let info = slot_info[3u * s];
     let m = info.x;
-    let chart = info.y & 0xffffu;
-    let mip = info.y >> 16u;
+    let chart = info.y & KEY_CHART_MASK;
+    let mip = info.y >> KEY_MIP_SHIFT;
     let page = vec2<u32>(info.z & 0xffffu, info.z >> 16u);
     let n = vc_grid(chart, m, mip);
     let texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
@@ -5098,8 +5103,8 @@ fn bounce_job(wg: vec3<u32>) -> BounceJob {
     let job = indirect_jobs[min(j, max(vc.indirect.x, 1u) - 1u)];
     let e = bake_list[job.x];
     let m = e.x;
-    let c = e.y & 0xffffu;
-    let mip = e.y >> 16u;
+    let c = e.y & KEY_CHART_MASK;
+    let mip = e.y >> KEY_MIP_SHIFT;
     let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
     let n = vc_grid(c, m, mip);
     let k = job.y & 0xffu;

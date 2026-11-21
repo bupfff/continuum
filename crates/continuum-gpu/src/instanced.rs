@@ -2868,6 +2868,19 @@ impl InstancedRenderer {
         self.scene.iter().map(|(_, b)| b.size()).sum()
     }
 
+    /// Diagnostics: GPU memory by buffer (binding, bytes), the scene's then
+    /// the cache's, largest first.
+    #[doc(hidden)]
+    pub fn memory_report(&self) -> (crate::BufferSizes, crate::BufferSizes) {
+        let mut scene: Vec<(u32, u64)> = self.scene.iter().map(|(k, b)| (*k, b.size())).collect();
+        scene.sort_by_key(|&(_, size)| std::cmp::Reverse(size));
+        let cache = self
+            .cache
+            .as_ref()
+            .map_or(Vec::new(), |c| c.state.buffer_sizes());
+        (scene, cache)
+    }
+
     /// GPU memory held by the lighting cache, in bytes (0 without one).
     pub fn cache_bytes(&self) -> u64 {
         self.cache.as_ref().map_or(0, |c| c.state.bytes())

@@ -616,7 +616,11 @@ fn chart_tables(geometries: &[Surface], skip: usize) -> ChartTables {
         }
         first_tri += g.triangles.len() as u32;
     }
-    assert!(t.charts.len() < 1 << 16, "too many charts for page keys");
+    assert!(
+        t.charts.len() < 1 << 24,
+        "too many charts for page keys: {}",
+        t.charts.len()
+    );
     if t.cells.is_empty() {
         t.cells.push([0, 0]);
     }
@@ -775,9 +779,15 @@ pub struct CachePage {
     pub sky_baked: bool,
 }
 
-/// A page's key, (object, chart | mip << 16, page x | page y << 16), unpacked.
+/// A page's key, (object, chart | mip << 24, page x | page y << 16), unpacked
+/// (the shaders' `KEY_MIP_SHIFT`).
 fn unpack(k: [u32; 3]) -> (u32, u32, u32, [u32; 2]) {
-    (k[0], k[1] & 0xffff, k[1] >> 16, [k[2] & 0xffff, k[2] >> 16])
+    (
+        k[0],
+        k[1] & 0xff_ffff,
+        k[1] >> 24,
+        [k[2] & 0xffff, k[2] >> 16],
+    )
 }
 
 /// A fast hash for page keys: std's SipHash cost more than the rest of the
@@ -1876,6 +1886,13 @@ impl VirtualCache {
     }
 
     /// GPU memory the cache holds, in bytes.
+    /// Diagnostics: the cache's buffers by binding and size, largest first.
+    pub(crate) fn buffer_sizes(&self) -> Vec<(u32, u64)> {
+        let mut v: Vec<(u32, u64)> = self.buffers.iter().map(|(k, b)| (*k, b.size())).collect();
+        v.sort_by_key(|&(_, size)| std::cmp::Reverse(size));
+        v
+    }
+
     pub(crate) fn bytes(&self) -> u64 {
         self.buffers.iter().map(|(_, b)| b.size()).sum::<u64>()
             + self.readbacks.iter().map(|r| r.buffer.size()).sum::<u64>()
@@ -2278,7 +2295,7 @@ impl VirtualCache {
         self.frame
     }
 
-    /// Diagnostics: the page slot `slot` holds (object, chart | mip << 16,
+    /// Diagnostics: the page slot `slot` holds (object, chart | mip << 24,
     /// page x | y << 16).
     pub(crate) fn slot_key_of(&self, slot: u32) -> [u32; 3] {
         self.slot_key[slot as usize]
