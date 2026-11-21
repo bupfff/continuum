@@ -2014,7 +2014,10 @@ conversation or after a compaction; history lives in git and
   against a 60 fps frame budget (16.7 ms) with a streaming time budget,
   not as a ratio against unthrottled frames (which are about 4 ms on this
   scene).
-- **Releases:** `v0.2.0` tagged (2026-11-08). The repository is public
+- **Releases:** `v0.2.0` tagged (2026-11-08); `v0.3.0` (2026-11-21) with
+  a downloadable macOS viewer (the user approved publishing it), built by
+  `.github/workflows/release.yml` on version tags from
+  `scripts/bundle_macos.sh`. The repository is public
   (2026-11-09) under PolyForm Noncommercial 1.0.0 ("Copyright 2026 Gabriel
   Kirrane, doing business as Penumbral Labs"); commercial requests through
   issues.

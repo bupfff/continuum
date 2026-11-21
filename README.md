@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.2.0-ffc15e">
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-ffc15e">
   <img alt="status" src="https://img.shields.io/badge/status-experimental-a9aeb8">
   <img alt="license" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-5b6577">
   <img alt="built with" src="https://img.shields.io/badge/Rust%20%C2%B7%20wgpu-compute%20only-171a22">
@@ -33,8 +33,18 @@ measured against [Blender's Cycles](https://www.cycles-renderer.org/), a
 reference path tracer.
 
 It ships as a library, a [Bevy](https://bevyengine.org) plugin, and a
-viewer that flies through your own glTF files. It is experimental: v0.2
+viewer that flies through your own glTF files. It is experimental: v0.3
 works and is measured, but the API will change.
+
+## Is it right for you?
+
+| | |
+|---|---|
+| **Try it in a minute** | [Download the viewer for Mac](https://github.com/bupfff/continuum/releases/latest) (Apple silicon), drop a `.glb` file on it and fly around. See [Try it](#try-it). |
+| **Good at** | Soft shadows from area lights that are exact and free of noise in every frame; very large instanced or streamed worlds; lights that change color at no cost. |
+| **Runs on** | Apple silicon Macs (Metal): tested and measured. Linux (Vulkan): the tests pass on a software GPU. Windows, NVIDIA and AMD: untested, and may not run yet. Needs a GPU with compute shaders; glass and streaming need hardware ray tracing. |
+| **Not yet** | Bounce light from moving lights, phones and the web, a stable API. See [Limits](#limits). |
+| **License** | Free for noncommercial use ([PolyForm Noncommercial 1.0.0](LICENSE.md)). Commercial use needs a license from Penumbral Labs: [open an issue](https://github.com/bupfff/continuum/issues). |
 
 ## Why it is different
 
@@ -202,7 +212,8 @@ Selected numbers (1280×720, Apple M4, release builds):
 - **glTF 2.0** import and export, with cameras, lights and animations.
 - **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
   entities moving its objects.
-- **Viewer:** fly through the showcase, the boulder field, or your own file.
+- **Viewer:** fly through the showcase, the boulder field, or your own
+  file, with a panel for its settings; a download for Apple silicon Macs.
 
 ## Limits
 
@@ -304,51 +315,97 @@ reference" against "how fast", instead of fixed presets.
 
 ## Try it
 
-You need [Rust](https://rustup.rs) and a GPU wgpu supports.
+**On a Mac with Apple silicon:** download
+`continuum-viewer-…-macos-arm64.zip` from the
+[latest release](https://github.com/bupfff/continuum/releases/latest),
+unzip it and open **Continuum Viewer**. The app is not notarized by Apple,
+so macOS refuses it the first time: open **System Settings → Privacy &
+Security**, scroll down and click **Open Anyway** (or run
+`xattr -dr com.apple.quarantine "Continuum Viewer.app"` in Terminal).
+
+The panel at the top left picks a scene (a gallery, a field of up to a
+million boulders, or your own glTF file: **Open a glTF file…**, or drop a
+`.glb` or `.gltf` on the window) and changes how it renders. W A S D move,
+drag to look, Shift to go faster, H hides the panel.
+
+**From source, on any platform** (you need [Rust](https://rustup.rs); the
+first build takes a few minutes):
 
 ```bash
+git clone https://github.com/bupfff/continuum
+cd continuum
 cargo run --release -p viewer
 ```
 
-That flies through the showcase. Other scenes:
-
-```bash
-cargo run --release -p viewer -- --scene field --scale 2
-```
-
-```bash
-cargo run --release -p viewer -- --gltf your-scene.glb
-```
-
-Controls: WASD to move, Q/E down and up, Shift to move faster, drag to look,
-P to pause moving objects and animations, `[` and `]` for exposure, V for
-vsync, Esc to quit.
+Add a file to open it straight away
+(`cargo run --release -p viewer -- your-scene.glb`); the
+[viewer's documentation](apps/viewer/src/main.rs) lists its options.
 
 ## Use it
 
-As a library, the front door is `continuum_gpu::Renderer`: give it a scene
-(geometry and placements, or a glTF file through `continuum_gltf::load`),
-lights and a camera, and it renders into your texture.
-[docs/GUIDE.md](docs/GUIDE.md) walks through it, and the API reference is
-`cargo doc --no-deps -p continuum-gpu -p continuum-gltf --open`.
+Continuum is not on crates.io yet; add it from GitHub:
 
-In Bevy:
+```toml
+[dependencies]
+continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+
+# Recommended: wgpu with two fixes for scenes with very many instances
+# (third_party/README.md). Everything works without them, more slowly.
+[patch.crates-io]
+wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+```
+
+The front door is `continuum_gpu::Renderer`: give it a scene, lights and a
+camera, and it renders into your wgpu texture. In outline:
 
 ```rust
-use bevy::prelude::*;
-use bevy_continuum::{ContinuumCamera, ContinuumPlugin, ContinuumScene};
+let imported = continuum_gltf::load("scene.glb".as_ref())?;
+let mut renderer = Renderer::new(
+    MaskConeKernel::new().ok_or("no GPU")?, // or with_device(device, queue, name)
+    wgpu::TextureFormat::Rgba8UnormSrgb,
+    (1280, 720),
+    &imported.scene,
+    origin, // a point near the camera; lights and cameras are relative to it
+    &lights,
+    RendererOptions::default(),
+);
+// Each frame:
+renderer.render(camera, &view);
+```
 
+The whole program, with the file's own lights and camera, is
+[`examples/render.rs`](crates/continuum-gltf/examples/render.rs) (a glTF
+file to a PNG):
+
+```bash
+cargo run --release -p continuum-gltf --example render -- scene.glb out.png
+```
+
+[docs/GUIDE.md](docs/GUIDE.md) walks through the rest, and
+`cargo doc --no-deps -p continuum-gpu -p continuum-gltf --open` is the API
+reference.
+
+**In Bevy,** `bevy_continuum` renders a camera's view with Continuum. Its
+[example](crates/bevy_continuum/examples/boxes.rs) builds a scene in code:
+
+```bash
+cargo run --release -p bevy_continuum --example boxes
+```
+
+and sets the plugin up like this (`scene()` is the example's, returning a
+`ContinuumScene`: geometry, lights and renderer options):
+
+```rust
 App::new()
     .add_plugins((DefaultPlugins, ContinuumPlugin))
-    .insert_resource(my_continuum_scene())
+    .insert_resource(scene())
     .add_systems(Startup, |mut commands: Commands| {
         commands.spawn((Camera3d::default(), bevy::camera::Hdr, ContinuumCamera));
     })
     .run();
-```
-
-```bash
-cargo run --release -p bevy_continuum --example boxes
 ```
 
 ## How it was built

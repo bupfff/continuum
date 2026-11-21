@@ -17,4 +17,4 @@ egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-wgpu = "0.37.0"
 egui-winit = "0.37.0"
 rfd = "0.18.0"
-flatland = { version = "0.2.0", path = "../../experiments/flatland" }
+flatland = { path = "../../experiments/flatland" }

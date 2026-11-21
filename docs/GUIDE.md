@@ -355,22 +355,26 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
 
 ## Setup
 
-Add the crates from this repository (they are not on crates.io):
+Add the crates from GitHub (they are not on crates.io):
 
 ```toml
 [dependencies]
-continuum = { path = "../Continuum/crates/continuum" }
-continuum-gpu = { path = "../Continuum/crates/continuum-gpu" }
-continuum-gltf = { path = "../Continuum/crates/continuum-gltf" }
+continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
 
-# Recommended for large instanced scenes: wgpu-core with one fix for
+# Recommended for large instanced scenes: wgpu with two fixes for
 # acceleration structures with many instances (third_party/README.md).
 [patch.crates-io]
-wgpu-core = { path = "../Continuum/third_party/wgpu-core" }
+wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
 ```
 
-Without the patch everything works, but each frame with hardware rays spends
-milliseconds of CPU time on scenes with very many instances (M4 G9).
+(A checkout next to your project works the same with `path =` entries:
+`crates/continuum`, `crates/continuum-gpu`, `crates/continuum-gltf`,
+`third_party/wgpu-core`, `third_party/wgpu-hal`.) Without the patch
+everything works, but each frame with hardware rays spends milliseconds of
+CPU time on scenes with very many instances (M4 G9).
 
 ## Rendering a glTF file
 
