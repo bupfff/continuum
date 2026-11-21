@@ -106,7 +106,7 @@ fn main() {
         v[v.len() / 2],
         v[v.len() * 9 / 10]
     );
-    let mut sums = vec![0.0f64; 16];
+    let mut sums = [0.0f64; 16];
     let mut bake = std::collections::BTreeMap::<&str, f64>::new();
     for f in 300..320 {
         if moving {
