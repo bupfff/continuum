@@ -1140,6 +1140,12 @@ pub(crate) struct VirtualCache {
     /// model it feeds.
     pub(crate) timer: Option<GpuTimer>,
     model: BakeModel,
+    /// The last frame whose GPU timestamps were in order (the bake's span
+    /// before the camera passes', each start before its end): the model
+    /// steers the budget only while such frames keep coming (M22). Where
+    /// timestamps arrive out of order (Apple's GPUs, at pass boundaries)
+    /// the frame period steers it instead.
+    model_frame: u32,
     /// Slots to free, least recently used last (popped first).
     evict_queue: Vec<u32>,
     /// A frame whose invalid slots overflowed the list: every slot's mark
@@ -1658,6 +1664,7 @@ impl VirtualCache {
                     period: queue.get_timestamp_period(),
                 }),
             model: BakeModel::new(),
+            model_frame: 0,
             cap: options.bake_budget as f32,
             evict_queue: Vec::new(),
             overflowed: None,
@@ -2669,7 +2676,10 @@ impl VirtualCache {
             self.evict_marked(device);
         }
         let target = self.options.frame_target_ms;
-        if target > 0.0 && self.timer.is_some() {
+        // The model steers while in-order timings keep coming (M22).
+        let model =
+            self.timer.is_some() && self.model_frame > 0 && self.model_frame + 32 >= self.frame;
+        if target > 0.0 && model {
             // Only once a frame has been timed. Alternate frames bake 20%
             // more and less, so the fit can tell latency from cost.
             if self.latest > 0 {
@@ -2858,15 +2868,19 @@ impl VirtualCache {
                 let t = b.wrapping_sub(a) as f64 * timer.period as f64 * 1e-6;
                 (a != 0 && b > a && t < 1000.0).then_some(t as f32)
             };
-            let bake = if record.pages_baked > 0 || moved {
+            let baked = record.pages_baked > 0 || moved;
+            let bake = if baked {
                 ms(stamps[0], stamps[1])
             } else {
                 Some(0.0)
             };
-            if let (Some(bake), Some(render)) = (bake, ms(stamps[2], stamps[3])) {
+            // The bake's span must end before the camera passes' begins.
+            let ordered = !baked || stamps[1] <= stamps[2];
+            if let (Some(bake), Some(render), true) = (bake, ms(stamps[2], stamps[3]), ordered) {
                 record.gpu_bake_ms = bake;
                 record.gpu_render_ms = render;
                 self.model.add(record.spent as f32, bake, render);
+                self.model_frame = frame;
             }
         }
         record.fallback_pixels = counters[0];

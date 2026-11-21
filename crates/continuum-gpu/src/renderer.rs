@@ -116,6 +116,16 @@ pub struct RendererOptions {
     /// (`docs/results/m15-gate1.md`). Not with the sub-pixel path, which
     /// resolves pixels itself.
     pub anti_aliasing: bool,
+    /// Bounce light (M22; on by default): one bounce of diffuse light
+    /// through the cache (`CacheOptions::indirect`), kept right while
+    /// instances move (a ledger re-bakes what moves may have changed) and
+    /// settling to a fresh bake's (`CacheOptions::bounce_settles`). About
+    /// 1.07–1.17× the frame and 190 MB of GPU memory at the default pool.
+    /// Taken with the cache, except with moving lights (not supported yet),
+    /// the sub-pixel path, or movers without hardware ray queries (bounce
+    /// rays would not see them); `cache_options.indirect` turns it on
+    /// regardless.
+    pub bounce: bool,
     /// How the display maps light to the screen (M17): Khronos PBR Neutral
     /// by default, as Blender's view of that name.
     pub tone_map: crate::ToneMap,
@@ -157,6 +167,7 @@ impl Default for RendererOptions {
             streaming: None,
             sub_pixel: false,
             anti_aliasing: true,
+            bounce: true,
             tone_map: crate::ToneMap::PbrNeutral,
             auto_exposure: Some(crate::AutoExposure::default()),
             fog: None,
@@ -269,6 +280,11 @@ impl Renderer {
             && placed <= 64;
         let mut cache_options = options.cache_options;
         cache_options.anti_aliasing |= options.anti_aliasing && !sub_pixel;
+        cache_options.indirect |= options.bounce
+            && options.moving_lights.is_empty()
+            && !sub_pixel
+            && (kernel.has_hardware_rays()
+                || (options.movable.is_empty() && options.deforming.is_empty()));
         if options.fog.is_some() {
             cache_options.fog = options.fog;
         }
@@ -466,9 +482,12 @@ impl Renderer {
         // lagging its pose: M12 gate 3.)
         latest >= frames
             && self.inner.deforming_lag() == 0
-            && log[latest - frames..latest]
-                .iter()
-                .all(|s| s.requests == 0 && s.pages_baked == 0 && s.rebaked_pages == 0)
+            && log[latest - frames..latest].iter().all(|s| {
+                s.requests == 0
+                    && s.pages_baked == 0
+                    && s.rebaked_pages == 0
+                    && s.indirect_samples == 0
+            })
     }
 
     /// The most frames any light's lighting near deforming geometry lags
