@@ -394,6 +394,8 @@ fn cache_settles_near_per_pixel() {
             },
             // One ray a pixel, as the per-pixel image.
             anti_aliasing: false,
+            // Direct light, as the per-pixel image.
+            bounce: false,
             ..Default::default()
         },
     );
@@ -598,6 +600,9 @@ fn settled_with(scene: &InstancedScene, anti_aliasing: bool) -> Image {
                 ..Default::default()
             },
             anti_aliasing,
+            // Direct effects compared pixel by pixel: no bounce light, which
+            // carries them to other surfaces.
+            bounce: false,
             ..Default::default()
         },
     );
@@ -1719,6 +1724,9 @@ fn movers_leave_no_stale_light() {
             ..Default::default()
         },
         movable: movable.clone(),
+        // Direct light under movers is exact; bounce light is within the
+        // ledger's ε (M22).
+        bounce: false,
         ..Default::default()
     };
     let mut r = renderer(kernel(), &s, DVec3::ZERO, options.clone());
@@ -1963,6 +1971,7 @@ fn bounce_light_settles_and_recolors_free() {
                     indirect,
                     ..Default::default()
                 },
+                bounce: indirect,
                 ..Default::default()
             },
         );
@@ -2070,6 +2079,8 @@ fn sub_pixel_detail_settles_near_one_ray() {
             ..Default::default()
         },
         sub_pixel,
+        // The sub-pixel path has no bounce light; nor does its reference.
+        bounce: false,
         ..Default::default()
     };
     let kernel = kernel();
