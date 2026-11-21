@@ -1395,6 +1395,89 @@ fn hw_vc_bake_indirect_movers(@builtin(workgroup_id) wg: vec3<u32>, @builtin(loc
     bounce_finish(li, job, sum, missing);
 }
 
+// --- Receivers next to large lights (M5 gate 15). ---
+
+var<workgroup> wide_sums: array<vec2<f32>, 64>;
+var<workgroup> wide_count: u32;
+
+// One workgroup per texel listed in `wide_list` (its window on a rect light
+// too wide for a cone): the hemicube's 192 directions around the texel's
+// normal (as the sky's rays, M5 gate 13), each counting its projected solid
+// angle where its ray meets the light, as open where nothing comes first.
+// The open share of that, times the unshadowed light, replaces the cone's
+// value as `vc_bake` stores it; a texel whose bins all miss the light (a
+// sliver) keeps the cone's.
+@compute @workgroup_size(64)
+fn hw_vc_bake_wide(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    if (li == 0u) { wide_count = min(atomicLoad(&wide_list[0]), arrayLength(&wide_list) - 1u); }
+    let count = workgroupUniformLoad(&wide_count);
+    let w = wg.x + wg.y * 65535u;
+    let listed = w < count;
+    let j = select(0u, atomicLoad(&wide_list[min(w, max(count, 1u) - 1u) + 1u]), listed);
+    let job = bake_jobs[j];
+    let k = job.y & 0xffu;
+    let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
+    let t = page_texel(job.x, k);
+    let s = vc_surface(t.m, t.c, t.n, t.texel);
+    let r = lights[l];
+    let on = listed && t.inside && s.ok;
+    var acc = vec2<f32>(0.0);
+    if (on) {
+        let u = r.edge_u.xyz;
+        let v = r.edge_v.xyz;
+        let nl = normalize(cross(u, v));
+        let one_sided = r.corner.w > 0.5;
+        let o = s.apex + s.normal * surface_offset(length(s.apex));
+        for (var b = li; b < IND_BINS; b += 64u) {
+            let dir = normalize(bin_world(s.normal, bin_local(b, IND_R)));
+            let denom = dot(dir, nl);
+            // The light emits toward +nl (one-sided): rays must arrive from
+            // that side.
+            if (abs(denom) < 1e-9 || (one_sided && denom >= 0.0)) { continue; }
+            let along = dot(r.corner.xyz - o, nl) / denom;
+            if (along <= 0.0) { continue; }
+            let p = o + dir * along - r.corner.xyz;
+            let a = dot(p, u) / dot(u, u);
+            let c = dot(p, v) / dot(v, v);
+            if (a < 0.0 || a > 1.0 || c < 0.0 || c > 1.0) { continue; }
+            let wgt = hemicube_weight(b);
+            acc.y += wgt;
+            if (hw_segment_open_but(o, dir, along * 0.999, t.m)) { acc.x += wgt; }
+        }
+    }
+    wide_sums[li] = acc;
+    workgroupBarrier();
+    for (var hh = 32u; hh > 0u; hh >>= 1u) {
+        if (li < hh) { wide_sums[li] += wide_sums[li + hh]; }
+        workgroupBarrier();
+    }
+    if (li == 0u && on && wide_sums[0].y > 0.0) {
+        let total = wide_sums[0];
+        let open = unshadowed_rect(s.apex, s.normal, r);
+        let spot = spot_falloff(r, normalize(s.apex - light_center(r)));
+        let ratio = select(0.0, spot * clamp(total.x / total.y, 0.0, 1.0), open > 0.0);
+        pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(ratio * open, ratio, vc.sky.w == 1u);
+    }
+}
+
+// Whether the segment from `p` along unit `w` for `t` meets nothing but
+// object `own` (candidates, the first other confirmed and terminating):
+// a texel's lighting level may lie a little inside the finer surface the
+// structure holds (M5 gate 15).
+fn hw_segment_open_but(p: vec3<f32>, w: vec3<f32>, t: f32, own: u32) -> bool {
+    var rq: ray_query;
+    // FORCE_NO_OPAQUE | TERMINATE_ON_FIRST_HIT.
+    rayQueryInitialize(&rq, scene_as, RayDesc(0x6u, 0xffu, 0.0, t, p, w));
+    while (rayQueryProceed(&rq)) {
+        let c = rayQueryGetCandidateIntersection(&rq);
+        if (hw_object(c.instance_custom_data, c.geometry_index).x != own) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
+    return rayQueryGetCommittedIntersection(&rq).kind == 0u;
+}
+
 // Whether a ray from `eye` along `dir` meets nothing (FORCE_OPAQUE |
 // TERMINATE_ON_FIRST_HIT: visibility only).
 fn hw_sky_open(eye: vec3<f32>, dir: vec3<f32>) -> bool {

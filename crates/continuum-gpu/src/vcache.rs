@@ -98,6 +98,9 @@ const INDIRECT_SAMPLES: u32 = 9;
 /// their radiance (M10 gate 21).
 const INDIRECT_CHANNELS: u64 = 5;
 const INCOMPLETE_CAP: u32 = 1 << 14;
+/// Texels a frame's bake lists for rays to wide lights at most (M5 gate
+/// 15); more keep their cones' estimates.
+pub(crate) const WIDE_CAP: u32 = 1 << 14;
 /// Pages whose bake met an absent lighting level (M14 gate 4), with that
 /// geometry's object, listed per frame at most (pairs after the incomplete
 /// list; the shader's `MISSING_CAP`).
@@ -203,6 +206,14 @@ pub struct CacheOptions {
     /// field. Not yet with movers, streamed levels or alpha-blended objects,
     /// which keep cones.
     pub sky_rays: bool,
+    /// Experimental (receivers next to large lights, DESIGN §8 "Wide light
+    /// cones"): a texel whose window on a rect light is too wide for its
+    /// cone (clipped or a grazing sliver) takes that light's visible share
+    /// from hardware rays along the hemicube's 192 directions, where sky
+    /// samples may use rays (not with movers, streamed levels or
+    /// alpha-blended objects). Unvalidated: it did not bring M5 gate 14's
+    /// near view closer to Cycles. Off by default.
+    pub wide_rays: bool,
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
     pub sky_ray_cost: u32,
@@ -341,6 +352,7 @@ impl Default for CacheOptions {
             sky_spacing: 0.0,
             sky_sample_cost: 10,
             sky_rays: true,
+            wide_rays: false,
             sky_ray_cost: 1,
             bounces: 1,
             ledger_epsilon: 0.01,
@@ -1484,6 +1496,16 @@ impl VirtualCache {
                 ),
             ),
             (115, empty("bounce state", 64, wgpu::BufferUsages::COPY_DST)),
+            // Texels for rays to wide lights (M5 gate 15): a count, then
+            // job indices.
+            (
+                117,
+                empty(
+                    "wide texels",
+                    (WIDE_CAP as u64 + 1) * 4,
+                    wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                ),
+            ),
             (
                 116,
                 empty(

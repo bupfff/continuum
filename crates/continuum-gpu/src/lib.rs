@@ -637,6 +637,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_vc_bake_indirect",
     "hw_vc_bake_indirect_movers",
     "hw_vc_bake_sky",
+    "hw_vc_bake_wide",
     "hw_vc_error_shares",
     "hw_aa_list",
     "hw_aa_args",
@@ -734,7 +735,7 @@ pub(crate) const VC_ARGS_EDGES_BINDINGS: &[u32] = &[42, 66, 81];
 pub(crate) const VC_UPDATE_BINDINGS: &[u32] = &[36, 41, 44];
 pub(crate) const VC_BAKE_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 37, 38, 41, 42, 43, 52, 62, 64, 68, 69,
-    70, 75, 83,
+    70, 75, 83, 117,
 ];
 pub(crate) const VC_BAKE_SKY_BINDINGS: &[u32] = &[
     0, 2, 3, 5, 9, 10, 23, 24, 25, 26, 29, 30, 33, 34, 54, 38, 41, 42, 46, 47, 49, 51, 62, 64, 75,
@@ -769,6 +770,9 @@ pub(crate) const HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS: &[u32] = &[
 /// Sky samples through hardware ray queries (M5 gate 13).
 pub(crate) const HW_VC_BAKE_SKY_BINDINGS: &[u32] =
     &[2, 3, 23, 24, 30, 32, 33, 34, 38, 41, 46, 47, 54, 64];
+/// Rays to wide lights (M5 gate 15).
+pub(crate) const HW_VC_BAKE_WIDE_BINDINGS: &[u32] =
+    &[2, 3, 23, 24, 30, 32, 33, 34, 37, 38, 41, 43, 52, 54, 117];
 /// The error while flying (M4 gate 13): each probe's exact shares (light
 /// cones through the compute hierarchy, sky rays through the acceleration
 /// structure, 32), then its shading with them (the cache's shading

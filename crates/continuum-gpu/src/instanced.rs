@@ -18,19 +18,20 @@ use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_EDGES_BINDINGS, HW_LAYERS_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
-    HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS, HW_VC_BAKE_SKY_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS,
-    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS,
-    InstancedScene, Light, LightGpu, M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS,
-    M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS, M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS,
-    M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS, M13_PAGE_BAKE_BINDINGS,
-    M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS, M13_SHADE_ARGS_BINDINGS,
-    M13_SHADE_BACKGROUND_BINDINGS, M13_SHADE_MISSES_BINDINGS, M13_SHADE_RAYS_BINDINGS,
-    M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
-    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
-    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_BOUNCE_BINDINGS, VC_ERROR_PROBES_BINDINGS,
-    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
-    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS,
-    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS, HW_VC_BAKE_SKY_BINDINGS, HW_VC_BAKE_WIDE_BINDINGS,
+    HW_VC_ERROR_SHARES_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS,
+    HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu, M13_BIN_ARGS_BINDINGS,
+    M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS, M13_COVERAGE_BINDINGS,
+    M13_MAPS_BINDINGS, M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS,
+    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS,
+    M13_SHADE_ARGS_BINDINGS, M13_SHADE_BACKGROUND_BINDINGS, M13_SHADE_MISSES_BINDINGS,
+    M13_SHADE_RAYS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
+    SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS,
+    VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_BOUNCE_BINDINGS,
+    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
+    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
+    uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -133,6 +134,10 @@ impl Cache {
             let g = n.div_ceil(64);
             Dispatch::Groups(g.min(65_535), g.div_ceil(65_535))
         };
+        // The bake lists wide texels afresh (M5 gate 15).
+        if self.wide.is_some() && only.is_none_or(|o| o == 0) {
+            encoder.clear_buffer(self.state.buffer(117), 0, Some(4));
+        }
         let mut list: Vec<(
             &'static str,
             &wgpu::ComputePipeline,
@@ -190,6 +195,23 @@ impl Cache {
         if indirect {
         } else if counts[1] > 0 {
             list.push(("bake", &self.passes[1], &self.binds[1], groups(counts[1])));
+        }
+        // Rays to wide lights (M5 gate 15): a workgroup a listed texel, at
+        // most the frame's texel jobs.
+        if let Some((pipeline, Some(bind))) = &self.wide
+            && (indirect || counts[1] > 0)
+        {
+            let n = if indirect {
+                crate::vcache::WIDE_CAP
+            } else {
+                counts[1].min(crate::vcache::WIDE_CAP)
+            };
+            list.push((
+                "wide",
+                pipeline,
+                bind,
+                Dispatch::Groups(n.min(65_535), n.div_ceil(65_535)),
+            ));
         }
         // The stale pass may append sky samples (M9 gate 3).
         if indirect && self.state.has_sky() {
@@ -290,6 +312,8 @@ struct Cache {
     indirect_hw: bool,
     /// Sky samples through hardware ray queries (M5 gate 13).
     sky_hw: bool,
+    /// Rays to wide lights (M5 gate 15): the pass and its bind group.
+    wide: Option<(wgpu::ComputePipeline, Option<wgpu::BindGroup>)>,
 }
 
 /// What [`InstancedRenderer::verify_cache`] found: resident pages that
@@ -1917,6 +1941,14 @@ impl InstancedRenderer {
             }),
             indirect_hw: bounce_hw,
             sky_hw: sky_rays,
+            // Rays to wide lights where sky samples may use rays (the same
+            // structures hold the lighting's geometry).
+            wide: (bounce_hw
+                && cache.is_some_and(|o| o.wide_rays)
+                && movable.is_empty()
+                && stream.is_none()
+                && !scene.sees_through())
+            .then(|| (kernel.entry("hw_vc_bake_wide"), None)),
             passes: [
                 kernel.entry("vc_update"),
                 kernel.entry("vc_bake"),
@@ -2531,8 +2563,25 @@ impl InstancedRenderer {
                 }
             })
         });
+        let wide_bind = self.cache.as_ref().and_then(|cache| {
+            cache.wide.as_ref().map(|(pipeline, _)| {
+                bind_group(
+                    device,
+                    pipeline,
+                    &all,
+                    &tlas,
+                    None,
+                    HW_VC_BAKE_WIDE_BINDINGS,
+                )
+            })
+        });
         if let (Some(cache), Some(bind)) = (&mut self.cache, bounce_bind)
             && let Some((_, b)) = &mut cache.indirect
+        {
+            *b = Some(bind);
+        }
+        if let (Some(cache), Some(bind)) = (&mut self.cache, wide_bind)
+            && let Some((_, b)) = &mut cache.wide
         {
             *b = Some(bind);
         }
@@ -3390,6 +3439,20 @@ impl InstancedRenderer {
     /// threshold, as `CacheOptions::bounce_epsilon`.
     pub fn verify_bounce(&mut self, epsilon: f32) -> BounceCheck {
         self.check_bounce(epsilon, true)
+    }
+
+    /// Diagnostics (M5 gate 15): texels the last bake listed for rays to
+    /// wide lights, and whether the pass that traces them runs.
+    pub fn wide_listed(&mut self) -> (u32, bool) {
+        let Some(cache) = &self.cache else {
+            return (0, false);
+        };
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        let raw = cache.state.read_buffer(&self.device, 117);
+        let w: &[u32] = bytemuck::cast_slice(&raw);
+        (w[0], cache.wide.as_ref().is_some_and(|(_, b)| b.is_some()))
     }
 
     /// Diagnostics (M22): [`Self::verify_bounce`] without restoring: every

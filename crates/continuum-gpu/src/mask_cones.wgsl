@@ -2984,6 +2984,10 @@ fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: v
 // telescoped as the sky's ledger; z: the frames' crescents summed), the
 // charge the lesser; and which movers it has been charged for since.
 @group(0) @binding(116) var<storage, read_write> bounce_ledger: array<vec4<f32>>;
+// Texels whose window on a rect light was too wide for its cone (M5 gate
+// 15): word 0 the count, then each bake job's index; `hw_vc_bake_wide`
+// takes their light's visible share from rays to points of the light.
+@group(0) @binding(117) var<storage, read_write> wide_list: array<atomic<u32>>;
 
 // A box's charge on `page` as a share of its view (0 for an empty box).
 fn box_share(page: Box3, b: Box3) -> f32 {
@@ -3301,6 +3305,13 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // page re-baked whole.
     let overflow = on && on_lattice && open > 0.0 && lat < 0.0;
     let value = hit_irradiance_rect(on && (!on_lattice || overflow), 0u, s.apex, s.normal, lights[l]);
+    // A window too wide for the cone (clipped, or a grazing sliver; DESIGN
+    // §8 "Wide light cones"): listed for rays to the light (M5 gate 15),
+    // which overwrite the cone's estimate where the pass runs.
+    if (on && wide_window && (!on_lattice || overflow) && !is_sphere(lights[l]) && open > 0.0) {
+        let q = atomicAdd(&wide_list[0], 1u);
+        if (q + 1u < arrayLength(&wide_list)) { atomicStore(&wide_list[q + 1u], j); }
+    }
     // With `light_ratio`, the texel keeps its light's shadowed share of the
     // unshadowed light, and shading multiplies that by the unshadowed light
     // at the pixel, with the pixel's own normal (a ratio estimator). Where

@@ -1949,9 +1949,10 @@ conversation or after a compaction; history lives in git and
   (G5: settling faster, M14's frame budget held). Bounce with movers works
   through the ledger, but its gate (G2) is parked: cost and quality sit on
   its bars at ε 1% (§3.4 "Development for gate 2", levers listed).
-- **Next:** (1) the rest of item 5: emissive surfaces as lights (M10
-  G23), receivers next to large lights (M5 G14: hardware rays for wide
-  windows), bounce light with moving lights (refused now). (2) Settling
+- **Next:** (1) the rest of item 5: bounce light with moving lights
+  (refused now), emissive surfaces as lights (M10 G23), receivers next to
+  large lights (M5 G14; rays for wide windows tried and set aside,
+  `wide_rays` off: §8 "Wide light cones" says what to find first). (2) Settling
   with bounce is 2.3–3× the frames without (its own work under the time
   budget). (3) Parked costs: movers under a sky 331 ms a frame (M9 G3's
   sky re-bakes), the movers' own direct light (14 ms of a 20 ms frame in
@@ -2754,6 +2755,22 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
   each other within mask cones. **Next: rays** for texels whose light
   window is wide (hardware rays to points of the light, converging over
   frames as the sky's samples do), the guards staying as the backstop.
+  **Rays tried (2026-11-20, `m5_wide_dev`; `CacheOptions::wide_rays`,
+  off):** texels whose window is wide are listed by the bake, and a
+  hardware-ray pass takes the light's open share along the hemicube's 192
+  directions (area samples of the light first: 256 uniform points on a 40 m
+  panel leave the receiver's near field unsampled, and the far, grazing
+  samples are mostly blocked). On gate 14's near development view (panel
+  alone, the cache settled, 4×4 at 320×180) it changed little: surfaces'
+  sum 49.6 with rays, 71.4 with cones, Cycles 99.7. The boulders resting
+  on the panel stay at exactly zero even with every texel's light taken by
+  rays (373 of 452 pixels in the band where Cycles is brightest), so they
+  are not lit through the texels the rays reach, or the geometry differs
+  from the reference's; on the 40 m development view the error runs the
+  other way (Cycles 1.6, ours 10.2 by per-pixel cones, 7.1 with rays).
+  Next: find which path shades those boulders (object-level prefiltering
+  at that distance, perhaps) and check the reference's panel against ours
+  on a small scene before any gate.
 - **Ledger bound tightness** (biggest risk): too-pessimistic charges mean
   everything recomputes and the edge disappears. Flatland: geometric bounds used
   0.2–8% of the certified bound; projected charges about 6% and halved the work.
