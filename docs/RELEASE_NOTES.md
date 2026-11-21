@@ -2,10 +2,14 @@ Continuum 0.3.0 makes it easy to try and adds most of what a finished
 image needs. Every number below is measured against Blender's Cycles or
 the engine's own exact reference; the details are in `docs/results/`.
 
-**Try it on a Mac with Apple silicon:** download
-`continuum-viewer-0.3.0-macos-arm64.zip` below, unzip it and open
-Continuum Viewer. The app is not notarized by Apple, so the first time
-macOS refuses it: open System Settings → Privacy & Security, scroll down
+**Try it on a Mac with Apple silicon:** paste this into Terminal, which
+installs Continuum Viewer into `~/Applications` and opens it:
+
+    curl -fsSL https://raw.githubusercontent.com/bupfff/continuum/main/scripts/install_macos.sh | sh
+
+Or download `continuum-viewer-0.3.0-macos-arm64.zip` below, unzip it and
+open the app; it is not notarized by Apple, so the first time macOS refuses
+a browser download: open System Settings → Privacy & Security, scroll down
 and click Open Anyway. Then pick a scene in the panel, or drop a `.glb` or
 `.gltf` file on the window. Only Apple silicon Macs are tested so far;
 other platforms build from source (see the README).

@@ -40,7 +40,7 @@ works and is measured, but the API will change.
 
 | | |
 |---|---|
-| **Try it in a minute** | [Download the viewer for Mac](https://github.com/bupfff/continuum/releases/latest) (Apple silicon), drop a `.glb` file on it and fly around. See [Try it](#try-it). |
+| **Try it in a minute** | On a Mac with Apple silicon, one Terminal command installs the viewer ([Try it](#try-it)); drop a `.glb` file on it and fly around. |
 | **Good at** | Soft shadows from area lights that are exact and free of noise in every frame; very large instanced or streamed worlds; lights that change color at no cost. |
 | **Runs on** | Apple silicon Macs (Metal): tested and measured. Linux (Vulkan): the tests pass on a software GPU. Windows, NVIDIA and AMD: untested, and may not run yet. Needs a GPU with compute shaders; glass and streaming need hardware ray tracing. |
 | **Not yet** | Bounce light from moving lights, phones and the web, a stable API. See [Limits](#limits). |
@@ -315,13 +315,19 @@ reference" against "how fast", instead of fixed presets.
 
 ## Try it
 
-**On a Mac with Apple silicon:** download
-`continuum-viewer-…-macos-arm64.zip` from the
-[latest release](https://github.com/bupfff/continuum/releases/latest),
-unzip it and open **Continuum Viewer**. The app is not notarized by Apple,
-so macOS refuses it the first time: open **System Settings → Privacy &
-Security**, scroll down and click **Open Anyway** (or run
-`xattr -dr com.apple.quarantine "Continuum Viewer.app"` in Terminal).
+**On a Mac with Apple silicon,** paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bupfff/continuum/main/scripts/install_macos.sh | sh
+```
+
+It downloads the [latest release](https://github.com/bupfff/continuum/releases/latest)'s
+app, checks it against the checksum GitHub publishes, puts **Continuum
+Viewer** in `~/Applications` and opens it ([the script](scripts/install_macos.sh)).
+Or download `continuum-viewer-…-macos-arm64.zip` from the release in a
+browser, unzip it and open the app: it is not notarized by Apple, so macOS
+refuses a browser download the first time. Open **System Settings →
+Privacy & Security**, scroll down and click **Open Anyway**.
 
 The panel at the top left picks a scene (a gallery, a field of up to a
 million boulders, or your own glTF file: **Open a glTF file…**, or drop a
