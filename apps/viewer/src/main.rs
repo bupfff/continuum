@@ -159,8 +159,12 @@ impl World {
             fov: scene.vertical_fov_degrees,
             speed: 1.2,
             start: (camera.eye, camera.target),
-            showcase: Some(scene),
+            // The lightmap path: through `Renderer` (`Showcase::instanced`)
+            // its two movers cost 10–35× the still frame (the view cache
+            // re-bakes 60,000–90,000 texels a frame for their penumbrae;
+            // DESIGN §3.8).
             instanced: None,
+            showcase: Some(scene),
             scale: 1,
             cache: true,
             sky: false,
@@ -168,6 +172,21 @@ impl World {
             animations: None,
             exposure: 1.0,
         }
+    }
+
+    /// Whether the scene wants bounce light: not the field, whose bounce rays
+    /// reach thousands of boulders, each wanting its own page, so its view
+    /// never settles (and outdoors one bounce adds little).
+    fn bounce_by_default(&self) -> bool {
+        self.name != "field"
+    }
+
+    /// Whether the scene looks best with its sky: outdoor scenes (the field,
+    /// a glTF file without animations, which do not play with a sky yet).
+    fn sky_by_default(&self) -> bool {
+        self.instanced.is_some()
+            && self.showcase.is_none()
+            && self.animations.as_ref().is_none_or(|a| a.list.is_empty())
     }
 
     fn field(boulders: usize) -> World {
@@ -614,6 +633,8 @@ struct App {
     boulders: usize,
     /// The settings the renderer was built with.
     built: (bool, bool, bool, u32),
+    /// Whether `--scale` was given (else Retina displays render at half).
+    scale_given: bool,
     /// `--screenshot`: the last frame's image, written as a PNG.
     screenshot: Option<PathBuf>,
 }
@@ -804,6 +825,8 @@ impl App {
                 Ok(world) => {
                     // Free the old scene's GPU memory before the new one's.
                     gpu.backend = None;
+                    self.settings.sky = world.sky_by_default();
+                    self.settings.bounce = world.bounce_by_default();
                     self.world = world;
                     self.world.exposure = 1.0;
                     self.scene = choice;
@@ -995,6 +1018,12 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_none() {
             let mut gpu = Self::init(event_loop, self.screenshot.is_some());
+            // On a Retina display, render at half the window's pixels (drawn up
+            // by the renderer's upscaler) unless `--scale` says otherwise:
+            // frames half as long, and lighting fills in sooner.
+            if !self.scale_given && gpu.window.scale_factor() >= 2.0 {
+                self.settings.scale = 2;
+            }
             gpu.backend = Some(Self::build(&gpu, &mut self.world, &self.settings));
             self.built = self.settings.build_key();
             gpu.window
@@ -1475,9 +1504,9 @@ fn main() {
         world.environment = Some(load_environment(&world, &spec, strength));
     }
     let settings = Settings {
-        bounce: !has("--no-bounce"),
+        bounce: !has("--no-bounce") && (has("--bounce") || world.bounce_by_default()),
         anti_aliasing: !has("--no-aa"),
-        sky: has("--sky"),
+        sky: has("--sky") || (!has("--no-sky") && world.sky_by_default()),
         scale: arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1),
         bloom: true,
         tone_map: continuum_gpu::ToneMap::PbrNeutral,
@@ -1534,6 +1563,7 @@ fn main() {
         show_panel: !has("--no-panel"),
         boulders,
         built: settings.build_key(),
+        scale_given: arg("--scale").is_some(),
         screenshot: arg("--screenshot").map(PathBuf::from),
     };
     let event_loop = EventLoop::new().expect("event loop");

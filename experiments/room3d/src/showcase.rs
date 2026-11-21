@@ -131,9 +131,18 @@ const BALL_RADIUS: f32 = 0.16;
 const CUBE_HALF: f32 = 0.15;
 const KNOT_CENTER: Vec3 = Vec3::new(2.5, 1.9, 1.06);
 
-/// The moving surfaces at `frame` (60 Hz): a ball bouncing across the floor in
-/// front of the sculpture, and a cube spinning as it orbits the sculpture.
-pub fn movers(frame: f32) -> Vec<Surface> {
+/// The movers' shapes about their own centers: the ball, then the cube.
+pub fn mover_shapes() -> [Surface; 2] {
+    [
+        sphere(Vec3::ZERO, BALL_RADIUS, 24, 12),
+        Surface::cuboid(Vec3::splat(-CUBE_HALF), Vec3::splat(CUBE_HALF)),
+    ]
+}
+
+/// The movers' placements (rotation, position) at `frame` (60 Hz): a ball
+/// bouncing across the floor in front of the sculpture, and a cube spinning
+/// as it orbits the sculpture.
+pub fn mover_poses(frame: f32) -> [(Mat3, Vec3); 2] {
     let t = frame / 60.0;
     let sweep = 0.5 - 0.5 * (TAU * t / 6.0).cos();
     let ball = Vec3::new(
@@ -144,10 +153,16 @@ pub fn movers(frame: f32) -> Vec<Surface> {
     let orbit = TAU * t / 8.0;
     let cube_at = KNOT_CENTER + Vec3::new(0.9 * orbit.cos(), 0.9 * orbit.sin(), 0.75);
     let spin = Mat3::from_rotation_z(TAU * t / 4.0) * Mat3::from_rotation_x(0.6);
-    vec![
-        sphere(Vec3::ZERO, BALL_RADIUS, 24, 12).transformed(Mat3::IDENTITY, ball),
-        Surface::cuboid(Vec3::splat(-CUBE_HALF), Vec3::splat(CUBE_HALF)).transformed(spin, cube_at),
-    ]
+    [(Mat3::IDENTITY, ball), (spin, cube_at)]
+}
+
+/// The moving surfaces at `frame` (60 Hz), placed.
+pub fn movers(frame: f32) -> Vec<Surface> {
+    mover_shapes()
+        .into_iter()
+        .zip(mover_poses(frame))
+        .map(|(s, (rotation, position))| s.transformed(rotation, position))
+        .collect()
 }
 
 impl Showcase {
@@ -257,6 +272,40 @@ impl Showcase {
             radiance: 70.0,
             first_mover,
             vertical_fov_degrees: 55.0,
+        }
+    }
+
+    /// The scene as instances, for `continuum_gpu::Renderer`: each static
+    /// surface placed as it is, then the movers about their centers placed
+    /// at frame 0 (instances `first_mover` and on; move them with
+    /// [`mover_poses`]).
+    pub fn instanced(&self) -> continuum_gpu::InstancedScene {
+        let mut geometries: Vec<Surface> = self.surfaces[..self.first_mover].to_vec();
+        let mut instances: Vec<continuum_gpu::Instance> = (0..self.first_mover)
+            .map(|k| continuum_gpu::Instance {
+                geometry: k,
+                rotation: Mat3::IDENTITY,
+                scale: 1.0,
+                position: continuum::glam::DVec3::ZERO,
+                albedo: self.albedo[k],
+            })
+            .collect();
+        for (k, (shape, (rotation, position))) in
+            mover_shapes().into_iter().zip(mover_poses(0.0)).enumerate()
+        {
+            geometries.push(shape);
+            instances.push(continuum_gpu::Instance {
+                geometry: geometries.len() - 1,
+                rotation,
+                scale: 1.0,
+                position: position.as_dvec3(),
+                albedo: self.albedo[self.first_mover + k],
+            });
+        }
+        continuum_gpu::InstancedScene {
+            geometries,
+            instances,
+            ..Default::default()
         }
     }
 

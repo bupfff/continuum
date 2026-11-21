@@ -1980,6 +1980,20 @@ conversation or after a compaction; history lives in git and
   drag and drop, settings, frame rate, lighting settled), and the README
   opens with "Is it right for you?" and a quick start. The user is
   seeking funds for the NVIDIA test (item 6).
+- **Found while making the download (2026-11-21), both high in
+  priority:** (1) movers through `Renderer` in an enclosed room: the
+  showcase instanced (`Showcase::instanced`, `movers_aa_dev`) runs 8.5 ms
+  still but 80–175 ms with its ball and cube moving at 1280×720: the stale
+  pass re-bakes 58,000–91,000 texels a frame (most visible pages near the
+  light's penumbrae), 230–420 ms when profiled alone; anti-aliasing and
+  bounce are not the cost. Levers: coarser receivers while moving (the
+  lightmap path does this scene at 17 ms), or lag within a budget (as
+  deforming geometry, M12 G2). (2) Bounce light on the million-boulder
+  field never settles (`warmup_dev`): bounce rays hit thousands of
+  boulders, each wanting its own page; nearly every sample incomplete,
+  8,000–75,000 requests a frame. Not from M22 G3 (the same with
+  `bounce_settles` off). The viewer turns bounce off for the field;
+  `Renderer`'s default needs a rule for such scenes.
 - **Pitfalls:** compare renderers at a fixed bake budget
   (`frame_target_ms` 0) and wait for every renderer's frame before timing
   the next (M22 G1); this device's GPU timestamps arrive out of order, so

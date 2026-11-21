@@ -237,6 +237,14 @@ Honest about where it stands:
   settles in 1.8–3.2× the frames. With moving objects a ledger keeps it
   right (about 1.2× the moving frame in development; its gate is parked);
   not yet with moving lights; several bounces are untried with streaming.
+  In very large instanced worlds (a field of a million boulders) bounce
+  rays reach thousands of objects that each want lighting of their own,
+  and the view does not settle: turn it off there (the viewer does).
+- **Moving objects near a light can be slow:** shadows of moving objects
+  stay exact by re-baking every texel they touch in the same frame. In a
+  closed room with a large light that is tens of thousands of texels a
+  frame (the showcase's two movers cost 10–35× the still frame through
+  `Renderer`); the viewer's showcase uses the older lightmap path.
 - **Transparency** needs hardware ray queries. Glass is sharp even when
   rough, its shadows are grey rather than tinted and carry no caustics,
   and solid glass costs about 1.4× the frame where it covers a ninth of
