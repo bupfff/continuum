@@ -224,6 +224,11 @@ pub struct CacheOptions {
     /// bounce samples re-bake. At rest, pages charged above a hundredth of
     /// it re-bake with what the budget leaves.
     pub bounce_epsilon: f32,
+    /// Bounce light with movers (M22): the share of the bake budget the
+    /// ledger's re-bakes may take in a frame something moved, in the order
+    /// listed (the rest wait, still charged). At rest the drain takes what
+    /// the budget leaves. 0.5 by default.
+    pub bounce_share: f32,
     /// Anti-aliasing at silhouettes (M7 gates 3–4): pixels whose neighbours
     /// see another object or depth average four rays through their
     /// quarters. With hardware camera rays (and no movers) the rays are ray
@@ -323,6 +328,7 @@ impl Default for CacheOptions {
             emission_bounce: true,
             indirect_sample_cost: 8,
             bounce_epsilon: 0.01,
+            bounce_share: 0.5,
             edge_rays: false,
             deforming_budget: 512,
             edge_samples: 4,
@@ -1002,6 +1008,11 @@ pub(crate) struct VirtualCache {
     indirect_jobs: Vec<[u32; 2]>,
     retry: std::collections::VecDeque<(u32, u32)>,
     retrying: std::collections::HashSet<u32>,
+    /// Bounce light's ledger (M22): listed slots in the order listed (the
+    /// largest charges first did worse: pages next to a mover take a large
+    /// charge again each frame and starve the rest), and the set of them.
+    bounce_queue: std::collections::VecDeque<u32>,
+    bounce_queued: std::collections::HashSet<u32>,
     /// Pages baked for bounce samples' hits (secondary requests), with their
     /// keys: kept resident while any page's bounce samples wait for their
     /// hits. Bounce samples complete only when every hit finds a page at
@@ -1554,6 +1565,8 @@ impl VirtualCache {
             indirect_jobs: Vec::new(),
             retry: Default::default(),
             retrying: Default::default(),
+            bounce_queue: Default::default(),
+            bounce_queued: Default::default(),
             pinned: Default::default(),
             lighting: lit_cells.is_some(),
             lit_cells,
@@ -1949,13 +1962,8 @@ impl VirtualCache {
                 self.drains.insert(self.frame);
             }
             if let Some(drain) = self.bounce_pass {
-                // This frame's shadows' box starts empty; the frame before's
-                // (the other parity) stays for the telescoped charge.
-                let parity = self.frame % 2;
-                queue.write_buffer(self.buffer(115), parity as u64 * 32, &[0u8; 24]);
                 let control = [self.options.bounce_epsilon.max(0.0).to_bits(), drain as u32];
                 queue.write_buffer(self.buffer(115), 24, bytemuck::cast_slice(&control));
-                queue.write_buffer(self.buffer(115), 56, bytemuck::bytes_of(&parity));
             }
         }
         let lit = std::mem::take(&mut self.lights_moved) && self.moving > 0;
@@ -2193,6 +2201,18 @@ impl VirtualCache {
         (0..self.options.pages)
             .filter(|&s| self.slot_key[s as usize][0] != EMPTY && marks[s as usize] == 0)
             .collect()
+    }
+
+    /// Diagnostics: the frame counter (the last frame's, as the shaders
+    /// saw it).
+    pub(crate) fn frame_number(&self) -> u32 {
+        self.frame
+    }
+
+    /// Diagnostics: the page slot `slot` holds (object, chart | mip << 16,
+    /// page x | y << 16).
+    pub(crate) fn slot_key_of(&self, slot: u32) -> [u32; 3] {
+        self.slot_key[slot as usize]
     }
 
     /// Diagnostics: pages one re-bake of `upload_rebake` holds at most.
@@ -2870,10 +2890,13 @@ impl VirtualCache {
             bounce_listed += 1;
             let slot = entry & 0x3fff_ffff;
             if trace_bakes() {
-                eprintln!("bounce listed frame {frame} slot {slot}");
+                eprintln!(
+                    "bounce listed frame {frame} slot {slot} object {}",
+                    self.slot_key[slot as usize][0]
+                );
             }
-            if self.retrying.insert(slot) {
-                self.retry.push_back((slot, frame));
+            if self.bounce_queued.insert(slot) {
+                self.bounce_queue.push_back(slot);
             }
         }
         if self.drains.remove(&frame) && bounce_listed == 0 && self.last_motion < frame {
@@ -3058,7 +3081,7 @@ impl VirtualCache {
     /// (see `pinned`), at most a quarter of the pool, the latest first;
     /// releases them once none wait.
     fn refresh_pinned(&mut self) {
-        if self.retry.is_empty() {
+        if self.retry.is_empty() && self.bounce_queue.is_empty() {
             self.pinned.clear();
             return;
         }
@@ -3471,6 +3494,35 @@ impl VirtualCache {
         // Bounce samples of pages that met missing hits, once due, within
         // what is left of the budget.
         let bounce = INDIRECT_SAMPLES * self.options.indirect_sample_cost;
+        // The ledger's re-bakes (M22), in the order listed: in a frame
+        // something moved, within their share of the budget.
+        let moving = self.last_motion + 1 >= self.frame;
+        let mut share = if moving {
+            (self.options.bounce_share.clamp(0.0, 1.0) * budget as f32) as u32
+        } else {
+            u32::MAX
+        };
+        while self.options.indirect
+            && share >= bounce
+            && self.spent + bounce <= budget
+            && self.bake_list.len() < budget as usize
+            && let Some(slot) = self.bounce_queue.pop_front()
+        {
+            self.bounce_queued.remove(&slot);
+            let k = self.slot_key[slot as usize];
+            if k[0] == EMPTY {
+                continue;
+            }
+            if !self.lighting_ready(k) {
+                self.schedule_retry(slot, self.frame + INDIRECT_RETRY);
+                continue;
+            }
+            if trace_bakes() {
+                eprintln!("ledger re-bake frame {} slot {slot}", self.frame);
+            }
+            self.plan_bounce_rebake(slot, k);
+            share -= bounce;
+        }
         while self.options.indirect
             && self.spent + bounce <= budget
             && self.bake_list.len() < budget as usize
@@ -3491,29 +3543,14 @@ impl VirtualCache {
                 continue;
             }
             self.retrying.remove(&slot);
-            let (m, c, mip, page) = unpack(k);
             if trace_bakes() {
+                let (m, c, mip, page) = unpack(k);
                 eprintln!(
                     "retry frame {} page m{m} c{c} mip{mip} {page:?} slot {slot}",
                     self.frame
                 );
             }
-            let index = self.bake_list.len() as u32;
-            self.bake_list.push([k[0], k[1], k[2], slot]);
-            let b = self.page_bounds(m, c, mip, page);
-            self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
-            // w 5: bounce samples alone (the fill keeps the page's marks).
-            self.bake_bounds.push([b[4], b[5], b[6], 5.0]);
-            if self.sky {
-                let stride = self.sky_stride(m, mip);
-                let first = self.sky_samples.len() as u32;
-                self.page_sky.push([first, stride << 24]);
-            }
-            let target = self.slot_target[slot as usize].max(1) as u32;
-            for s in 0..INDIRECT_SAMPLES {
-                self.indirect_jobs.push([index, s | target << 8]);
-            }
-            self.spent += bounce;
+            self.plan_bounce_rebake(slot, k);
         }
         if trace_jobs() {
             eprintln!(
@@ -3525,6 +3562,27 @@ impl VirtualCache {
                 self.jobs.len()
             );
         }
+    }
+
+    /// Adds slot `slot`'s page (key `k`) to the frame's bake for its bounce
+    /// samples alone (job kind 5: the fill keeps the page's marks).
+    fn plan_bounce_rebake(&mut self, slot: u32, k: [u32; 3]) {
+        let (m, c, mip, page) = unpack(k);
+        let index = self.bake_list.len() as u32;
+        self.bake_list.push([k[0], k[1], k[2], slot]);
+        let b = self.page_bounds(m, c, mip, page);
+        self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
+        self.bake_bounds.push([b[4], b[5], b[6], 5.0]);
+        if self.sky {
+            let stride = self.sky_stride(m, mip);
+            let first = self.sky_samples.len() as u32;
+            self.page_sky.push([first, stride << 24]);
+        }
+        let target = self.slot_target[slot as usize].max(1) as u32;
+        for s in 0..INDIRECT_SAMPLES {
+            self.indirect_jobs.push([index, s | target << 8]);
+        }
+        self.spent += INDIRECT_SAMPLES * self.options.indirect_sample_cost;
     }
 }
 

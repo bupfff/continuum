@@ -71,7 +71,14 @@ fn main() {
     let mut t = Textured::new();
     t.sky = Vec3::ZERO;
     kernel.set_sky(t.sky);
-    let movers: Vec<usize> = (1..=movers_n).collect();
+    let first: usize = env("CD_FIRST", 1);
+    let movers: Vec<usize> = (first..first + movers_n).collect();
+    // Along +x, or −y with `CD_DIR=y`.
+    let step = if std::env::var("CD_DIR").is_ok_and(|d| d == "y") {
+        DVec3::new(0.0, -speed, 0.0)
+    } else {
+        DVec3::new(speed, 0.0, 0.0)
+    };
     let make = |indirect: bool, eps: f32| {
         InstancedRenderer::with_movers(
             &kernel,
@@ -85,6 +92,7 @@ fn main() {
             Some(CacheOptions {
                 indirect,
                 bounce_epsilon: eps,
+                bounce_share: env("CD_SHARE", 1.0),
                 frame_target_ms: 0.0,
                 ..Default::default()
             }),
@@ -100,14 +108,14 @@ fn main() {
     let gate1_order = std::env::var_os("CD_GATE1_ORDER").is_some();
     let order: [usize; 3] = if gate1_order { [0, 2, 1] } else { [0, 1, 2] };
     let mut times = [Vec::new(), Vec::new(), Vec::new()];
-    let mut sums = [[0f64; 5]; 3];
+    let mut sums = [[0f64; 6]; 3];
     for f in 1..=frames {
-        let at = speed * f as f64;
+        let at = f as f64;
         for k in order {
             let r = &mut rs[k];
             for &m in &movers {
                 let i = &t.scene.instances[m];
-                r.set_instance_transform(m, i.rotation, i.position + DVec3::new(at, 0.0, 0.0));
+                r.set_instance_transform(m, i.rotation, i.position + step * at);
             }
             let s = Instant::now();
             r.frame(t.camera, &target);
@@ -121,6 +129,7 @@ fn main() {
                 sums[k][2] += st.rebaked_pages as f64;
                 sums[k][3] += st.gpu_bake_ms as f64;
                 sums[k][4] += st.gpu_render_ms as f64;
+                sums[k][5] += st.indirect_incomplete as f64;
             }
         }
     }
@@ -129,16 +138,15 @@ fn main() {
         let mut v = times[k].clone();
         v.sort_by(f64::total_cmp);
         println!(
-            "{:12} median {:6.2} ms (p10 {:6.2}, p90 {:6.2}); a frame: bounce samples {:7.1}, pages baked {:6.1}, stale re-baked {:6.1}, gpu bake {:5.2} ms, render {:5.2} ms",
+            "{:12} median {:6.2} ms (p10 {:6.2}, p90 {:6.2}); a frame: bounce samples {:7.1} ({:6.1} incomplete), pages baked {:6.1}, stale re-baked {:6.1}",
             names[k],
             v[v.len() / 2],
             v[v.len() / 10],
             v[9 * v.len() / 10],
             sums[k][0] / n,
+            sums[k][5] / n,
             sums[k][1] / n,
-            sums[k][2] / n,
-            sums[k][3] / n,
-            sums[k][4] / n
+            sums[k][2] / n
         );
     }
 }

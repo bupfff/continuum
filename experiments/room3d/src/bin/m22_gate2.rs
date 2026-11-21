@@ -5,8 +5,9 @@
 //! rendered untimed and was not waited for, so its GPU work ran into the
 //! next timed frame of ours. Waiting for every renderer, the same flights
 //! measured 1.18× and 1.145× (`m22_cost_dev`, DESIGN §3.4). This gate times
-//! every renderer's frame to completion, and adds a flight not used in
-//! development.
+//! every renderer's frame to completion, and adds flights. Since gate 1,
+//! moved shadows charge pages by each mover's shadow regions, not by one
+//! box around every page a moved shadow may touch.
 //!
 //! Method (DESIGN §3.4, "Bounce light with movers"): each frame something
 //! moves, pages holding bounce samples are charged the share of their view
@@ -16,10 +17,10 @@
 //!
 //! Scene: M6's textured scene, sun only (movers under a sky are their own
 //! gap), bounce light on, a fixed bake budget (`frame_target_ms` 0), 640×360.
-//! Flights, 120 frames each: (a) boulders 1–6 at 0.02 m a frame along +x
-//! (developed); (b) boulders 1–12 at 0.04 m a frame along +x (gate 1's new
-//! flight); (c), not used in development: boulders 13–24 at 0.03 m a frame
-//! along −y.
+//! Flights, 120 frames each: (a) boulders 1–6 at 0.02 m a frame along +x;
+//! (b) boulders 1–12 at 0.04 m a frame along +x; (c) boulders 13–24 at 0.03
+//! m a frame along −y (all three seen in development); (d), not used in
+//! development: boulders 25–30 at 0.05 m a frame along (+x, +y)/√2.
 //!
 //! Measures: `verify_bounce` re-bakes every resident page's bounce samples
 //! in place from the direct light the cache holds and counts pages that
@@ -39,10 +40,10 @@
 //!    bounce light off, every renderer's frame waited for, ours and bounce
 //!    off timed back to back each frame.
 //!
-//! Rehearsal (`M22_REHEARSE=1`): flights (a) and (b) as the gate measures
-//! them at full size, 60 frames, checks at 30 and 60; flight (c) only run
-//! for 8 frames at 320×180, its numbers not printed. Development mode
-//! (`M22_DEV=1`): 320×180, 30 frames, checks every 15, every flight.
+//! Rehearsal (`M22_REHEARSE=1`): flights (a)–(c) as the gate measures
+//! them at full size, 60 frames, checks at 30 and 60. Development mode
+//! (`M22_DEV=1`): 320×180, 30 frames, checks every 15. Both only run flight
+//! (d) for 8 frames at 320×180, its numbers not printed.
 
 use std::io::Write;
 use std::path::Path;
@@ -81,7 +82,13 @@ fn main() -> std::io::Result<()> {
     let dev = std::env::var_os("M22_DEV").is_some();
     let rehearse = std::env::var_os("M22_REHEARSE").is_some();
     let (w, h) = if dev { (320u32, 180u32) } else { (640, 360) };
-    let frames: usize = if dev { 30 } else if rehearse { 60 } else { 120 };
+    let frames: usize = if dev {
+        30
+    } else if rehearse {
+        60
+    } else {
+        120
+    };
     let every: usize = if dev { 15 } else { 30 };
     let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("out");
     std::fs::create_dir_all(&out_dir)?;
@@ -145,15 +152,24 @@ fn main() -> std::io::Result<()> {
             movers: (13..=24).collect(),
             step: DVec3::new(0.0, -0.03, 0.0),
         },
+        Flight {
+            name: "(d) boulders 25-30 at 0.05 m a frame diagonally",
+            movers: (25..=30).collect(),
+            step: DVec3::new(0.05, 0.05, 0.0) / 2f64.sqrt(),
+        },
     ];
     let mut all = [true; 4];
     let mut unsettled = 0;
     for (fi, fl) in flights.iter().enumerate() {
-        // The rehearsal only runs flight (c), small and briefly, unseen.
-        let smoke = rehearse && fi == 2;
+        // Rehearsals and development only run flight (d), small and
+        // briefly, unseen.
+        let smoke = (rehearse || dev) && fi == 3;
         if smoke {
             smoke_run(&kernel, &t, fl);
-            say(format!("{}: ran 8 frames at 320x180 (rehearsal; numbers not shown)", fl.name));
+            say(format!(
+                "{}: ran 8 frames at 320x180 (numbers not shown)",
+                fl.name
+            ));
             continue;
         }
         let options = |indirect: bool, eps: f32| CacheOptions {
@@ -329,7 +345,7 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Flight (c) in the rehearsal: eight frames at 320×180, to catch a crash,
+/// Flight (d) in rehearsals and development: eight frames at 320×180, to catch a crash,
 /// nothing measured.
 fn smoke_run(kernel: &MaskConeKernel, t: &Textured, fl: &Flight) {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;

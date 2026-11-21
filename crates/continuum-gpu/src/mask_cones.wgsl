@@ -2971,11 +2971,8 @@ fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: v
 // Slots listed for the CPU to re-bake their sky (top bit: a page on a
 // moved object); count in mover_stats[7].
 @group(0) @binding(78) var<storage, read_write> sky_list: array<u32>;
-// Bounce light under movers (M22): words 8p to 8p + 5 the box of the
-// candidate pages (where moved shadows may fall; each bound as an ordered
-// float, lo negated) of frames of parity p (word 14: this frame's), 6 the
-// threshold (ε, as f32 bits), 7 1 for a drain at rest (no move: list what
-// is charged above ε / 100). Per slot the charge since its bounce samples
+// Bounce light under movers (M22): word 6 the threshold (ε, as f32 bits),
+// 7 1 for a drain at rest (no move: list what is charged above ε / 100). Per slot the charge since its bounce samples
 // were baked is `slot_info[3s + 1].w` (f32 bits, for diagnostics; the
 // ledger is `bounce_ledger`); bit 1 of `slot_info[3s].w` says it is listed
 // (sky_list, bit 30) for a re-bake of its bounce samples alone, bits 8-31
@@ -2983,22 +2980,10 @@ fn material_at(m: u32, t: u32, p: vec3<f32>, n: vec3<f32>, distance: f32, dir: v
 // something moved.
 @group(0) @binding(115) var<storage, read_write> bounce_state: array<atomic<u32>, 16>;
 // Per slot: the charges since its bounce samples were baked (x: what movers
-// covered then, y: what they cover now less then, telescoped as the sky's
-// ledger; z: the frames' crescents summed), the charge the lesser; and
-// which movers (and bit 31 of w: the shadows' box) it has been charged for
-// since.
+// and their shadow regions covered then, y: what they cover now less then,
+// telescoped as the sky's ledger; z: the frames' crescents summed), the
+// charge the lesser; and which movers it has been charged for since.
 @group(0) @binding(116) var<storage, read_write> bounce_ledger: array<vec4<f32>>;
-
-// The candidate pages' box of frames of parity `p` (empty: lo > hi).
-fn shadow_box(p: u32) -> Box3 {
-    let b = 8u * p;
-    if (atomicLoad(&bounce_state[b + 3u]) == 0u) { return Box3(vec3<f32>(1.0), vec3<f32>(-1.0)); }
-    let hi = vec3<f32>(unordered(atomicLoad(&bounce_state[b + 3u])), unordered(atomicLoad(&bounce_state[b + 4u])),
-                       unordered(atomicLoad(&bounce_state[b + 5u])));
-    let lo = -vec3<f32>(unordered(atomicLoad(&bounce_state[b])), unordered(atomicLoad(&bounce_state[b + 1u])),
-                        unordered(atomicLoad(&bounce_state[b + 2u])));
-    return Box3(lo, hi);
-}
 
 // A box's charge on `page` as a share of its view (0 for an empty box).
 fn box_share(page: Box3, b: Box3) -> f32 {
@@ -3023,15 +3008,6 @@ fn swept_share(page: Box3, a: Box3, b: Box3) -> f32 {
     let whole = box_share(page, a) + box_share(page, b);
     if (d <= 0.0) { return whole; }
     return min(whole, 4.0 * r * delta / (3.14159265 * d * d));
-}
-
-fn ordered(x: f32) -> u32 {
-    let b = bitcast<u32>(x);
-    return select(b | 0x80000000u, ~b, x < 0.0);
-}
-
-fn unordered(u: u32) -> f32 {
-    return bitcast<f32>(select(~u, u & 0x7fffffffu, (u & 0x80000000u) != 0u));
 }
 
 fn vc_hash(k: vec3<u32>) -> u32 {
@@ -3948,11 +3924,21 @@ fn vc_bounce(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             // Telescoped: what the page sees can have changed only where
             // the mover was at the bake (its old box the first frame it
-            // moves after) or is now.
-            let o = box_share(page, moved_box(e));
-            let n = box_share(page, moved_box(e + 2u));
+            // moves after) or is now, and where its shadows fell then or
+            // fall now (each light's shadow region, swept from the light
+            // to the scene's edge).
+            var o = box_share(page, moved_box(e));
+            var n = box_share(page, moved_box(e + 2u));
             // The frames' crescents summed bound it too (z).
             led.z += swept_share(page, moved_box(e), moved_box(e + 2u));
+            for (var l = 0u; l < lights_n; l++) {
+                let r = e + 4u + 4u * l;
+                let a = moved_box(r);
+                let b = moved_box(r + 2u);
+                o += box_share(page, a);
+                n += box_share(page, b);
+                led.z += swept_share(page, a, b);
+            }
             let id = bitcast<u32>(moved[e + 1u].w);
             if (id < 96u) {
                 let bit = 1u << (id % 32u);
@@ -3966,17 +3952,6 @@ fn vc_bounce(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else {
                 led.x += o + n;
             }
-        }
-        // The shadows' box likewise, now against the frame before.
-        let parity = atomicLoad(&bounce_state[14]);
-        let now = box_share(page, shadow_box(parity));
-        led.z += swept_share(page, shadow_box(1u - parity), shadow_box(parity));
-        if ((mask.w & 0x80000000u) == 0u) {
-            mask.w |= 0x80000000u;
-            led.x += now;
-            led.y += now;
-        } else {
-            led.y += now - box_share(page, shadow_box(1u - parity));
         }
         bounce_ledger[2u * s] = led;
         bounce_ledger[2u * s + 1u] = bitcast<vec4<f32>>(mask);
@@ -4081,16 +4056,6 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
         candidate = may_be_shadowed(page, l, s);
     }
     if (!candidate) { return; }
-    // Where moved shadows may fall, for bounce light's ledger (M22).
-    if (vc.indirect.y == 1u) {
-        let b = 8u * atomicLoad(&bounce_state[14]);
-        atomicMax(&bounce_state[b], ordered(-page.lo.x));
-        atomicMax(&bounce_state[b + 1u], ordered(-page.lo.y));
-        atomicMax(&bounce_state[b + 2u], ordered(-page.lo.z));
-        atomicMax(&bounce_state[b + 3u], ordered(page.hi.x));
-        atomicMax(&bounce_state[b + 4u], ordered(page.hi.y));
-        atomicMax(&bounce_state[b + 5u], ordered(page.hi.z));
-    }
     // A page hidden for another reason (its sky the guess, set aside by the
     // ledger) is not re-baked in part: the fill would show it.
     if (unknown_sky || mark != 0u) {
@@ -5060,6 +5025,10 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
         vc_request(vc_page(hit.mesh, hc, uv, want).key, 1u | SECONDARY | wanted_bits);
         return w;
     }
+    // A page bounce rays read is in use (as reflections' hits): kept, and
+    // its stale texels re-baked under movers rather than evicted, which
+    // would leave the next re-bake's rays missing it (M22).
+    slot_used[slot] = vc.counts.y;
     let hn = shading_normal(hit.mesh, hit.tri, p, -dir);
     let hp = p + hit.normal * surface_offset(length(p));
     let reflect = bounce_albedo(hit.mesh, hit.tri, p, footprint) * (w / 3.14159265);

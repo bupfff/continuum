@@ -58,3 +58,22 @@ more than ε of the largest bounce value, restoring the cache;
   pages over ε: bounce samples baked against coarse hits are not baked
   again when finer hits arrive (the cache's own; item 5's "quicker to
   settle").
+
+## Found after the run: the cost criterion was mistimed (2026-11-20)
+
+The verdict stands (no re-run), but criterion 4's numbers measured the
+harness, not the ledger. Each frame the gate timed ours (waited), then
+bounce light off (waited), then rendered the renderer without re-bakes
+*without waiting*; its GPU work (about 21 ms) ran into the next timed
+frame of ours. `m22_cost_dev` (commit after `8b44ca6`) on the current code:
+
+| Flight (a), 640×360, 120 frames | ours | without re-bakes | bounce off |
+|---|---|---|---|
+| gate 1's order (third renderer not waited for) | **44.56 ms** | 0.24 ms (not waited) | 20.66 ms |
+| every renderer waited for | **24.03 ms** (1.18×) | 21.16 ms | 20.37 ms |
+
+Flight (b), every renderer waited for: 37.75 ms against 32.96 ms bounce
+off (1.145×). About 2,100 bounce samples a frame are re-baked in both
+flights (the fixed budget's remainder). The "Development after gate 1"
+conclusion in DESIGN §3.4 that the cost "did not fall" was measured the
+same mistaken way. Gate 2 times every renderer to completion.

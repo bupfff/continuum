@@ -316,6 +316,13 @@ pub struct BounceCheck {
     pub largest_change: f32,
     /// The largest charge held.
     pub largest_charge: f32,
+    /// Diagnostics: of the pages over ε, those read in the last frame.
+    pub visible_over: u32,
+    /// Of the pages over ε, those listed for a re-bake.
+    pub listed_over: u32,
+    /// Of the pages over ε, those whose samples were baked while something
+    /// moved.
+    pub moving_over: u32,
 }
 
 /// Two halves packed in a word (low first).
@@ -3439,21 +3446,35 @@ impl InstancedRenderer {
             }
             largest_value = largest_value.max(value);
             let charge = f32::from_bits(info[12 * slot as usize + 7]);
-            if std::env::var_os("CONTINUUM_TRACE_BOUNCE").is_some() && change > 2e-6 {
-                eprintln!(
-                    "bounce check: slot {slot} charge {charge} listed {} change {change:.3e}",
-                    info[12 * slot as usize + 3] & 2
-                );
-            }
-            changes.push((change, charge));
+            changes.push((slot, change, charge));
         }
+        let used: &[u32] = bytemuck::cast_slice(&used);
+        let frame = cache.state.frame_number();
+        let trace = std::env::var_os("CONTINUUM_TRACE_BOUNCE").is_some();
         let mut check = BounceCheck {
             pages: pages.len() as u32,
             largest_value,
             ..Default::default()
         };
-        for (change, charge) in changes {
+        for (slot, change, charge) in changes {
             let stale = change > epsilon * largest_value;
+            if stale {
+                let w = info[12 * slot as usize + 3];
+                let visible = used[slot as usize].saturating_add(1) >= frame;
+                check.visible_over += visible as u32;
+                check.listed_over += (w & 2 != 0) as u32;
+                check.moving_over += (w & 4 != 0) as u32;
+                if trace {
+                    eprintln!(
+                        "bounce over eps: key {:?} slot {slot} charge {charge:.3} visible {visible} listed {} at {} moving {} change {:.2}",
+                        cache.state.slot_key_of(slot),
+                        w & 2 != 0,
+                        w >> 8,
+                        w & 4 != 0,
+                        change / (epsilon * largest_value)
+                    );
+                }
+            }
             check.changed += (change > 1e-4 * largest_value) as u32;
             check.over_epsilon += stale as u32;
             check.missed += (stale && charge <= epsilon) as u32;
