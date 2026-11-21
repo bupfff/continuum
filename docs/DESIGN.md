@@ -1449,6 +1449,36 @@ gate 2's rehearsal mode):**
   direct-light cost (14 ms of a 20 ms frame here), which every renderer
   pays.
 
+#### Bounce light that settles (M22 gate 3 design, 2026-11-20)
+
+Item 5's "quicker to settle": a settled still scene's bounce light was not
+what a fresh bake gives. A bounce ray reads its hit's direct light from
+the first page resident at or coarser than the bin's footprint and keeps
+it; finer pages that arrive later (asked for by pixels or other samples)
+never reach the sample. Development (`m22_settle_dev`, 1280×720, a fixed
+budget): 212–285 pages over ε of 7,700–8,900 (2.4–3.5%), the largest
+change 45–68% of the largest bounce value, in three views.
+- **Asked for and retried:** a bin that finds only a coarser page than it
+  wants asks for its page (a secondary request, as for a missing one) and
+  counts toward the sample's retry (with the bins short of bounces), so
+  the sample re-bakes once the page may have arrived. Allowing one mip of
+  slack before asking failed: a sample keeps a coarse read after the finer
+  page comes (195 pages over ε, a change of 70%).
+- **One mip coarser than the footprint:** asking for every hit's own mip
+  baked ten times the pages (13,000 resident against 2,400 bounce pages)
+  and settled 2–2.6× slower in time; reading one mip coarser than the
+  footprint (consistently, so a fresh bake reads the same) wants a
+  quarter of the pages.
+- **Result in development:** 9–44 pages over ε (0.1–0.6%), the largest
+  change 1.4–2.7%; settling 1.47–1.96× the old's frames (fixed budget,
+  0.9–5.0 s). `CacheOptions::bounce_settles`, on by default.
+- **Found:** with the default time budget at 1280×720 the night scene
+  settles in about 1,200 frames or about 14,800, run to run: when the
+  frame period stays above `frame_budget_ms` (11 ms) the cap holds the
+  bake at its floor (about 1,000 units a frame) for the whole settle. The
+  old behaviour shows it too (805 and 8,883 frames). A gap of the budget's
+  own.
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
