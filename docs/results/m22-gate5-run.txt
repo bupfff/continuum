@@ -1,0 +1,5 @@
+M22 gate 5: 1280x720 (criteria 1-2 are M14 gate 11's run)
+3. (b) night: settled with bounce in 1038 frames (8.6 s), gate 4 1,570 (0.661x, at most 0.8x): PASS; without bounce 641 (4.8 s), gate 4 898
+(a) day (reported): settled with bounce in 283 frames (1.8 s), without 125 (0.6 s): 2.26x
+(c) materials, far side (reported): settled with bounce in 730 frames (7.5 s), without 245 (2.3 s): 2.98x
+Verdict (criterion 3): PASS

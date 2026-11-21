@@ -96,8 +96,16 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   that need it are hidden until wanted again. Moving sphere lights re-bake
   shadow edges whenever they move. Not yet with movers or a sky in the
   cache. Lights change color and intensity freely either way.
-- **Bounce light.** `CacheOptions::indirect` adds one bounce of diffuse
-  light (M10 gate 1). `CacheOptions::bounces` carries it further: a bounce
+- **Bounce light.** On by default in `Renderer` (`RendererOptions::bounce`;
+  M22 gate 4: 1.06–1.12× the warm frame, about 190 MB of GPU memory at
+  the default pool, the night scene 0.39× the error without it); not with
+  moving lights, the sub-pixel path, or movers without hardware ray
+  queries. `CacheOptions::indirect` adds one bounce of diffuse
+  light (M10 gate 1). With movers, a ledger re-bakes the bounce light of
+  pages whose view a move may have changed (`bounce_epsilon`, within
+  `bounce_share` of the bake budget; M22). A settled view's bounce light
+  matches a fresh bake (`bounce_settles`, M22 gate 3): bounce rays ask for
+  their hits' pages and samples re-bake once they arrive. `CacheOptions::bounces` carries it further: a bounce
   sample gathers the bounce light of the pages it hits, and pages re-bake
   until their hits hold enough. A closed room lit by one panel goes from
   45% to 6.5% of Cycles' 12-bounce image with 8 (M10 gate 25), settling in

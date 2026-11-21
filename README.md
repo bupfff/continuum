@@ -221,8 +221,11 @@ Honest about where it stands:
 - **Deforming meshes are costly:** a character large on screen costs
   about 1.6× the frame, and the lighting near it lags its motion (up to
   about a second) until it stops.
-- **Bounce light** is one bounce by default (more on request), not yet
-  with moving objects; several bounces are untried with streaming.
+- **Bounce light** is on by default in `Renderer`, one bounce (more on
+  request): 1.06–1.12× the frame and about 190 MB of GPU memory, and a view
+  settles in 1.8–3.2× the frames. With moving objects a ledger keeps it
+  right (about 1.2× the moving frame in development; its gate is parked);
+  not yet with moving lights; several bounces are untried with streaming.
 - **Transparency** needs hardware ray queries. Glass is sharp even when
   rough, its shadows are grey rather than tinted and carry no caustics,
   and solid glass costs about 1.4× the frame where it covers a ninth of

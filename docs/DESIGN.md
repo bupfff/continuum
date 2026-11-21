@@ -1508,6 +1508,34 @@ night scene 7.43% from Cycles against 19.13% without (not supersampled).
   own share of the frame (fit from the period against the units baked)
   would keep both.
 
+#### The time budget steered by the frame period's median (M22 gate 5 design, 2026-11-20)
+
+Gate 4 failed on settling (3.18× the frames without bounce in its new
+view), and its control found M14 gate 11's readback warm-up claim broken
+(1.38–1.50×). Both come from the frame period now steering the budget on
+this device (gate 4: the GPU model only on in-order timestamps):
+- **A lone stall cut the budget:** since M5 gate 14 a caller's wait for
+  the GPU counts into the frame's period, so reading the image back looks
+  like a frame two or three times long. The budget now follows the median
+  of the last three periods: a caller waiting every frame still counts, a
+  lone wait does not. M14 gate 11's development: readback warm-up 1.06–
+  1.09× (from 1.31–1.39×); the night scene settles in about 1,050 frames
+  (from about 1,600).
+- **The floor's overrun** (`CacheOptions::floor_overrun`, 0.25): where
+  frames with the bake at its floor already take longer than the frame
+  budget or target (pages missing), frames may take a quarter more than
+  those, measured at the floor every 120 frames at most. With the median
+  filter it changes little (the night scene 1,018 against 1,096 frames).
+- **Tried and dropped:** retrying incomplete bounce samples one by one
+  (no faster, and samples that read slightly coarse pages were left stale:
+  591 pages over ε in the night scene); backing off repeated retries (4, 8,
+  16, 32 frames; slower everywhere, the night scene 1,593 frames).
+- **Left:** bounce light's settling is mostly its own work under the time
+  budget (secondary pages, samples and their retries): 2.4–3.2× the frames
+  without bounce. In the night scene the settled check's largest change
+  varies run to run (2.2–6.4% of the largest value; gate 3 measured 2.25%
+  against 5%).
+
 ## 3.5 What the 2D phase (M0) taught us
 
 Status after the flatland gates (2026-10-23). Full results are in `docs/results/`.
@@ -1916,23 +1944,24 @@ estimates, and gates fail often, so treat them as ranges.
 conversation or after a compaction; history lives in git and
 `docs/results/`, the plan below.
 - **Now:** item 5 of the user's order (lighting gaps), milestone M22.
-  Bounce light with movers works (the ledger; `bounce_share`) but gate 2
-  is parked unrun: cost and quality sit on its bars from both sides at ε
-  1% (§3.4 "Development for gate 2", with the levers left). Gate 1's cost
-  failure was mistimed (results addendum).
-- **Next:** (1) M22 G3, bounce light that settles: samples baked against
-  coarse hit pages are never re-baked when finer ones arrive (137–229
-  pages over ε in a still scene); request the wanted pages and retry.
-  (2) Bounce by default (moving lights with bounce are refused), emissive
-  surfaces as lights (M10 G23), receivers next to large lights (M5 G14:
-  hardware rays for wide windows). (3) Parked costs: movers under a sky
-  331 ms a frame (M9 G3's sky re-bakes), deforming 1.6–1.95× (M12 G2),
-  solid glass 1.378× (M16 G3), the movers' own direct light (14 ms of a
-  20 ms frame in M22's flights).
+  Bounce light is on by default in `Renderer` (G4), settles to a fresh
+  bake's (G3), and the time budget follows the frame period's median
+  (G5: settling faster, M14's frame budget held). Bounce with movers works
+  through the ledger, but its gate (G2) is parked: cost and quality sit on
+  its bars at ε 1% (§3.4 "Development for gate 2", levers listed).
+- **Next:** (1) the rest of item 5: emissive surfaces as lights (M10
+  G23), receivers next to large lights (M5 G14: hardware rays for wide
+  windows), bounce light with moving lights (refused now). (2) Settling
+  with bounce is 2.3–3× the frames without (its own work under the time
+  budget). (3) Parked costs: movers under a sky 331 ms a frame (M9 G3's
+  sky re-bakes), the movers' own direct light (14 ms of a 20 ms frame in
+  M22's flights), deforming 1.6–1.95× (M12 G2), solid glass 1.378× (M16
+  G3).
 - **Pitfalls:** compare renderers at a fixed bake budget
   (`frame_target_ms` 0) and wait for every renderer's frame before timing
-  the next (M22 G1); time at full size, interleaved in one process (the
-  machine's external displays make controls 8–16% slow).
+  the next (M22 G1); this device's GPU timestamps arrive out of order, so
+  the frame period steers the time budget (M22 G4–G5); time at full size,
+  interleaved in one process.
 
 - **Decided 2026-11-15 (the user): toward a full engine, in the order a
   user would hit the gaps.**
@@ -2673,7 +2702,7 @@ let frame = renderer.render(&camera); // frame.image, frame.certified_error
 | M15 anti-aliasing on the default path | Edge pixels supersampled within a ray budget, shaded per surface | Edges smooth and steady in motion, on by default. **Design** (2026-11-15, §3.4 "Anti-aliasing on the default path"): edge pixels (a neighbour sees another object, light, the sky or a surface off the pixel's plane) trace four samples of a fixed eight, the other four where those disagree, within a ray a pixel; samples off the pixel's own surface shaded from the cache; with movers and deforming geometry; `RendererOptions::anti_aliasing` on by default. G1 (**passed**: the textured scene with foliage 0.312× one ray's error at edges, 0.301× its frame-to-frame error in a slow turn, 1.26 ms added (1.449×); the million-boulder field standing 0.378×, 0.418×, 2.77 ms added (2.071×), its horizon band of sub-pixel boulders most of the cost; elsewhere no worse (0.946×, 0.720×); M7's quarter rays 0.392×/0.397× at edges; `docs/results/m15-gate1.md`) |
 | M16 material breadth | Transmission, then volumes, clearcoat and sheen, a second texture coordinate set | glTF materials users meet first. **Design** (2026-11-15, §3.4 "Transmission"): thin glass (`KHR_materials_transmission`): full reflection, the unreflected light's factor straight through tinted, through blending's layered records; cones weigh triangles by Fresnel at their angle; import and save. G1 (**failed** on speed only: 1.389× the frame with the panes opaque against 1.3×, the pane pixels' own hits shaded twice; accuracy 5.09% from Cycles, 0.346× the error of blending over the pixels transmission changes; `docs/results/m16-gate1.md`); G2 (**passed**: what a transmissive hit passes kept by the shading pass, 1.217×, 5.08% from Cycles; `docs/results/m16-gate2.md`); volumes (solid glass: refraction in and out, Beer\'s law, total internal reflection, `KHR_materials_volume` and `_ior`) G3 (**failed** on speed only: 1.378× against 1.3×, the machine\'s state moving during the rounds; accuracy 8.34% from Cycles clamped at 4× its mean, 0.371× thin glass\'s error; `docs/results/m16-gate3.md`); surface lobes (a dielectric\'s reflectance, `KHR_materials_ior` and `_specular`; a clear coat, `KHR_materials_clearcoat`) G4 (**passed**: 1.134×, 3.64% from Cycles clamped, 0.461× the error of ignoring them; `docs/results/m16-gate4.md`) |
 | M17 atmosphere and post | Display transform, auto-exposure; then fog, bloom, depth of field, motion blur, upscaling | A finished image. **Design** (2026-11-15, §3.4 "Display"): Khronos PBR Neutral (Renderer's default) and an AgX approximation in the display pass; auto-exposure from a histogram of log2 luminance, adapted with a time constant. G1 (**failed** on cost only: the meter 0.168 ms at 720p against 0.15; PBR Neutral 0.42/255 and 0.32/255 from Blender's view on average; no overshoot; `docs/results/m17-gate1.md`); G2 (**passed**: the histogram at a quarter of the pixels, 0.078 ms; `docs/results/m17-gate2.md`); fog with light shafts (M18 G1, **passed**: 0.802 ms at 720p, 9.58% and 5.51% from Cycles, 0.216× and 0.146× the error without fog; `docs/results/m18-gate1.md`); bloom and upscaling (M19 G1, **passed**: bloom 4.72e-8 from the CPU's and the light kept, +0.262 ms; Catmull-Rom 0.870× nearest's error from 640×360, the frame 0.506× native; `docs/results/m19-gate1.md`); depth of field (M20 G1, **failed** on a seen point light at night: the day views 0.134×/0.129× the pinhole's error from the lens sampled in our renderer and 1.034×/1.056× that lens's error from Cycles, +1.66/+1.75 ms at 720p; the night view 0.284× and 12.279×, the light blurred into a blocky shape; `docs/results/m20-gate1.md`); G2 (**passed**: seen lights at their own depth, highlights by size and contrast added as light; four views 0.025–0.134× the pinhole's error from the sampled lens, 0.472–1.053× its error from Cycles, means within 0.5%, +1.79/+1.90/+2.49 ms at 720p; `docs/results/m20-gate2.md`); motion blur (M21 G1, **passed**: four views 0.072–0.343× the still image's error from the shutter sampled in our renderer, 0.998–1.097× its error from Cycles, means within 0.12%, +1.43/+1.30/+0.55 ms at 720p; the new view narrowly; `docs/results/m21-gate1.md`) |
-| M22 lighting gaps (item 5) | Bounce light with movers; bounce by default and quicker to settle; emissive surfaces as lights; receivers next to large lights | Bounce light right while things move, within a budget. **Design** (2026-11-16, §3.4 "Bounce light with movers"): a ledger charges pages with bounce samples by the share of their view moves can change; past ε their bounce samples alone re-bake. G1 (**failed** on cost, 2.163×/2.075× bounce off, and one check of the new flight; the cost was mistimed, found after: 1.18×/1.145× timed right; `docs/results/m22-gate1.md`). G2 **not run, parked** (2026-11-20): rehearsals put cost and quality on its bars from both sides (§3.4 "Development for gate 2"); kept the stall's fix (pages bounce rays read stay in use) and `CacheOptions::bounce_share`. G3 (**passed**, 2026-11-20: bounce light that settles, `CacheOptions::bounce_settles`; settled scenes 0.09–0.77% of pages over ε against 2.39–7.09%, largest change 1.38–2.70% against 45–95%, settling 1.50–2.00× the frames, Cycles unchanged at 3.08%; `docs/results/m22-gate3.md`). G4 (**failed** on settling in the new view, 3.18× the frames without bounce against 3×; cost 1.057–1.117×, night 0.388× the error without bounce; kept: `RendererOptions::bounce` on by default, the time budget's model only on in-order timestamps; control: M14 G11's flights hold the frame budget, its readback warm-up claim no longer does, 1.38–1.50×; `docs/results/m22-gate4.md`) | 2 (1 spent) |
+| M22 lighting gaps (item 5) | Bounce light with movers; bounce by default and quicker to settle; emissive surfaces as lights; receivers next to large lights | Bounce light right while things move, within a budget. **Design** (2026-11-16, §3.4 "Bounce light with movers"): a ledger charges pages with bounce samples by the share of their view moves can change; past ε their bounce samples alone re-bake. G1 (**failed** on cost, 2.163×/2.075× bounce off, and one check of the new flight; the cost was mistimed, found after: 1.18×/1.145× timed right; `docs/results/m22-gate1.md`). G2 **not run, parked** (2026-11-20): rehearsals put cost and quality on its bars from both sides (§3.4 "Development for gate 2"); kept the stall's fix (pages bounce rays read stay in use) and `CacheOptions::bounce_share`. G3 (**passed**, 2026-11-20: bounce light that settles, `CacheOptions::bounce_settles`; settled scenes 0.09–0.77% of pages over ε against 2.39–7.09%, largest change 1.38–2.70% against 45–95%, settling 1.50–2.00× the frames, Cycles unchanged at 3.08%; `docs/results/m22-gate3.md`). G4 (**failed** on settling in the new view, 3.18× the frames without bounce against 3×; cost 1.057–1.117×, night 0.388× the error without bounce; kept: `RendererOptions::bounce` on by default, the time budget's model only on in-order timestamps; control: M14 G11's flights hold the frame budget, its readback warm-up claim no longer does, 1.38–1.50×; `docs/results/m22-gate4.md`). G5 (**passed**, 2026-11-20: the time budget follows the median of three frame periods, `CacheOptions::floor_overrun`; M14 G11's frame budget and readback warm-up hold, 1.02–1.09×; the night scene settles in 0.661× gate 4's frames; `docs/results/m22-gate5.md`) | 2 (1 spent) |
 
 ## 7. Benchmark protocol
 
