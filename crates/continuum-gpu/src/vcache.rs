@@ -43,6 +43,9 @@ const EVICT_PER_FRAME: usize = 2_048;
 const EVICT_AGE: u32 = 64;
 /// The adaptive bake budget's floor and starting point (cones per frame).
 const MIN_BUDGET: f32 = 1_000.0;
+/// Frames a measure of the frame period with the bake at its floor stays
+/// in use (M22 gate 5); then the floor is visited again.
+const FLOOR_FRESH: u32 = 120;
 /// An object moved this frame, for the cache's stale pass: its world box the
 /// frame before and now; for deforming geometry (M12 gate 2), per light the
 /// box when that light's lighting last caught up (empty: the frame
@@ -168,8 +171,16 @@ pub struct CacheOptions {
     /// the cap grows by 5% a frame. It catches what the GPU model does not
     /// see (structures built, uploads, the CPU's own work). 11 ms by default
     /// (M14 gate 10): frames vary by about 5 ms around it under heavy
-    /// streaming, so their 99th percentile stays within 16.7 ms.
+    /// streaming, so their 99th percentile stays within 16.7 ms. See
+    /// `floor_overrun` for frames that overrun it with the bake at its
+    /// floor.
     pub frame_budget_ms: f32,
+    /// Where frames with the bake at its floor already take longer than the
+    /// frame budget or target (as while a view's pages are missing), how
+    /// much longer than they take a frame may take, so the bake still
+    /// progresses (M22 gate 5): 0.25 by default; 0 holds frames to the
+    /// budget and target, the bake at its floor until they fit.
+    pub floor_overrun: f32,
     /// Pages the pool holds. Each texel holds one channel per light, then
     /// the sky's, so the pool takes 81 × 4 bytes × channels per page: 340 MB
     /// at the default 2^19 pages with one light, 680 MB with three. Fewer
@@ -325,6 +336,7 @@ impl Default for CacheOptions {
             bake_budget: 20_000,
             frame_target_ms: 14.0,
             frame_budget_ms: 11.0,
+            floor_overrun: 0.25,
             pages: 1 << 19,
             sky_spacing: 0.0,
             sky_sample_cost: 10,
@@ -1136,6 +1148,10 @@ pub(crate) struct VirtualCache {
     /// time, waiting for the GPU included, not the caller's between calls),
     /// for the frame period.
     last_frame: Option<Duration>,
+    /// The last three frames' periods (M22 gate 5): the budget follows
+    /// their median, so a lone stall (a caller reading the image back)
+    /// does not cut it, while a caller waiting every frame still counts.
+    periods: [Duration; 3],
     /// GPU timing, where the device has timestamp queries, and the bake
     /// model it feeds.
     pub(crate) timer: Option<GpuTimer>,
@@ -1146,6 +1162,12 @@ pub(crate) struct VirtualCache {
     /// timestamps arrive out of order (Apple's GPUs, at pass boundaries)
     /// the frame period steers it instead.
     model_frame: u32,
+    /// The frame period with the bake at its floor (smoothed, ms) and the
+    /// last frame it was measured (M22 gate 5): while rendering alone takes
+    /// longer than the frame budget or target, frames may take up to a
+    /// quarter more than it, so the bake still progresses.
+    floor_period: f32,
+    floor_frame: u32,
     /// Slots to free, least recently used last (popped first).
     evict_queue: Vec<u32>,
     /// A frame whose invalid slots overflowed the list: every slot's mark
@@ -1646,6 +1668,7 @@ impl VirtualCache {
                 options.bake_budget as f32
             },
             last_frame: None,
+            periods: [Duration::ZERO; 3],
             timer: device
                 .features()
                 .contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -1665,6 +1688,8 @@ impl VirtualCache {
                 }),
             model: BakeModel::new(),
             model_frame: 0,
+            floor_period: 0.0,
+            floor_frame: 0,
             cap: options.bake_budget as f32,
             evict_queue: Vec::new(),
             overflowed: None,
@@ -2660,7 +2685,13 @@ impl VirtualCache {
     /// frame's bake.
     pub(crate) fn begin_frame(&mut self, device: &wgpu::Device, lit_resident: Option<&[bool]>) {
         let start = Instant::now();
-        let period = self.last_frame.take();
+        let period = self.last_frame.take().map(|p| {
+            self.periods = [self.periods[1], self.periods[2], p];
+            let mut sorted = self.periods;
+            sorted.sort();
+            // Until three frames have been timed, the latest.
+            if sorted[0].is_zero() { p } else { sorted[1] }
+        });
         let slot = (self.frame % 2) as usize;
         if let Some(r) = lit_resident {
             self.lit_resident.clear();
@@ -2676,6 +2707,35 @@ impl VirtualCache {
             self.evict_marked(device);
         }
         let target = self.options.frame_target_ms;
+        // What a frame takes with the bake at its floor (M22 gate 5): while
+        // rendering alone overruns a limit (pages missing, say), shrinking
+        // the bake cannot bring frames within it, and starving the bake
+        // keeps pages missing; frames may then take a quarter more than
+        // that.
+        let floor = MIN_BUDGET.min(self.options.bake_budget as f32);
+        if target > 0.0
+            && let Some(p) = period
+        {
+            let p = p.as_secs_f32() * 1e3;
+            if self.budget <= 1.2 * floor {
+                self.floor_period = if self.floor_frame > 0 && self.floor_frame + 8 >= self.frame {
+                    0.8 * self.floor_period + 0.2 * p
+                } else {
+                    p
+                };
+                self.floor_frame = self.frame;
+            }
+        }
+        let floor_known = self.floor_frame > 0 && self.floor_frame + FLOOR_FRESH >= self.frame;
+        let floor_period = self.floor_period;
+        let overrun = self.options.floor_overrun.max(0.0);
+        let limit = |l: f32| {
+            if overrun > 0.0 && floor_known && floor_period > l {
+                (1.0 + overrun) * floor_period
+            } else {
+                l
+            }
+        };
         // The model steers while in-order timings keep coming (M22).
         let model =
             self.timer.is_some() && self.model_frame > 0 && self.model_frame + 32 >= self.frame;
@@ -2701,6 +2761,7 @@ impl VirtualCache {
         {
             let period = period.as_secs_f32() * 1e3;
             let gpu_bound = self.waiting > Duration::from_millis(1);
+            let target = limit(target);
             if gpu_bound && period > target {
                 self.budget *= target / period;
             } else if period < target {
@@ -2718,7 +2779,7 @@ impl VirtualCache {
             && let Some(period) = period
         {
             let period = period.as_secs_f32() * 1e3;
-            let floor = MIN_BUDGET.min(self.options.bake_budget as f32);
+            let budget_ms = limit(budget_ms);
             if period > budget_ms {
                 self.cap = (self.budget.min(self.cap) * budget_ms / period).max(floor);
             } else if period < 0.85 * budget_ms {
@@ -2945,7 +3006,9 @@ impl VirtualCache {
             self.sky_due.insert(slot, due);
         }
         // Incomplete bounce samples: re-bake once the requested pages have
-        // had time to arrive.
+        // had time to arrive. (The whole page: retrying incomplete samples
+        // alone left samples that read slightly coarse pages stale, M22
+        // gate 5's development.)
         for slot in incomplete {
             self.schedule_retry(slot, frame + INDIRECT_RETRY);
         }

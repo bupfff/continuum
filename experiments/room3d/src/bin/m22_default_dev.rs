@@ -114,14 +114,23 @@ fn main() -> std::io::Result<()> {
     let rounds: usize = env("DD_ROUNDS", 5);
     let only: String = env("DD_SCENE", String::new());
     let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("out");
-    for name in ["day", "night"] {
-        if !only.is_empty() && only != name {
+    for name in ["day", "night", "mat"] {
+        if (!only.is_empty() && only != name) || (only.is_empty() && name == "mat") {
             continue;
         }
-        let t = if name == "night" {
-            Textured::new().with_lamps()
+        let t = match name {
+            "night" => Textured::new().with_lamps(),
+            "mat" => Textured::new().with_materials(),
+            _ => Textured::new(),
+        };
+        let camera = if name == "mat" {
+            Camera {
+                eye: Vec3::new(6.0, 22.0, 3.0),
+                target: Vec3::new(-2.0, 8.0, 0.0),
+                vertical_fov_degrees: 45.0,
+            }
         } else {
-            Textured::new()
+            t.camera
         };
         let make = |bounce: bool| {
             let kernel = MaskConeKernel::new().expect("GPU");
@@ -140,6 +149,7 @@ fn main() -> std::io::Result<()> {
                             "DD_BUDGET",
                             continuum_gpu::CacheOptions::default().bake_budget,
                         ),
+                        floor_overrun: env("DD_OVERRUN", 0.25),
                         frame_budget_ms: env(
                             "DD_FRAME_BUDGET",
                             continuum_gpu::CacheOptions::default().frame_budget_ms,
@@ -153,8 +163,8 @@ fn main() -> std::io::Result<()> {
         let mut on = make(true);
         let mut off = make(false);
         let (v_on, v_off) = (target(&on, w, h), target(&off, w, h));
-        let (f_on, s_on) = settle(&mut on, t.camera, &v_on);
-        let (f_off, s_off) = settle(&mut off, t.camera, &v_off);
+        let (f_on, s_on) = settle(&mut on, camera, &v_on);
+        let (f_off, s_off) = settle(&mut off, camera, &v_off);
         println!(
             "{name}: settled in {f_on} frames ({s_on:.1} s) with bounce, {f_off} ({s_off:.1} s) without; GPU memory {:.0} MB and {:.0} MB",
             on.gpu_bytes() as f64 / 1e6,
@@ -162,8 +172,8 @@ fn main() -> std::io::Result<()> {
         );
         let mut ratios = Vec::new();
         for k in 0..rounds {
-            let a = warm(&mut off, t.camera, &v_off);
-            let b = warm(&mut on, t.camera, &v_on);
+            let a = warm(&mut off, camera, &v_off);
+            let b = warm(&mut on, camera, &v_on);
             ratios.push(b / a);
             println!(
                 "{name} round {k}: off {a:.2} ms, on {b:.2} ms ({:.3}x)",
