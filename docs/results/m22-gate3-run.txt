@@ -1,0 +1,11 @@
+M22 gate 3: 1280x720, adapter Apple M4
+1. (a) sun: settled, pages over eps 13 of 8277 (0.16%, at most 1%), largest change 1.38% of the largest value (at most 5%): PASS; old 212 of 8862 (2.39%), 68.16%
+2. (a) sun: settled in 181 frames (0.9 s), old 121 (0.5 s): 1.50x (at most 3x): PASS
+1. (b) lamps: settled, pages over eps 7 of 7738 (0.09%, at most 1%), largest change 2.25% of the largest value (at most 5%): PASS; old 263 of 8132 (3.23%), 45.16%
+2. (b) lamps: settled in 603 frames (5.1 s), old 302 (2.5 s): 2.00x (at most 3x): PASS
+3. (b) lamps: from Cycles over surfaces 3.080% (at most 5% and the old's + 0.2 points), old 3.081%: PASS
+1. (c) sky: settled, pages over eps 44 of 7892 (0.56%, at most 1%), largest change 2.70% of the largest value (at most 5%): PASS; old 286 of 8786 (3.26%), 67.77%
+2. (c) sky: settled in 281 frames (1.5 s), old 158 (0.8 s): 1.78x (at most 3x): PASS
+1. (d) sky, far side: settled, pages over eps 76 of 9861 (0.77%, at most 1%), largest change 2.06% of the largest value (at most 5%): PASS; old 747 of 10534 (7.09%), 94.90%
+2. (d) sky, far side: settled in 314 frames (1.8 s), old 179 (0.9 s): 1.75x (at most 3x): PASS
+Verdict: 1 PASS, 2 PASS, 3 PASS: PASS
