@@ -509,6 +509,10 @@ fn light_box(light: &Light) -> (Vec3, Vec3) {
 pub struct InstancedRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// The last frame's submission: the movers' top-level structure is
+    /// rebuilt in place, so a frame that rebuilds it waits for the frame
+    /// before (whose rays may still read it) to finish.
+    last_submission: Option<wgpu::SubmissionIndex>,
     /// Camera passes with the bindings each uses: one pass, or a visibility
     /// pass and a shading pass (and with the extra samples' list, the
     /// passes that make and shade it).
@@ -1357,6 +1361,15 @@ impl InstancedRenderer {
             bytemuck::cast_slice(&items),
         );
         if let Some(hw) = &mut self.hw {
+            // Rebuilt in place: not while the frame before may still trace
+            // it (pipelined frames lost an animated fox from camera rays
+            // in the viewer).
+            if let Some(index) = self.last_submission.take() {
+                let _ = self.device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(index),
+                    timeout: None,
+                });
+            }
             hw.update_movers(encoder, &movers.placements);
         }
         if let Some(cache) = &mut self.cache {
@@ -2018,6 +2031,7 @@ impl InstancedRenderer {
         let mut renderer = InstancedRenderer {
             device: device.clone(),
             queue: kernel.queue.clone(),
+            last_submission: None,
             passes,
             camera_dispatch,
             hw,
@@ -3234,6 +3248,7 @@ impl InstancedRenderer {
             cache.state.encode_timestamps(&mut encoder);
         }
         let index = self.queue.submit([encoder.finish()]);
+        self.last_submission = Some(index.clone());
         if let Some(stream) = &mut self.stream {
             stream.after_submit(index.clone());
         }

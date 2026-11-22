@@ -205,8 +205,14 @@ re-baked every frame). The viewer now plays animations under the sky and
 HDRIs with `sky_lag` on (Fox 9.18 ms, CesiumMan 12.43 ms, BrainStem 44.00
 ms at 2560×1440 rendered at half).
 
-Open: in the viewer the animated Fox renders unlit and unseen by camera
-rays after a few frames (its shadow stays right); fine with `--no-cache`,
-fine posed once (`VIEWER_DEBUG_NO_POSE=1`), and fine in `anim_dev` with the
-same poses (checked by their bounds), camera, size and scale, format,
-pacing, pipelining and resizing. Also in v0.3.1 under the sun alone.
+Found and fixed (2026-11-22): in the viewer the animated Fox went unseen
+by camera rays after a few frames (its shadow stayed right), also in
+v0.3.1. The movers' top-level structure is rebuilt in place every frame
+they move, and with frames pipelined (as a window renders them) the next
+frame's rebuild overwrote it while the previous frame's rays still traced
+it. Waiting for the GPU before each frame fixed it; so did waiting only
+before the rebuild. `InstancedRenderer` now waits for the previous frame's
+submission before rebuilding it (frames with moving movers only). Viewer,
+2560×1440 rendered at half, under the defaults' HDRIs: Fox 10.90 ms,
+CesiumMan 11.43 ms, BrainStem 32.56 ms a frame. (`anim_dev` never showed
+it: its frames ran shallower.)

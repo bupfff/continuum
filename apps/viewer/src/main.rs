@@ -1389,41 +1389,10 @@ impl App {
             r.set_tone_map(self.settings.tone_map);
             r.set_bloom(self.settings.bloom.then(continuum_gpu::Bloom::default));
         }
-        // Development: `VIEWER_DEBUG_POSE=1` prints the pose's bounds and the
-        // cache's counters every 20 frames; `VIEWER_DEBUG_NO_POSE=1` poses
-        // deforming geometry in the first frames only (the animated Fox
-        // goes unlit and unseen after a few frames with the cache in the
-        // viewer alone: DESIGN, Start here).
-        if std::env::var_os("VIEWER_DEBUG_POSE").is_some()
-            && self.all_times.len().is_multiple_of(20)
-            && let Some(Backend::Instanced(r)) = &gpu.backend
-        {
-            let b = shapes.first().map(|p| {
-                p.triangles.iter().flatten().fold(
-                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                    |(lo, hi), &v| (lo.min(v), hi.max(v)),
-                )
-            });
-            eprintln!(
-                "pose: bounds {b:?}, time {:.2}, frames {}, lag {}, stats {:?}",
-                self.time,
-                self.all_times.len(),
-                r.deforming_lag(),
-                r.stats().map(|s| (
-                    s.fallback_pixels,
-                    s.rebaked_pages,
-                    s.rebaked_texels,
-                    s.pages_baked,
-                    s.requests
-                ))
-            );
-        }
         if let Some(b) = &mut gpu.backend {
             b.update_surfaces(&changes);
             b.set_transforms(&poses);
-            if std::env::var_os("VIEWER_DEBUG_NO_POSE").is_none() || self.all_times.is_empty() {
-                b.set_vertices(shapes);
-            }
+            b.set_vertices(shapes);
         }
         let texture = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
