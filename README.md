@@ -49,8 +49,14 @@ outdoors), on an M4 MacBook Air.
 | ![ChronographWatch](docs/images/gallery/chronograph.jpg) | ![ABeautifulGame](docs/images/gallery/chess.jpg) | ![Lantern](docs/images/gallery/lantern.jpg) |
 | ChronographWatch (graphiccompressor and Darmstadt Graphics Group, CC BY 4.0) | A Beautiful Game: 1.5 million triangles (ASWF and Ed Mackey, CC BY 4.0) | Lantern (Microsoft, CC0) |
 
+<p align="center">
+  <img alt="Sponza's courtyard in the viewer under the outdoor HDRI: red, green and blue curtains between stone arches, the lion head at the far end" src="docs/images/gallery/sponza.jpg" width="860">
+  <br>
+  <sub>Sponza (Crytek, CRYENGINE Limited License Agreement): 3 million triangles once its ivy and flowers are cut out, under the outdoor HDRI, 25.6 ms a frame at 2560×1440 (rendered at half).</sub>
+</p>
+
 Models from the [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets);
-HDRI Studio Small 09 from [Poly Haven](https://polyhaven.com) (CC0). Each
+HDRIs Studio Small 09 and Kloofendal 48d Partly Cloudy (Pure Sky) from [Poly Haven](https://polyhaven.com) (CC0). Each
 is compared with Cycles in [`docs/results/assets-vs-cycles.md`](docs/results/assets-vs-cycles.md).
 
 ## Is it right for you?
