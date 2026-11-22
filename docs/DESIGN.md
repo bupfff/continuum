@@ -1998,6 +1998,17 @@ For a new conversation or after a compaction; history lives in git and
   budget; Cycles needs 2,000+ samples in dark interiors; this device's GPU
   timestamps arrive out of order.
 
+- **Decided 2026-11-22 (the user, later the same day): finish the basics
+  before compatibility.** Three items, in order: (1) lighting texels that
+  average their area (Sponza's blotchy gallery and bright arch undersides);
+  (2) the field's bounce light settling; (3) deforming characters in motion
+  (BrainStem's last 7% of pixels without a page). Deferred: Sponza's
+  anti-aliasing cost, the path without ray queries (with Windows/NVIDIA).
+  Phase 1 ends when the scorecard shows every scene settling, no motion
+  row above a few percent of pixels without a page, and the real scenes
+  within a stated bar of Cycles; phase 2 then starts with a compatibility
+  scorecard (Khronos samples: a second texture coordinate set, the missing
+  material extensions, particles, decals, animated emission).
 - **Decided 2026-11-22 (the user): three phases.** (1) **Strengthen the
   basics:** make Continuum really good at what it set out to be strong
   at (scale, detail, lighting: exact shadows without noise or past
