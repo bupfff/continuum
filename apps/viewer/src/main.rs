@@ -111,11 +111,19 @@ struct Instanced {
 }
 
 impl World {
+    /// Whether the sky (or an environment) keeps the file's animation from
+    /// playing (`VIEWER_ANIMATE_UNDER_SKY=1` plays it anyway, to measure).
+    fn sky_stops_animation(&self) -> bool {
+        self.cache
+            && (self.sky || self.environment.is_some())
+            && std::env::var_os("VIEWER_ANIMATE_UNDER_SKY").is_none()
+    }
+
     /// The instances the first animation moves, if it plays: not with a sky
     /// (movers and a sky do not mix in the cache yet).
     fn animated_instances(&self) -> Vec<usize> {
         match &self.animations {
-            Some(a) if !(self.cache && (self.sky || self.environment.is_some())) => a.instances(0),
+            Some(a) if !self.sky_stops_animation() => a.instances(0),
             _ => Vec::new(),
         }
     }
@@ -125,7 +133,7 @@ impl World {
     /// weights apart): not with a sky, as movers.
     fn deforming_geometries(&self) -> Vec<usize> {
         match &self.animations {
-            Some(a) if !(self.cache && (self.sky || self.environment.is_some())) => a.deforming(),
+            Some(a) if !self.sky_stops_animation() => a.deforming(),
             _ => Vec::new(),
         }
     }

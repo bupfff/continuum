@@ -169,3 +169,18 @@ sun alone; venice_sunset now its low sun (2% share, under take_sun's 20%).
 Cost (DamagedHelmet, 1280×720, `Renderer` defaults): settled in 1.18 s with
 no lights taken, 1.38 s with one, 1.75 s with two (the lamps), 3.66 s with
 the softbox too (a wide light's cones); frames 4.7–5.1 ms once settled.
+
+## Animated files under a sky (2026-11-22)
+
+The viewer plays a file's animation only under the sun alone; under a sky
+or an HDRI the movers' and deforming geometry's sky re-bakes cost too much
+(`VIEWER_ANIMATE_UNDER_SKY=1` plays it anyway). Viewer, 2560×1440 window
+rendered at half, 400 frames:
+
+| File | Sun alone | Under the sky |
+|---|---|---|
+| Fox (1 skinned mesh) | 7.53 ms | 78.59 ms |
+| BrainStem (59 skinned meshes) | 32.10 ms | over 1 s (stopped after 10 minutes) |
+
+Characters are the game assets most often animated; making the sky cheap
+around moving and deforming geometry is the next large item for them.
