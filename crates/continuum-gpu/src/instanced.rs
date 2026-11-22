@@ -2012,6 +2012,9 @@ impl InstancedRenderer {
             binds: Vec::new(),
         });
         let mut cache = cache;
+        if let Some(c) = &mut cache {
+            c.state.set_sky_mean(kernel.sky());
+        }
         if !fog && let Some(c) = &mut cache {
             // Without the passes, no fog in shading either.
             c.state.drop_fog();

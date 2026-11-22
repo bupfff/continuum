@@ -266,6 +266,13 @@ pub struct CacheOptions {
     /// listed (the rest wait, still charged). At rest the drain takes what
     /// the budget leaves. 0.75 by default.
     pub bounce_share: f32,
+    /// With more bounces (`bounces` above 1): a bounce ray's hit whose
+    /// samples hold at least one bounce asks for more only where bounce
+    /// light is more than this share of the light it gives; the orders it
+    /// then misses, a geometric tail, stay under about share² / (1 −
+    /// share) of its light (2.6% at the default 0.15). Without it every
+    /// hit asks, and four bounces never let Sponza settle.
+    pub bounce_tail: f32,
     /// Bounce light that settles (M22 gate 3): bounce rays read their hits'
     /// light one mip coarser than a bin's footprint, and a bin that finds
     /// only a coarser page asks for its page and re-bakes the sample once
@@ -382,6 +389,7 @@ impl Default for CacheOptions {
             indirect_sample_cost: 8,
             bounce_epsilon: 0.01,
             bounce_share: 0.75,
+            bounce_tail: 0.15,
             bounce_settles: true,
             edge_rays: false,
             deforming_budget: 512,
@@ -551,6 +559,9 @@ struct VcParams {
     extra: [u32; 4],
     /// Fog (M18): extinction at height 0, falloff, top, 1 if on.
     fog: [f32; 4],
+    /// Bounce light: the sky's mean radiance (RGB), then
+    /// `CacheOptions::bounce_tail`.
+    bounce: [f32; 4],
 }
 
 /// Per-chart tables shared by every object with a geometry: the chart's size
@@ -1078,6 +1089,8 @@ pub(crate) struct VirtualCache {
     /// Pages were deferred when last counted (`slot_stale` 4): the stale
     /// pass runs until none are, moving or not.
     deferred: bool,
+    /// The sky's mean radiance (bounce light's weights).
+    sky_mean: Vec3,
     /// Bounce light: this frame's samples (entry in `bake_list`, sample),
     /// and slots whose samples to re-bake, each with the frame it is due.
     indirect_jobs: Vec<[u32; 2]>,
@@ -1668,6 +1681,7 @@ impl VirtualCache {
             poses: poses.to_vec(),
             lights_moved: false,
             deferred: false,
+            sky_mean: Vec3::ZERO,
             indirect_jobs: Vec::new(),
             retry: Default::default(),
             retrying: Default::default(),
@@ -2021,6 +2035,12 @@ impl VirtualCache {
     /// updates, sun texels, sky face jobs, pages; then the objects moved (the
     /// stale pass runs if any), and 1 if a moving light moved (the ledger
     /// runs).
+    /// The sky's mean radiance (a uniform sky's, or an environment's
+    /// mean), which weighs the sky's bounce channel against the lights'.
+    pub(crate) fn set_sky_mean(&mut self, sky: Vec3) {
+        self.sky_mean = sky;
+    }
+
     pub(crate) fn upload(
         &mut self,
         queue: &wgpu::Queue,
@@ -2151,6 +2171,12 @@ impl VirtualCache {
                     | (self.options.sky_lag as u32) << 9,
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
+            ],
+            bounce: [
+                self.sky_mean.x,
+                self.sky_mean.y,
+                self.sky_mean.z,
+                self.options.bounce_tail,
             ],
             fog: self.options.fog.map_or([0.0; 4], |f| {
                 [f.density.max(0.0), f.height_falloff.max(0.0), f.top, 1.0]

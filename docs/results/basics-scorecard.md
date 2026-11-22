@@ -182,3 +182,32 @@ against settled: 14.39% in a BrainStem-only run, 31.49% in the full run
 (this measure moves with where the catch-ups stand at the stop; 16.10%
 before). Other rows within run-to-run spread; against Cycles unchanged.
 Tests pass (`movers_leave_no_stale_light` keeps rigid movers exact).
+
+## Fewer mirror rays (2026-11-22)
+
+Sponza's settled frame (1280×720, `gltf_dev` profile, each pass alone):
+visibility 4.2 ms, shading 12.9, edge shading 3.0, anti-aliasing's
+passes about 15 (its samples' shading 9.0). Without reflection rays at
+all (`GD_GLOSSY=0`): shading 3.6 ms, the samples' shading 2.1 ms. So:
+- Anti-aliasing's extra samples trace no mirror ray where the specular
+  layer reflects less than 0.15 (dielectrics): their reflection is read
+  from the cache as a rough surface's is (sky and bounce light over π).
+  Samples' shading 9.0 → 3.8 ms.
+- Any pixel skips its mirror ray where the ray's share of the reflected
+  light (the specular albedo times the mirror's weight against the rough
+  estimate) is under 3%: faint reflections on rough dielectrics. Metals,
+  smooth surfaces and grazing views keep theirs. Shading 12.8 → 8.5 ms.
+
+Full scorecard: Sponza's settled frame 30.74 → **22.41 ms**, moving 37.28
+→ 30.47 ms, settled in 35.0 s (33–50 s before; under 1% at 17.5 s); against
+Cycles 30.44% → **29.94%**. Other rows unchanged (helmet 4.46%, fox 2.15%).
+FlightHelmet against Cycles (1,024 samples): 3.17% → 3.15%, pixels off 1.80%
+→ 1.72%.
+
+Also in (no effect at the default of one bounce): `CacheOptions::bounce_tail`
+(0.15): with more bounces, a hit whose samples hold one asks for more only
+where bounce light is over that share of its light. Four bounces with it:
+the room 7.67% from Cycles (7.74% without), but Sponza still does not settle
+within 60 s (39.7 ms frames before the change above): its arcades are mostly
+lit by bounce, so the cascade is needed there. Next: four bounces by default
+once settling is fast enough (M22 gate 6).

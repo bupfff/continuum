@@ -1970,8 +1970,9 @@ For a new conversation or after a compaction; history lives in git and
   +20%: make settling cheaper, then bounces by default); (b) BrainStem in
   motion: deferred pages took its pixels without a page from 34% to 7.3%;
   the rest come from pages out of view invalidated while the time budget
-  sits at its floor (31 ms frames); (c) Sponza: 31 ms settled frames, 37–50 s to settle, 30% from Cycles
-  (regional, both direct sky and bounce).
+  sits at its floor (31 ms frames); (c) Sponza: 22.4 ms settled frames after fewer mirror rays
+  (from 31); anti-aliasing's passes still about 13 ms of it; 30% from
+  Cycles (regional, both direct sky and bounce).
 - **Pitfalls:** a GPU hang logs the user out (WindowServer's 40 s
   watchdog): `APPEND_PAGES` 16,384 and building deforming meshes'
   structures in one submission each did (patches in

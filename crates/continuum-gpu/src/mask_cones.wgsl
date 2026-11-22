@@ -2788,6 +2788,10 @@ struct VcParams {
     // Fog (M18): extinction at height 0, its falloff with height, the
     // layer's top, 1 if on.
     fog: vec4<f32>,
+    // Bounce light: the sky's mean radiance (RGB), and the share of a hit's
+    // light past which its bounce light asks for more bounces
+    // (`CacheOptions::bounce_tail`).
+    bounce: vec4<f32>,
 };
 
 // Fog (M18): the extinction at height `z` of a layer with extinction
@@ -5172,6 +5176,27 @@ fn bounce_more(slot: u32, r: PageRef, reflect: vec3<f32>, sum: ptr<function, arr
     return held;
 }
 
+// With more bounces (M10 gate 25): a hit whose samples hold at least one
+// bounce asks for more only where bounce light is more than `vc.bounce.w`
+// of the light it gives. Its missing orders, a geometric tail of ratio r
+// (the share), are about r² / (1 − r) of its light: 2.6% at 0.15. A sunlit
+// floor (r small) stops the cascade; walls lit only by bounce (r near 1)
+// keep it going.
+
+// The light in `b` beyond `a` (bounce channels), as luminance: each light's
+// channel times its radiance, the sky's times the sky's, emission as is.
+fn ind_energy(a: array<vec3<f32>, 5>, b: array<vec3<f32>, 5>) -> f32 {
+    let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
+    var e = 0.0;
+    let lights_n = min(arrayLength(&lights), IND_SKY);
+    for (var l = 0u; l < lights_n; l++) {
+        e += dot((b[l] - a[l]) * lights[l].radiance.xyz, lum);
+    }
+    e += dot((b[IND_SKY] - a[IND_SKY]) * vc.bounce.xyz, lum);
+    e += dot(b[IND_GLOW] - a[IND_GLOW], lum);
+    return e;
+}
+
 fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>, bounces: u32) -> f32 {
     if (hit.mesh == NONE) { return 0.0; }
     let lights_n = min(arrayLength(&lights), IND_SKY);
@@ -5181,6 +5206,7 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     let tv = 3u * hit.tri;
     let geometric = normal_to_world(hit.mesh, cross(tris[tv + 1u].xyz - tris[tv].xyz, tris[tv + 2u].xyz - tris[tv].xyz));
     if (dot(geometric, dir) > 0.0) { return 0.0; }
+    let before = *sum;
     // The hit's own emission (M10 gate 11): radiance over the bin's
     // projected solid angle; no page needed.
     if (vc.extra.x == 1u) {
@@ -5244,11 +5270,16 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     }
     (*sum)[IND_SKY] += reflect * vc_bilinear(slot, r, sky_ch);
     if (bounces > 1u) {
+        let direct_only = *sum;
         let held = bounce_more(slot, r, reflect, sum);
         ind_gen = min(ind_gen, held);
         if (held < f32(bounces - 1u)) {
-            ind_short += w;
-            vc_request(r.key, 1u | SECONDARY | WANTS_SAMPLES | wanted_bits);
+            let d = ind_energy(before, direct_only);
+            let b = ind_energy(direct_only, *sum);
+            if (held < 1.0 || b > vc.bounce.w * max(d + b, 1e-30)) {
+                ind_short += w;
+                vc_request(r.key, 1u | SECONDARY | WANTS_SAMPLES | wanted_bits);
+            }
         }
     }
     return 0.0;
@@ -5642,7 +5673,9 @@ fn vc_aa_shade_at(gid: vec3<u32>, li: u32) {
     } else {
         sub_share = inverseSqrt(f32(1u + k + 4u * aa_data[aa_header() + 2u]));
         vc_request_priority = 0u;
+        aa_sample_shading = true;
         c = vc_hit_color(sd, hit_from(hit, sd), false);
+        aa_sample_shading = false;
         if (vc_request_priority > 0u) { vc_request(vc_request_key, vc_request_priority); }
     }
     aa_data[at + 5u] = bitcast<u32>(c.x);
@@ -6012,6 +6045,17 @@ var<private> vc_sky_part: vec3<f32> = vec3<f32>(0.0);
 const ROUGH_FROM: f32 = 0.45;
 const ROUGH_TO: f32 = 0.8;
 
+// Anti-aliasing's extra samples at edges (M15): no mirror ray where the
+// specular layer reflects less than `AA_RAY_ALBEDO` (dielectrics), whose
+// reflection there is read from the cache as a rough surface's is. Edges
+// are about coverage; their samples' rays were 7 of Sponza's 33 ms.
+var<private> aa_sample_shading: bool = false;
+const AA_RAY_ALBEDO: f32 = 0.15;
+// Any pixel: no mirror ray where its share of the reflected light (the
+// specular layer's albedo times the mirror's weight against the rough
+// estimate) is below this; the cache's estimate stands in.
+const RAY_WEIGHT_MIN: f32 = 0.03;
+
 // Where `vc_hit_color`'s ray starts if not at the eye (w 1; M16: the point
 // a ray refracted through glass leaves it).
 var<private> shade_from: vec4<f32> = vec4<f32>(0.0);
@@ -6095,7 +6139,9 @@ fn vc_hit_color(dir: vec3<f32>, hit: Hit, sample: bool) -> vec3<f32> {
         // ensure_valid_reflection does).
         let rough = smoothstep(ROUGH_FROM, ROUGH_TO, mat.y);
         var seen = (vc_sky_part + bounce) / 3.14159265;
-        if (rough < 1.0) {
+        let spec_max = max(albedo_spec.x, max(albedo_spec.y, albedo_spec.z));
+        let ray = (!aa_sample_shading || spec_max >= AA_RAY_ALBEDO) && spec_max * (1.0 - rough) >= RAY_WEIGHT_MIN;
+        if (rough < 1.0 && ray) {
             var refl = reflect(dir, normal);
             let up = dot(refl, hit.normal);
             if (up < 0.01) { refl = normalize(refl + hit.normal * (0.01 - up)); }
