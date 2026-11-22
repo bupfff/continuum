@@ -1966,9 +1966,10 @@ For a new conversation or after a compaction; history lives in git and
   stale texels by one atomic add (159 → 20.5 ms a moving frame),
   `sky_lag` on by default (Fox 14.7 → 8.8 ms, BrainStem 49 → 31 ms).
 - **Next, worst rows first:** (a) done: two bounces with the rest
-  estimated by default where no sky lights the scene (M22 G8: the closed
-  room 46.55% → 7.68% from Cycles); under a sky more bounces would help
-  (the field 1.68% → 1.31%) but Sponza then settles 1.5–2× slower;
+  estimated by default where local lights alone light the scene (M22 G8:
+  the closed room 46.55% → 7.68% from Cycles); outdoors (a sky, an
+  environment or a sun) keeps one: more helped the field a little (1.68%
+  → 1.31%), Sponza not at all, and slowed its settling 1.5–2×;
   (b) BrainStem in motion: 7.3% of pixels without a page (pages out of view
   invalidated, the budget at its floor); (c) Sponza: 22–28 ms settled
   frames (anti-aliasing's passes about 13 ms: Sponza has 13% edge pixels),
@@ -1983,7 +1984,8 @@ For a new conversation or after a compaction; history lives in git and
   structures in one submission each did (patches in
   `experiments/room3d/out/scorecard/`); read
   `/Library/Logs/DiagnosticReports/gpuEvent-*.ips` after any hang, try
-  such changes alone and short first. Test assets live in
+  such changes alone and short first. GPU tests pin one bounce (their
+  scenes have no sky; two took lavapipe's CI past 45 minutes). Test assets live in
   `experiments/room3d/out/assets/` (gitignored); compare at a fixed bake
   budget; Cycles needs 2,000+ samples in dark interiors; this device's GPU
   timestamps arrive out of order.
