@@ -68,7 +68,7 @@ fn main() {
         env.rgb
             .iter_mut()
             .for_each(|c| c.iter_mut().for_each(|x| *x *= k));
-        println!("environment sun: {:?}", env.clone().take_sun());
+        println!("environment lights: {:?}", env.clone().take_lights(4));
         env
     });
     // Suns added here (toward the sun, irradiance), for Cycles.
@@ -159,6 +159,10 @@ fn main() {
             sky: (environment.is_none() && std::env::var("GD_SKY").as_deref() != Ok("0"))
                 .then_some(Vec3::new(0.6, 0.75, 1.0) * 0.3),
             environment,
+            lights_from_environment: std::env::var("GD_ENV_LIGHTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4),
             bounce: std::env::var("GD_BOUNCE").as_deref() != Ok("0"),
             anti_aliasing: std::env::var("GD_AA").as_deref() != Ok("0"),
             cache_options: continuum_gpu::CacheOptions {

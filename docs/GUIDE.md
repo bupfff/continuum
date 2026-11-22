@@ -179,10 +179,11 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   scene's geometry stands for the ground. Surfaces get its irradiance at
   their normal times the cache's sky visibility; rays that miss see the
   image (RGBM over its peak, with mips: rough reflections see it blurred
-  by roughness). An outdoor HDRI's sun is taken out of the image and made
-  a sun light with exact soft shadows (`RendererOptions::
-  sun_from_environment`, on by default; `Environment::take_sun` does it by
-  hand). 1.37% from Cycles on a gradient sky (M5 gate 12), 1.04× the frame;
+  by roughness). Its compact bright lights (an outdoor HDRI's sun, a
+  studio's softboxes and lamps) are taken out of the image and made
+  distant lights with exact soft shadows (`RendererOptions::
+  lights_from_environment`, up to 4 by default; `Environment::take_lights`
+  does it by hand). 1.37% from Cycles on a gradient sky (M5 gate 12), 1.04× the frame;
   DamagedHelmet under two Poly Haven HDRIs within 0.4% of Cycles' mean
   (`docs/results/assets-vs-cycles.md`). Bounce light and per-pixel
   rendering use its mean radiance.

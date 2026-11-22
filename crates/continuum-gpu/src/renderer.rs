@@ -54,11 +54,13 @@ pub struct RendererOptions {
     /// `sky`: an equirectangular image above the horizon. See
     /// [`crate::MaskConeKernel::set_environment`].
     pub environment: Option<crate::Environment>,
-    /// With an `environment`: its sun, if it has one (the bright spot of an
-    /// outdoor HDRI, [`crate::Environment::take_sun`]), taken out of the
-    /// image and added as a sun light, whose soft shadows are computed
-    /// exactly (if a light fits under [`crate::MAX_LIGHTS`]). On by default.
-    pub sun_from_environment: bool,
+    /// With an `environment`: up to this many of its compact bright lights
+    /// (an outdoor HDRI's sun, a studio's softboxes,
+    /// [`crate::Environment::take_lights`]) taken out of the image and
+    /// added as distant lights, whose soft shadows are computed exactly (as
+    /// many as fit under [`crate::MAX_LIGHTS`]). 4 by default; 0 leaves the
+    /// image whole.
+    pub lights_from_environment: usize,
     /// The cache's tuning.
     pub cache_options: CacheOptions,
     /// Anti-aliasing (experimental, M7): each pixel traces a mask cone
@@ -164,7 +166,7 @@ impl Default for RendererOptions {
             cache: true,
             sky: None,
             environment: None,
-            sun_from_environment: true,
+            lights_from_environment: 4,
             cache_options: CacheOptions::default(),
             pixel_cones: false,
             movable: Vec::new(),
@@ -224,18 +226,20 @@ impl Renderer {
         let mut all_lights = lights.to_vec();
         let environment = options.environment.as_ref().map(|e| {
             let mut e = e.clone();
-            if options.sun_from_environment
-                && all_lights.len() < crate::MAX_LIGHTS
-                && let Some((toward, irradiance)) = e.take_sun()
-            {
+            let room = crate::MAX_LIGHTS.saturating_sub(all_lights.len());
+            let taken = e.take_lights(options.lights_from_environment.min(room));
+            if !taken.is_empty() {
                 let (lo, hi) = scene_bounds(scene, origin);
                 let radius = ((hi - lo).length() * 0.5).max(1.0) as f64;
-                all_lights.push(Light::sun(
-                    (lo + hi) * 0.5,
-                    toward.as_dvec3(),
-                    50.0 * radius,
-                    irradiance,
-                ));
+                for l in taken {
+                    all_lights.push(Light::distant(
+                        (lo + hi) * 0.5,
+                        l.toward.as_dvec3(),
+                        50.0 * radius,
+                        l.solid_angle as f64,
+                        l.irradiance,
+                    ));
+                }
             }
             e
         });

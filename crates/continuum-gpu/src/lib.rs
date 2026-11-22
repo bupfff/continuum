@@ -299,45 +299,47 @@ impl Environment {
         (levels, peak)
     }
 
-    /// Takes an outdoor environment's sun out of its image: the pixels
-    /// joined to the brightest one that reach 5% of its radiance, if they
-    /// span at most 0.005 sr (a cap about 2.3° across) and hold at least a
-    /// fifth of the image's light (`∫ L dω` over the sphere). They are
-    /// filled with the mean of the pixels around them. Returns the unit
-    /// direction toward the sun (z up) and its irradiance on a surface
-    /// facing it (`∫ L dω` over those pixels), for a sun light
-    /// ([`Light::sun`]) whose shadows the renderer computes exactly
-    /// (spherical harmonics, the environment's diffuse light, would smear
-    /// it over the sky). None for a studio's or overcast sky.
+    /// Takes an outdoor environment's sun out of its image, as
+    /// [`Environment::take_lights`] would its first light, if that spans at
+    /// most 0.005 sr (a cap about 2.3° across) and holds a fifth of the
+    /// image's light. Returns the unit direction toward it (z up) and its
+    /// irradiance on a surface facing it.
     pub fn take_sun(&mut self) -> Option<(Vec3, Vec3)> {
-        let (w, h) = (self.width.max(1), self.height.max(1));
-        if self.rgb.len() < (w * h) as usize {
+        let mut trial = self.clone();
+        let first = trial.take_lights(1).into_iter().next()?;
+        let total = self.light();
+        let share = luminance(first.irradiance.to_array()) / total.max(1e-12);
+        if first.solid_angle > 0.005 || share < 0.2 {
             return None;
         }
-        let luminance = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        *self = trial;
+        Some((first.toward, first.irradiance))
+    }
+
+    /// Takes up to `max` compact bright lights out of the image (an
+    /// outdoor HDRI's sun, a studio's softboxes and lamps), brightest
+    /// first: from each remaining peak, the pixels joined to it above 10%
+    /// of its radiance, kept if they span at most 0.2 sr, hold at least 2%
+    /// of the image's light (`∫ L dω` over the sphere) and average at least
+    /// ten times its median radiance. Each is filled with the mean of the
+    /// pixels around it. A renderer computes such lights' shadows exactly
+    /// ([`Light::distant`]); the spherical harmonics the rest lights
+    /// through would smear them over the sky.
+    pub fn take_lights(&mut self, max: usize) -> Vec<EnvironmentLight> {
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        let mut found = Vec::new();
+        if self.rgb.len() < (w * h) as usize {
+            return found;
+        }
         let cell = std::f32::consts::TAU / w as f32 * std::f32::consts::PI / h as f32;
         let solid = |y: u32| {
             let e = (0.5 - (y as f32 + 0.5) / h as f32) * std::f32::consts::PI;
             cell * e.cos()
         };
-        let (peak_at, peak) = self
-            .rgb
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| (i, luminance(c)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))?;
-        if peak <= 0.0 {
-            return None;
-        }
-        let total: f32 = (0..w * h)
-            .map(|i| luminance(self.rgb[i as usize]) * solid(i / w))
-            .sum();
-        // The region: flood fill from the peak over pixels above 5% of it.
-        let threshold = 0.05 * peak;
-        let mut inside = vec![false; (w * h) as usize];
-        let mut stack = vec![peak_at as u32];
-        inside[peak_at] = true;
-        let mut region = Vec::new();
+        let total = self.light();
+        let mut sorted: Vec<f32> = self.rgb.iter().map(|&c| luminance(c)).collect();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
         let neighbours = |i: u32| {
             let (x, y) = (i % w, i / w);
             let mut n = vec![((x + 1) % w) + y * w, ((x + w - 1) % w) + y * w];
@@ -349,54 +351,97 @@ impl Environment {
             }
             n
         };
-        while let Some(i) = stack.pop() {
-            region.push(i);
-            if region.len() > 4096 {
-                return None;
+        let mut taken = vec![false; (w * h) as usize];
+        while found.len() < max {
+            let Some((peak_at, peak)) = self
+                .rgb
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !taken[*i])
+                .map(|(i, &c)| (i, luminance(c)))
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+            else {
+                break;
+            };
+            if peak <= 0.0 {
+                break;
             }
-            for n in neighbours(i) {
-                if !inside[n as usize] && luminance(self.rgb[n as usize]) >= threshold {
-                    inside[n as usize] = true;
-                    stack.push(n);
+            let threshold = 0.1 * peak;
+            let mut inside = vec![false; (w * h) as usize];
+            let mut stack = vec![peak_at as u32];
+            inside[peak_at] = true;
+            let mut region = Vec::new();
+            let mut area = 0.0;
+            while let Some(i) = stack.pop() {
+                region.push(i);
+                area += solid(i / w);
+                if area > 0.2 {
+                    break;
+                }
+                for n in neighbours(i) {
+                    if !inside[n as usize]
+                        && !taken[n as usize]
+                        && luminance(self.rgb[n as usize]) >= threshold
+                    {
+                        inside[n as usize] = true;
+                        stack.push(n);
+                    }
                 }
             }
-        }
-        let area: f32 = region.iter().map(|&i| solid(i / w)).sum();
-        let mut irradiance = Vec3::ZERO;
-        let mut toward = Vec3::ZERO;
-        for &i in &region {
-            let c = Vec3::from_array(self.rgb[i as usize]) * solid(i / w);
-            irradiance += c;
-            toward += Self::direction(w, h, i % w, i / w) * luminance(c.to_array());
-        }
-        let share = (0.2126 * irradiance.x + 0.7152 * irradiance.y + 0.0722 * irradiance.z)
-            / total.max(1e-12);
-        if area > 0.005 || share < 0.2 || toward.length_squared() == 0.0 {
-            return None;
-        }
-        // Fill it with the mean of the pixels bordering it.
-        let mut ring = Vec3::ZERO;
-        let mut count = 0.0;
-        for &i in &region {
-            for n in neighbours(i) {
-                if !inside[n as usize] {
-                    ring += Vec3::from_array(self.rgb[n as usize]);
-                    count += 1.0;
+            let mut irradiance = Vec3::ZERO;
+            let mut toward = Vec3::ZERO;
+            for &i in &region {
+                let c = Vec3::from_array(self.rgb[i as usize]) * solid(i / w);
+                irradiance += c;
+                toward += Self::direction(w, h, i % w, i / w) * luminance(c.to_array());
+            }
+            let share = luminance(irradiance.to_array()) / total.max(1e-12);
+            let mean = luminance(irradiance.to_array()) / area.max(1e-12);
+            if area > 0.2 || share < 0.02 || mean < 10.0 * median || toward.length_squared() == 0.0
+            {
+                break;
+            }
+            // Filled with the mean of the pixels bordering it.
+            let mut ring = Vec3::ZERO;
+            let mut count = 0.0;
+            for &i in &region {
+                for n in neighbours(i) {
+                    if !inside[n as usize] && !taken[n as usize] {
+                        ring += Vec3::from_array(self.rgb[n as usize]);
+                        count += 1.0;
+                    }
                 }
             }
+            let fill = if count > 0.0 {
+                ring / count
+            } else {
+                Vec3::ZERO
+            };
+            let mut left = Vec3::ZERO;
+            for &i in &region {
+                left += fill * solid(i / w);
+                self.rgb[i as usize] = fill.to_array();
+                taken[i as usize] = true;
+            }
+            found.push(EnvironmentLight {
+                toward: toward.normalize(),
+                solid_angle: area,
+                irradiance: (irradiance - left).max(Vec3::ZERO),
+            });
         }
-        let fill = if count > 0.0 {
-            ring / count
-        } else {
-            Vec3::ZERO
-        };
-        // Its own light, less what the fill leaves in its place.
-        let mut left = Vec3::ZERO;
-        for &i in &region {
-            left += fill * solid(i / w);
-            self.rgb[i as usize] = fill.to_array();
-        }
-        Some((toward.normalize(), (irradiance - left).max(Vec3::ZERO)))
+        found
+    }
+
+    /// `∫ L dω` over the sphere (luminance).
+    fn light(&self) -> f32 {
+        let (w, h) = (self.width.max(1), self.height.max(1));
+        let cell = std::f32::consts::TAU / w as f32 * std::f32::consts::PI / h as f32;
+        (0..w * h)
+            .map(|i| {
+                let e = (0.5 - ((i / w) as f32 + 0.5) / h as f32) * std::f32::consts::PI;
+                luminance(self.rgb[i as usize]) * cell * e.cos()
+            })
+            .sum()
     }
 
     /// The unit direction through pixel `(x, y)`'s centre.
@@ -435,6 +480,21 @@ impl Environment {
         let sh = c.map(|k| [k[0] as f32, k[1] as f32, k[2] as f32, 0.0]);
         (sh, (sum / area.max(1e-12)).as_vec3())
     }
+}
+
+/// A light taken out of an environment image ([`Environment::take_lights`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvironmentLight {
+    /// The unit direction toward its middle (z up).
+    pub toward: Vec3,
+    /// The solid angle it spans, in steradians.
+    pub solid_angle: f32,
+    /// Its irradiance on a surface facing it.
+    pub irradiance: Vec3,
+}
+
+fn luminance(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
 /// The nine real spherical harmonics at unit direction `d` (bands 0–2).
@@ -599,8 +659,23 @@ impl Light {
     /// `irradiance` on a surface facing it. `center` is relative to the
     /// render origin, like every light.
     pub fn sun(center: Vec3, toward: DVec3, distance: f64, irradiance: Vec3) -> Light {
+        let size = 2.0 * 0.25f64.to_radians().tan();
+        Light::distant(center, toward, distance, size * size, irradiance)
+    }
+
+    /// A distant square light toward `toward` from `center`, `distance`
+    /// away, spanning `solid_angle` steradians, giving `irradiance` to a
+    /// surface facing it (a softbox or the sun taken out of an
+    /// environment: [`Environment::take_lights`]).
+    pub fn distant(
+        center: Vec3,
+        toward: DVec3,
+        distance: f64,
+        solid_angle: f64,
+        irradiance: Vec3,
+    ) -> Light {
         let toward = toward.normalize();
-        let size = 2.0 * distance * 0.25f64.to_radians().tan();
+        let size = distance * solid_angle.max(1e-12).sqrt();
         let w = -toward;
         let side = if w.cross(DVec3::Z).length() > 1e-6 {
             DVec3::Z.cross(w)

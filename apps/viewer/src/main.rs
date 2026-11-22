@@ -588,7 +588,7 @@ impl Settings {
 
 /// How an instanced scene is lit: its lights (the file's, or a sun), with
 /// or without the uniform sky, or an environment image (an HDRI; its sun,
-/// if it has one, becomes a light: `RendererOptions::sun_from_environment`)
+/// its sun and softboxes become lights: `RendererOptions::lights_from_environment`)
 /// with the file's own lights.
 #[derive(Clone, Debug, PartialEq)]
 enum Lighting {

@@ -148,3 +148,24 @@ the mean) undercounts errors on the models themselves.
 - Left: ChronographWatch's metal reflections (darker and brighter in
   patches), DragonAttenuation's backdrop (its wall brighter, floor
   darker than Cycles').
+
+## Studio lights taken out of the HDRI (2026-11-22)
+
+`Environment::take_lights` (up to 4, `RendererOptions::
+lights_from_environment`) generalizes the sun's extraction: from each
+remaining peak, the pixels joined to it above 10% of its radiance, kept if
+at most 0.2 sr, at least 2% of the light and ten times the median, made
+distant square lights of the same solid angle. studio_small_09 gives its two
+lamps (0.003 and 0.004 sr) and a softbox (0.103 sr); the outdoor HDRI its
+sun alone; venice_sunset now its low sun (2% share, under take_sun's 20%).
+
+| studio_small_09 | Before (clamped RMSE, pixels off) | Lights taken out |
+|---|---|---|
+| DragonAttenuation | 10.00%, 14.09% | **8.49%, 8.71%** |
+| ChronographWatch | 24.23%, 15.73% | **15.83%, 14.64%** |
+| SheenChair (with sheen) | 5.92%, 12.78% | 4.79%, 14.32% |
+| DamagedHelmet | 6.69%, 2.49% | 9.80%, 2.46% |
+
+Cost (DamagedHelmet, 1280×720, `Renderer` defaults): settled in 1.18 s with
+no lights taken, 1.38 s with one, 1.75 s with two (the lamps), 3.66 s with
+the softbox too (a wide light's cones); frames 4.7–5.1 ms once settled.
