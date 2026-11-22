@@ -163,3 +163,22 @@ reports in `/Library/Logs/DiagnosticReports`). Patches kept in
   direct light under the sun about right; bounce light 0.92× overall,
   0.48–1.63× by region (the right arcade's vaults bright, the far corners
   dark). Many regional errors of ±25–60%, not one bias.
+
+## Deferred pages near deforming objects (2026-11-22)
+
+A page in view that only deforming objects' catch-up made stale (lighting
+near them may lag, M12 gate 2), left out of a frame whose 4,096 appended
+pages are full, is no longer invalidated: it is marked deferred
+(`slot_stale` 4), keeps showing its light, and the stale pass re-bakes it
+whole (every light) in the first frame with room, running while any page
+waits. A rigid mover reaching it, or the page leaving the view, still
+invalidates it. `CacheStats::deferred` counts them.
+
+BrainStem's first moving frame: 6,262 pages deferred (they were invalidated
+before), all re-baked by frame 20. Full scorecard run, BrainStem moving:
+pixels without their page 34.32% → **7.32%** mean, 50.66% → **15.66%**
+worst; frames 31.17 / 90.51 ms (median, p99) against 31.17 / 86.41. Stop
+against settled: 14.39% in a BrainStem-only run, 31.49% in the full run
+(this measure moves with where the catch-ups stand at the stop; 16.10%
+before). Other rows within run-to-run spread; against Cycles unchanged.
+Tests pass (`movers_leave_no_stale_light` keeps rigid movers exact).

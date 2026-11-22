@@ -481,7 +481,7 @@ fn speed(case: &Case, run_start: Instant) -> Speed {
             && let Some(s) = r.stats()
         {
             println!(
-                "  {} frame {k}: fallback {:.1}%, requests {}, baked {} pages, re-baked {} pages, candidates {}, invalidated {}, sky invalidated {}, sky listed {}, sky charged {}, sky re-baked {}, evicted {}, budget {}, missed {}, visible {}",
+                "  {} frame {k}: fallback {:.1}%, requests {}, baked {} pages, re-baked {} pages, candidates {}, invalidated {}, sky invalidated {}, sky listed {}, sky charged {}, sky re-baked {}, evicted {}, budget {}, missed {}, visible {}, deferred {}",
                 case.name,
                 100.0 * shares[k - 1],
                 s.requests,
@@ -496,7 +496,8 @@ fn speed(case: &Case, run_start: Instant) -> Speed {
                 s.evicted,
                 s.budget,
                 s.missed,
-                s.visible_pages
+                s.visible_pages,
+                s.deferred
             );
         }
     }

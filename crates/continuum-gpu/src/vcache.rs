@@ -126,7 +126,7 @@ const SECONDARY: u32 = 0x8000_0000;
 const WANTS_SAMPLES: u32 = 0x4000_0000;
 const TARGET_SHIFT: u32 = 24;
 /// The stale passes' and the ledger's counters (16 words) in each readback.
-const MOVER_STATS_BYTES: u64 = 96;
+const MOVER_STATS_BYTES: u64 = 128;
 /// Movers under a sky (M9 gate 3): slots listed for a sky re-bake per frame
 /// at most, and frames a moved object's page waits (re-listed while it
 /// moves) before its sky re-bakes.
@@ -512,8 +512,15 @@ pub struct CacheStats {
     /// Pages read in the frame before (counted when something moved).
     pub visible_pages: u32,
     /// Of the stale pages read recently, those that did not fit the frame's
-    /// bake (marked invalid too).
+    /// bake (marked invalid too, or deferred).
     pub missed: u32,
+    /// Pages in view that only deforming objects' catch-up made stale, left
+    /// out of a full frame or waiting since: shown with their light until
+    /// re-baked whole (their lighting may lag, M12 gate 2).
+    pub deferred: u32,
+    /// Whether the frame ran the stale pass (diagnostics).
+    #[doc(hidden)]
+    pub stale_pass: bool,
     /// The bake's work, with `KernelOptions::count_work` (zero otherwise):
     /// object nodes tested, object nodes splatted, meshes entered,
     /// triangle-hierarchy nodes tested, of those splatted, triangles tested,
@@ -1068,6 +1075,9 @@ pub(crate) struct VirtualCache {
     moving: u32,
     poses: Vec<crate::LightGpu>,
     lights_moved: bool,
+    /// Pages were deferred when last counted (`slot_stale` 4): the stale
+    /// pass runs until none are, moving or not.
+    deferred: bool,
     /// Bounce light: this frame's samples (entry in `bake_list`, sample),
     /// and slots whose samples to re-bake, each with the frame it is due.
     indirect_jobs: Vec<[u32; 2]>,
@@ -1657,6 +1667,7 @@ impl VirtualCache {
             moving: moving.len() as u32,
             poses: poses.to_vec(),
             lights_moved: false,
+            deferred: false,
             indirect_jobs: Vec::new(),
             retry: Default::default(),
             retrying: Default::default(),
@@ -2162,6 +2173,7 @@ impl VirtualCache {
             evicting: std::mem::take(&mut self.evicting),
             waiting: std::mem::take(&mut self.waiting),
             moved: moved.max(lit as u32),
+            stale_pass: moved > 0 || self.deferred,
             indirect_samples: self.indirect_jobs.len() as u32,
             sky_rebaked: self.sky_rebaked,
             ..Default::default()
@@ -2172,7 +2184,9 @@ impl VirtualCache {
             self.jobs.len() as u32,
             6 * self.sky_samples.len() as u32,
             self.bake_list.len() as u32,
-            moved,
+            // The stale pass runs while something moved, or while pages wait
+            // deferred.
+            moved.max(self.deferred as u32),
             // The ledger runs every frame with moving lights (it re-bakes
             // pages it set aside once wanted).
             (self.moving > 0) as u32,
@@ -2922,15 +2936,16 @@ impl VirtualCache {
             .map(|r| ([r[0], r[1], r[2]], r[3]))
             .collect();
         // Movers (M9): the stale pass's counters and invalid slots.
-        let moved = self.log[frame as usize - 1].moved > 0;
-        let mut mover = [0u32; 24];
+        let moved =
+            self.log[frame as usize - 1].moved > 0 || self.log[frame as usize - 1].stale_pass;
+        let mut mover = [0u32; 32];
         let mut invalid: Vec<u32> = Vec::new();
         let mut incomplete: Vec<u32> = Vec::new();
         let mut sky_listed: Vec<u32> = Vec::new();
         let mut missing: Vec<(u32, u32)> = Vec::new();
         if moved || self.options.indirect || self.lighting {
             let at = 4 * tiles + (STATS_BYTES + TIMESTAMP_BYTES) as usize / 4;
-            mover.copy_from_slice(&words[at..at + 24]);
+            mover.copy_from_slice(&words[at..at + 32]);
             let listed = (mover[1] as usize).min(INVALID_CAP as usize);
             let first = at + MOVER_STATS_BYTES as usize / 4;
             invalid.extend_from_slice(&words[first..first + listed]);
@@ -2967,6 +2982,10 @@ impl VirtualCache {
         record.invalidated = mover[1];
         record.visible_pages = mover[2];
         record.missed = mover[3];
+        record.deferred = mover[24];
+        if record.stale_pass {
+            self.deferred = mover[24] > 0;
+        }
         record.candidates = mover[4];
         record.ledger_pages = mover[8];
         record.ledger_texels = mover[9];

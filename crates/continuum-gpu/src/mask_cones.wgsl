@@ -2915,7 +2915,7 @@ const EMPTY_KEY: u32 = 0xffffffffu;
 // (M9 gate 3): 7 slots listed for a sky re-bake (`sky_list`), 16 pages
 // read in the frame before that sky charges touched, 17 pages the sky
 // ledger marked invalid.
-@group(0) @binding(64) var<storage, read_write> mover_stats: array<atomic<u32>, 24>;
+@group(0) @binding(64) var<storage, read_write> mover_stats: array<atomic<u32>, 32>;
 // Slots marked invalid this frame, for the CPU to evict.
 @group(0) @binding(65) var<storage, read_write> invalid_list: array<u32>;
 // Indirect dispatch sizes (x, y, z each): the texel test, the bake's texel
@@ -3110,8 +3110,9 @@ fn vc_find(k: vec3<u32>) -> u32 {
             // re-bakes it.
             let stale = atomicLoad(&slot_stale[e.w]);
             // 3: a page on a moved object, its sky a guess (M9 gate 3).
+            // DEFERRED: shown with its light until re-baked.
             sky_guess = stale == 3u;
-            if (stale != 0u && stale != 3u) {
+            if (stale != 0u && stale != 3u && stale != DEFERRED) {
                 if (stale == 2u) { slot_used[e.w] = vc.counts.y; }
                 return NONE;
             }
@@ -3830,6 +3831,33 @@ fn moved_box(i: u32) -> Box3 {
 // slot `s`) may meet a box moved this frame (old or new place). A deforming
 // object's light catching up in slices (M12 gate 2) takes, each frame, the
 // pages whose slot falls in that frame's slice (slot mod slices).
+// `slot_stale`'s mark for a page in view that only deforming objects'
+// catch-up (whose lighting may lag, M12 gate 2) made stale, left out of a
+// frame whose appended pages were full: it shows its light until the stale
+// pass re-bakes it whole, in the first frame with room. Invalidated instead
+// (as rigid movers' pages are), BrainStem's first moving frame left 55% of
+// the pixels unshadowed for about 90 frames.
+const DEFERRED: u32 = 4u;
+
+// Whether no mover but deforming objects catching up in slices may have
+// changed box `p`'s light: no other moved object's boxes reach it.
+fn lag_only(p: Box3) -> bool {
+    let lights_n = vc.sky.z;
+    let first = 2u * lights_n + 2u;
+    let stride = 4u + 4u * lights_n;
+    for (var k = 0u; k < vc.movers.x; k++) {
+        let e = first + k * stride;
+        if (bitcast<u32>(moved[e + 3u].w) != 0u) { continue; }
+        for (var l = 0u; l < lights_n; l++) {
+            let lb = light_box(lights[l]);
+            let r = e + 4u + 4u * l;
+            if (boxes_meet(p, moved_box(r)) && hull_meets(p, lb, moved_box(e))) { return false; }
+            if (boxes_meet(p, moved_box(r + 2u)) && hull_meets(p, lb, moved_box(e + 2u))) { return false; }
+        }
+    }
+    return true;
+}
+
 fn may_be_shadowed(p: Box3, l: u32, s: u32) -> bool {
     let lights_n = vc.sky.z;
     if (!boxes_meet(p, moved_box(2u * l))) { return false; }
@@ -3853,7 +3881,7 @@ fn may_be_shadowed(p: Box3, l: u32, s: u32) -> bool {
 // partial re-bake would clear it while texels made stale now stayed stale.
 fn mark_invalid(s: u32) {
     let old = atomicExchange(&slot_stale[s], 1u);
-    if (old == 0u || old == 2u || old == 3u) {
+    if (old == 0u || old == 2u || old == 3u || old == DEFERRED) {
         let q = atomicAdd(&mover_stats[1], 1u);
         if (q < arrayLength(&invalid_list)) { invalid_list[q] = s; }
     }
@@ -4110,6 +4138,41 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lights_n = vc.sky.z;
     let first = 2u * lights_n + 2u;
     let stride = 4u + 4u * lights_n;
+    // Deferred: re-baked whole, every light, if the frame has room (checked
+    // first, so an appended page always has its texels); else kept while
+    // only deforming objects' catch-up reaches it. Out of view, or a rigid
+    // mover's shadow on it: invalid.
+    if (mark == DEFERRED) {
+        atomicAdd(&mover_stats[24], 1u);
+        if (!visible) {
+            mark_invalid(s);
+            return;
+        }
+        // Its sky charged as any page's (a page invalidated there is done).
+        let known_sky = bitcast<u32>(sky_ledger[2u * s + 1u].w) != 0u;
+        if (vc.sky.y == 1u && known_sky && !charge_sky(s, info.xyz, lo, hi, page, visible)) { return; }
+        let count = PAGE_TEXELS * lights_n;
+        var entry = NONE;
+        if (atomicLoad(&mover_stats[5]) + count <= vc.movers.z) {
+            entry = append_page(s, info.xyz, lo, hi);
+        }
+        if (entry == NONE) {
+            if (!lag_only(page)) { mark_invalid(s); }
+            return;
+        }
+        let j = append_jobs(count);
+        if (j == NONE) {
+            fail_entry(entry, s);
+            return;
+        }
+        atomicAdd(&mover_stats[6], 1u);
+        for (var l = 0u; l < lights_n; l++) {
+            for (var k = 0u; k < PAGE_TEXELS; k++) {
+                bake_jobs[j + l * PAGE_TEXELS + k] = vec2<u32>(entry, k | (l << 8u));
+            }
+        }
+        return;
+    }
     // A page on a moved object (it lies within the moved boxes' union) is
     // stale whole.
     var own = false;
@@ -4187,7 +4250,12 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
         entry = append_page(s, info.xyz, lo, hi);
         if (entry == NONE) {
             candidates[c] = vec2<u32>(NONE, NONE);
-            mark_invalid(s);
+            if (lag_only(page)) {
+                atomicStore(&slot_stale[s], DEFERRED);
+                atomicAdd(&mover_stats[24], 1u);
+            } else {
+                mark_invalid(s);
+            }
             return;
         }
     }

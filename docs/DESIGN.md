@@ -1968,9 +1968,9 @@ For a new conversation or after a compaction; history lives in git and
 - **Next, worst rows first:** (a) the closed room 46.6% dark (one bounce;
   4 bounces give 7.7%, but Sponza then never settles in 60 s and frames
   +20%: make settling cheaper, then bounces by default); (b) BrainStem in
-  motion, 34% of pixels without a page: its catch-ups overflow the 4,096
-  appended pages a frame (slice them by that capacity, not a larger cap);
-  (c) Sponza: 31 ms settled frames, 37–50 s to settle, 30% from Cycles
+  motion: deferred pages took its pixels without a page from 34% to 7.3%;
+  the rest come from pages out of view invalidated while the time budget
+  sits at its floor (31 ms frames); (c) Sponza: 31 ms settled frames, 37–50 s to settle, 30% from Cycles
   (regional, both direct sky and bounce).
 - **Pitfalls:** a GPU hang logs the user out (WindowServer's 40 s
   watchdog): `APPEND_PAGES` 16,384 and building deforming meshes'
