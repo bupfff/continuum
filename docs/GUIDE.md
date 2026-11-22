@@ -373,15 +373,15 @@ Add the crates from GitHub (they are not on crates.io):
 
 ```toml
 [dependencies]
-continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
-continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
-continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
+continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
+continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
 
 # Recommended for large instanced scenes: wgpu with two fixes for
 # acceleration structures with many instances (third_party/README.md).
 [patch.crates-io]
-wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
-wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
+wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
 ```
 
 (A checkout next to your project works the same with `path =` entries:

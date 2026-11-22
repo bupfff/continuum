@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.3.1-ffc15e">
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.2-ffc15e">
   <img alt="status" src="https://img.shields.io/badge/status-experimental-a9aeb8">
   <img alt="license" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-5b6577">
   <img alt="built with" src="https://img.shields.io/badge/Rust%20%C2%B7%20wgpu-compute%20only-171a22">
@@ -244,9 +244,12 @@ Honest about where it stands:
   smooths edges, but a field of tiny distant objects needs the
   experimental sub-pixel path (static scenes), and there anti-aliasing
   costs about 2× the frame.
-- **The sky warms in a few hundred frames** (hardware rays); with moving
-  objects, streamed detail or glass it falls back to a slower path that
-  takes thousands of frames.
+- **The sky warms in a few hundred frames** (hardware rays, moving
+  objects included); with streamed detail or glass it falls back to a
+  slower path that takes thousands of frames. Around moving objects the
+  viewer lets the sky catch up within a few frames (`CacheOptions::
+  sky_lag`); kept exact, it re-bakes every page in their reach each frame
+  (an animated fox: 42 ms a frame instead of 9).
 - **Deforming meshes are costly:** a character large on screen costs
   about 1.6× the frame, and the lighting near it lags its motion (up to
   about a second) until it stops.
@@ -382,15 +385,15 @@ Continuum is not on crates.io yet; add it from GitHub:
 
 ```toml
 [dependencies]
-continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
-continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
-continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
+continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
+continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
 
 # Recommended: wgpu with two fixes for scenes with very many instances
 # (third_party/README.md). Everything works without them, more slowly.
 [patch.crates-io]
-wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
-wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
+wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.2" }
 ```
 
 The front door is `continuum_gpu::Renderer`: give it a scene, lights and a
