@@ -147,6 +147,11 @@ mod tangents;
 mod vcache;
 
 pub use cutout::cut_out;
+/// A cache slot whose sky is still the guess (diagnostics): the slot, its
+/// page's key, the frame its sky is due (None: not queued), its sky
+/// ledger's listed flag, and the frame it was last used.
+#[doc(hidden)]
+pub type SkyGuess = (u32, [u32; 3], Option<u32>, f32, u32);
 /// GPU buffers by binding and size in bytes, largest first (diagnostics).
 #[doc(hidden)]
 pub type BufferSizes = Vec<(u32, u64)>;

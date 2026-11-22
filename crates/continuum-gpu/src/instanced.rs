@@ -1094,6 +1094,15 @@ impl InstancedRenderer {
         [words[0], words[1], words[2], words[3], words[4], words[5]]
     }
 
+    /// Diagnostics: the slots whose sky is still the guess
+    /// (`VirtualCache::sky_guesses`).
+    #[doc(hidden)]
+    pub fn sky_guesses(&self) -> Vec<crate::SkyGuess> {
+        self.cache
+            .as_ref()
+            .map_or(Vec::new(), |c| c.state.sky_guesses(&self.device))
+    }
+
     /// Whether skies wait to re-bake (pages on moved objects wait
     /// `SKY_SETTLE` frames after their last move).
     pub(crate) fn skies_pending(&self) -> bool {

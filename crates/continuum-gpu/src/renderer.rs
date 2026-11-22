@@ -541,6 +541,14 @@ impl Renderer {
             })
     }
 
+    /// Diagnostics: the cache's slots whose sky is still the guess (slot,
+    /// page key, frame due or None, sky ledger's listed flag, last used),
+    /// and the frame the cache last reported on.
+    #[doc(hidden)]
+    pub fn sky_guesses(&self) -> (Vec<crate::SkyGuess>, Option<u32>) {
+        (self.inner.sky_guesses(), self.stats().map(|s| s.frame))
+    }
+
     /// The most frames any light's lighting near deforming geometry lags
     /// its pose (`CacheOptions::deforming_budget`; 0 when caught up).
     pub fn deforming_lag(&self) -> u32 {

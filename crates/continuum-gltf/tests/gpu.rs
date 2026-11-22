@@ -1898,11 +1898,17 @@ fn movers_under_a_sky(bake_budget: u32) {
     let check = r.verify_sky();
     eprintln!("settled: {check:?}");
     assert_eq!(check.violations + check.over_threshold, 0, "{check:?}");
-    assert_eq!(
-        r.stats().map_or(1, |s| s.fallback_pixels),
-        0,
-        "sky guesses left"
-    );
+    let left = r.stats().map_or(1, |s| s.fallback_pixels);
+    if left != 0 {
+        // What lavapipe leaves (it fails here now and then; Metal does not).
+        let (guesses, frame) = r.sky_guesses();
+        eprintln!(
+            "sky guesses left at frame {frame:?} after {frames} frames: {} slots (slot, key, due, listed, used): {:?}",
+            guesses.len(),
+            &guesses[..guesses.len().min(12)]
+        );
+    }
+    assert_eq!(left, 0, "sky guesses left");
 }
 
 fn view_for(r: &Renderer) -> wgpu::TextureView {

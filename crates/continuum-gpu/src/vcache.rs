@@ -3431,6 +3431,32 @@ impl VirtualCache {
         samples
     }
 
+    /// Diagnostics: the resident slots whose sky is still the guess
+    /// (`slot_stale` 3): each slot, its page's key, the frame its sky is due
+    /// (None: not queued), its sky ledger's listed flag, and the frame it
+    /// was last used.
+    pub(crate) fn sky_guesses(&self, device: &wgpu::Device) -> Vec<crate::SkyGuess> {
+        let stale: Vec<u32> = bytemuck::cast_slice(&self.read_buffer(device, 62)).to_vec();
+        let used: Vec<u32> = bytemuck::cast_slice(&self.read_buffer(device, 40)).to_vec();
+        let ledger: Vec<[f32; 4]> = if self.sky {
+            bytemuck::cast_slice(&self.read_buffer(device, 77)).to_vec()
+        } else {
+            Vec::new()
+        };
+        (0..self.slot_key.len())
+            .filter(|&s| self.slot_key[s][0] != EMPTY && stale.get(s) == Some(&3))
+            .map(|s| {
+                (
+                    s as u32,
+                    self.slot_key[s],
+                    self.sky_due.get(&(s as u32)).copied(),
+                    ledger.get(2 * s).map_or(-1.0, |l| l[3]),
+                    used.get(s).copied().unwrap_or(0),
+                )
+            })
+            .collect()
+    }
+
     /// Whether skies wait to re-bake.
     pub(crate) fn skies_pending(&self) -> bool {
         !self.sky_due.is_empty()
