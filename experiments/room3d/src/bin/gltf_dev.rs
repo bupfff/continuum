@@ -183,6 +183,9 @@ fn main() {
             anti_aliasing: std::env::var("GD_AA").as_deref() != Ok("0"),
             cache_options: continuum_gpu::CacheOptions {
                 glossy_rays: std::env::var("GD_GLOSSY").as_deref() != Ok("0"),
+                // `GD_CACHE_BOUNCES`: the cache's bounces (`GD_BOUNCES` is
+                // Cycles').
+                bounces: num("GD_CACHE_BOUNCES", 1),
                 hardware_shading: std::env::var("GD_HW_SHADE").as_deref() != Ok("0"),
                 frame_target_ms: if budget > 0 { 0.0 } else { 14.0 },
                 bake_budget: if budget > 0 {

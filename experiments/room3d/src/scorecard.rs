@@ -75,6 +75,8 @@ pub struct Case {
     pub movers: Vec<usize>,
     /// Bounces instead of the default (`CacheOptions::bounces`).
     pub bounces: Option<u32>,
+    /// `CacheOptions::bounce_rest` instead of the default.
+    pub bounce_rest: Option<bool>,
     pub reference: Reference,
 }
 
@@ -133,6 +135,20 @@ impl Case {
         }
         if let Some(b) = self.bounces {
             cache_options.bounces = b;
+        }
+        if let Some(r) = self.bounce_rest {
+            cache_options.bounce_rest = r;
+        }
+        // Development: `SC_BOUNCE_REST=1` for `CacheOptions::bounce_rest`.
+        if std::env::var_os("SC_BOUNCE_REST").is_some() {
+            cache_options.bounce_rest = true;
+        }
+        // Development: `SC_BOUNCE_TAIL` for `CacheOptions::bounce_tail`.
+        if let Some(t) = std::env::var("SC_BOUNCE_TAIL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            cache_options.bounce_tail = t;
         }
         // Development: `SC_BOUNCES` bounces instead of the default.
         if let Some(b) = std::env::var("SC_BOUNCES")
@@ -272,6 +288,7 @@ pub fn gltf_case(
         deforming,
         movers: Vec::new(),
         bounces: None,
+        bounce_rest: None,
         reference: Reference::Gltf {
             path,
             samples,
@@ -295,6 +312,7 @@ pub fn field_case() -> Case {
         deforming: Vec::new(),
         movers: Vec::new(),
         bounces: None,
+        bounce_rest: None,
         reference: Reference::Field {
             light,
             radiance: field.radiance,
@@ -346,6 +364,7 @@ pub fn room_case(with_movers: bool) -> Case {
             Vec::new()
         },
         bounces: None,
+        bounce_rest: None,
         reference: Reference::Room,
     }
 }
@@ -413,6 +432,12 @@ pub struct Speed {
 }
 
 pub fn speed(case: &Case, run_start: Instant) -> Speed {
+    speed_capped(case, run_start, 60.0)
+}
+
+/// [`speed`] with warm-up capped at `cap` seconds (and settling again after
+/// the motion at half of it).
+pub fn speed_capped(case: &Case, run_start: Instant, cap: f64) -> Speed {
     let load_min = run_start.elapsed().as_secs_f64() / 60.0;
     let defaults = CacheOptions::default();
     let mut r = case.renderer((W, H), defaults);
@@ -420,7 +445,7 @@ pub fn speed(case: &Case, run_start: Instant) -> Speed {
     let pixels = (W * H) as f64;
     case.pose(&mut r, 0.0);
     let mut under_1 = None;
-    let settled = settle(&mut r, case.camera, &view, 60.0, |r, f, t| {
+    let settled = settle(&mut r, case.camera, &view, cap, |r, f, t| {
         let share = r.stats().map_or(1.0, |s| s.fallback_pixels as f64 / pixels);
         if under_1.is_none() && f > 4 && share < 0.01 {
             under_1 = Some((f, t));
@@ -531,7 +556,7 @@ pub fn speed(case: &Case, run_start: Instant) -> Speed {
     );
     let stopped = case.camera_at(1.0);
     let at_stop = r.read_colors();
-    let resettled = settle(&mut r, stopped, &view, 30.0, |_, _, _| {});
+    let resettled = settle(&mut r, stopped, &view, 0.5 * cap, |_, _, _| {});
     let settled_image = r.read_colors();
     let stop_error = relative_rmse(&at_stop, &settled_image);
     // Development: `SC_SAVE_STOP=1` saves both (out/scorecard).

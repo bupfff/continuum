@@ -5154,6 +5154,10 @@ const BOUNCE_WANT: u32 = 0x80000000u;
 // fewest), and the hemisphere's share whose hits hold too few.
 var<private> ind_gen: f32 = 15.0;
 var<private> ind_short: f32 = 0.0;
+// The sample's closure-weighted albedo: what its bins' hits reflect of
+// uniform light (`CacheOptions::bounce_rest`).
+var<private> ind_albedo: f32 = 0.0;
+var<workgroup> ind_albedo_wg: array<f32, 64>;
 
 // Adds the bounce light of the page at a hit (slot `slot`, lookup `r`), its
 // 3×3 samples bilinearly, times `reflect`, to each channel's `sum`; returns
@@ -5256,6 +5260,7 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     let hn = shading_normal(hit.mesh, hit.tri, p, -dir);
     let hp = p + hit.normal * surface_offset(length(p));
     let reflect = bounce_albedo(hit.mesh, hit.tri, p, footprint) * (w / 3.14159265);
+    ind_albedo += dot(reflect, vec3<f32>(0.2126, 0.7152, 0.0722));
     for (var l = 0u; l < lights_n; l++) {
         var direct = vc_bilinear(slot, r, l);
         if (vc.sky.w == 1u && direct > 0.0) { direct *= unshadowed_rect(hp, hn, lights[l]); }
@@ -5272,15 +5277,21 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     if (bounces > 1u) {
         let direct_only = *sum;
         let held = bounce_more(slot, r, reflect, sum);
-        ind_gen = min(ind_gen, held);
+        var counted = held;
         if (held < f32(bounces - 1u)) {
             let d = ind_energy(before, direct_only);
             let b = ind_energy(direct_only, *sum);
             if (held < 1.0 || b > vc.bounce.w * max(d + b, 1e-30)) {
                 ind_short += w;
                 vc_request(r.key, 1u | SECONDARY | WANTS_SAMPLES | wanted_bits);
+            } else {
+                // Its missing orders are a small tail: counted as held, so
+                // pages reading this sample do not ask again (they looped
+                // to their retry cap and the view never settled).
+                counted = f32(bounces - 1u);
             }
         }
+        ind_gen = min(ind_gen, counted);
     }
     return 0.0;
 }
@@ -5309,6 +5320,7 @@ fn bounce_job(wg: vec3<u32>) -> BounceJob {
     let texel = min(page * PAGE + vec2<u32>(4u * (k % 3u), 4u * (k / 3u)), n - vec2<u32>(1u));
     ind_gen = 15.0;
     ind_short = 0.0;
+    ind_albedo = 0.0;
     return BounceJob(e, k, listed, vc_surface(m, c, n, texel), max(job.y >> 8u, 1u));
 }
 
@@ -5320,6 +5332,7 @@ fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32
     ind_missing[li] = missing;
     ind_gen_wg[li] = ind_gen;
     ind_short_wg[li] = ind_short;
+    ind_albedo_wg[li] = ind_albedo;
     workgroupBarrier();
     for (var h = 32u; h > 0u; h >>= 1u) {
         if (li < h) {
@@ -5329,6 +5342,7 @@ fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32
             ind_missing[li] += ind_missing[li + h];
             ind_gen_wg[li] = min(ind_gen_wg[li], ind_gen_wg[li + h]);
             ind_short_wg[li] += ind_short_wg[li + h];
+            ind_albedo_wg[li] += ind_albedo_wg[li + h];
         }
         workgroupBarrier();
     }
@@ -5338,8 +5352,16 @@ fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32
         // (M10 gate 25).
         var held = 1.0;
         if (job.bounces > 1u) { held = min(1.0 + ind_gen_wg[0], 15.0); }
+        // `CacheOptions::bounce_rest` (extra.y bit 10): with one bounce, the
+        // orders past it as a geometric series of the sample's closure-
+        // weighted albedo ρ (the hits' light taken as the sample's own):
+        // B / (1 − ρ), ρ at most 0.9.
+        var rest = 1.0;
+        if (job.bounces == 1u && (vc.extra.y & 0x400u) != 0u) {
+            rest = 1.0 / (1.0 - min(ind_albedo_wg[0], 0.9));
+        }
         for (var ch = 0u; ch < IND_CH; ch++) {
-            let v = ind_partial[ch].xyz;
+            let v = ind_partial[ch].xyz * rest;
             indirect[indirect_at(job.e.w, job.k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, held)));
         }
         // Retried while hits were missing, or held too few bounces.

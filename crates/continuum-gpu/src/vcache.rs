@@ -273,6 +273,12 @@ pub struct CacheOptions {
     /// share) of its light (2.6% at the default 0.15). Without it every
     /// hit asks, and four bounces never let Sponza settle.
     pub bounce_tail: f32,
+    /// With one bounce: the orders past it estimated, as a geometric series
+    /// of each bounce sample's closure-weighted albedo ρ (what its rays'
+    /// hits reflect of uniform light): its bounce light times 1 / (1 − ρ),
+    /// ρ at most 0.9. Progressive radiosity's ambient term, per sample
+    /// (Cohen et al. 1988). Free, and nothing more to settle.
+    pub bounce_rest: bool,
     /// Bounce light that settles (M22 gate 3): bounce rays read their hits'
     /// light one mip coarser than a bin's footprint, and a bin that finds
     /// only a coarser page asks for its page and re-bakes the sample once
@@ -390,6 +396,7 @@ impl Default for CacheOptions {
             bounce_epsilon: 0.01,
             bounce_share: 0.75,
             bounce_tail: 0.15,
+            bounce_rest: false,
             bounce_settles: true,
             edge_rays: false,
             deforming_budget: 512,
@@ -2168,7 +2175,8 @@ impl VirtualCache {
                 (self.options.indirect && self.options.emission_bounce) as u32,
                 self.options.bounces.clamp(1, 8)
                     | (self.options.bounce_settles as u32) << 8
-                    | (self.options.sky_lag as u32) << 9,
+                    | (self.options.sky_lag as u32) << 9
+                    | (self.options.bounce_rest as u32) << 10,
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
@@ -2512,7 +2520,8 @@ impl VirtualCache {
             self.options.emission_bounce as u32,
             self.options.bounces.clamp(1, 8)
                 | (self.options.bounce_settles as u32) << 8
-                | (self.options.sky_lag as u32) << 9,
+                | (self.options.sky_lag as u32) << 9
+                | (self.options.bounce_rest as u32) << 10,
             0,
             0,
         ];
