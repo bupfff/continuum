@@ -342,7 +342,7 @@ Sponza, ours over Cycles in direct sun: curtain 0.82 → 0.91, fronds
 0.67 → 0.78, banner 0.93 → 1.00. The ten showcase models under the studio
 HDRI (its lights taken out) move by 0.5 points or less: SheenChair 4.80%
 → 4.75%, ChronographWatch 15.62% → 15.59%, CarConcept 10.39% → 10.82%,
-the rest within 0.05 points.
+the rest within 0.06 points.
 
 Environment reflections keep the split sum's Schlick terms: on the black
 planes under the outdoor HDRI they are 4–9% bright at roughness 0.6 and
