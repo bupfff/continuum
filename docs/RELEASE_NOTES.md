@@ -37,6 +37,9 @@ and click Open Anyway. Then drop a `.glb` or `.gltf` file on the window.
   bumps beside texels that face away from the light left unshadowed.
   Sponza against Cycles under the sun and sky 65.4% → 46.4% (clamped
   relative RMSE), about 6% longer to warm up.
+- Lights' reflections use the exact Fresnel curve for dielectrics
+  (Schlick's was 18–24% dark seen toward the light): Sponza 46.4% →
+  43.0%, its curtains 18% → 9% darker than Cycles'.
 
 **The viewer**
 - Objects open in the studio with their own lights too; the view from

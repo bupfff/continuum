@@ -25,6 +25,10 @@ fn main() {
     if std::env::var_os("GD_NOCUT").is_some() {
         imported.scene.geometry_alpha_cutoff.clear();
     }
+    // `GD_NONORMALS=1`: without normal maps (a diagnostic).
+    if std::env::var_os("GD_NONORMALS").is_some() {
+        imported.scene.geometry_normal_maps.clear();
+    }
     // `GD_ONLY=a,b,…`: only the instances of these geometries (a diagnostic).
     if let Ok(v) = std::env::var("GD_ONLY") {
         let keep: Vec<usize> = v

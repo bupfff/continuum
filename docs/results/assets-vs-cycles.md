@@ -303,3 +303,49 @@ are (curtain 0.0267, Cycles 0.0340; fronds 0.0269, 0.0399).
   sphere's brightest before, 0 now).
 - Tried and dropped: back faces of open meshes occluding (meshes with
   unpaired edges flagged at build time): no change on Sponza.
+
+## Exact Fresnel for lights' reflections (2026-11-22)
+
+After the leak fix Sponza's curtains stayed 18% darker than Cycles' in
+direct sun (fronds 33%): Cycles ≈ 1.04 × ours plus a white term, on the
+fabric alone and with the curtain's three textures on a plane, so a
+specular difference. Black rough dielectric planes (glTF, base colour 0,
+sun alone, 320×180 2×2, Cycles 256 samples) isolate it: seen toward the
+sun ours was 18–24% dark at roughness 0.3, 0.6 and 0.94, and right from
+behind (back-scatter) within 3%. Schlick's Fresnel is 10–27% below the
+exact dielectric curve (index 1.5) between 45° and 65°, and Cycles'
+Principled uses the exact one. `specular_light` now takes the dielectric
+part by the exact curve of the index its F0 implies (scaled between F0
+and f90, as `KHR_materials_specular` sets them), metals by Schlick's.
+
+| Black plane, mean ours / Cycles | Toward the sun | Low, toward | Behind |
+|---|---|---|---|
+| Roughness 0.94, Schlick | 0.0084 / 0.0110 | | 0.0059 / 0.0061 |
+| Roughness 0.94, exact | 0.0104 / 0.0110 | 0.0086 / 0.0089 | 0.0059 / 0.0061 |
+| Roughness 0.6, Schlick | 0.0312 / 0.0401 | 0.0185 / 0.0243 | 0.0029 / 0.0029 |
+| Roughness 0.6, exact | 0.0385 / 0.0401 | 0.0263 / 0.0270 | 0.0029 / 0.0029 |
+| Roughness 0.3, Schlick | 0.0516 / 0.0631 | 0.0057 / 0.0075 | 0.0002 / 0.0002 |
+| Roughness 0.3, exact | 0.0614 / 0.0631 | 0.0091 / 0.0093 | 0.0002 / 0.0002 |
+
+(The rows' "low" views differ slightly: 0.5 m and 0.6 m high.) What is
+left (2–5% dark) is likely Cycles' multiple-scattering GGX.
+
+| Clamped RMSE, pixels off | Schlick | Exact |
+|---|---|---|
+| Sponza, direct sun | 95.9%, 4.50% | 92.1%, 3.68% |
+| Sponza, sun and sky | 46.4%, 27.4% | **43.0%, 26.6%** |
+| Sponza, HDRI | 42.65%, 31.5% | 42.62%, 31.5% |
+| FlightHelmet, sun and sky | 3.47%, 2.06% | 3.22%, 1.89% |
+| DamagedHelmet, sun and sky | 8.09%, 2.71% | 8.09%, 2.71% |
+
+Sponza, ours over Cycles in direct sun: curtain 0.82 → 0.91, fronds
+0.67 → 0.78, banner 0.93 → 1.00. The ten showcase models under the studio
+HDRI (its lights taken out) move by 0.5 points or less: SheenChair 4.80%
+→ 4.75%, ChronographWatch 15.62% → 15.59%, CarConcept 10.39% → 10.82%,
+the rest within 0.05 points.
+
+Environment reflections keep the split sum's Schlick terms: on the black
+planes under the outdoor HDRI they are 4–9% bright at roughness 0.6 and
+0.94; at 0.3 one view was 44% dark where it mirrors the HDRI's sun, left
+in the environment for that test (`GD_ENV_LIGHTS=0`; by default the sun
+is a light).

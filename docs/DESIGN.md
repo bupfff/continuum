@@ -1964,12 +1964,13 @@ conversation or after a compaction; history lives in git and
   is prepared (`docs/RELEASE_NOTES.md`): sheen, studio lights from HDRIs,
   animations under the sky, and sunlight through walls fixed (cones clip
   large triangles in direction space; texels facing away trace past their
-  own triangle): Sponza against Cycles 65.4% → 46.4%. Against Cycles
+  own triangle), lights' reflections by the exact Fresnel: Sponza
+  against Cycles 65.4% → 43.0%. Against Cycles
   through Blender's importer: `docs/results/assets-vs-cycles.md`
   (`gltf_dev GD_CYCLES`; `leak_probe` checks shadows by CPU rays).
 - **Next:** (1) release v0.3.2 (dry-run `release.yml`, test the artifact,
-  tag). (2) The worst left against Cycles: Sponza's curtains and fronds
-  20–30% dark, ChronographWatch's metals, DragonAttenuation's backdrop,
+  tag). (2) The worst left against Cycles: Sponza's fronds 22% dark,
+  ChronographWatch's metals, DragonAttenuation's backdrop,
   ToyCar's red sheen and green line. (3) The movers' top-level structure
   double-buffered; movers in enclosed rooms (§3.4); Bistro-class scenes.
 - **Pitfalls:** compare at a fixed bake budget (`GD_BUDGET`); Cycles needs

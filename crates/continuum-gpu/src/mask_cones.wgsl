@@ -6366,10 +6366,39 @@ fn specular_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, r: LightRect, base: 
     let a = max(mat.y * mat.y, 1e-3);
     let wide = min(a + 0.5 * radius / max(length(light_center(r) - p), 1e-6), 1.0);
     let norm = (a / wide) * (a / wide);
-    let f0 = mix(shade_spec.xyz, base, mat.x);
-    let f90 = mix(shade_spec.w, 1.0, mat.x);
-    let vh = clamp(1.0 - max(dot(v, h), 0.0), 0.0, 1.0);
-    return ggx_d(max(dot(n, h), 0.0), a) * smith_visibility(nv, nl, a) * (f0 + (vec3<f32>(f90) - f0) * pow(vh, 5.0)) * norm;
+    let vh = max(dot(v, h), 0.0);
+    return ggx_d(max(dot(n, h), 0.0), a) * smith_visibility(nv, nl, a) * surface_fresnel(vh, base, mat.x) * norm;
+}
+
+// A dielectric's reflectance from outside at cosine `c` for index `eta`
+// (unpolarized, exact).
+fn dielectric_fresnel(c: f32, eta: f32) -> f32 {
+    let g2 = eta * eta - 1.0 + c * c;
+    if (g2 <= 0.0) { return 1.0; }
+    let g = sqrt(g2);
+    let a = (g - c) / (g + c);
+    let b = (c * (g + c) - 1.0) / (c * (g - c) + 1.0);
+    return 0.5 * a * a * (1.0 + b * b);
+}
+
+// The surface's reflectance at cosine `vh` between the view and the
+// microfacet: the dielectric's (`shade_spec`: F0 and f90) by the exact
+// Fresnel curve of the index its F0 implies, the metal's (base color) by
+// Schlick's, mixed by metalness. Schlick's for the dielectric was 10–27%
+// low between 45° and 65° (Cycles' Principled is exact): a sun's
+// reflection off rough surfaces seen toward it 18–24% darker than
+// Cycles' (`docs/results/assets-vs-cycles.md`).
+fn surface_fresnel(vh: f32, base: vec3<f32>, metallic: f32) -> vec3<f32> {
+    let c = clamp(vh, 0.0, 1.0);
+    let f0 = shade_spec.xyz;
+    let f90 = shade_spec.w;
+    let r0 = clamp(max(f0.x, max(f0.y, f0.z)) / max(f90, 1e-4), 1e-4, 0.99);
+    let s = sqrt(r0);
+    let eta = (1.0 + s) / (1.0 - s);
+    let w = clamp((dielectric_fresnel(c, eta) - r0) / (1.0 - r0), 0.0, 1.0);
+    let dielectric = f0 + (vec3<f32>(f90) - f0) * w;
+    let metal = base + (vec3<f32>(1.0) - base) * pow(1.0 - c, 5.0);
+    return mix(dielectric, metal, metallic);
 }
 
 // The light arriving at `p` along `refl`: what the cache holds for the
