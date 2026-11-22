@@ -161,7 +161,18 @@ impl Case {
         }
     }
 
-    fn renderer(&self, size: (u32, u32), cache_options: CacheOptions) -> Renderer {
+    fn renderer(&self, size: (u32, u32), mut cache_options: CacheOptions) -> Renderer {
+        // Development: `SC_SKY_LAG=1` with `CacheOptions::sky_lag`.
+        if std::env::var_os("SC_SKY_LAG").is_some() {
+            cache_options.sky_lag = true;
+        }
+        // Development: `SC_BOUNCES` bounces instead of the default.
+        if let Some(b) = std::env::var("SC_BOUNCES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            cache_options.bounces = b;
+        }
         let kernel = MaskConeKernel::new().expect("GPU");
         Renderer::new(
             kernel,
@@ -174,6 +185,8 @@ impl Case {
                 sky: self.sky,
                 deforming: self.deforming.clone(),
                 movable: self.movers.clone(),
+                // Development: `SC_NOBOUNCE=1` without bounce light.
+                bounce: std::env::var_os("SC_NOBOUNCE").is_none(),
                 cache_options,
                 ..Default::default()
             },
@@ -366,6 +379,17 @@ fn room_case(with_movers: bool) -> Case {
     }
 }
 
+/// Stops the run after a frame of more than 5 s: one GPU submission that
+/// long starves the WindowServer (with the display off, past its 40 s
+/// watchdog, which logs the user out; 2026-11-22).
+fn guard(start: Instant, what: &str) {
+    let s = start.elapsed().as_secs_f64();
+    if s > 5.0 {
+        eprintln!("a frame took {s:.1} s ({what}): stopping the run");
+        std::process::exit(2);
+    }
+}
+
 fn median_p(v: &[f64], p: f64) -> (f64, f64) {
     let mut s = v.to_vec();
     s.sort_by(f64::total_cmp);
@@ -388,8 +412,10 @@ fn settle(
     let start = Instant::now();
     let mut stamps = Vec::new();
     for f in 1.. {
+        let frame = Instant::now();
         r.render(camera, view);
         r.wait();
+        guard(frame, "settling");
         let t = start.elapsed().as_secs_f64();
         stamps.push(t);
         on_frame(r, f, t);
@@ -445,8 +471,86 @@ fn speed(case: &Case, run_start: Instant) -> Speed {
         case.pose(&mut r, k as f32 / 60.0);
         r.render(camera, &view);
         r.wait();
+        guard(t, "moving");
         times.push(t.elapsed().as_secs_f64() * 1e3);
         shares.push(r.stats().map_or(1.0, |s| s.fallback_pixels as f64 / pixels));
+        // Development: `SC_TRACE=1` prints the cache's work every 20 moving
+        // frames.
+        if std::env::var_os("SC_TRACE").is_some()
+            && (k <= 6 || k % 20 == 0)
+            && let Some(s) = r.stats()
+        {
+            println!(
+                "  {} frame {k}: fallback {:.1}%, requests {}, baked {} pages, re-baked {} pages, candidates {}, invalidated {}, sky invalidated {}, sky listed {}, sky charged {}, sky re-baked {}, evicted {}, budget {}, missed {}, visible {}",
+                case.name,
+                100.0 * shares[k - 1],
+                s.requests,
+                s.pages_baked,
+                s.rebaked_pages,
+                s.candidates,
+                s.invalidated,
+                s.sky_invalidated,
+                s.sky_listed,
+                s.sky_charged,
+                s.sky_rebaked,
+                s.evicted,
+                s.budget,
+                s.missed,
+                s.visible_pages
+            );
+        }
+    }
+    // Development: `SC_PROFILE=1` profiles ten more moving frames.
+    if std::env::var_os("SC_PROFILE").is_some() {
+        let mut bake = std::collections::BTreeMap::<&str, f64>::new();
+        let mut passes = [0.0f64; 16];
+        let (mut posing, mut rendering) = (0.0, 0.0);
+        for k in 0..10 {
+            let t = Instant::now();
+            case.pose(&mut r, (MOTION_FRAMES + k) as f32 / 60.0);
+            posing += t.elapsed().as_secs_f64() * 100.0;
+            let t = Instant::now();
+            r.render(case.camera_at(1.0), &view);
+            r.wait();
+            rendering += t.elapsed().as_secs_f64() * 100.0;
+            case.pose(&mut r, (MOTION_FRAMES + k) as f32 / 60.0 + 0.5 / 60.0);
+            let p = r.render_profiled(case.camera_at(1.0), &view);
+            for (i, d) in p.passes.iter().enumerate() {
+                passes[i] += d.as_secs_f64() * 100.0;
+            }
+            for (label, d) in p.bake_passes {
+                if !label.is_empty() {
+                    *bake.entry(label).or_insert(0.0) += d.as_secs_f64() * 100.0;
+                }
+            }
+            if let Some(s) = r.stats() {
+                println!(
+                    "  {}: baked {} pages {} texels, re-baked {} pages {} texels, requests {}, budget {}, planning {:?}, waiting {:?}",
+                    case.name,
+                    s.pages_baked,
+                    s.texels_baked,
+                    s.rebaked_pages,
+                    s.rebaked_texels,
+                    s.requests,
+                    s.budget,
+                    s.planning,
+                    s.waiting
+                );
+            }
+        }
+        let b: Vec<String> = bake.iter().map(|(k, t)| format!("{k} {t:.2}")).collect();
+        let c: Vec<String> = passes
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t > 0.05)
+            .map(|(i, t)| format!("{i}: {t:.2}"))
+            .collect();
+        println!(
+            "  {}: posing {posing:.2} ms, render and wait {rendering:.2} ms a frame",
+            case.name
+        );
+        println!("  {} bake passes (ms): {}", case.name, b.join(", "));
+        println!("  {} camera passes (ms): {}", case.name, c.join(", "));
     }
     let motion = median_p(&times, 0.99);
     let motion_fallback = (
@@ -456,7 +560,31 @@ fn speed(case: &Case, run_start: Instant) -> Speed {
     let stopped = case.camera_at(1.0);
     let at_stop = r.read_colors();
     let resettled = settle(&mut r, stopped, &view, 30.0, |_, _, _| {});
-    let stop_error = relative_rmse(&at_stop, &r.read_colors());
+    let settled_image = r.read_colors();
+    let stop_error = relative_rmse(&at_stop, &settled_image);
+    // Development: `SC_SAVE_STOP=1` saves both (out/scorecard).
+    if std::env::var_os("SC_SAVE_STOP").is_some() {
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("out/scorecard");
+        let m = settled_image
+            .iter()
+            .flatten()
+            .map(|&x| x as f64)
+            .sum::<f64>()
+            / (3 * settled_image.len()) as f64;
+        let e = (0.18 / m) as f32;
+        save(
+            &at_stop,
+            (W, H),
+            e,
+            &out.join(format!("{}.stop.png", case.name)),
+        );
+        save(
+            &settled_image,
+            (W, H),
+            e,
+            &out.join(format!("{}.stop_settled.png", case.name)),
+        );
+    }
     Speed {
         load_min,
         under_1,
@@ -649,8 +777,10 @@ fn quality(case: &Case, out: &Path) -> std::io::Result<Quality> {
     let camera = case.camera_at(1.0);
     let mut settled = None;
     for f in 1..=600 {
+        let frame = Instant::now();
         r.render(camera, &view);
         r.wait();
+        guard(frame, "quality");
         if f > 32 && r.is_settled(32) {
             settled = Some(f - 32);
             break;

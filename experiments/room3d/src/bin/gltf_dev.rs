@@ -8,6 +8,7 @@
 //! alpha cutouts and counts triangles. `GD_CYCLES=<samples>` also renders
 //! the file in Cycles through Blender's own importer (`GD_BOUNCES`, 4),
 //! saves it beside `GD_OUT` (`.cycles.png`) and prints the relative RMSE.
+//! `GD_RAW=1`: the linear images too (`.f32`, `.cycles.f32`).
 //! Not a gate.
 //!
 //! `cargo run --release -p room3d --bin gltf_dev -- scene.gltf`
@@ -370,8 +371,21 @@ fn main() {
             .expect("the PNG");
     };
     let out = std::env::var_os("GD_OUT").map(std::path::PathBuf::from);
+    // `GD_RAW=1`: the linear images too (`.f32` beside the PNGs: RGB f32
+    // rows from the top).
+    let dump_raw = |image: &[[f32; 3]], path: &std::path::Path| {
+        if std::env::var_os("GD_RAW").is_some() {
+            let bytes: Vec<u8> = image
+                .iter()
+                .flatten()
+                .flat_map(|x| x.to_le_bytes())
+                .collect();
+            std::fs::write(path, bytes).expect("the raw image");
+        }
+    };
     if let Some(out) = &out {
         save(&ours, out);
+        dump_raw(&ours, &out.with_extension("f32"));
     }
     if let Ok(samples) = std::env::var("GD_CYCLES") {
         let work = std::env::temp_dir().join(format!("gltf_dev_cycles_{}", std::process::id()));
@@ -470,6 +484,7 @@ fn main() {
         );
         if let Some(out) = &out {
             save(&reference, &out.with_extension("cycles.png"));
+            dump_raw(&reference, &out.with_extension("cycles.f32"));
             // The difference, ours minus Cycles: red brighter, blue darker,
             // full scale at half the mean.
             let diff: Vec<[f32; 3]> = oc

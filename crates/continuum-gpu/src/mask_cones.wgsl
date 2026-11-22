@@ -3347,12 +3347,13 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let j = gid.x;
     // No early return: every invocation follows its packet's walks.
     let total = bake_job_count();
-    let listed = j < total;
     let job = bake_jobs[min(j, max(total, 1u) - 1u)];
+    // An empty job (an append past the capacity) is skipped.
+    let listed = j < total && job.x != NONE;
     // The texel within the page, and the light (M5).
     let k = job.y & 0xffu;
     let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
-    let t = page_texel(job.x, k);
+    let t = page_texel(select(job.x, 0u, job.x == NONE), k);
     lit_missing = NONE;
     let s = vc_surface(t.m, t.c, t.n, t.texel);
     let on = listed && t.inside && s.ok;
@@ -3874,15 +3875,17 @@ fn append_page(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>) -> u32 {
 }
 
 // `count` texel jobs appended to the bake: the first's index, or NONE if
-// they do not fit. The count never passes the capacity, so every job the
-// bake runs was written.
+// they do not fit. One atomic add (a compare-and-swap loop here, contended
+// by every stale texel of a moving frame, took 285 ms of a 160 ms-median
+// frame in the showcase room with its two movers). Past the capacity the
+// range taken is not the caller's: what of it lies within the capacity is
+// written as empty jobs, which the bake skips, so every job the bake runs
+// was written.
 fn append_jobs(count: u32) -> u32 {
-    var old = atomicLoad(&mover_stats[5]);
-    loop {
-        if (old + count > vc.movers.z) { return NONE; }
-        let r = atomicCompareExchangeWeak(&mover_stats[5], old, old + count);
-        if (r.exchanged) { return vc.jobs.x + old; }
-        old = r.old_value;
+    let old = atomicAdd(&mover_stats[5], count);
+    if (old + count <= vc.movers.z) { return vc.jobs.x + old; }
+    for (var k = old; k < min(old + count, vc.movers.z); k++) {
+        bake_jobs[vc.jobs.x + k] = vec2<u32>(NONE, 0u);
     }
     return NONE;
 }

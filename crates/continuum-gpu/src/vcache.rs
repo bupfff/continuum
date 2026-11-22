@@ -80,7 +80,11 @@ const REQUEST_SET: u64 = 1 << 18;
 /// (fewer with many lights: at most 2^21 texel jobs), slots it may list as
 /// invalid per frame, and how recently a stale page must have been read to
 /// be re-baked rather than marked invalid (1: in the frame before; every
-/// pixel marks the page it reads).
+/// pixel marks the page it reads). Pages past the first are marked invalid
+/// (shown unshadowed until baked again). Not larger: at 16,384 a BrainStem
+/// frame took 25.6 s (about four times the re-bakes, around 59 moving
+/// meshes, in one frame), and with the display off such a frame starved the
+/// WindowServer past its watchdog and logged the user out (2026-11-22).
 const APPEND_PAGES: u32 = 4096;
 const APPEND_JOBS: u32 = 1 << 21;
 const INVALID_CAP: u32 = 1 << 14;
@@ -233,8 +237,10 @@ pub struct CacheOptions {
     /// same frame (off: the shown sky stays within the ledger's bound). A
     /// mover's sky bound is its whole bounding sphere, so around anything
     /// that keeps moving every page in reach re-bakes every frame: an
-    /// animated fox under a sky took 78.6 ms a frame, 7.5 ms without. On,
-    /// the sky around moving things trails them by a few frames.
+    /// animated fox under a sky took 78.6 ms a frame, 7.5 ms without. On
+    /// (the default since 2026-11-22, as the viewer had it), the sky around
+    /// moving things trails them by a few frames: Fox 9 ms a frame against
+    /// 92 ms, BrainStem 24 ms against 110 ms (the basics scorecard).
     pub sky_lag: bool,
     /// Bounce light (M10 gate 1): one bounce of diffuse light, sampled on a
     /// 3×3 grid per page (192 rays each), from the direct light the cache
@@ -370,7 +376,7 @@ impl Default for CacheOptions {
             sky_ray_cost: 1,
             bounces: 1,
             ledger_epsilon: 0.01,
-            sky_lag: false,
+            sky_lag: true,
             indirect: false,
             emission_bounce: true,
             indirect_sample_cost: 8,

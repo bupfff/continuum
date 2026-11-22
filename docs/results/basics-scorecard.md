@@ -105,3 +105,61 @@ Reading it (worst first):
   the left vault dark), 44 s to settle, 31 ms a frame.
 - **The field** never settles (bounce), though it is 1.7% from Cycles.
 - Fine: the helmet, and the characters once settled.
+
+## Fixes from the scorecard (2026-11-22)
+
+**Movers: one atomic add instead of a compare-and-swap loop.** Every stale
+texel of a moving frame appended its re-bake job through a compare-and-swap
+loop on one counter (`append_jobs`); with about 76,000 stale texels a frame
+in the room, the "stale texels" pass took about 285 ms (profiled, its own
+submission) and now 0.43 ms. Past the capacity, the range an append took is
+written as empty jobs, which the bake skips.
+
+**`CacheOptions::sky_lag` on by default** (the viewer had it on): the sky
+around moving and deforming things trails them by a few frames instead of
+re-baking in the same frame. Without it, Fox took 92 ms and BrainStem 110
+ms a moving frame (p99 745 ms) once the fix above let more work through.
+
+| Row (motion: median, p99; without page: mean, worst; stop vs settled) | Baseline | After |
+|---|---|---|
+| movers | 159.06, 273.59 ms; 0.00%, 0.13%; 2.51% | **20.53, 27.58 ms**; 0.01%, 0.08%; 3.95% |
+| fox | 14.67, 51.61 ms; 1.97%, 96.25%; 8.35% | **8.76, 10.54 ms; 0.00%, 0.02%; 3.77%** |
+| brainstem | 49.21, 62.46 ms; 38.18%, 85.92%; 71.04% | **31.17**, 86.41 ms; 34.32%, 50.66%; **16.10%** |
+
+Everything else within run-to-run spread; against Cycles unchanged. (Sponza's
+warm-up moves most between runs: under 1% at 23–37 s, settled 36–50 s.)
+
+**Tried and reverted: they hung the GPU and logged the user out** (three
+times; macOS's WindowServer watchdog restarts it after 40 s without a frame;
+reports in `/Library/Logs/DiagnosticReports`). Patches kept in
+`experiments/room3d/out/scorecard/`.
+- `APPEND_PAGES` 4,096 → 16,384: BrainStem's first moving frame asks for
+  10,553 pages in view near its 59 meshes; past 4,096 they are invalidated
+  (55% of the pixels unshadowed for about 90 frames). At 16,384 BrainStem's
+  pixels without a page fell to 7.4% in motion, but one frame took 25.6 s.
+- All deforming meshes' new structures built in one submission (one each
+  before): BrainStem's render 32.4 → 22.9 ms a frame. Present in all four
+  bad runs; a GPU report showed a page fault (an unmapped read) then a
+  firmware-detected lockup. Shader buffer access is bounds-checked, so most
+  likely ray traversal met an invalid structure (perhaps builds in one
+  command buffer sharing scratch memory in wgpu's Metal path); not found.
+- The scorecard now stops at any frame over 5 s.
+
+**Investigated, not changed yet:**
+- *More bounces* (`CacheOptions::bounces`; speed, then against Cycles):
+
+| | 1 (default) | 4 | 8 |
+|---|---|---|---|
+| room | 46.55%; settled 1.7 s | **7.74%**; 3.4 s | 6.64%; 4.9 s |
+| movers | 44.46%; moving 159 ms (before the fix) | 6.69%; 209 ms | 5.84%; 210 ms |
+| field | 1.68% | 1.35% | 1.34% |
+| helmet | 4.46%; settled 1.3 s | 4.46%; 2.4 s | 4.46%; 4.6 s |
+| sponza | 30.43%; 30.8 ms, settled 44 s | 31.66%; 37.2 ms, not in 60 s | 31.66%; 46.6 ms, not in 60 s |
+
+- *Sponza's 30%*, split at the original view (eye 5, 0.3, −3.4) against
+  Cycles at 0 and 1 bounces, 4,096 samples: sky light alone with
+  reflections 1.013× Cycles' mean (0.81× without reflections: Cycles'
+  direct light includes the sky's specular), but by region 0.75–1.42×;
+  direct light under the sun about right; bounce light 0.92× overall,
+  0.48–1.63× by region (the right arcade's vaults bright, the far corners
+  dark). Many regional errors of ±25–60%, not one bias.

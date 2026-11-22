@@ -1988,6 +1988,9 @@ fn movers_under_a_sky(bake_budget: u32) {
             // Loose, so charges build up without invalidating: the bound is
             // what is tested.
             ledger_epsilon: 0.3,
+            // The sky within the ledger's bound every frame (the default
+            // lets it trail).
+            sky_lag: false,
             ..Default::default()
         },
         sky: Some(SKY),
