@@ -887,3 +887,144 @@ pub fn cases(assets: &Path) -> Vec<(&'static str, Build)> {
         ),
     ]
 }
+
+/// One renderer of a pair being settled side by side: its own frames' times.
+struct Side {
+    r: Renderer,
+    view: wgpu::TextureView,
+    /// Its own frames' accumulated seconds after each frame.
+    stamps: Vec<f64>,
+    under_1: Option<(usize, f64)>,
+    settled: Option<(usize, f64)>,
+}
+
+impl Side {
+    fn new(case: &Case) -> Side {
+        let mut r = case.renderer((W, H), CacheOptions::default());
+        let view = target(&r, (W, H));
+        case.pose(&mut r, 0.0);
+        Side {
+            r,
+            view,
+            stamps: Vec::new(),
+            under_1: None,
+            settled: None,
+        }
+    }
+
+    /// One frame toward settling; true once settled.
+    fn settle_step(&mut self, camera: Camera) -> bool {
+        if self.settled.is_some() {
+            return true;
+        }
+        let t = Instant::now();
+        self.r.render(camera, &self.view);
+        self.r.wait();
+        guard(t, "settling");
+        let own = self.stamps.last().copied().unwrap_or(0.0) + t.elapsed().as_secs_f64();
+        self.stamps.push(own);
+        let f = self.stamps.len();
+        let share = self
+            .r
+            .stats()
+            .map_or(1.0, |s| s.fallback_pixels as f64 / (W * H) as f64);
+        if self.under_1.is_none() && f > 4 && share < 0.01 {
+            self.under_1 = Some((f, own));
+        }
+        if f > 32 && self.r.is_settled(32) {
+            self.settled = Some((f - 32, self.stamps[f - 33]));
+        }
+        self.settled.is_some()
+    }
+
+    fn frame(&mut self, case: &Case, camera: Camera, pose: Option<f32>) -> f64 {
+        let t = Instant::now();
+        if let Some(time) = pose {
+            case.pose(&mut self.r, time);
+        }
+        self.r.render(camera, &self.view);
+        self.r.wait();
+        guard(t, "timed");
+        t.elapsed().as_secs_f64() * 1e3
+    }
+}
+
+/// Settles two renderers side by side, alternating frames until each is
+/// settled or its own frames have taken `cap` seconds.
+fn settle_pair(sides: &mut [Side; 2], camera: Camera, cap: f64) {
+    loop {
+        let mut busy = false;
+        for s in sides.iter_mut() {
+            if s.settled.is_none() && s.stamps.last().copied().unwrap_or(0.0) <= cap {
+                s.settle_step(camera);
+                busy = true;
+            }
+        }
+        if !busy {
+            break;
+        }
+    }
+}
+
+/// [`speed_capped`] for two configurations of a scene measured side by side
+/// (M22 gate 7): both renderers alive, frames alternated, so the machine's
+/// heat weighs on both alike. Warm-up and settling count each renderer's own
+/// frames' time; the settled frames are six alternated blocks of ten; the
+/// motion alternates frame by frame; the settling after it alternates as the
+/// warm-up does (at half the cap).
+pub fn speed_pair(a: &Case, b: &Case, run_start: Instant, cap: f64) -> [Speed; 2] {
+    let load_min = run_start.elapsed().as_secs_f64() / 60.0;
+    let cases = [a, b];
+    let mut sides = [Side::new(a), Side::new(b)];
+    settle_pair(&mut sides, a.camera, cap);
+    let (under_1, settled) = (
+        [sides[0].under_1, sides[1].under_1],
+        [sides[0].settled, sides[1].settled],
+    );
+    let mut still = [Vec::new(), Vec::new()];
+    for _ in 0..6 {
+        for (k, s) in sides.iter_mut().enumerate() {
+            for _ in 0..10 {
+                still[k].push(s.frame(cases[k], cases[k].camera, None));
+            }
+        }
+    }
+    let mut moving = [Vec::new(), Vec::new()];
+    let mut shares = [Vec::new(), Vec::new()];
+    for f in 1..=MOTION_FRAMES {
+        let x = f as f32 / MOTION_FRAMES as f32;
+        for (k, s) in sides.iter_mut().enumerate() {
+            let camera = cases[k].camera_at(x * x * (3.0 - 2.0 * x));
+            moving[k].push(s.frame(cases[k], camera, Some(f as f32 / 60.0)));
+            shares[k].push(
+                s.r.stats()
+                    .map_or(1.0, |st| st.fallback_pixels as f64 / (W * H) as f64),
+            );
+        }
+    }
+    let at_stop = [sides[0].r.read_colors(), sides[1].r.read_colors()];
+    for s in sides.iter_mut() {
+        s.stamps.clear();
+        s.settled = None;
+        s.under_1 = None;
+    }
+    settle_pair(&mut sides, a.camera_at(1.0), 0.5 * cap);
+    let resettled = [sides[0].settled, sides[1].settled];
+    std::array::from_fn(|k| {
+        let settled_image = sides[k].r.read_colors();
+        Speed {
+            load_min,
+            under_1: under_1[k],
+            settled: settled[k],
+            frame: median_p(&still[k], 0.9),
+            motion: median_p(&moving[k], 0.99),
+            motion_fallback: (
+                100.0 * shares[k].iter().sum::<f64>() / shares[k].len() as f64,
+                100.0 * shares[k].iter().copied().fold(0.0, f64::max),
+            ),
+            stop_error: relative_rmse(&at_stop[k], &settled_image),
+            resettled: resettled[k],
+            gpu_mb: sides[k].r.gpu_bytes() as f64 / 1e6,
+        }
+    })
+}

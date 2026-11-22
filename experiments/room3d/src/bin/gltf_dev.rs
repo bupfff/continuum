@@ -186,6 +186,7 @@ fn main() {
                 // `GD_CACHE_BOUNCES`: the cache's bounces (`GD_BOUNCES` is
                 // Cycles').
                 bounces: num("GD_CACHE_BOUNCES", 1),
+                bounce_rest: std::env::var_os("GD_BOUNCE_REST").is_some(),
                 hardware_shading: std::env::var("GD_HW_SHADE").as_deref() != Ok("0"),
                 frame_target_ms: if budget > 0 { 0.0 } else { 14.0 },
                 bake_budget: if budget > 0 {
