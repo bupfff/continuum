@@ -42,6 +42,10 @@
     (pages waiting for lighting levels); the rock field `room3d::rocks`
     (`with_proxies`, `on_demand`); `stream_dev` sizes working sets and has
     `PAGES`/`STILL`/`MEMORY`/`LOAD_COST`/`BASELINE` modes.
+  - **Basics scorecard (phase 1):** `experiments/room3d/src/bin/scorecard.rs`
+    (seven fixed scenes, speed then error against Cycles;
+    `docs/results/basics-scorecard.md`); run it after each change that
+    may move them.
   - **README media:** diagrams from `scripts/readme_diagrams.py`
     (`docs/images/how/`), GIFs from the `readme_media` binary's frames
     through `scripts/make_gif.py`, Cycles comparisons in

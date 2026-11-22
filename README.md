@@ -253,9 +253,9 @@ Honest about where it stands:
 - **The sky warms in a few hundred frames** (hardware rays, moving
   objects included); with streamed detail or glass it falls back to a
   slower path that takes thousands of frames. Around moving objects the
-  viewer lets the sky catch up within a few frames (`CacheOptions::
-  sky_lag`); kept exact, it re-bakes every page in their reach each frame
-  (an animated fox: 42 ms a frame instead of 9).
+  sky catches up within a few frames (`CacheOptions::sky_lag`, on by
+  default); kept exact, it re-bakes every page in their reach each frame
+  (an animated fox: 92 ms a frame instead of 9).
 - **Deforming meshes are costly:** a character large on screen costs
   about 1.6× the frame, and the lighting near it lags its motion (up to
   about a second) until it stops.

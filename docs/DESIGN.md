@@ -1956,36 +1956,31 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-22, seventeenth session, v0.3.2).** For a new
-conversation or after a compaction; history lives in git and
+**Start here (updated 2026-11-22, eighteenth session, v0.3.2 + fixes).**
+For a new conversation or after a compaction; history lives in git and
 `docs/results/`, the plan below.
-- **Now:** phase 1 of the user's plan (below, 2026-11-22): strengthen
-  the basics. v0.3.2 is out (2026-11-22): sheen, studio lights from
-  HDRIs, animations under the sky, sunlight through walls fixed, lights'
-  reflections by the exact Fresnel (Sponza against Cycles 65.4% →
-  43.0%). Against Cycles through Blender's importer:
-  `docs/results/assets-vs-cycles.md` (`gltf_dev GD_CYCLES`; `leak_probe`
-  checks shadows by CPU rays).
-- **Next** (the user approved this list 2026-11-22; start with (1)):
-  (1) a basics scorecard: fixed scenes (Sponza, the
-  million-boulder field, a closed room with bounce, animated characters,
-  a showcase object) with error against Cycles, frame time, warm-up time,
-  memory and response to motion, run after each change. (2) The worst
-  rows first: the sky's warm-up on the slower paths (thousands of
-  frames), bounce never settling on the field, movers in enclosed rooms
-  (80–175 ms, §3.4), the movers' structure waited for, the path without
-  ray queries (sky near black, bounce over 29 buffers). (3) Left against
-  Cycles: Sponza's fringes 22% dark, ChronographWatch's metals,
-  DragonAttenuation's backdrop, ToyCar's sheen and green line.
-- **Pitfalls:** test assets live in `experiments/room3d/out/assets/`
-  (gitignored: `khronos/Models/` with Sponza, `glb/` the showcase files,
-  `hdri/`, `brdf/` the black and textured test planes); fetch again if
-  missing. Compare at a fixed bake budget (`GD_BUDGET`); Cycles needs
-  2,000+ samples in dark interiors; without ray queries Sponza's sky is
-  near black and bounce needs 30 buffers (Metal allows 29);
-  `movers_under_a_sky_at_a_small_budget` fails now and then on lavapipe
-  (sky guesses left once settled; not reproduced on Metal); this device's
-  GPU timestamps arrive out of order.
+- **Now:** phase 1 (strengthen the basics). Item (1) done: the basics
+  scorecard, `cargo run --release -p room3d --bin scorecard` (7 scenes,
+  about 5 minutes; `docs/results/basics-scorecard.md`). Fixed from it:
+  suns 10⁴ radii away (`SUN_RADII`; Fox 8.7% → 2.1% from Cycles), movers'
+  stale texels by one atomic add (159 → 20.5 ms a moving frame),
+  `sky_lag` on by default (Fox 14.7 → 8.8 ms, BrainStem 49 → 31 ms).
+- **Next, worst rows first:** (a) the closed room 46.6% dark (one bounce;
+  4 bounces give 7.7%, but Sponza then never settles in 60 s and frames
+  +20%: make settling cheaper, then bounces by default); (b) BrainStem in
+  motion, 34% of pixels without a page: its catch-ups overflow the 4,096
+  appended pages a frame (slice them by that capacity, not a larger cap);
+  (c) Sponza: 31 ms settled frames, 37–50 s to settle, 30% from Cycles
+  (regional, both direct sky and bounce).
+- **Pitfalls:** a GPU hang logs the user out (WindowServer's 40 s
+  watchdog): `APPEND_PAGES` 16,384 and building deforming meshes'
+  structures in one submission each did (patches in
+  `experiments/room3d/out/scorecard/`); read
+  `/Library/Logs/DiagnosticReports/gpuEvent-*.ips` after any hang, try
+  such changes alone and short first. Test assets live in
+  `experiments/room3d/out/assets/` (gitignored); compare at a fixed bake
+  budget; Cycles needs 2,000+ samples in dark interiors; this device's GPU
+  timestamps arrive out of order.
 
 - **Decided 2026-11-22 (the user): three phases.** (1) **Strengthen the
   basics:** make Continuum really good at what it set out to be strong
