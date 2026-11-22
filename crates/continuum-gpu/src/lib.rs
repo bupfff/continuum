@@ -871,6 +871,7 @@ const HW_ENTRY_POINTS: &[&str] = &[
     "hw_m13_page_bake",
     "hw_vc_bake_indirect",
     "hw_vc_bake_indirect_movers",
+    "hw_vc_bake_sky_movers",
     "hw_vc_bake_sky",
     "hw_vc_bake_wide",
     "hw_vc_error_shares",
@@ -1016,6 +1017,9 @@ pub(crate) const HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS: &[u32] = &[
 /// Sky samples through hardware ray queries (M5 gate 13).
 pub(crate) const HW_VC_BAKE_SKY_BINDINGS: &[u32] =
     &[2, 3, 23, 24, 30, 32, 33, 34, 38, 41, 46, 47, 54, 64];
+/// The same with movers: their structure too.
+pub(crate) const HW_VC_BAKE_SKY_MOVERS_BINDINGS: &[u32] =
+    &[2, 3, 23, 24, 30, 32, 33, 34, 38, 41, 46, 47, 54, 59, 64];
 /// Rays to wide lights (M5 gate 15).
 pub(crate) const HW_VC_BAKE_WIDE_BINDINGS: &[u32] =
     &[2, 3, 23, 24, 30, 32, 33, 34, 37, 38, 41, 43, 52, 54, 117];

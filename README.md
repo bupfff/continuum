@@ -506,7 +506,8 @@ outdoor one (larger scenes, whose sun becomes a light with exact soft
 shadows); `--sky`, `--no-sky` and `--env` choose instead. Seen from the
 file's camera, or framed around an object, or from inside a large scene at
 eye height; on a grey ground (`--no-ground` leaves it out); playing the
-file's first animation (under the sun alone: not with a sky yet).
+file's first animation (under a sky or HDRI the sky around moving things
+catches up within a few frames).
 `--emitters-as-lights` makes emissive rectangles area lights
 (experimental, M10 gate 23).
 

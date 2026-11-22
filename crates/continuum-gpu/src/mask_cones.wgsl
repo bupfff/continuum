@@ -3883,6 +3883,12 @@ fn charge_sky(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>, page: Box3, 
     let charge = ledger.x + max(ledger.y, 0.0);
     if (charge > ledger.z) {
         atomicAdd(&mover_stats[17], 1u);
+        // `CacheOptions::sky_lag` (extra.y bit 9): a page in view keeps its
+        // sky, listed for a re-bake under the budget.
+        if (visible && (vc.extra.y & 0x200u) != 0u) {
+            list_sky(s, false);
+            return true;
+        }
         if (visible && sky_rebake(s, key, lo, hi)) { return true; }
         mark_invalid(s);
         return false;

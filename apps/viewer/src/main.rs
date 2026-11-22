@@ -22,8 +22,9 @@
 //! `--no-panel`; for glTF files `--no-ground` and `--emitters-as-lights`
 //! (emissive rectangles as area lights); `--env sky.hdr` (or a `.png`, or
 //! `gradient`; `--env-strength K`) lights the field or a glTF scene with an
-//! environment image. A file's first animation plays (P pauses it; not with
-//! a sky, as movers and a sky do not mix in the cache yet).
+//! environment image. A file's first animation plays (P pauses it); under a
+//! sky or an HDRI the sky around moving things catches up within the bake
+//! budget (`CacheOptions::sky_lag`).
 //!
 //! Controls: WASD move, Q/E down/up, drag with the left mouse button to look,
 //! Shift to move faster, C to play the camera path (showcase), P to pause
@@ -111,40 +112,32 @@ struct Instanced {
 }
 
 impl World {
-    /// Whether the sky (or an environment) keeps the file's animation from
-    /// playing (`VIEWER_ANIMATE_UNDER_SKY=1` plays it anyway, to measure).
-    fn sky_stops_animation(&self) -> bool {
-        self.cache
-            && (self.sky || self.environment.is_some())
-            && std::env::var_os("VIEWER_ANIMATE_UNDER_SKY").is_none()
-    }
-
-    /// The instances the first animation moves, if it plays: not with a sky
-    /// (movers and a sky do not mix in the cache yet).
+    /// The instances the first animation moves.
     fn animated_instances(&self) -> Vec<usize> {
         match &self.animations {
-            Some(a) if !self.sky_stops_animation() => a.instances(0),
+            Some(a) => a.instances(0),
             _ => Vec::new(),
         }
     }
 
     /// Skinned and morphing geometry (M12 gate 3), posed from every
     /// animation together (files often animate a rig and a mesh's morph
-    /// weights apart): not with a sky, as movers.
+    /// weights apart).
     fn deforming_geometries(&self) -> Vec<usize> {
         match &self.animations {
-            Some(a) if !self.sky_stops_animation() => a.deforming(),
+            Some(a) => a.deforming(),
             _ => Vec::new(),
         }
     }
 
-    /// The deforming geometries' poses at `time` (60 Hz frames), looping
-    /// over the longest animation.
+    /// The deforming geometries' poses at `time` (60 Hz frames), from the
+    /// animations that play together (`Animations::together`), looping over
+    /// the longest of them.
     fn deforming_poses(&self, time: f32) -> Vec<continuum_gltf::Pose> {
         match &self.animations {
             Some(a) if !self.deforming_geometries().is_empty() => {
-                let all: Vec<usize> = (0..a.list.len()).collect();
-                let duration = a.list.iter().map(|x| x.duration).fold(1e-3, f32::max);
+                let all = a.together();
+                let duration = all.iter().map(|&k| a.list[k].duration).fold(1e-3, f32::max);
                 a.deform(&all, (time / 60.0) % duration)
             }
             _ => Vec::new(),
@@ -204,8 +197,7 @@ impl World {
     /// The lighting the scene looks best in: the field under its sun and
     /// sky; an object (under 10 m across) in the studio, with its own
     /// lights if it has any; a larger scene under its own lights and the
-    /// sky, or else outdoors; an animated file under the sun alone
-    /// (animations do not play with a sky yet).
+    /// sky, or else outdoors.
     fn lighting_by_default(&self) -> Lighting {
         let Some(scene) = &self.instanced else {
             return Lighting::Sun;
@@ -213,9 +205,7 @@ impl World {
         if self.name != "glTF" {
             return Lighting::SunAndSky;
         }
-        if self.animations.as_ref().is_some_and(|a| !a.list.is_empty()) {
-            Lighting::Sun
-        } else if scene.radius < 5.0 {
+        if scene.radius < 5.0 {
             Lighting::Studio
         } else if !scene.sun_added {
             Lighting::SunAndSky
@@ -876,6 +866,13 @@ impl App {
                 environment: world.environment.clone().filter(|_| world.cache),
                 movable: world.animated_instances(),
                 deforming: world.deforming_geometries(),
+                // Animation under a sky: the sky around moving things
+                // catches up within the bake budget (an animated fox:
+                // 9 ms a frame, 42 ms re-baking it in every frame).
+                cache_options: continuum_gpu::CacheOptions {
+                    sky_lag: true,
+                    ..Default::default()
+                },
                 anti_aliasing: settings.anti_aliasing,
                 bounce: settings.bounce,
                 bloom: settings.bloom.then(continuum_gpu::Bloom::default),
@@ -1392,10 +1389,41 @@ impl App {
             r.set_tone_map(self.settings.tone_map);
             r.set_bloom(self.settings.bloom.then(continuum_gpu::Bloom::default));
         }
+        // Development: `VIEWER_DEBUG_POSE=1` prints the pose's bounds and the
+        // cache's counters every 20 frames; `VIEWER_DEBUG_NO_POSE=1` poses
+        // deforming geometry in the first frames only (the animated Fox
+        // goes unlit and unseen after a few frames with the cache in the
+        // viewer alone: DESIGN, Start here).
+        if std::env::var_os("VIEWER_DEBUG_POSE").is_some()
+            && self.all_times.len().is_multiple_of(20)
+            && let Some(Backend::Instanced(r)) = &gpu.backend
+        {
+            let b = shapes.first().map(|p| {
+                p.triangles.iter().flatten().fold(
+                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                    |(lo, hi), &v| (lo.min(v), hi.max(v)),
+                )
+            });
+            eprintln!(
+                "pose: bounds {b:?}, time {:.2}, frames {}, lag {}, stats {:?}",
+                self.time,
+                self.all_times.len(),
+                r.deforming_lag(),
+                r.stats().map(|s| (
+                    s.fallback_pixels,
+                    s.rebaked_pages,
+                    s.rebaked_texels,
+                    s.pages_baked,
+                    s.requests
+                ))
+            );
+        }
         if let Some(b) = &mut gpu.backend {
             b.update_surfaces(&changes);
             b.set_transforms(&poses);
-            b.set_vertices(shapes);
+            if std::env::var_os("VIEWER_DEBUG_NO_POSE").is_none() || self.all_times.is_empty() {
+                b.set_vertices(shapes);
+            }
         }
         let texture = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -1712,16 +1740,9 @@ fn main() {
         }
         if deforming > 0 {
             println!(
-                "Posing {deforming} skinned or morphing meshes from {} animations, looping; P pauses.",
+                "Posing {deforming} skinned or morphing meshes from {} of {} animations, looping; P pauses.",
+                a.together().len(),
                 a.list.len()
-            );
-        }
-        if moving == 0
-            && deforming == 0
-            && (!a.deforming().is_empty() || !a.instances(0).is_empty())
-        {
-            println!(
-                "The file's animation does not play with a sky (movers and a sky do not mix in the cache yet)."
             );
         }
     }

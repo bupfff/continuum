@@ -18,20 +18,21 @@ use crate::vcache::{PAGE_TEXELS, VirtualCache};
 use crate::{
     COMPUTE_VISIBILITY_BINDINGS, CacheOptions, CacheStats, Camera, CameraUniform,
     HW_EDGES_BINDINGS, HW_LAYERS_BINDINGS, HW_M13_CORNERS_BINDINGS, HW_VC_BAKE_INDIRECT_BINDINGS,
-    HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS, HW_VC_BAKE_SKY_BINDINGS, HW_VC_BAKE_WIDE_BINDINGS,
-    HW_VC_ERROR_SHARES_BINDINGS, HW_VC_SHADE_BINDINGS, HW_VC_SHADE_EDGES_BINDINGS,
-    HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS, HW_VISIBILITY_MOVERS_BINDINGS,
-    InstancedScene, Light, LightGpu, M13_BIN_ARGS_BINDINGS, M13_BIN_RAYS_BINDINGS,
-    M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS, M13_COVERAGE_BINDINGS, M13_MAPS_BINDINGS,
-    M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS, M13_PAGE_BAKE_BINDINGS,
-    M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS, M13_SHADE_ARGS_BINDINGS,
-    M13_SHADE_BACKGROUND_BINDINGS, M13_SHADE_MISSES_BINDINGS, M13_SHADE_RAYS_BINDINGS,
-    M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight, SceneTextures,
-    VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS, VC_BAKE_BINDINGS,
-    VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_BOUNCE_BINDINGS, VC_ERROR_PROBES_BINDINGS,
-    VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS, VC_SELF_BAKE_BINDINGS,
-    VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS, VC_STALE_BINDINGS,
-    VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform, uniform_buffer,
+    HW_VC_BAKE_INDIRECT_MOVERS_BINDINGS, HW_VC_BAKE_SKY_BINDINGS, HW_VC_BAKE_SKY_MOVERS_BINDINGS,
+    HW_VC_BAKE_WIDE_BINDINGS, HW_VC_ERROR_SHARES_BINDINGS, HW_VC_SHADE_BINDINGS,
+    HW_VC_SHADE_EDGES_BINDINGS, HW_VISIBILITY_BINDINGS, HW_VISIBILITY_BLEND_BINDINGS,
+    HW_VISIBILITY_MOVERS_BINDINGS, InstancedScene, Light, LightGpu, M13_BIN_ARGS_BINDINGS,
+    M13_BIN_RAYS_BINDINGS, M13_BINS_BINDINGS, M13_CORNERS_TILES_BINDINGS, M13_COVERAGE_BINDINGS,
+    M13_MAPS_BINDINGS, M13_MISS_ARGS_BINDINGS, M13_NEAR_BINDINGS, M13_PAGE_ARGS_BINDINGS,
+    M13_PAGE_BAKE_BINDINGS, M13_PREP_BINDINGS, M13_REFERENCE_BINDINGS, M13_ROOTS_BINDINGS,
+    M13_SHADE_ARGS_BINDINGS, M13_SHADE_BACKGROUND_BINDINGS, M13_SHADE_MISSES_BINDINGS,
+    M13_SHADE_RAYS_BINDINGS, M13_TILES_BINDINGS, MaskConeKernel, RECT_LIGHT_BINDINGS, RectLight,
+    SceneTextures, VC_ARGS_BAKE_BINDINGS, VC_ARGS_BINDINGS, VC_ARGS_EDGES_BINDINGS,
+    VC_BAKE_BINDINGS, VC_BAKE_INDIRECT_BINDINGS, VC_BAKE_SKY_BINDINGS, VC_BOUNCE_BINDINGS,
+    VC_ERROR_PROBES_BINDINGS, VC_FILL_BINDINGS, VC_LEDGER_BINDINGS, VC_LEDGER_RESET_BINDINGS,
+    VC_SELF_BAKE_BINDINGS, VC_SHADE_BINDINGS, VC_SHADE_CONES_BINDINGS, VC_SHADE_EDGES_BINDINGS,
+    VC_STALE_BINDINGS, VC_STALE_TEXELS_BINDINGS, VC_UPDATE_BINDINGS, camera_uniform,
+    uniform_buffer,
 };
 
 /// Where a frame's time goes (see [`InstancedRenderer::frame_profiled`]).
@@ -1564,12 +1565,11 @@ impl InstancedRenderer {
         // are some (M14 gate 10).
         let bounce_hw = hw.is_some() && !pixel_cones;
         // Sky samples through the same structures (M5 gate 13), where they
-        // hold the lighting's geometry: not with movers (a second
-        // structure), streamed levels (camera levels differ from lighting
-        // levels) or alpha-blended objects (cones weigh their opacity).
+        // hold the lighting's geometry: with movers through theirs too; not
+        // with streamed levels (camera levels differ from lighting levels)
+        // or alpha-blended objects (cones weigh their opacity).
         let sky_rays = bounce_hw
             && cache.is_some_and(|o| o.sky_rays)
-            && movable.is_empty()
             && stream.is_none()
             && !scene.sees_through();
         let visibility = hw.as_ref().map(|hw| {
@@ -1978,7 +1978,9 @@ impl InstancedRenderer {
             passes: [
                 kernel.entry("vc_update"),
                 kernel.entry("vc_bake"),
-                kernel.entry(if sky_rays {
+                kernel.entry(if sky_rays && !movable.is_empty() {
+                    "hw_vc_bake_sky_movers"
+                } else if sky_rays {
                     "hw_vc_bake_sky"
                 } else {
                     "vc_bake_sky"
@@ -2533,7 +2535,9 @@ impl InstancedRenderer {
                 .zip([
                     VC_UPDATE_BINDINGS,
                     VC_BAKE_BINDINGS,
-                    if cache.sky_hw {
+                    if cache.sky_hw && cache.has_movers {
+                        HW_VC_BAKE_SKY_MOVERS_BINDINGS
+                    } else if cache.sky_hw {
                         HW_VC_BAKE_SKY_BINDINGS
                     } else {
                         VC_BAKE_SKY_BINDINGS

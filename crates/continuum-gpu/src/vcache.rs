@@ -227,6 +227,15 @@ pub struct CacheOptions {
     /// Moving lights (M9 gate 2): the largest change of a texel's ratio
     /// (its light's shadowed share) the cache may show before re-baking it.
     pub ledger_epsilon: f32,
+    /// Movers and deforming geometry under a sky: a page in view whose sky
+    /// a mover may have changed past its ledger's threshold keeps its sky
+    /// until a re-bake fits the bake budget, instead of re-baking it in the
+    /// same frame (off: the shown sky stays within the ledger's bound). A
+    /// mover's sky bound is its whole bounding sphere, so around anything
+    /// that keeps moving every page in reach re-bakes every frame: an
+    /// animated fox under a sky took 78.6 ms a frame, 7.5 ms without. On,
+    /// the sky around moving things trails them by a few frames.
+    pub sky_lag: bool,
     /// Bounce light (M10 gate 1): one bounce of diffuse light, sampled on a
     /// 3×3 grid per page (192 rays each), from the direct light the cache
     /// holds at the hits. The first three lights' bounce re-colors free; later
@@ -361,6 +370,7 @@ impl Default for CacheOptions {
             sky_ray_cost: 1,
             bounces: 1,
             ledger_epsilon: 0.01,
+            sky_lag: false,
             indirect: false,
             emission_bounce: true,
             indirect_sample_cost: 8,
@@ -2119,7 +2129,9 @@ impl VirtualCache {
             // z: probe pixels (M4 gate 13).
             extra: [
                 (self.options.indirect && self.options.emission_bounce) as u32,
-                self.options.bounces.clamp(1, 8) | (self.options.bounce_settles as u32) << 8,
+                self.options.bounces.clamp(1, 8)
+                    | (self.options.bounce_settles as u32) << 8
+                    | (self.options.sky_lag as u32) << 9,
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
@@ -2452,7 +2464,9 @@ impl VirtualCache {
         ];
         params.extra = [
             self.options.emission_bounce as u32,
-            self.options.bounces.clamp(1, 8) | (self.options.bounce_settles as u32) << 8,
+            self.options.bounces.clamp(1, 8)
+                | (self.options.bounce_settles as u32) << 8
+                | (self.options.sky_lag as u32) << 9,
             0,
             0,
         ];

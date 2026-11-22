@@ -185,6 +185,24 @@ impl Animations {
         (local, weights)
     }
 
+    /// The animations to play together: the first, and each other that
+    /// animates none of the nodes those before it do (a file that animates
+    /// a rig and a mesh's morph weights apart plays both; one with
+    /// alternative clips of the same rig, as the Fox's Survey, Walk and
+    /// Run, plays the first alone).
+    pub fn together(&self) -> Vec<usize> {
+        let mut taken: Vec<usize> = Vec::new();
+        let mut out = Vec::new();
+        for (k, a) in self.list.iter().enumerate() {
+            let nodes: Vec<usize> = a.channels.iter().map(|c| c.node).collect();
+            if k == 0 || nodes.iter().all(|n| !taken.contains(n)) {
+                taken.extend(nodes);
+                out.push(k);
+            }
+        }
+        out
+    }
+
     /// The geometries that deform (skinned or morphing meshes, M12 gate
     /// 3): list them in `RendererOptions::deforming`.
     pub fn deforming(&self) -> Vec<usize> {

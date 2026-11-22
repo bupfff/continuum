@@ -1524,6 +1524,47 @@ fn hw_vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     if (listed) { sky_partial[6u * k + f] = select(0.0, value, on); }
 }
 
+// `hw_sky_open` with movers: open only if the ray meets neither the static
+// structure nor the movers' (`movers_as`, the objects as they are now).
+fn hw_sky_open_movers(eye: vec3<f32>, dir: vec3<f32>) -> bool {
+    if (!hw_sky_open(eye, dir)) { return false; }
+    var mq: ray_query;
+    rayQueryInitialize(&mq, movers_as, RayDesc(0x5u, 0xffu, 0.0, 3.4e38, eye, dir));
+    rayQueryProceed(&mq);
+    return rayQueryGetCommittedIntersection(&mq).kind == 0u;
+}
+
+// `hw_vc_bake_sky` with movers and deforming geometry: their rays see them
+// too (cones, 14× dearer a sample, were the only way before: an animated
+// fox under a sky took 78.6 ms a frame, 7.5 without the sky).
+@compute @workgroup_size(64)
+fn hw_vc_bake_sky_movers(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    let count = vc.sky.x + appended_sky();
+    let j = gid.x;
+    let listed = j < 6u * count;
+    let f = min(j / max(count, 1u), 5u);
+    let k = j % max(count, 1u);
+    let sample = sky_samples[k];
+    let t = page_texel(sample.x, sample.y);
+    let s = vc_surface(t.m, t.c, t.n, t.texel);
+    let on = listed && t.inside && s.ok;
+    var value = 0.0;
+    // The hemicube turned by an angle of the texel's own (`turned_bin`):
+    // fixed directions made Sponza's floor under its roof opening a sharp
+    // strip one tile wide, 45% over Cycles.
+    let spin = hemicube_spin(vec3<u32>(t.e.x, t.e.y, t.e.z ^ (t.texel.x * 0x9E3779B1u) ^ (t.texel.y * 0x85EBCA77u)));
+    if (on) {
+        for (var q = 0u; q < 32u; q++) {
+            let b = 32u * f + q;
+            let dir = turned_bin(s.normal, b, spin);
+            // The uniform sky lies above the horizon.
+            if (dir.z > 0.0 && hw_sky_open_movers(s.apex, dir)) { value += hemicube_weight(b); }
+        }
+    }
+    if (listed) { sky_partial[6u * k + f] = select(0.0, value, on); }
+}
+
 // --- The error while flying, reported (M4 gate 13). ---
 
 // Whether the segment from `p` along unit `w` for `t` meets nothing

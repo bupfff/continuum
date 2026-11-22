@@ -1970,10 +1970,12 @@ conversation or after a compaction; history lives in git and
 - **Next:** (1) the worst left in that table: ChronographWatch's metal
   reflections, DragonAttenuation's backdrop (wall bright, floor dark),
   Sponza's arches and lion head; thin glass in the Cycles reference
-  (ToyCar). (2) Animated characters under a sky or HDRI: Fox 7.5 → 78.6
-  ms a frame, BrainStem over 1 s (the viewer plays animations under the
-  sun alone); the sky re-bakes around moving and deforming geometry need a
-  cheap path. (3) Movers through `Renderer` in enclosed rooms (80–175 ms,
+  (ToyCar). (2) Animated characters: under a sky now 9 ms (Fox) with sky
+  rays through the movers' structure and `CacheOptions::sky_lag`; but in
+  the viewer the animated Fox goes unlit and unseen by camera rays after a
+  few frames with the cache (fine in `anim_dev`; what was ruled out:
+  `docs/results/assets-vs-cycles.md`). With hardware rays off, bounce
+  light's compute pass needs 30 buffers (Metal allows 29). (3) Movers through `Renderer` in enclosed rooms (80–175 ms,
   §3.4); bounce never settling on the million-boulder field; Bistro-class
   scenes.
 - **Pitfalls:** compare at a fixed bake budget (`GD_BUDGET`); Cycles needs

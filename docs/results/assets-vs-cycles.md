@@ -184,3 +184,29 @@ rendered at half, 400 frames:
 
 Characters are the game assets most often animated; making the sky cheap
 around moving and deforming geometry is the next large item for them.
+
+### Sky rays with movers, and `sky_lag` (2026-11-22)
+
+`anim_dev` (Fox, posed every frame, under the viewer's sun and sky, 1280×720):
+
+| | Median frame | Sky bake pass |
+|---|---|---|
+| Sky through cones (movers had no ray path) | 42.18 ms | 40.29 ms |
+| Sky rays with movers (`hw_vc_bake_sky_movers`) | 23.24 ms | 18.56 ms |
+| And `CacheOptions::sky_lag` | **9.11 ms** | 2.25 ms |
+| No sky | 7.52 ms | — |
+
+BrainStem (59 skinned meshes) with both: 30.87 ms. Sky rays with movers
+see the movers' structure as it is now; `sky_lag` lets a page in view
+whose sky a mover may have changed past its ledger's threshold keep its
+sky until a re-bake fits the budget (the bound charges a mover's whole
+bounding sphere, so around anything that keeps moving every page in reach
+re-baked every frame). The viewer now plays animations under the sky and
+HDRIs with `sky_lag` on (Fox 9.18 ms, CesiumMan 12.43 ms, BrainStem 44.00
+ms at 2560×1440 rendered at half).
+
+Open: in the viewer the animated Fox renders unlit and unseen by camera
+rays after a few frames (its shadow stays right); fine with `--no-cache`,
+fine posed once (`VIEWER_DEBUG_NO_POSE=1`), and fine in `anim_dev` with the
+same poses (checked by their bounds), camera, size and scale, format,
+pacing, pipelining and resizing. Also in v0.3.1 under the sun alone.
