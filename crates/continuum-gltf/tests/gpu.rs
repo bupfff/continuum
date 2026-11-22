@@ -184,8 +184,14 @@ fn renderer(
     kernel: MaskConeKernel,
     scene: &InstancedScene,
     origin: DVec3,
-    options: RendererOptions,
+    mut options: RendererOptions,
 ) -> Renderer {
+    // One bounce where a test leaves it to the default: these scenes have no
+    // sky, where the default is two (M22 gate 8), which took CI's software
+    // GPU past its time limit; the tests here are about other things.
+    if options.cache_options.bounces == 0 {
+        options.cache_options.bounces = 1;
+    }
     Renderer::new(
         kernel,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -428,6 +434,7 @@ fn a_wall_shadows_a_sphere_close_to_it() {
             &[sun_behind_the_wall()],
             RendererOptions {
                 cache_options: CacheOptions {
+                    bounces: 1,
                     frame_target_ms: 0.0,
                     pages: 1 << 15,
                     ..Default::default()
@@ -804,6 +811,7 @@ fn exposure_scales_the_drawn_colors() {
         // A pool small enough for software adapters (as `settled`).
         RendererOptions {
             cache_options: CacheOptions {
+                bounces: 1,
                 frame_target_ms: 0.0,
                 pages: 1 << 15,
                 ..Default::default()
@@ -1262,6 +1270,7 @@ fn auto_exposure_shows_the_middle_at_the_key() {
         &lights(),
         RendererOptions {
             cache_options: CacheOptions {
+                bounces: 1,
                 frame_target_ms: 0.0,
                 pages: 1 << 15,
                 ..Default::default()
@@ -1677,6 +1686,7 @@ fn bloom_spreads_light_and_keeps_it() {
         &lights(),
         RendererOptions {
             cache_options: CacheOptions {
+                bounces: 1,
                 frame_target_ms: 0.0,
                 pages: 1 << 15,
                 ..Default::default()
@@ -2436,6 +2446,7 @@ fn skinned_gltf_alone_plays() {
         &lights(),
         RendererOptions {
             cache_options: CacheOptions {
+                bounces: 1,
                 frame_target_ms: 0.0,
                 // A small pool: software adapters bind at most 128 MB.
                 pages: 1 << 15,
