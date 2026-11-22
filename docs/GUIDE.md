@@ -226,7 +226,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   and reflection over the material under it; a dielectric's reflectance
   from its index, tinted and scaled. 3.64% from Cycles (highlights
   clamped), 1.13× the frame on a scene of coated boulders. The coat's
-  textures and normal map are not imported; sheen is not supported.
+  textures and normal map are not imported.
+- **Sheen** (`InstancedScene::geometry_sheen`, `Sheen`; glTF's
+  `KHR_materials_sheen`, its factors): a fabric's back-scattering layer
+  (the Charlie distribution and visibility the extension specifies) over
+  its material, lit by each light through its BRDF and by the sky and
+  bounce light through its albedo, dimming what lies under it. Against
+  Cycles (whose own sheen model differs) under a studio HDRI:
+  GlamVelvetSofa 5.0% → 2.1%, SheenChair 8.1% → 5.9% (relative RMSE).
+  Its textures are not imported yet.
 - **Fog** (`RendererOptions::fog`, `Fog`; M18 gate 1): a layer with an
   extinction at height 0 falling with height (or even), a top, an albedo
   and an anisotropy. Camera rays lose light to it and gather what it

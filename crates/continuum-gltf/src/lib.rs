@@ -44,6 +44,9 @@
 //! - Vertex colors (`COLOR_0`'s RGB; alpha ignored) become the geometry's
 //!   (`InstancedScene::geometry_colors`, M10 gate 17), multiplying its base
 //!   color, and are saved.
+//! - Transmission, volumes, index of refraction, specular, clear coats and
+//!   sheen (`KHR_materials_transmission`, `_volume`, `_ior`, `_specular`,
+//!   `_clearcoat`, `_sheen`; their factors) become the geometry's (M16).
 //! - Punctual lights (`KHR_lights_punctual`) are imported
 //!   ([`Imported::lights`]): point and spot lights as small spheres,
 //!   directional lights as suns.
@@ -206,9 +209,36 @@ type GeometryKey = (
     Option<u32>,
     bool,
     // The emissive texture, the blend opacity's bits, the texture
-    // transform's, and the vertex colors' accessor.
-    (Option<u32>, Option<u32>, [u32; 5], Option<usize>),
+    // transform's, the vertex colors' accessor, and the transmission's,
+    // specular's, clear coat's and sheen's bits (`lobe_bits`).
+    (Option<u32>, Option<u32>, [u32; 5], Option<usize>, [u32; 9]),
 );
+
+/// A primitive's transmission, specular, clear coat and sheen as bits, for
+/// `GeometryKey` (geometry is shared only where they agree; base colour
+/// lives in instances).
+fn lobe_bits(
+    transmission: Option<f32>,
+    specular: Option<continuum_gpu::Specular>,
+    clearcoat: Option<continuum_gpu::Clearcoat>,
+    sheen: Option<continuum_gpu::Sheen>,
+) -> [u32; 9] {
+    let b = |x: Option<f32>| x.map_or(u32::MAX, f32::to_bits);
+    [
+        b(transmission),
+        b(specular.map(|s| s.factor)),
+        b(specular.map(|s| s.color.x)),
+        b(specular.map(|s| s.color.y)),
+        b(specular.map(|s| s.color.z)),
+        b(specular.map(|s| s.ior)),
+        b(clearcoat.map(|c| c.factor)),
+        b(clearcoat.map(|c| c.roughness)),
+        sheen.map_or(u32::MAX, |sh| {
+            let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+            q(sh.color.x) | q(sh.color.y) << 8 | q(sh.color.z) << 16 | q(sh.roughness) << 24
+        }),
+    ]
+}
 
 /// A texture slot's coordinate set and `KHR_texture_transform` (the identity
 /// without one).
@@ -320,6 +350,7 @@ struct Primitive {
     /// Its dielectric reflectance and clear coat (M16), if set.
     specular: Option<continuum_gpu::Specular>,
     clearcoat: Option<continuum_gpu::Clearcoat>,
+    sheen: Option<continuum_gpu::Sheen>,
     /// Its alpha cutoff (over its base color texture's alpha).
     alpha_cutoff: Option<f32>,
     /// Its vertex colors per triangle corner (`COLOR_0`, M10 gate 17).
@@ -522,6 +553,29 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                         .unwrap_or(0.0) as f32,
                 })
                 .filter(|c| c.factor > 0.0);
+            // A sheen (`KHR_materials_sheen`; its factors: textures not
+            // yet).
+            let sheen = material
+                .extension_value("KHR_materials_sheen")
+                .filter(|_| surface.is_some())
+                .map(|v| {
+                    let color = v.get("sheenColorFactor").and_then(|c| c.as_array()).map_or(
+                        Vec3::ZERO,
+                        |c| {
+                            Vec3::from_array(std::array::from_fn(|k| {
+                                c.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32
+                            }))
+                        },
+                    );
+                    continuum_gpu::Sheen {
+                        color,
+                        roughness: v
+                            .get("sheenRoughnessFactor")
+                            .and_then(|x| x.as_f64())
+                            .unwrap_or(0.0) as f32,
+                    }
+                })
+                .filter(|sh| sh.color.max_element() > 0.0);
             let volume = material
                 .volume()
                 .filter(|v| transmission.is_some() && v.thickness_factor() > 0.0)
@@ -636,6 +690,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                 volume,
                 specular,
                 clearcoat,
+                sheen,
                 alpha_cutoff,
                 colors: colors.is_some().then_some(corner_colors),
                 deform,
@@ -658,6 +713,7 @@ pub fn load(path: &Path) -> Result<Imported, gltf::Error> {
                         blend.map(f32::to_bits),
                         chosen.bits(),
                         accessor(gltf::Semantic::Colors(0)),
+                        lobe_bits(transmission, specular, clearcoat, sheen),
                     ),
                 ),
                 geometry: usize::MAX,
@@ -1118,6 +1174,7 @@ fn push_geometry(
     scene.geometry_volumes.push(p.volume);
     scene.geometry_specular.push(p.specular);
     scene.geometry_clearcoat.push(p.clearcoat);
+    scene.geometry_sheen.push(p.sheen);
     scene.geometries.len() - 1
 }
 
@@ -1209,6 +1266,7 @@ fn place(scene: &mut InstancedScene, p: &Primitive, m: DMat4, stats: &mut Import
     scene.geometry_volumes.push(p.volume);
     scene.geometry_specular.push(p.specular);
     scene.geometry_clearcoat.push(p.clearcoat);
+    scene.geometry_sheen.push(p.sheen);
     scene.instances.push(Instance {
         geometry,
         rotation: Mat3::IDENTITY,
@@ -1330,6 +1388,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
     let mut ior_used = false;
     let mut specular_used = false;
     let mut clearcoat_used = false;
+    let mut sheen_used = false;
     let mut mesh_of: HashMap<(usize, [u32; 3]), usize> = HashMap::new();
     let mut nodes: Vec<String> = Vec::new();
     let (c, c_inv) = axes();
@@ -1473,6 +1532,13 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
                         c.factor, c.roughness
                     ));
                 }
+                if let Some(sh) = scene.geometry_sheen.get(i.geometry).copied().flatten() {
+                    sheen_used = true;
+                    extensions.push(format!(
+                        r#""KHR_materials_sheen":{{"sheenColorFactor":[{:?},{:?},{:?}],"sheenRoughnessFactor":{:?}}}"#,
+                        sh.color.x, sh.color.y, sh.color.z, sh.roughness
+                    ));
+                }
             }
             let glow = if extensions.is_empty() {
                 glow
@@ -1557,6 +1623,7 @@ pub fn save(scene: &InstancedScene, path: &Path) -> std::io::Result<()> {
         (ior_used, "\"KHR_materials_ior\""),
         (specular_used, "\"KHR_materials_specular\""),
         (clearcoat_used, "\"KHR_materials_clearcoat\""),
+        (sheen_used, "\"KHR_materials_sheen\""),
     ]
     .iter()
     .filter(|(on, _)| *on)

@@ -111,6 +111,7 @@ fn scene(offset: DVec3) -> InstancedScene {
         geometry_volumes: Vec::new(),
         geometry_specular: Vec::new(),
         geometry_clearcoat: Vec::new(),
+        geometry_sheen: Vec::new(),
         geometry_normal_maps: Vec::new(),
         geometry_metallic_roughness: Vec::new(),
         geometry_alpha_cutoff: Vec::new(),
@@ -808,6 +809,47 @@ fn vertex_colors_multiply_the_base_color() {
         plain.relative_rmse > 0.05,
         "the colors had no effect: {plain:?}"
     );
+}
+
+/// A sheen survives a glTF round trip (`KHR_materials_sheen`), on the
+/// geometry that has it alone.
+#[test]
+fn gltf_round_trip_keeps_sheen() {
+    let mut s = scene(DVec3::ZERO);
+    let sheen = continuum_gpu::Sheen {
+        color: Vec3::new(0.8, 0.4, 0.2),
+        roughness: 0.6,
+    };
+    s.geometry_materials = vec![
+        None,
+        None,
+        Some(continuum_gpu::Material {
+            metallic: 0.0,
+            roughness: 0.9,
+        }),
+    ];
+    s.geometry_sheen = vec![None, None, Some(sheen)];
+    let path = std::env::temp_dir().join(format!("continuum-sheen-{}.glb", std::process::id()));
+    continuum_gltf::save(&s, &path).unwrap();
+    let imported = continuum_gltf::load(&path).unwrap().scene;
+    std::fs::remove_file(&path).ok();
+    let found: Vec<continuum_gpu::Sheen> =
+        imported.geometry_sheen.iter().flatten().copied().collect();
+    assert!(!found.is_empty(), "no sheen came back");
+    for got in found {
+        assert!(
+            (got.color - sheen.color).abs().max_element() < 1e-6,
+            "{got:?}"
+        );
+        assert!((got.roughness - sheen.roughness).abs() < 1e-6, "{got:?}");
+    }
+    let plain = imported
+        .geometries
+        .iter()
+        .enumerate()
+        .filter(|(g, _)| imported.geometry_sheen.get(*g).copied().flatten().is_none())
+        .count();
+    assert!(plain > 0, "every geometry came back with a sheen");
 }
 
 /// Vertex colors survive a glTF round trip (`COLOR_0`).

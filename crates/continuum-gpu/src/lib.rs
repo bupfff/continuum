@@ -2085,7 +2085,19 @@ impl MaskConeKernel {
                     f0[0] | f0[1] << 16,
                     f0[2] | f90 << 16,
                     coat[0] | coat[1] << 16,
-                    0,
+                    // The sheen: colour and roughness, 8 bits each.
+                    scene
+                        .geometry_sheen
+                        .get(i.geometry)
+                        .copied()
+                        .flatten()
+                        .map_or(0, |sh| {
+                            let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+                            q(sh.color.x)
+                                | q(sh.color.y) << 8
+                                | q(sh.color.z) << 16
+                                | q(sh.roughness) << 24
+                        }),
                 ]
             })
             .chain(std::iter::once([
@@ -3511,6 +3523,10 @@ pub struct InstancedScene {
     /// over its material, reflecting lights and its surroundings, dimming
     /// what lies under it by what it reflects. Needs a material.
     pub geometry_clearcoat: Vec<Option<Clearcoat>>,
+    /// Each geometry's sheen, if any (empty: none; glTF's
+    /// `KHR_materials_sheen`, its factors: textures not yet). Needs a
+    /// material.
+    pub geometry_sheen: Vec<Option<Sheen>>,
     /// Each geometry's normal map, if any (empty: none; M10 gate 5): an
     /// index into `textures` of a tangent-space normal map (linear, OpenGL's
     /// convention as glTF specifies: green toward the image's top), read
@@ -3973,6 +3989,18 @@ pub struct Clearcoat {
     /// How much of the coat there is, 0 to 1.
     pub factor: f32,
     /// Its perceptual roughness, 0 (a mirror) to 1.
+    pub roughness: f32,
+}
+
+/// A sheen (glTF's `KHR_materials_sheen`): a fabric's back-scattering
+/// layer over its material, the Charlie distribution (Estevez and Kulla
+/// 2017) brightening grazing angles in its colour, dimming what lies under
+/// it by its albedo.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sheen {
+    /// Its colour (linear RGB, 0 to 1).
+    pub color: Vec3,
+    /// Its roughness, 0 to 1.
     pub roughness: f32,
 }
 

@@ -117,3 +117,34 @@ irradiance about 4; none found in two studio HDRIs or venice_sunset).
   direct sky is nearly black (0.0003 at the floor centre, with or without
   object prefiltering and with meshes combined by the maximum). Not the
   default anywhere with ray queries; to look into.
+
+## Ten Khronos showcase models under the studio HDRI (2026-11-21)
+
+`gltf_dev`, studio_small_09 (1k), each file's own or the default view,
+ours 4×4 supersampled to 640×360, Cycles 1,024 samples. The mean is mostly
+the bright studio behind each model, so "pixels off" (by more than 10% of
+the mean) undercounts errors on the models themselves.
+
+| Model | Mean ours / Cycles | Clamped RMSE | Pixels off |
+|---|---|---|---|
+| AntiqueCamera | 0.7571 / 0.7561 | 2.11% | 0.89% |
+| Lantern | 0.7580 / 0.7582 | 1.80% | 1.26% |
+| Corset | 0.6881 / 0.6889 | 2.82% | 2.11% |
+| BoomBox | 0.6671 / 0.6659 | 8.91% | 3.38% |
+| WaterBottle | 0.6762 / 0.6792 | 9.56% | 5.02% |
+| CarConcept | 0.7016 / 0.7008 | 12.40% | 7.10% |
+| GlamVelvetSofa | 0.6433 / 0.6495 | 4.35% | 11.25% |
+| DragonAttenuation | 0.6503 / 0.6386 | 10.00% | 14.09% |
+| ChronographWatch | 0.6556 / 0.6762 | 24.23% | 15.73% |
+| SheenChair | 0.6838 / 0.7005 | 8.08% | 18.30% |
+
+- **Sheen** (`KHR_materials_sheen`) was not supported: both fabrics came
+  out flat and dark (the navy velvet nearly black). With it (the Charlie
+  distribution and visibility, an albedo table from
+  `scripts/sheen_table.py`): GlamVelvetSofa 4.35% → **2.11%** (pixels off
+  11.25% → **1.50%**, mean 0.6494 against 0.6495), SheenChair 8.08% →
+  **5.92%** (18.30% → 12.78%; Cycles' Principled sheen is its own
+  microfibre model, not glTF's, and shows the fabric's texture more).
+- Left: ChronographWatch's metal reflections (darker and brighter in
+  patches), DragonAttenuation's backdrop (its wall brighter, floor
+  darker than Cycles').
