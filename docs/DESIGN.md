@@ -1973,7 +1973,15 @@ For a new conversation or after a compaction; history lives in git and
   (b) BrainStem in motion: 7.3% of pixels without a page (pages out of view
   invalidated, the budget at its floor); (c) Sponza: 22–28 ms settled
   frames (anti-aliasing's passes about 13 ms: Sponza has 13% edge pixels),
-  30% from Cycles (regional errors in sky and bounce light); (d) the field's
+  30% from Cycles (regional errors in sky and bounce light; by the error
+  split, 89% of it in mid and bright pixels, means within 3%): the upper
+  gallery, lit by bounce alone, shows coloured blotches where Cycles is
+  smooth and 1.47× darker (bounce samples' 192 fixed rays catch sunlit
+  scraps through the arches, and the pages they read are lit at texel
+  centres, not averaged over the area a ray stands for: coarse lighting
+  texels as area averages is the lever; reading the footprint's own mip
+  instead of one coarser gave 29.94% → 28.75%, not side by side, gallery
+  unchanged); (d) the field's
   bounce light never settles: ground samples' bounce rays hit distant
   boulders, each with pages of its own (23k resident at 3 s, 77k at 35 s,
   nearly every bounce sample incomplete); needs a design for far, small

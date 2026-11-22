@@ -810,6 +810,17 @@ pub fn quality(case: &Case, out: &Path) -> std::io::Result<Quality> {
         .zip(&rc)
         .filter(|(a, b)| (0..3).any(|k| ((a[k] - b[k]) as f64).abs() > 0.1 * m))
         .count();
+    // Development: `SC_RAW=1` saves both linear images (RGB f32 rows).
+    if std::env::var_os("SC_RAW").is_some() {
+        for (image, suffix) in [(&ours, "f32"), (&reference, "cycles.f32")] {
+            let bytes: Vec<u8> = image
+                .iter()
+                .flatten()
+                .flat_map(|x| x.to_le_bytes())
+                .collect();
+            std::fs::write(out.join(format!("{}.{suffix}", case.name)), bytes)?;
+        }
+    }
     let exposure = (0.18 / m) as f32;
     save(
         &ours,
