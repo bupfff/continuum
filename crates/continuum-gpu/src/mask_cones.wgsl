@@ -257,7 +257,10 @@ fn may_touch_box(c: Cone, lo: vec3<f32>, hi: vec3<f32>) -> bool {
 struct Poly3 { v: array<vec3<f32>, 10>, n: u32 };
 struct Poly2 { v: array<vec2<f32>, 10>, n: u32 };
 
-// Keeps the part of `p` where dot(normal, x) <= offset.
+// Keeps the part of `p` where dot(normal, x) <= offset. A crossing is
+// found from the kept end, so the two triangles sharing an edge, which walk
+// it in opposite directions, find the same point (a crack between them
+// would let light through a wall).
 fn clip_plane3(p: Poly3, normal: vec3<f32>, offset: f32) -> Poly3 {
     var out: Poly3;
     out.n = 0u;
@@ -267,7 +270,8 @@ fn clip_plane3(p: Poly3, normal: vec3<f32>, offset: f32) -> Poly3 {
         let da = offset - dot(normal, a);
         let db = offset - dot(normal, b);
         if (da >= 0.0) { out.v[out.n] = a; out.n++; }
-        if ((da >= 0.0) != (db >= 0.0)) { out.v[out.n] = a + (b - a) * (da / (da - db)); out.n++; }
+        if (da >= 0.0 && db < 0.0) { out.v[out.n] = a + (b - a) * (da / (da - db)); out.n++; }
+        if (da < 0.0 && db >= 0.0) { out.v[out.n] = b + (a - b) * (db / (db - da)); out.n++; }
     }
     return out;
 }
@@ -282,7 +286,9 @@ fn clip_line2(p: Poly2, normal: vec2<f32>, offset: f32) -> Poly2 {
         let da = offset - dot(normal, a);
         let db = offset - dot(normal, b);
         if (da >= 0.0) { out.v[out.n] = a; out.n++; }
-        if ((da >= 0.0) != (db >= 0.0)) { out.v[out.n] = a + (b - a) * (da / (da - db)); out.n++; }
+        // From the kept end, as in `clip_plane3`.
+        if (da >= 0.0 && db < 0.0) { out.v[out.n] = a + (b - a) * (da / (da - db)); out.n++; }
+        if (da < 0.0 && db >= 0.0) { out.v[out.n] = b + (a - b) * (db / (db - da)); out.n++; }
     }
     return out;
 }
@@ -356,23 +362,67 @@ fn rasterize(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, ve
         p = clip_plane3(p, c.far_normal, c.far_offset);
     }
     var all_near_ok = true;
+    var all_in_window = true;
+    let w = c.window;
     for (var i = 0u; i < p.n; i++) {
         p.v[i] = to_local(c, p.v[i]);
-        if (p.v[i].z < NEAR) { all_near_ok = false; }
+        let v = p.v[i];
+        if (v.z < NEAR) { all_near_ok = false; }
+        if (v.x < w.x * v.z || v.x > w.z * v.z || v.y < w.y * v.z || v.y > w.w * v.z) {
+            all_in_window = false;
+        }
     }
     // Keep z >= NEAR, i.e. dot(-z, x) <= -NEAR.
     if (!all_near_ok) {
         p = clip_plane3(p, vec3<f32>(0.0, 0.0, -1.0), -NEAR);
     }
     if (p.n < 3u) { return false; }
-    let su = f32(GRID) / (c.window.z - c.window.x);
-    let sv = f32(GRID) / (c.window.w - c.window.y);
-    var q: Poly2;
-    q.n = p.n;
-    for (var i = 0u; i < p.n; i++) {
-        q.v[i] = vec2<f32>((p.v[i].x / p.v[i].z - c.window.x) * su, (p.v[i].y / p.v[i].z - c.window.y) * sv);
-    }
+    let su = f32(GRID) / (w.z - w.x);
+    let sv = f32(GRID) / (w.w - w.y);
     let g = f32(GRID);
+    var q: Poly2;
+    if (all_near_ok && all_in_window) {
+        // Inside the window: the corners projected.
+        q.n = p.n;
+        for (var i = 0u; i < p.n; i++) {
+            q.v[i] = vec2<f32>((p.v[i].x / p.v[i].z - w.x) * su, (p.v[i].y / p.v[i].z - w.y) * sv);
+        }
+    } else {
+        // Reaching outside the window: the window's square clipped to the
+        // directions through the polygon, those on the inner side of the
+        // plane through the apex and each edge. Projected corners and their
+        // crossings with the window would be millions of bins away where a
+        // corner nears the apex's plane, and crossings found between corners
+        // metres apart lose a thousandth of a window a few millimetres
+        // across, which a wall close behind a receiver lets the light
+        // through (Sponza's lion, up to 30% of the sun; DESIGN §3.8).
+        // The winding's side, from the whole triangle (clipping keeps it,
+        // and may repeat a corner).
+        // Its sign is also the projected triangle's winding (the sign of
+        // its area, for corners in front), which the square takes: a mesh's
+        // pieces sum their signed areas before the absolute value.
+        let d = dot(to_local(c, v0), cross(to_local(c, v1), to_local(c, v2)));
+        if (d == 0.0) { return false; }
+        let side = sign(d);
+        q.n = 4u;
+        q.v[0] = vec2<f32>(0.0, 0.0);
+        q.v[2] = vec2<f32>(g, g);
+        if (side > 0.0) {
+            q.v[1] = vec2<f32>(g, 0.0);
+            q.v[3] = vec2<f32>(0.0, g);
+        } else {
+            q.v[1] = vec2<f32>(0.0, g);
+            q.v[3] = vec2<f32>(g, 0.0);
+        }
+        for (var i = 0u; i < p.n; i++) {
+            let e = cross(p.v[i], p.v[(i + 1u) % p.n]);
+            let len = length(e);
+            if (len == 0.0) { continue; }
+            // Keep side * e · (u, v, 1) >= 0 at u = w.x + x / su, v = w.y + y / sv.
+            let k = e * (side / len);
+            q = clip_line2(q, vec2<f32>(-k.x / su, -k.y / sv), k.x * w.x + k.y * w.y + k.z);
+        }
+    }
     var inside = true;
     for (var i = 0u; i < q.n; i++) {
         if (any(q.v[i] < vec2<f32>(0.0)) || any(q.v[i] > vec2<f32>(g))) { inside = false; }
@@ -534,10 +584,15 @@ var<private> tri_transmit: f32 = 0.0;
 // The object is solid glass (M16, a volume): light passes two surfaces, at
 // the same angle, as far as shadows go.
 var<private> tri_volume: bool = false;
+// A triangle the cone does not see (object, triangle): a texel's own, when
+// it looks for its light below its horizon (`vc_bake`). `cover_skip` is the
+// triangle while the walk is in that object (set per mesh).
+var<private> skip_triangle: vec2<u32> = vec2<u32>(0xffffffffu);
+var<private> cover_skip: u32 = 0xffffffffu;
 
 // Rasterizes triangle `t` into `acc` if it faces the apex and may touch the cone.
 fn cover_triangle(c: Cone, acc: ptr<function, array<f32, 68>>, span: ptr<function, vec2<u32>>, t: u32) -> bool {
-    if (u32(light.params.z) == 4u) { return false; }
+    if (u32(light.params.z) == 4u || t == cover_skip) { return false; }
     let v0 = tris[3u * t].xyz;
     let v1 = tris[3u * t + 1u].xyz;
     let v2 = tris[3u * t + 2u].xyz;
@@ -670,6 +725,7 @@ fn add_mesh_coverage_if(on: bool, world_cone: Cone, m: u32, cov: ptr<function, a
     }
     let c = cone_to_object(world_cone, m);
     let range = meshes[m];
+    cover_skip = select(NONE, skip_triangle.y, m == skip_triangle.x);
     // An alpha-blended object covers by its opacity (M10 gate 16).
     tri_weight = 1.0;
     tri_transmit = 0.0;
@@ -3177,13 +3233,15 @@ struct TexelSurface {
     apex: vec3<f32>,
     normal: vec3<f32>,
     ok: bool,
+    // The triangle (its index in `tris`).
+    tri: u32,
 };
 
 fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
     if (meshes[m].x == NONE) {
         // The object's lighting level is absent (M14 gate 4).
         lit_missing = m;
-        return TexelSurface(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), false);
+        return TexelSurface(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), false, NONE);
     }
     let ch = vcharts[c];
     let uv = (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n);
@@ -3219,7 +3277,7 @@ fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
     }
     let geometric = normal_to_world(m, cross(tris[3u * t + 1u].xyz - tris[3u * t].xyz, tris[3u * t + 2u].xyz - tris[3u * t].xyz));
     let apex = pw + normalize(geometric) * surface_offset(length(pw));
-    return TexelSurface(apex, nw, best_t != NONE);
+    return TexelSurface(apex, nw, best_t != NONE, t);
 }
 
 // A baked page's texel: the job's page, and the texel's place in the chart.
@@ -3326,7 +3384,23 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // re-bakes such pages whole first) bakes as other lights do and has its
     // page re-baked whole.
     let overflow = on && on_lattice && open > 0.0 && lat < 0.0;
-    let value = hit_irradiance_rect(on && (!on_lattice || overflow), 0u, s.apex, s.normal, lights[l]);
+    // A light below the texel's horizon gives it nothing, but its ratio
+    // reaches pixels nearby that face the light (a terminator, a bump). It
+    // is the light's share seen through a horizon facing the light, past
+    // the texel's own triangle: one where only the texel's own surface
+    // turns from the light (a convex object's terminator), the shadow's
+    // where something else covers it (Sponza's lion under the wall behind
+    // it, lit before at every bump facing the sun). Static lights only (a
+    // moving light's ledger bounds texels facing it). Sponza warms 25%
+    // slower at a fixed budget; only texels within 30° of their face
+    // turning from the light would save half of that and leave faint
+    // outlines lit.
+    let toward = normalize(light_center(lights[l]) - s.apex);
+    let back = on && open <= 0.0 && mj == NONE && faces_light(lights[l], s.apex, toward);
+    let seen = select(open, unshadowed_rect(s.apex, toward, lights[l]), back);
+    skip_triangle = select(vec2<u32>(NONE), vec2<u32>(t.m, s.tri), back);
+    let value = hit_irradiance_rect(on && (!on_lattice || overflow), 0u, s.apex, select(s.normal, toward, back), lights[l]);
+    skip_triangle = vec2<u32>(NONE);
     // A window too wide for the cone (clipped, or a grazing sliver; DESIGN
     // §8 "Wide light cones"): listed for rays to the light (M5 gate 15),
     // which overwrite the cone's estimate where the pass runs.
@@ -3337,15 +3411,14 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // With `light_ratio`, the texel keeps its light's shadowed share of the
     // unshadowed light, and shading multiplies that by the unshadowed light
     // at the pixel, with the pixel's own normal (a ratio estimator). Where
-    // the light is below the texel's horizon, the texel's own light is zero
-    // whatever the ratio; a ratio of one leaves pixels nearby that face the
-    // light unshadowed, as on a convex object's terminator.
-    var ratio = select(select(1.0, clamp(value / open, 0.0, 1.0), open > 0.0), 0.0, !on);
+    // the light is below the texel's horizon, the ratio is the share past
+    // the texel's own triangle (`back`), or one for a moving light.
+    var ratio = select(select(1.0, clamp(value / seen, 0.0, 1.0), seen > 0.0), 0.0, !on);
     // A cone that nothing covers sees all its light, one wholly covered
     // none: exactly, whatever the estimators' rounding at the horizon (M9
     // gate 2: so a ratio cannot drift while its guard holds).
-    if (on && open > 0.0 && last_empty) { ratio = 1.0; }
-    if (on && open > 0.0 && last_full) { ratio = 0.0; }
+    if (on && seen > 0.0 && last_empty) { ratio = 1.0; }
+    if (on && seen > 0.0 && last_full) { ratio = 0.0; }
     // A moving light's ratio within ε of 0 or 1 is that (M9 gate 2): a
     // nearly covered cone's estimate wavers by a few thousandths as its bins
     // realign, which no bound on the light's motion covers. Mixed texels'
@@ -3356,7 +3429,7 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
         if (ratio < snap) { ratio = 0.0; }
         if (ratio > 1.0 - snap) { ratio = 1.0; }
     }
-    var light_value = value;
+    var light_value = select(value, 0.0, back);
     if (on_lattice && !overflow) {
         ratio = select(select(1.0, lat, open > 0.0), 0.0, !on);
         if (on && open > 0.0 && lat_empty) { ratio = 1.0; }
@@ -6463,6 +6536,7 @@ fn mesh_fragment(world_cone: Cone, m: u32, base: u32) -> Fragment {
     frag_solid = vec2<u32>(0u);
     let c = cone_to_object(world_cone, m);
     let range = meshes[m];
+    cover_skip = select(NONE, skip_triangle.y, m == skip_triangle.x);
     // An alpha-blended object covers by its opacity (M10 gate 16).
     tri_weight = 1.0;
     tri_transmit = 0.0;

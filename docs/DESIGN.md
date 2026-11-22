@@ -1956,33 +1956,28 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-21, seventeenth session).** For a new
+**Start here (updated 2026-11-22, seventeenth session).** For a new
 conversation or after a compaction; history lives in git and
 `docs/results/`, the plan below.
 - **Now:** real-world files (item 2; the user wants game assets and complex
-  scenes tested more and made to look their best). v0.3.1 is out
-  (2026-11-22): Sponza's cutouts, glossy rays through ray queries, a tabled
-  split sum, HDR environments with the HDRI's sun as a light, sky rays
-  turned per texel, the viewer's Lighting menu. Since: sheen
-  (`KHR_materials_sheen`). Against Cycles through Blender's importer:
-  `docs/results/assets-vs-cycles.md` (`gltf_dev GD_CYCLES`; ten Khronos
-  models there).
-- **Next:** (1) the worst left in that table: ChronographWatch's metal
-  reflections, DragonAttenuation's backdrop (wall bright, floor dark),
-  Sponza's arches and lion head; thin glass in the Cycles reference
-  (ToyCar). (2) Animated characters now play under the sky and HDRIs
-  (Fox 10.9 ms, BrainStem 32.6 ms in the viewer); the movers' structure
-  was being rebuilt under a frame still tracing it (fixed). The movers'
-  top-level structure could be double-buffered instead of waited for.
-  With hardware rays off, bounce light's compute pass needs 30 buffers
-  (Metal allows 29). (3) Movers through `Renderer` in enclosed rooms (80–175 ms,
-  §3.4); bounce never settling on the million-boulder field; Bistro-class
-  scenes.
+  scenes tested more and made to look their best). v0.3.1 is out; v0.3.2
+  is prepared (`docs/RELEASE_NOTES.md`): sheen, studio lights from HDRIs,
+  animations under the sky, and sunlight through walls fixed (cones clip
+  large triangles in direction space; texels facing away trace past their
+  own triangle): Sponza against Cycles 65.4% → 46.4%. Against Cycles
+  through Blender's importer: `docs/results/assets-vs-cycles.md`
+  (`gltf_dev GD_CYCLES`; `leak_probe` checks shadows by CPU rays).
+- **Next:** (1) release v0.3.2 (dry-run `release.yml`, test the artifact,
+  tag). (2) The worst left against Cycles: Sponza's curtains and fronds
+  20–30% dark, ChronographWatch's metals, DragonAttenuation's backdrop,
+  ToyCar's red sheen and green line. (3) The movers' top-level structure
+  double-buffered; movers in enclosed rooms (§3.4); Bistro-class scenes.
 - **Pitfalls:** compare at a fixed bake budget (`GD_BUDGET`); Cycles needs
-  2,000+ samples in dark interiors; the compute path's sky is broken on
-  Sponza (near black); `movers_under_a_sky_at_a_small_budget` fails now and
-  then on lavapipe (sky guesses left once settled; not reproduced on
-  Metal); this device's GPU timestamps arrive out of order.
+  2,000+ samples in dark interiors; without ray queries Sponza's sky is
+  near black and bounce needs 30 buffers (Metal allows 29);
+  `movers_under_a_sky_at_a_small_budget` fails now and then on lavapipe
+  (sky guesses left once settled; not reproduced on Metal); this device's
+  GPU timestamps arrive out of order.
 
 - **Decided 2026-11-15 (the user): toward a full engine, in the order a
   user would hit the gaps.**

@@ -25,6 +25,17 @@ fn main() {
     if std::env::var_os("GD_NOCUT").is_some() {
         imported.scene.geometry_alpha_cutoff.clear();
     }
+    // `GD_ONLY=a,b,…`: only the instances of these geometries (a diagnostic).
+    if let Ok(v) = std::env::var("GD_ONLY") {
+        let keep: Vec<usize> = v
+            .split(',')
+            .map(|x| x.trim().parse().expect("indices"))
+            .collect();
+        imported
+            .scene
+            .instances
+            .retain(|i| keep.contains(&i.geometry));
+    }
     println!(
         "load {:.2} s: {:?}",
         t.elapsed().as_secs_f64(),

@@ -112,7 +112,8 @@ irradiance about 4; none found in two studio HDRIs or venice_sunset).
   page its noise showed as blotches on Sponza's vaults in the viewer, for
   1.1 points.
 - Left: Sponza's arches' undersides and the lion head stay brighter than
-  Cycles', curtains darker; not yet explained.
+  Cycles', curtains darker; not yet explained. (The lion and the arches:
+  sunlight through the walls, fixed 2026-11-22, below.)
 - Found: with hardware rays off (the compute path's sky cones), Sponza's
   direct sky is nearly black (0.0003 at the floor centre, with or without
   object prefiltering and with meshes combined by the maximum). Not the
@@ -233,5 +234,72 @@ ToyCar's interior is now seen through the window in both, and differs:
 its seats' sheen is pure red (`sheenColorFactor` [1, 0, 0] over a 0.15
 grey), which glTF's Charlie sheen shows red and Blender's microfibre sheen
 grey. Ours also shows a bright green line where the glass meets the
-window frame, which Cycles does not: a ray continuing behind the glass
-seems to skip the frame's lip just behind its edge and see the sky.
+window frame, which Cycles does not; not the offset of the ray behind the
+glass (0.1 mm, unchanged at 1e-7), and most likely the frame's inner lip
+seen from behind: glTF culls single-sided materials' back faces, as
+Continuum's camera rays do, and Cycles never culls them.
+
+## Sunlight through walls (Sponza, 2026-11-22)
+
+Sponza's lion head, and the edges of arches near the walls, were lit by the
+sun from behind the wall they stand against (direct sun alone: lion 0.0070,
+Cycles 0). A CPU ray from each of the lion's 317 triangles facing the sun
+(`leak_probe`) meets the wall's front: no triangle sees the sun, and none
+is blocked only by faces seen from behind. Two causes, both in the light
+cones:
+
+- **Clipping (all cones).** A wall triangle tens of metres across, a few
+  centimetres behind a receiver, reaches behind the cone's apex. Clipped
+  to the near plane (1e-4) and then projected, its corners landed millions
+  of bins from the window, and the 2D clip in f32 lost the window: the
+  isolated cone kernel let through up to 30% of the sun at the lion's
+  receivers (largest 2.2e-5 per unit radiance, open 7.6e-5). Clipping to
+  the window's pyramid in 3D first still lost about a thousandth of a
+  window, interpolating between corners metres apart to points millimetres
+  apart. Now a triangle reaching outside the window clips the window's
+  square instead, against the planes through the apex and each of its
+  edges (cross products of its corners, as in 2D homogeneous
+  rasterization, Olano and Greer 1997), wound like the projected triangle
+  (a mesh's pieces sum signed areas before the absolute value; an unwound
+  square doubled the sky's error at contacts before it was fixed). Largest
+  leak now 2e-7 there, a fully covered sun's window less its 64 bins in
+  f32 (the cache takes such a cone as dark).
+- **Texels facing away from the light (the cache).** A texel whose light
+  is below its horizon kept a shadowed share of one, so pixels nearby
+  facing the light (the lion's bumps, a terminator) were lit unshadowed:
+  with the clipping fixed, the lion with only the wall behind it still
+  showed 53% of its light. Such a texel now traces its light through a
+  horizon facing it, past its own triangle (one where only its own
+  surface turns away, as on a convex object's terminator; the shadow's
+  where anything else covers it). Static lights only. Tracing only texels
+  within 30° of edge-on saved half the cost and left faint outlines lit.
+
+Viewer's courtyard view as above (640×360, ours 2×2 supersampled, fixed
+bake budget 60,000 texels a frame; Cycles 512 samples for the direct sun,
+2,048 otherwise, the same cached renders before and after):
+
+| Sponza | Clamped RMSE, pixels off: before | After |
+|---|---|---|
+| Direct sun alone | 147.3%, 7.95% | 95.9%, 4.50% |
+| Sun and sky | 65.4%, 42.3% | 46.4%, 27.4% |
+| HDRI | 58.7%, 33.4% | 42.7%, 31.5% |
+
+Direct sun alone, linear means: lion 0.0070 → 0.0000 (Cycles 0.0000),
+far wall 0.0036 → 0.0029 (0.0028), left arch 0.00025 → 0 (0). The
+curtains and the green fronds were darker than Cycles' before and still
+are (curtain 0.0267, Cycles 0.0340; fronds 0.0269, 0.0399).
+
+- Cost: warm-up at the fixed budget, sun, sky and bounce, 8.11 / 8.10 s →
+  8.61 / 8.54 s (+6%, two runs each, interleaved); sun alone 2.34 / 2.34 →
+  2.57 / 2.55 s (+9.5%). Frame times unchanged (33 ms, 16 ms).
+- Unchanged elsewhere: the per-pixel golden image within 1e-4 (relative
+  RMSE, no pixel off), light cones against the CPU reference 3.3e-6 of
+  the light's weight; with boxes touching the receivers 3.3e-4 worst
+  (before 5.1e-4). The sky at ground pixels near objects, against 2,304
+  cosine-weighted CPU rays each: mean error 0.0079, worst 0.057, as before.
+- Tests: `a_large_wall_shadows_receivers_close_to_it` (the cone kernel;
+  7.6% before, 0.17% now, bar 0.5%) and
+  `a_wall_shadows_a_sphere_close_to_it` (a settled cache; 2% of the lit
+  sphere's brightest before, 0 now).
+- Tried and dropped: back faces of open meshes occluding (meshes with
+  unpaired edges flagged at build time): no change on Sponza.

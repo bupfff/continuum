@@ -329,6 +329,139 @@ fn cones_match_the_cpu() {
     assert!(worst <= 1e-4, "GPU differs from the CPU by {worst:.2e}");
 }
 
+/// A wall of two 20 m triangles, in the plane x = 0 facing +x.
+fn wall() -> Vec<[Vec3; 3]> {
+    let c = [(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-10.0, 10.0)]
+        .map(|(y, z)| Vec3::new(0.0, y, z));
+    vec![[c[0], c[1], c[2]], [c[0], c[2], c[3]]]
+}
+
+/// The sun behind `wall()`, high and to one side.
+fn sun_behind_the_wall() -> Light {
+    Light::sun(
+        Vec3::ZERO,
+        DVec3::new(-0.6, -0.3, 0.75),
+        900.0,
+        Vec3::splat(3.0),
+    )
+}
+
+/// A large wall shadows receivers close in front of it from a sun behind
+/// it: none sees more than 0.5% of its unshadowed light (a sun's window
+/// wholly covered still leaves about 0.2%, the window's weight less its 64
+/// bins' in f32; the cache takes such a cone as dark). Its triangles reach
+/// behind the receivers' cones, and clipped to the cones' near plane alone
+/// they projected millions of bins away, where f32 lost the window: 7.6%
+/// here before, 30% on Sponza's lion.
+#[test]
+fn a_large_wall_shadows_receivers_close_to_it() {
+    let light = sun_behind_the_wall().as_rect().expect("a rectangle");
+    let receivers: Vec<(Vec3, Vec3)> = (0..400)
+        .map(|k| {
+            let (i, j) = (k % 20, k / 20);
+            let p = Vec3::new(0.02 + 0.03 * i as f32, -1.0 + 0.1 * j as f32, 0.5);
+            // Normals between straight up and toward the wall.
+            let n = Vec3::new(-0.05 * i as f32, 0.0, 1.0).normalize();
+            (p, n)
+        })
+        .collect();
+    let kernel = kernel();
+    let (open, _) = kernel.irradiance(&receivers, light, &[], 1);
+    let (shadowed, _) = kernel.irradiance(&receivers, light, &[wall()], 1);
+    let worst = open
+        .iter()
+        .zip(&shadowed)
+        .map(|(o, s)| s / o.max(1e-12))
+        .fold(0.0f32, f32::max);
+    eprintln!("worst receiver sees {:.2e} of its light", worst);
+    assert!(
+        open.iter().all(|&o| o > 0.0),
+        "every receiver faces the sun"
+    );
+    assert!(worst <= 5e-3, "a receiver sees {worst:.2e} of its light");
+}
+
+/// A smooth sphere close in front of the wall, in its shadow, stays dark
+/// once the cache settles: its texels past the terminator (the sun below
+/// their horizon) take their light's share past their own triangle, not
+/// one, so pixels nearby that face the sun stay shadowed (2% of the lit
+/// sphere's brightest before). Without the wall it is lit, as a reference.
+#[test]
+fn a_wall_shadows_a_sphere_close_to_it() {
+    let sphere = Surface::parametric(32, 16, |u, v| {
+        let (theta, phi) = (u * std::f32::consts::TAU, (v - 0.5) * std::f32::consts::PI);
+        Vec3::new(theta.cos() * phi.cos(), theta.sin() * phi.cos(), phi.sin()) * 0.3
+    });
+    let at = |geometry| Instance {
+        geometry,
+        rotation: Mat3::IDENTITY,
+        scale: 1.0,
+        position: if geometry == 0 {
+            DVec3::new(0.4, 0.0, 0.0)
+        } else {
+            DVec3::ZERO
+        },
+        albedo: Vec3::splat(0.8),
+    };
+    let camera = Camera {
+        eye: Vec3::new(3.0, 1.0, 0.8),
+        target: Vec3::new(0.4, 0.0, 0.0),
+        vertical_fov_degrees: 30.0,
+    };
+    let brightest = |with_wall: bool| {
+        let scene = InstancedScene {
+            geometries: vec![sphere.clone(), Surface::from_triangles(wall())],
+            instances: if with_wall {
+                vec![at(0), at(1)]
+            } else {
+                vec![at(0)]
+            },
+            geometry_textures: vec![None, None],
+            ..Default::default()
+        };
+        let mut r = Renderer::new(
+            kernel(),
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            (WIDTH, HEIGHT),
+            &scene,
+            DVec3::ZERO,
+            &[sun_behind_the_wall()],
+            RendererOptions {
+                cache_options: CacheOptions {
+                    frame_target_ms: 0.0,
+                    pages: 1 << 15,
+                    ..Default::default()
+                },
+                bounce: false,
+                ..Default::default()
+            },
+        );
+        let view = target(&r);
+        let mut frames = 0;
+        while frames < 2_000 && !r.is_settled(32) {
+            r.render(camera, &view);
+            frames += 1;
+        }
+        let image = r.read_colors();
+        dump(
+            if with_wall {
+                "sphere_by_a_wall"
+            } else {
+                "sphere_alone"
+            },
+            &image,
+        );
+        image.iter().flatten().fold(0.0f32, |a, &b| a.max(b))
+    };
+    let (lit, shadowed) = (brightest(false), brightest(true));
+    eprintln!("brightest pixel: {lit:.3} alone, {shadowed:.2e} by the wall");
+    assert!(lit > 0.1, "the sphere alone is lit: {lit}");
+    assert!(
+        shadowed <= 1e-3 * lit,
+        "the shadowed sphere shows {shadowed:.2e}"
+    );
+}
+
 fn golden_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/per_pixel.f32")
 }
