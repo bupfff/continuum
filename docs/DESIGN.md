@@ -1960,19 +1960,19 @@ estimates, and gates fail often, so treat them as ranges.
 conversation or after a compaction; history lives in git and
 `docs/results/`, the plan below.
 - **Now:** real-world files (item 2; the user wants game assets and complex
-  scenes tested more and made to look their best). Done 2026-11-21:
-  Sponza's cutouts (24.9M → 3.0M triangles, 6.7 → 1.3 GB, built in 8.7 s),
-  glossy rays through ray queries (frames 116 → 36 ms), a tabled split sum,
-  HDR environments (RGBM image, the HDRI's sun made a light), rough
-  reflections from cached light, sky rays turned per texel, and the
-  viewer's Lighting menu with bundled HDRIs. Against Cycles through
-  Blender's importer: `docs/results/assets-vs-cycles.md` (`gltf_dev
-  GD_CYCLES`).
-- **Next:** (1) cut v0.3.1 (dry-run the workflow first). (2) More assets
-  (Bistro, the Khronos showcase), each against Cycles; thin glass in the
-  Cycles reference (ToyCar); Sponza's arches and lion head too bright.
-  (3) Movers through `Renderer` in enclosed rooms (80–175 ms, §3.4), bounce
-  never settling on the million-boulder field.
+  scenes tested more and made to look their best). v0.3.1 is out
+  (2026-11-22): Sponza's cutouts, glossy rays through ray queries, a tabled
+  split sum, HDR environments with the HDRI's sun as a light, sky rays
+  turned per texel, the viewer's Lighting menu. Since: sheen
+  (`KHR_materials_sheen`). Against Cycles through Blender's importer:
+  `docs/results/assets-vs-cycles.md` (`gltf_dev GD_CYCLES`; ten Khronos
+  models there).
+- **Next:** (1) the worst left in that table: ChronographWatch's metal
+  reflections, DragonAttenuation's backdrop (wall bright, floor dark),
+  Sponza's arches and lion head; thin glass in the Cycles reference
+  (ToyCar). (2) Bistro-class scenes. (3) Movers through `Renderer` in
+  enclosed rooms (80–175 ms, §3.4); bounce never settling on the
+  million-boulder field.
 - **Pitfalls:** compare at a fixed bake budget (`GD_BUDGET`); Cycles needs
   2,000+ samples in dark interiors; the compute path's sky is broken on
   Sponza (near black); `movers_under_a_sky_at_a_small_budget` fails now and
