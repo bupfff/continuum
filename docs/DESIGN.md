@@ -1972,8 +1972,12 @@ For a new conversation or after a compaction; history lives in git and
   (b) BrainStem in motion: 7.3% of pixels without a page (pages out of view
   invalidated, the budget at its floor); (c) Sponza: 22–28 ms settled
   frames (anti-aliasing's passes about 13 ms: Sponza has 13% edge pixels),
-  30% from Cycles (regional errors in sky and bounce light). Measure speed
-  side by side (`scorecard::speed_pair`): heat moves single runs 10–25%.
+  30% from Cycles (regional errors in sky and bounce light); (d) the field's
+  bounce light never settles: ground samples' bounce rays hit distant
+  boulders, each with pages of its own (23k resident at 3 s, 77k at 35 s,
+  nearly every bounce sample incomplete); needs a design for far, small
+  hits (an aggregate per object or cluster) and a gate. Measure speed side
+  by side (`scorecard::speed_pair`): heat moves single runs 10–25%.
 - **Pitfalls:** a GPU hang logs the user out (WindowServer's 40 s
   watchdog): `APPEND_PAGES` 16,384 and building deforming meshes'
   structures in one submission each did (patches in
