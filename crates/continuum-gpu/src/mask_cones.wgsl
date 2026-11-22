@@ -5189,7 +5189,9 @@ fn vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     var missing = 0.0;
     if (job.listed && job.surf.ok) {
         for (var b = li; b < IND_BINS; b += 64u) {
-            let dir = turned_bin(job.surf.normal, b, hemicube_spin(vec3<u32>(job.e.x, job.e.y, job.e.z ^ (job.k * 0x9E3779B1u))));
+            // Not turned per sample (as the sky's rays are): nine samples a
+            // page made the turns' noise blotches on Sponza's vaults.
+            let dir = turned_bin(job.surf.normal, b, 0.0);
             lit_missing = NONE;
             let hit = primary_hit(job.surf.apex, dir);
             // A ray that met an absent lighting level (M14 gate 8): its bin

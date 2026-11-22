@@ -1350,7 +1350,9 @@ fn hw_vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invo
     var missing = 0.0;
     if (job.listed && job.surf.ok) {
         for (var b = li; b < IND_BINS; b += 64u) {
-            let dir = turned_bin(job.surf.normal, b, hemicube_spin(vec3<u32>(job.e.x, job.e.y, job.e.z ^ (job.k * 0x9E3779B1u))));
+            // Not turned per sample (as the sky's rays are): nine samples a
+            // page made the turns' noise blotches on Sponza's vaults.
+            let dir = turned_bin(job.surf.normal, b, 0.0);
             let hit = hw_bounce_hit(job.surf.apex, dir, job.e.x);
             missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum, job.bounces);
         }
@@ -1387,7 +1389,9 @@ fn hw_vc_bake_indirect_movers(@builtin(workgroup_id) wg: vec3<u32>, @builtin(loc
     var missing = 0.0;
     if (job.listed && job.surf.ok) {
         for (var b = li; b < IND_BINS; b += 64u) {
-            let dir = turned_bin(job.surf.normal, b, hemicube_spin(vec3<u32>(job.e.x, job.e.y, job.e.z ^ (job.k * 0x9E3779B1u))));
+            // Not turned per sample (as the sky's rays are): nine samples a
+            // page made the turns' noise blotches on Sponza's vaults.
+            let dir = turned_bin(job.surf.normal, b, 0.0);
             let hit = hw_bounce_hit_movers(job.surf.apex, dir, job.e.x);
             missing += bounce_gather(job.surf.apex, dir, hit, hemicube_weight(b), &sum, job.bounces);
         }

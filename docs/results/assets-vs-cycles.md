@@ -98,7 +98,7 @@ irradiance about 4; none found in two studio HDRIs or venice_sunset).
 | Before | 71.6%, 58.6% | 69.5%, 51.2% |
 | Rough reflections blended | 68.7%, 55.7% | |
 | Sky rays turned per texel | 65.4%, 42.3% | 59.0%, 33.3% |
-| Bounce rays turned per sample too | 65.1%, 41.2% | |
+| Bounce rays turned per sample too (reverted) | 65.1%, 41.2% | |
 
 - The bright strip down Sponza's floor (one tile wide, sharp-edged) was
   the hardware sky bake's 192 fixed directions (hemicube bin centres, the
@@ -108,6 +108,9 @@ irradiance about 4; none found in two studio HDRIs or venice_sunset).
   against Cycles' 0.0165 and 0.0145 (Cycles' include direct specular).
   Each texel now turns the hemicube about its normal by an angle of its
   own (every bin keeps its weight).
+- Turning bounce rays per sample too was reverted: with nine samples a
+  page its noise showed as blotches on Sponza's vaults in the viewer, for
+  1.1 points.
 - Left: Sponza's arches' undersides and the lion head stay brighter than
   Cycles', curtains darker; not yet explained.
 - Found: with hardware rays off (the compute path's sky cones), Sponza's

@@ -81,8 +81,12 @@ struct World {
     /// Add the scene's sky (instanced scenes only).
     sky: bool,
     /// A sky that varies with direction, in place of the uniform one
-    /// (instanced scenes only).
+    /// (instanced scenes only): set from the lighting chosen.
     environment: Option<Environment>,
+    /// `--env`'s environment, if given (`Lighting::Custom`).
+    custom_environment: Option<Environment>,
+    /// The HDR file chosen in the panel, loaded (`Lighting::File`).
+    file_environment: Option<(PathBuf, Environment)>,
     /// A glTF file's first animation, played through movable instances.
     animations: Option<continuum_gltf::Animations>,
     /// The display's exposure (instanced scenes): `--exposure`, `[` and `]`.
@@ -93,7 +97,13 @@ struct World {
 /// `origin`.
 struct Instanced {
     scene: InstancedScene,
+    /// The file's lights, or the sun added for it (`sun_added`).
     lights: Vec<Light>,
+    /// Whether `lights` is a sun the viewer added (none in the file): an
+    /// environment image lights the scene in its place.
+    sun_added: bool,
+    /// The scene's radius (half its bounds' diagonal).
+    radius: f64,
     sky: Vec3,
     origin: DVec3,
     /// What the scene holds, for the startup line.
@@ -169,6 +179,8 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            custom_environment: None,
+            file_environment: None,
             animations: None,
             exposure: 1.0,
         }
@@ -181,12 +193,51 @@ impl World {
         self.name != "field"
     }
 
-    /// Whether the scene looks best with its sky: outdoor scenes (the field,
-    /// a glTF file without animations, which do not play with a sky yet).
-    fn sky_by_default(&self) -> bool {
-        self.instanced.is_some()
-            && self.showcase.is_none()
-            && self.animations.as_ref().is_none_or(|a| a.list.is_empty())
+    /// The lighting the scene looks best in: the field under its sun and
+    /// sky; a glTF file with lights of its own under them and the sky; an
+    /// object (under 10 m across) in the studio, a larger scene outdoors;
+    /// an animated file under the sun alone (animations do not play with a
+    /// sky yet).
+    fn lighting_by_default(&self) -> Lighting {
+        let Some(scene) = &self.instanced else {
+            return Lighting::Sun;
+        };
+        if self.name != "glTF" {
+            return Lighting::SunAndSky;
+        }
+        if self.animations.as_ref().is_some_and(|a| !a.list.is_empty()) {
+            Lighting::Sun
+        } else if !scene.sun_added {
+            Lighting::SunAndSky
+        } else if scene.radius < 5.0 {
+            Lighting::Studio
+        } else {
+            Lighting::Outdoor
+        }
+    }
+
+    /// Sets the sky and environment for `lighting` (falling back to the
+    /// sun and sky when its image is missing).
+    fn apply_lighting(&mut self, lighting: &Lighting) {
+        let decode = |bytes: &[u8]| continuum_gltf::decode_environment(bytes).ok();
+        let (sky, environment) = match lighting {
+            Lighting::Sun => (false, None),
+            Lighting::SunAndSky => (true, None),
+            Lighting::Studio => (false, decode(STUDIO_HDR)),
+            Lighting::Outdoor => (false, decode(OUTDOOR_HDR)),
+            Lighting::File(path) => (
+                false,
+                self.file_environment
+                    .as_ref()
+                    .filter(|(p, _)| p == path)
+                    .map(|(_, e)| e.clone()),
+            ),
+            Lighting::Custom => (false, self.custom_environment.clone()),
+        };
+        let fallback =
+            environment.is_none() && !matches!(lighting, Lighting::Sun | Lighting::SunAndSky);
+        self.sky = sky || fallback;
+        self.environment = environment;
     }
 
     fn field(boulders: usize) -> World {
@@ -213,6 +264,8 @@ impl World {
             showcase: None,
             instanced: Some(Instanced {
                 lights: vec![Light::white(light, field.radiance)],
+                sun_added: true,
+                radius: 1e3,
                 // `--sky`: a blue-white sky (M5), slow to warm up in the cache
                 // (M5 gate 5).
                 sky: field.sky(),
@@ -224,6 +277,8 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            custom_environment: None,
+            file_environment: None,
             animations: None,
             exposure: 1.0,
         }
@@ -311,11 +366,28 @@ impl World {
                 (c.target - origin).as_vec3(),
                 c.vertical_fov_degrees,
             ),
-            None => {
-                let (az, el) = (225f64.to_radians(), 25f64.to_radians());
-                let dir = DVec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
-                ((dir * radius * 2.2).as_vec3(), Vec3::ZERO, 40.0)
-            }
+            None => match (radius > 8.0)
+                .then(|| floor_below_centre(&scene, origin))
+                .flatten()
+            {
+                // A large scene (a building, a street) from inside: eye
+                // height over the floor under its centre, looking along
+                // its longer side.
+                Some(floor) => {
+                    let eye = Vec3::new(0.0, 0.0, floor + 1.7);
+                    let along = if hi.x - lo.x >= hi.y - lo.y {
+                        Vec3::X
+                    } else {
+                        Vec3::Y
+                    };
+                    (eye, eye - along * 10.0 + Vec3::Z * 0.8, 60.0)
+                }
+                None => {
+                    let (az, el) = (225f64.to_radians(), 25f64.to_radians());
+                    let dir = DVec3::new(el.cos() * az.cos(), el.cos() * az.sin(), el.sin());
+                    ((dir * radius * 2.2).as_vec3(), Vec3::ZERO, 40.0)
+                }
+            },
         };
         // Irradiance π on a surface facing the sun: white at albedo 1.
         let (az, el) = (200f64.to_radians(), 30f64.to_radians());
@@ -326,7 +398,8 @@ impl World {
             radius * 50.0,
             Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
         );
-        if lights.is_empty() {
+        let sun_added = lights.is_empty();
+        if sun_added {
             lights.push(sun);
         } else {
             println!("Lit by the file's {} lights.", lights.len());
@@ -352,6 +425,8 @@ impl World {
             instanced: Some(Instanced {
                 scene,
                 lights,
+                sun_added,
+                radius,
                 sky: Vec3::new(0.6, 0.75, 1.0) * 0.3,
                 origin,
                 summary: format!("{triangles} triangles"),
@@ -360,6 +435,8 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            custom_environment: None,
+            file_environment: None,
             animations,
             exposure: 1.0,
         })
@@ -397,6 +474,8 @@ impl World {
             cache: true,
             sky: false,
             environment: None,
+            custom_environment: None,
+            file_environment: None,
             animations: None,
             exposure: 1.0,
         }
@@ -484,11 +563,11 @@ struct Ui {
 
 /// What the panel changes. Bounce light, anti-aliasing, the sky and the
 /// render scale rebuild the renderer; the rest apply at once.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Settings {
     bounce: bool,
     anti_aliasing: bool,
-    sky: bool,
+    lighting: Lighting,
     scale: u32,
     bloom: bool,
     tone_map: continuum_gpu::ToneMap,
@@ -497,10 +576,53 @@ struct Settings {
 
 impl Settings {
     /// The settings a renderer is built with.
-    fn build_key(&self) -> (bool, bool, bool, u32) {
-        (self.bounce, self.anti_aliasing, self.sky, self.scale)
+    fn build_key(&self) -> (bool, bool, Lighting, u32) {
+        (
+            self.bounce,
+            self.anti_aliasing,
+            self.lighting.clone(),
+            self.scale,
+        )
     }
 }
+
+/// How an instanced scene is lit: its lights (the file's, or a sun), with
+/// or without the uniform sky, or an environment image (an HDRI; its sun,
+/// if it has one, becomes a light: `RendererOptions::sun_from_environment`)
+/// with the file's own lights.
+#[derive(Clone, Debug, PartialEq)]
+enum Lighting {
+    Sun,
+    SunAndSky,
+    /// The bundled studio HDRI (Poly Haven's Studio Small 09, CC0).
+    Studio,
+    /// The bundled outdoor HDRI (Poly Haven's Kloofendal 48d Partly
+    /// Cloudy, CC0).
+    Outdoor,
+    /// An HDR file chosen in the panel.
+    File(PathBuf),
+    /// `--env`'s.
+    Custom,
+}
+
+impl Lighting {
+    fn name(&self) -> String {
+        match self {
+            Lighting::Sun => "Sun".into(),
+            Lighting::SunAndSky => "Sun and sky".into(),
+            Lighting::Studio => "Studio (HDRI)".into(),
+            Lighting::Outdoor => "Outdoor (HDRI)".into(),
+            Lighting::File(p) => p
+                .file_name()
+                .map_or("HDR file".into(), |n| n.to_string_lossy().into_owned()),
+            Lighting::Custom => "--env".into(),
+        }
+    }
+}
+
+const STUDIO_HDR: &[u8] = include_bytes!("../assets/hdri/studio_small_09_1k.hdr");
+const OUTDOOR_HDR: &[u8] =
+    include_bytes!("../assets/hdri/kloofendal_48d_partly_cloudy_puresky_1k.hdr");
 
 /// A scene to show.
 #[derive(Clone)]
@@ -632,7 +754,7 @@ struct App {
     /// Boulders for the field's button.
     boulders: usize,
     /// The settings the renderer was built with.
-    built: (bool, bool, bool, u32),
+    built: (bool, bool, Lighting, u32),
     /// Whether `--scale` was given (else Retina displays render at half).
     scale_given: bool,
     /// `--screenshot`: the last frame's image, written as a PNG.
@@ -725,9 +847,16 @@ impl App {
             gpu.adapter_name.clone(),
         );
         let config = &gpu.config;
-        world.sky = settings.sky;
+        world.apply_lighting(&settings.lighting);
         world.scale = settings.scale;
         if let Some(scene) = &world.instanced {
+            // Under an environment image the sun the viewer added gives way
+            // to the image's own (the renderer takes it out of the image).
+            let lights: Vec<Light> = if world.environment.is_some() && scene.sun_added {
+                Vec::new()
+            } else {
+                scene.lights.clone()
+            };
             let start = Instant::now();
             let options = RendererOptions {
                 scale: world.scale,
@@ -750,7 +879,7 @@ impl App {
                 (config.width, config.height),
                 &scene.scene,
                 scene.origin,
-                &scene.lights,
+                &lights,
                 options,
             );
             renderer.set_exposure(world.exposure);
@@ -825,7 +954,7 @@ impl App {
                 Ok(world) => {
                     // Free the old scene's GPU memory before the new one's.
                     gpu.backend = None;
-                    self.settings.sky = world.sky_by_default();
+                    self.settings.lighting = world.lighting_by_default();
                     self.settings.bounce = world.bounce_by_default();
                     self.world = world;
                     self.world.exposure = 1.0;
@@ -926,11 +1055,36 @@ impl App {
                         if !instanced {
                             ui.small("These apply to the boulder field and glTF scenes.");
                         }
+                        let mut open_hdr = false;
                         ui.add_enabled_ui(instanced, |ui| {
+                            let mut choices = vec![
+                                Lighting::Sun,
+                                Lighting::SunAndSky,
+                                Lighting::Studio,
+                                Lighting::Outdoor,
+                            ];
+                            if let Some((path, _)) = &self.world.file_environment {
+                                choices.push(Lighting::File(path.clone()));
+                            }
+                            if self.world.custom_environment.is_some() {
+                                choices.push(Lighting::Custom);
+                            }
                             let s = &mut self.settings;
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_label("Lighting")
+                                    .selected_text(s.lighting.name())
+                                    .show_ui(ui, |ui| {
+                                        for c in choices {
+                                            let name = c.name();
+                                            ui.selectable_value(&mut s.lighting, c, name);
+                                        }
+                                    });
+                                if ui.button("Open HDR…").clicked() {
+                                    open_hdr = true;
+                                }
+                            });
                             ui.checkbox(&mut s.bounce, "Bounce light");
                             ui.checkbox(&mut s.anti_aliasing, "Anti-aliasing");
-                            ui.checkbox(&mut s.sky, "Sky");
                             egui::ComboBox::from_label("Render scale")
                                 .selected_text(format!("1/{}", s.scale))
                                 .show_ui(ui, |ui| {
@@ -967,6 +1121,22 @@ impl App {
                             }
                         });
                         ui.checkbox(&mut self.settings.vsync, "Vsync");
+                        if open_hdr
+                            && let Some(path) = rfd::FileDialog::new()
+                                .add_filter("HDR image", &["hdr", "png"])
+                                .pick_file()
+                        {
+                            match continuum_gltf::load_environment(&path) {
+                                Ok(env) => {
+                                    self.world.file_environment = Some((path.clone(), env));
+                                    self.settings.lighting = Lighting::File(path);
+                                }
+                                Err(e) => {
+                                    self.message =
+                                        Some(format!("Could not load {}: {e}", path.display()));
+                                }
+                            }
+                        }
                     });
                 egui::CollapsingHeader::new("Controls").show(ui, |ui| {
                     ui.small("W A S D: move · Q / E: down, up · Shift: faster");
@@ -1501,18 +1671,26 @@ fn main() {
         let strength: f32 = arg("--env-strength")
             .and_then(|k| k.parse().ok())
             .unwrap_or(1.0);
-        world.environment = Some(load_environment(&world, &spec, strength));
+        world.custom_environment = Some(load_environment(&world, &spec, strength));
     }
     let settings = Settings {
         bounce: !has("--no-bounce") && (has("--bounce") || world.bounce_by_default()),
         anti_aliasing: !has("--no-aa"),
-        sky: has("--sky") || (!has("--no-sky") && world.sky_by_default()),
+        lighting: if world.custom_environment.is_some() {
+            Lighting::Custom
+        } else if has("--sky") {
+            Lighting::SunAndSky
+        } else if has("--no-sky") {
+            Lighting::Sun
+        } else {
+            world.lighting_by_default()
+        },
         scale: arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1),
         bloom: true,
         tone_map: continuum_gpu::ToneMap::PbrNeutral,
         vsync: has("--vsync"),
     };
-    world.sky = settings.sky;
+    world.apply_lighting(&settings.lighting);
     if let Some(a) = &world.animations {
         let moving = world.animated_instances().len();
         let deforming = world.deforming_geometries().len();
@@ -1540,6 +1718,7 @@ fn main() {
     }
     let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
     let camera = FlyCamera::looking_at(world.start.0, world.start.1);
+    let built = settings.build_key();
     let mut app = App {
         gpu: None,
         world,
@@ -1562,10 +1741,43 @@ fn main() {
         message,
         show_panel: !has("--no-panel"),
         boulders,
-        built: settings.build_key(),
+        built,
         scale_given: arg("--scale").is_some(),
         screenshot: arg("--screenshot").map(PathBuf::from),
     };
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.run_app(&mut app).expect("event loop");
+}
+
+/// The height (relative to `origin`, the scene's centre) of the highest
+/// upward-facing surface straight below the centre, if any: where to stand
+/// (the ground added under the scene is the lowest).
+fn floor_below_centre(scene: &InstancedScene, origin: DVec3) -> Option<f32> {
+    let mut highest: Option<f32> = None;
+    for i in &scene.instances {
+        let offset = (i.position - origin).as_vec3();
+        for t in &scene.geometries[i.geometry].triangles {
+            let p = t.map(|v| i.rotation * (v * i.scale) + offset);
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            if n.z <= 0.0 {
+                continue;
+            }
+            // Barycentric coordinates of (0, 0) in the triangle's xy
+            // projection.
+            let d = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[2].x - p[0].x) * (p[1].y - p[0].y);
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            let u = ((0.0 - p[0].x) * (p[2].y - p[0].y) - (p[2].x - p[0].x) * (0.0 - p[0].y)) / d;
+            let v = ((p[1].x - p[0].x) * (0.0 - p[0].y) - (0.0 - p[0].x) * (p[1].y - p[0].y)) / d;
+            if u < 0.0 || v < 0.0 || u + v > 1.0 {
+                continue;
+            }
+            let z = p[0].z + u * (p[1].z - p[0].z) + v * (p[2].z - p[0].z);
+            if z < 0.0 && highest.is_none_or(|h| z > h) {
+                highest = Some(z);
+            }
+        }
+    }
+    highest
 }
