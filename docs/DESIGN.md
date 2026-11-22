@@ -1965,14 +1965,16 @@ For a new conversation or after a compaction; history lives in git and
   suns 10⁴ radii away (`SUN_RADII`; Fox 8.7% → 2.1% from Cycles), movers'
   stale texels by one atomic add (159 → 20.5 ms a moving frame),
   `sky_lag` on by default (Fox 14.7 → 8.8 ms, BrainStem 49 → 31 ms).
-- **Next, worst rows first:** (a) the closed room 46.6% dark (one bounce;
-  4 bounces give 7.7%, but Sponza then never settles in 60 s and frames
-  +20%: make settling cheaper, then bounces by default); (b) BrainStem in
-  motion: deferred pages took its pixels without a page from 34% to 7.3%;
-  the rest come from pages out of view invalidated while the time budget
-  sits at its floor (31 ms frames); (c) Sponza: 22.4 ms settled frames after fewer mirror rays
-  (from 31); anti-aliasing's passes still about 13 ms of it; 30% from
-  Cycles (regional, both direct sky and bounce).
+- **Next, worst rows first:** (a) the closed room 46.6% dark: two
+  bounces with the rest estimated (`bounces` 2, `bounce_rest`) bring it to
+  7.68% at no cost a frame (M22 G6–G7), but Sponza then settles 1.5–2.0×
+  slower (G7 failed at 2.02×): make the second level cheaper (the tail test
+  for hits without samples) or Sponza's frame faster, then a new gate;
+  (b) BrainStem in motion: 7.3% of pixels without a page (pages out of view
+  invalidated, the budget at its floor); (c) Sponza: 22–28 ms settled
+  frames (anti-aliasing's passes about 13 ms), 30% from Cycles (regional).
+  Measure speed side by side (`scorecard::speed_pair`): heat moves single
+  runs 10–25%.
 - **Pitfalls:** a GPU hang logs the user out (WindowServer's 40 s
   watchdog): `APPEND_PAGES` 16,384 and building deforming meshes'
   structures in one submission each did (patches in
