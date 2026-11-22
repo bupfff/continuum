@@ -323,6 +323,29 @@ impl Renderer {
         if options.fog.is_some() {
             cache_options.fog = options.fog;
         }
+        // Bounces 0 (the default): two, with the rest estimated, where only
+        // local lights light the scene (bounce light is most of what is not
+        // direct there: a closed room 46.55% → 7.68% from Cycles, M22 gate
+        // 8); one outdoors, under a sky, an environment or a distant light
+        // (a sun more than 100 scene radii away), where more cost settling
+        // and gained nothing measured (Sponza under a sun alone: 69.6% →
+        // 70.3% from Cycles, settling 1.78× slower).
+        if cache_options.bounces == 0 {
+            let outdoors =
+                environment.is_some() || options.sky.is_some_and(|s| s != Vec3::ZERO) || {
+                    let (lo, hi) = scene_bounds(scene, origin);
+                    let center = (lo + hi) * 0.5;
+                    let radius = ((hi - lo).length() * 0.5).max(1e-3);
+                    all_lights.iter().any(|l| match l.emitter {
+                        crate::Emitter::Rect(r) => {
+                            (r.corner + (r.edge_u + r.edge_v) * 0.5 - center).length()
+                                > 100.0 * radius
+                        }
+                        crate::Emitter::Sphere(_) => false,
+                    })
+                };
+            cache_options.bounces = if outdoors { 1 } else { 2 };
+        }
         if sub_pixel {
             kernel.set_prefilter(8.0);
             kernel.set_hardware_rays(true);

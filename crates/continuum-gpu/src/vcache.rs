@@ -227,10 +227,11 @@ pub struct CacheOptions {
     /// pages whose hits hold too few re-bake their samples, and the pages
     /// hit are asked for with samples of their own, one bounce fewer, down to
     /// pages with none. 0 (the default): 2, with the orders past them
-    /// estimated (`bounce_rest`), where no sky or environment lights the
-    /// scene (its bounce light is all of its light but the lights'; a closed
-    /// room went from 46.55% to 7.68% from Cycles, M22 gate 8), and 1 under
-    /// a sky (direct light at hits only).
+    /// estimated (`bounce_rest`), where only local lights light the scene
+    /// (a closed room went from 46.55% to 7.68% from Cycles, M22 gate 8),
+    /// and 1 outdoors: under a sky or an environment, or (through
+    /// `Renderer`) a distant light such as a sun, where more bounces cost
+    /// settling and gained nothing measured.
     pub bounces: u32,
     /// Moving lights (M9 gate 2): the largest change of a texel's ratio
     /// (its light's shadowed share) the cache may show before re-baking it.

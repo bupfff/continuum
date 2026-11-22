@@ -55,3 +55,17 @@ Notes:
   blur, whose scenes have no sky) now set `bounces: 1`.
 - Sponza and the field under a sky would gain from more bounces in
   accuracy (the field 1.68% → 1.31%) but settle slower; left for later.
+
+## After the gate: outdoors under a sun alone (2026-11-22)
+
+The rule as gated gave two bounces to any scene without a sky or
+environment, so also to one lit by a sun alone (the viewer's "Sun"
+lighting). Sponza under the sun alone, development (`gltf_dev`, a fixed
+budget against Cycles at 4 bounces, 4,096 samples): one bounce 69.61%,
+two with the rest 70.28% from Cycles; settling (time budget) 24.2 s against
+42.9 s (1.78×), frames equal. So `Renderer` now gives two bounces only
+where local lights alone light the scene: no sky, environment, or light
+more than 100 scene radii away. Every scene measured in the gate keeps
+its configuration (the room and the movers are lit by a panel inside;
+the others have a sky); Sponza under a sun alone is back to one bounce
+(settled at frame 711, 69,908 pages, as before).
