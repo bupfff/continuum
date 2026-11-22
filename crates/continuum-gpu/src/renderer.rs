@@ -235,7 +235,7 @@ impl Renderer {
                     all_lights.push(Light::distant(
                         (lo + hi) * 0.5,
                         l.toward.as_dvec3(),
-                        50.0 * radius,
+                        crate::SUN_RADII * radius,
                         l.solid_angle as f64,
                         l.irradiance,
                     ));

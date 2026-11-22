@@ -48,7 +48,7 @@ fn main() {
     let lights = [Light::sun(
         Vec3::ZERO,
         toward,
-        radius * 50.0,
+        radius * continuum_gpu::SUN_RADII,
         Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
     )];
     let (az, el) = (225f64.to_radians(), 25f64.to_radians());

@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lights.push(Light::sun(
             Vec3::ZERO,
             toward,
-            radius * 50.0,
+            radius * continuum_gpu::SUN_RADII,
             Vec3::new(1.0, 0.92, 0.8) * std::f32::consts::PI,
         ));
     }

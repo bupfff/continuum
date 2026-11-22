@@ -93,7 +93,7 @@ fn main() {
         lights.push(Light::sun(
             Vec3::ZERO,
             toward,
-            radius * 50.0,
+            radius * continuum_gpu::SUN_RADII,
             Vec3::splat(3.0),
         ));
         suns.push((toward.normalize().as_vec3(), Vec3::splat(3.0)));

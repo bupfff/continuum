@@ -349,3 +349,11 @@ planes under the outdoor HDRI they are 4–9% bright at roughness 0.6 and
 0.94; at 0.3 one view was 44% dark where it mirrors the HDRI's sun, left
 in the environment for that test (`GD_ENV_LIGHTS=0`; by default the sun
 is a light).
+
+## Suns 10⁴ radii away (2026-11-22)
+
+Every sun above stood 50 scene radii away, a square whose irradiance falls
+off across the scene; they now stand `continuum_gpu::SUN_RADII` (10⁴)
+radii away and light as Cycles' sun at infinity does (Fox over the
+viewer's ground 8.73% → 2.13%, BrainStem 9.47% → 3.22%; Sponza and
+DamagedHelmet within 0.2 points). Details: `basics-scorecard.md`.

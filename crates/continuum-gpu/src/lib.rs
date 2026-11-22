@@ -662,7 +662,8 @@ impl Light {
     /// A square sun 0.5° across, `distance` from `center` in the direction
     /// `toward`, one-sided and facing `center`, whose radiance gives
     /// `irradiance` on a surface facing it. `center` is relative to the
-    /// render origin, like every light.
+    /// render origin, like every light. Put it [`SUN_RADII`] scene radii
+    /// away to light the scene as a sun at infinity does.
     pub fn sun(center: Vec3, toward: DVec3, distance: f64, irradiance: Vec3) -> Light {
         let size = 2.0 * 0.25f64.to_radians().tan();
         Light::distant(center, toward, distance, size * size, irradiance)
@@ -748,6 +749,14 @@ impl From<&Light> for LightGpu {
 
 /// The most lights a scene can have.
 pub const MAX_LIGHTS: usize = 16;
+
+/// How many scene radii away to put a distant light ([`Light::sun`],
+/// [`Light::distant`]) so that it acts as one at infinity: lights are
+/// squares at a distance, and at 50 radii a sun's irradiance falls off by
+/// up to ±40% across a ground 20 radii wide (Fox over the viewer's ground
+/// was 8.7% from Cycles' sun at 50 radii, 2.1% at this distance; no loss of
+/// precision on Sponza at 200 km).
+pub const SUN_RADII: f64 = 1e4;
 
 impl RectLight {
     #[allow(clippy::too_many_arguments)]

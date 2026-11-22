@@ -141,7 +141,7 @@ fn main() {
         let light = continuum_gpu::Light::sun(
             Vec3::ZERO,
             DVec3::new(-0.6, -0.3, 0.75),
-            radius * 50.0,
+            radius * continuum_gpu::SUN_RADII,
             Vec3::ONE,
         )
         .as_rect()

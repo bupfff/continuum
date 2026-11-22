@@ -17,6 +17,10 @@ Run as `blender -b --factory-startup -noaudio --python render_gltf_reference.py
 - "distribution": "GGX" or "MULTI_GGX" for every Principled BSDF (else
   the importer's, Multiscatter GGX); "thin_glass" (true by default):
   transmission without a volume as thin glass, as glTF defines it;
+- "time": seconds into the file's animation (its first clip, as
+  `compare_skinned_pose.py` poses it), or absent for the rest pose;
+- "ground": {"z", "half", "albedo"}: a Lambertian square 2 × half across
+  at height z under the origin (the viewer's ground), or absent;
 - "out": where to write the linear image, float32 RGB rows from the top.
 """
 
@@ -126,6 +130,52 @@ if job.get("thin_glass", True):
             ):
                 thin_glass(m, n)
                 break
+
+if "time" in job:
+    # Every animation plays, as glTF means (see compare_skinned_pose.py):
+    # the importer leaves some only as muted NLA tracks.
+    for ob in scene.objects:
+        ids = [ob]
+        if ob.type == "MESH" and ob.data.shape_keys:
+            ids.append(ob.data.shape_keys)
+        for idb in ids:
+            ad = idb.animation_data
+            if not ad or not ad.nla_tracks or ad.action is not None:
+                continue
+            strips = [s for t in ad.nla_tracks for s in t.strips]
+            if strips:
+                ad.action = strips[0].action
+                if hasattr(ad, "action_slot") and getattr(strips[0], "action_slot", None):
+                    ad.action_slot = strips[0].action_slot
+    fps = scene.render.fps / scene.render.fps_base
+    # The importer puts time t at frame t × fps.
+    frame = job["time"] * fps
+    scene.frame_set(int(frame), subframe=frame - int(frame))
+
+if job.get("ground"):
+    g = job["ground"]
+    h, z = g["half"], g["z"]
+    mesh = bpy.data.meshes.new("ground")
+    mesh.from_pydata(
+        [(origin.x + x, origin.y + y, origin.z + z) for x, y in ((-h, -h), (h, -h), (h, h), (-h, h))],
+        [],
+        [(0, 1, 2, 3)],
+    )
+    mat = bpy.data.materials.new("ground")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    for n in list(nodes):
+        if n.type != "OUTPUT_MATERIAL":
+            nodes.remove(n)
+    diffuse = nodes.new("ShaderNodeBsdfDiffuse")
+    diffuse.inputs["Color"].default_value = (*([g["albedo"]] * 3), 1.0)
+    mat.node_tree.links.new(
+        diffuse.outputs["BSDF"],
+        next(n for n in nodes if n.type == "OUTPUT_MATERIAL").inputs["Surface"],
+    )
+    mesh.materials.append(mat)
+    ground = bpy.data.objects.new("ground", mesh)
+    scene.collection.objects.link(ground)
 
 cam = job["camera"]
 eye = Vector(cam["eye"]) + origin
