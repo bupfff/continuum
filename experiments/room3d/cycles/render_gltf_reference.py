@@ -15,7 +15,8 @@ Run as `blender -b --factory-startup -noaudio --python render_gltf_reference.py
 - "suns": [{"toward": unit vector to the sun, "irradiance": [r, g, b],
   "angle": degrees}];
 - "distribution": "GGX" or "MULTI_GGX" for every Principled BSDF (else
-  the importer's, Multiscatter GGX);
+  the importer's, Multiscatter GGX); "thin_glass" (true by default):
+  transmission without a volume as thin glass, as glTF defines it;
 - "out": where to write the linear image, float32 RGB rows from the top.
 """
 
@@ -40,6 +41,91 @@ if job.get("distribution"):
             if n.type == "BSDF_PRINCIPLED":
                 n.distribution = job["distribution"]
 origin = Vector(job["origin"])
+
+
+def thin_glass(mat, bsdf):
+    """glTF's transmission without a volume as thin glass (as M16's reference,
+    `render_instanced_reference.py`): the surface with its transmission off,
+    mixed by the transmission factor with its specular layer alone plus a
+    Transparent BSDF passing the base colour times one less Schlick's
+    Fresnel (F0 0.04, of |N·I|): light goes straight through, and shadow
+    rays pass tinted. Blender's importer makes it a solid refracting surface
+    with no exit instead."""
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    t = bsdf.inputs["Transmission Weight"].default_value
+    out = next(n for n in nodes if n.type == "OUTPUT_MATERIAL")
+    base = bsdf.inputs["Base Color"]
+    if base.is_linked:
+        base_socket = base.links[0].from_socket
+    else:
+        rgb = nodes.new("ShaderNodeRGB")
+        rgb.outputs[0].default_value = base.default_value
+        base_socket = rgb.outputs[0]
+    bsdf.inputs["Transmission Weight"].default_value = 0.0
+    spec = nodes.new("ShaderNodeBsdfPrincipled")
+    spec.distribution = "GGX"
+    spec.inputs["Base Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+    spec.inputs["Metallic"].default_value = 0.0
+    spec.inputs["Roughness"].default_value = bsdf.inputs["Roughness"].default_value
+    spec.inputs["IOR"].default_value = 1.5
+    geometry = nodes.new("ShaderNodeNewGeometry")
+    cosine = nodes.new("ShaderNodeVectorMath")
+    cosine.operation = "DOT_PRODUCT"
+    links.new(geometry.outputs["Normal"], cosine.inputs[0])
+    links.new(geometry.outputs["Incoming"], cosine.inputs[1])
+    magnitude = nodes.new("ShaderNodeMath")
+    magnitude.operation = "ABSOLUTE"
+    links.new(cosine.outputs["Value"], magnitude.inputs[0])
+    grazing = nodes.new("ShaderNodeMath")
+    grazing.operation = "SUBTRACT"
+    grazing.inputs[0].default_value = 1.0
+    links.new(magnitude.outputs[0], grazing.inputs[1])
+    fifth = nodes.new("ShaderNodeMath")
+    fifth.operation = "POWER"
+    fifth.inputs[1].default_value = 5.0
+    links.new(grazing.outputs[0], fifth.inputs[0])
+    rest = nodes.new("ShaderNodeMath")
+    rest.operation = "SUBTRACT"
+    rest.inputs[0].default_value = 1.0
+    links.new(fifth.outputs[0], rest.inputs[1])
+    unreflected = nodes.new("ShaderNodeMath")
+    unreflected.operation = "MULTIPLY"
+    unreflected.inputs[1].default_value = 0.96
+    links.new(rest.outputs[0], unreflected.inputs[0])
+    tint = nodes.new("ShaderNodeMix")
+    tint.data_type = "RGBA"
+    tint.blend_type = "MULTIPLY"
+    tint.inputs["Factor"].default_value = 1.0
+    links.new(base_socket, tint.inputs["A"])
+    links.new(unreflected.outputs[0], tint.inputs["B"])
+    transparent = nodes.new("ShaderNodeBsdfTransparent")
+    links.new(tint.outputs["Result"], transparent.inputs["Color"])
+    through = nodes.new("ShaderNodeAddShader")
+    links.new(spec.outputs["BSDF"], through.inputs[0])
+    links.new(transparent.outputs["BSDF"], through.inputs[1])
+    mix = nodes.new("ShaderNodeMixShader")
+    mix.inputs["Fac"].default_value = t
+    links.new(bsdf.outputs["BSDF"], mix.inputs[1])
+    links.new(through.outputs["Shader"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], out.inputs["Surface"])
+
+
+# "thin_glass": transmission without a volume as glTF defines it (default).
+if job.get("thin_glass", True):
+    for m in bpy.data.materials:
+        if not m.node_tree:
+            continue
+        out = next((n for n in m.node_tree.nodes if n.type == "OUTPUT_MATERIAL"), None)
+        if out is None or out.inputs["Volume"].is_linked:
+            continue
+        for n in list(m.node_tree.nodes):
+            if (
+                n.type == "BSDF_PRINCIPLED"
+                and n.inputs["Transmission Weight"].default_value > 0.0
+                and not n.inputs["Transmission Weight"].is_linked
+            ):
+                thin_glass(m, n)
+                break
 
 cam = job["camera"]
 eye = Vector(cam["eye"]) + origin

@@ -216,3 +216,22 @@ submission before rebuilding it (frames with moving movers only). Viewer,
 2560×1440 rendered at half, under the defaults' HDRIs: Fox 10.90 ms,
 CesiumMan 11.43 ms, BrainStem 32.56 ms a frame. (`anim_dev` never showed
 it: its frames ran shallower.)
+
+### Thin glass in the Cycles reference (2026-11-22)
+
+`render_gltf_reference.py` now makes glTF's transmission without a volume
+thin glass in Cycles too (as M16's reference does: the specular layer plus
+a Transparent BSDF passing the base colour times one less Fresnel), where
+Blender's importer made it a solid refracting surface with no exit.
+
+| Model (lighting) | Clamped RMSE, pixels off: before | Thin glass |
+|---|---|---|
+| ToyCar (sun and sky) | 39.9%, 28.3% | 41.1%, 38.05% |
+| ChronographWatch (studio) | 15.8%, 14.6% | 15.8%, 14.3% |
+
+ToyCar's interior is now seen through the window in both, and differs:
+its seats' sheen is pure red (`sheenColorFactor` [1, 0, 0] over a 0.15
+grey), which glTF's Charlie sheen shows red and Blender's microfibre sheen
+grey. Ours also shows a bright green line where the glass meets the
+window frame, which Cycles does not: a ray continuing behind the glass
+seems to skip the frame's lip just behind its edge and see the sky.
