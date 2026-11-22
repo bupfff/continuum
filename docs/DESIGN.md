@@ -1966,7 +1966,8 @@ conversation or after a compaction; history lives in git and
   43.0%). Against Cycles through Blender's importer:
   `docs/results/assets-vs-cycles.md` (`gltf_dev GD_CYCLES`; `leak_probe`
   checks shadows by CPU rays).
-- **Next:** (1) a basics scorecard: fixed scenes (Sponza, the
+- **Next** (the user approved this list 2026-11-22; start with (1)):
+  (1) a basics scorecard: fixed scenes (Sponza, the
   million-boulder field, a closed room with bounce, animated characters,
   a showcase object) with error against Cycles, frame time, warm-up time,
   memory and response to motion, run after each change. (2) The worst
@@ -1976,7 +1977,10 @@ conversation or after a compaction; history lives in git and
   ray queries (sky near black, bounce over 29 buffers). (3) Left against
   Cycles: Sponza's fringes 22% dark, ChronographWatch's metals,
   DragonAttenuation's backdrop, ToyCar's sheen and green line.
-- **Pitfalls:** compare at a fixed bake budget (`GD_BUDGET`); Cycles needs
+- **Pitfalls:** test assets live in `experiments/room3d/out/assets/`
+  (gitignored: `khronos/Models/` with Sponza, `glb/` the showcase files,
+  `hdri/`, `brdf/` the black and textured test planes); fetch again if
+  missing. Compare at a fixed bake budget (`GD_BUDGET`); Cycles needs
   2,000+ samples in dark interiors; without ray queries Sponza's sky is
   near black and bounce needs 30 buffers (Metal allows 29);
   `movers_under_a_sky_at_a_small_budget` fails now and then on lavapipe
