@@ -36,6 +36,23 @@ It ships as a library, a [Bevy](https://bevyengine.org) plugin, and a
 viewer that flies through your own glTF files. It is experimental: v0.3
 works and is measured, but the API will change.
 
+### Real assets in the viewer
+
+Each opened as it is, with the viewer's defaults (an object in the studio
+HDRI, its softboxes made lights with exact soft shadows; a larger scene
+outdoors), on an M4 MacBook Air.
+
+| | | |
+|---|---|---|
+| ![FlightHelmet](docs/images/gallery/flight-helmet.jpg) | ![SheenChair](docs/images/gallery/sheen-chair.jpg) | ![GlamVelvetSofa](docs/images/gallery/velvet-sofa.jpg) |
+| FlightHelmet (CC0) | SheenChair: sheen fabric (Wayfair, CC0) | GlamVelvetSofa: velvet (Wayfair, CC BY 4.0) |
+| ![ChronographWatch](docs/images/gallery/chronograph.jpg) | ![ABeautifulGame](docs/images/gallery/chess.jpg) | ![Lantern](docs/images/gallery/lantern.jpg) |
+| ChronographWatch (graphiccompressor and Darmstadt Graphics Group, CC BY 4.0) | A Beautiful Game: 1.5 million triangles (ASWF and Ed Mackey, CC BY 4.0) | Lantern (Microsoft, CC0) |
+
+Models from the [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets);
+HDRI Studio Small 09 from [Poly Haven](https://polyhaven.com) (CC0). Each
+is compared with Cycles in [`docs/results/assets-vs-cycles.md`](docs/results/assets-vs-cycles.md).
+
 ## Is it right for you?
 
 | | |

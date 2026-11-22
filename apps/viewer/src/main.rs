@@ -194,10 +194,10 @@ impl World {
     }
 
     /// The lighting the scene looks best in: the field under its sun and
-    /// sky; a glTF file with lights of its own under them and the sky; an
-    /// object (under 10 m across) in the studio, a larger scene outdoors;
-    /// an animated file under the sun alone (animations do not play with a
-    /// sky yet).
+    /// sky; an object (under 10 m across) in the studio, with its own
+    /// lights if it has any; a larger scene under its own lights and the
+    /// sky, or else outdoors; an animated file under the sun alone
+    /// (animations do not play with a sky yet).
     fn lighting_by_default(&self) -> Lighting {
         let Some(scene) = &self.instanced else {
             return Lighting::Sun;
@@ -207,10 +207,10 @@ impl World {
         }
         if self.animations.as_ref().is_some_and(|a| !a.list.is_empty()) {
             Lighting::Sun
-        } else if !scene.sun_added {
-            Lighting::SunAndSky
         } else if scene.radius < 5.0 {
             Lighting::Studio
+        } else if !scene.sun_added {
+            Lighting::SunAndSky
         } else {
             Lighting::Outdoor
         }
@@ -369,10 +369,11 @@ impl World {
             None => match (radius > 8.0)
                 .then(|| floor_below_centre(&scene, origin))
                 .flatten()
+                .filter(|&floor| enclosed(&scene, origin, Vec3::new(0.0, 0.0, floor + 1.7)))
             {
                 // A large scene (a building, a street) from inside: eye
                 // height over the floor under its centre, looking along
-                // its longer side.
+                // its longer side (where walls stand around that spot).
                 Some(floor) => {
                     let eye = Vec3::new(0.0, 0.0, floor + 1.7);
                     let along = if hi.x - lo.x >= hi.y - lo.y {
@@ -1780,4 +1781,48 @@ fn floor_below_centre(scene: &InstancedScene, origin: DVec3) -> Option<f32> {
         }
     }
     highest
+}
+
+/// Whether walls stand around `eye` (relative to `origin`): at least six of
+/// eight level rays from it meet the scene.
+fn enclosed(scene: &InstancedScene, origin: DVec3, eye: Vec3) -> bool {
+    let dirs: Vec<Vec3> = (0..8)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            Vec3::new(a.cos(), a.sin(), 0.0)
+        })
+        .collect();
+    let mut hit = [false; 8];
+    for i in &scene.instances {
+        let offset = (i.position - origin).as_vec3();
+        for t in &scene.geometries[i.geometry].triangles {
+            let p = t.map(|v| i.rotation * (v * i.scale) + offset);
+            let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
+            for (k, d) in dirs.iter().enumerate() {
+                if hit[k] {
+                    continue;
+                }
+                // Möller–Trumbore.
+                let q = d.cross(e2);
+                let det = e1.dot(q);
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let s = eye - p[0];
+                let u = s.dot(q) / det;
+                if !(0.0..=1.0).contains(&u) {
+                    continue;
+                }
+                let r = s.cross(e1);
+                let v = d.dot(r) / det;
+                if v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                if e2.dot(r) / det > 0.0 {
+                    hit[k] = true;
+                }
+            }
+        }
+    }
+    hit.iter().filter(|&&h| h).count() >= 6
 }
