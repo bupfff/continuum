@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-ffc15e">
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.1-ffc15e">
   <img alt="status" src="https://img.shields.io/badge/status-experimental-a9aeb8">
   <img alt="license" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-5b6577">
   <img alt="built with" src="https://img.shields.io/badge/Rust%20%C2%B7%20wgpu-compute%20only-171a22">
@@ -339,8 +339,11 @@ Privacy & Security**, scroll down and click **Open Anyway**.
 
 The panel at the top left picks a scene (a gallery, a field of up to a
 million boulders, or your own glTF file: **Open a glTF file…**, or drop a
-`.glb` or `.gltf` on the window) and changes how it renders. W A S D move,
-drag to look, Shift to go faster, H hides the panel.
+`.glb` or `.gltf` on the window), how it is lit (**Lighting**: the sun, the
+sun and sky, a studio or outdoor HDRI that come with the viewer, or **Open
+HDR…** for your own) and how it renders. Objects open in the studio and
+larger scenes outdoors, from inside at eye height. W A S D move, drag to
+look, Shift to go faster, H hides the panel.
 
 **From source, on any platform** (you need [Rust](https://rustup.rs); the
 first build takes a few minutes):
@@ -361,15 +364,15 @@ Continuum is not on crates.io yet; add it from GitHub:
 
 ```toml
 [dependencies]
-continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
-continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
-continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
 
 # Recommended: wgpu with two fixes for scenes with very many instances
 # (third_party/README.md). Everything works without them, more slowly.
 [patch.crates-io]
-wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
-wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
 ```
 
 The front door is `continuum_gpu::Renderer`: give it a scene, lights and a
@@ -479,10 +482,13 @@ kept while they stay in view.
   `--env-strength K` scales it (1.37% from Cycles, M5 gate 12).
 - `--exposure K` sets the starting exposure.
 
-**Your own glTF files** (`--gltf scene.glb`): lit by the file's own lights,
-or else a sun (`--sky` and `--env` add a sky); seen from the file's camera
-or one framed around the scene; on a grey ground (`--no-ground` leaves it
-out); playing the file's first animation (not with a sky yet).
+**Your own glTF files** (`--gltf scene.glb`): lit by the file's own lights
+and the sky, or else a studio HDRI (objects under 10 m across) or an
+outdoor one (larger scenes, whose sun becomes a light with exact soft
+shadows); `--sky`, `--no-sky` and `--env` choose instead. Seen from the
+file's camera, or framed around an object, or from inside a large scene at
+eye height; on a grey ground (`--no-ground` leaves it out); playing the
+file's first animation (under the sun alone: not with a sky yet).
 `--emitters-as-lights` makes emissive rectangles area lights
 (experimental, M10 gate 23).
 

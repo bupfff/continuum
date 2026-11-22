@@ -1,58 +1,41 @@
-Continuum 0.3.0 makes it easy to try and adds most of what a finished
-image needs. Every number below is measured against Blender's Cycles or
-the engine's own exact reference; the details are in `docs/results/`.
+Continuum 0.3.1 makes real-world files look right and run well. Every
+number below is measured against Blender's Cycles (through Blender's own
+glTF importer) or the engine's own reference; the details are in
+`docs/results/assets-vs-cycles.md`.
 
 **Try it on a Mac with Apple silicon:** paste this into Terminal, which
 installs Continuum Viewer into `~/Applications` and opens it:
 
     curl -fsSL https://raw.githubusercontent.com/bupfff/continuum/main/scripts/install_macos.sh | sh
 
-Or download `continuum-viewer-0.3.0-macos-arm64.zip` below, unzip it and
+Or download `continuum-viewer-0.3.1-macos-arm64.zip` below, unzip it and
 open the app; it is not notarized by Apple, so the first time macOS refuses
 a browser download: open System Settings → Privacy & Security, scroll down
-and click Open Anyway. Then pick a scene in the panel, or drop a `.glb` or
-`.gltf` file on the window. Only Apple silicon Macs are tested so far;
-other platforms build from source (see the README).
+and click Open Anyway. Then drop a `.glb` or `.gltf` file on the window.
 
 **The viewer**
-- A panel: the showcase, a field of up to a million boulders, or your own
-  glTF file (Open…, or drag and drop); bounce light, anti-aliasing, the
-  sky, render scale, tone map, bloom, exposure and vsync; frame rate, GPU
-  memory, and whether the lighting has settled.
-- Problems show in the panel or a dialog instead of a terminal.
+- A Lighting menu: the sun, the sun and sky, a studio or an outdoor HDRI
+  (both CC0, from Poly Haven, built in), or your own `.hdr`. Objects open
+  in the studio, larger scenes outdoors and from inside at eye height.
 
-**Lighting**
-- Bounce light is on by default in `Renderer` (1.06–1.12× the frame), and a
-  settled view's bounce light now matches a fresh bake (0.1–0.8% of pages
-  off by more than 1%, from 2.4–7.1%).
-- Bounce light stays right while objects move (a ledger re-bakes what a
-  move can change), and several bounces on request.
-- Settling under the default time budget is faster where the GPU's
-  timestamps are unreliable (Apple GPUs).
+**Real-world files**
+- Alpha-cutout foliage (Sponza's ivy and flowers): 3.0 million triangles
+  instead of 24.9 million, 1.3 GB of GPU memory instead of 6.7, ready in
+  under 9 s instead of about 70.
+- Glossy reflections through hardware ray queries: Sponza's frames 116 →
+  36 ms at 1280×720 with the same image.
+- HDR environments: the image keeps its range (RGBM), rough surfaces
+  reflect it blurred, and an outdoor HDRI's sun becomes a sun light with
+  exact soft shadows. A helmet under two HDRIs matches Cycles' mean within
+  0.4%.
+- Metals 15–20% brighter where they were too dark (the split sum's
+  directional albedo from a table), metal seen in metal no longer black,
+  rough surfaces reflect what the cache knows they see.
+- Sky light through narrow openings no longer shows sharp strips
+  (Sponza's floor).
 
-**Scale and detail**
-- Unique geometry streamed beyond memory: 4,096 unique rocks carrying 33
-  GB of detail produced on demand, and fields of 36,864 flown with no
-  frame over 16.7 ms on the M4, with lighting streamed too and still
-  exact.
-- Coarser versions of imported meshes (`InstancedScene::simplify_geometries`).
-- An experimental sub-pixel path for fields of tiny distant objects
-  (`RendererOptions::sub_pixel`).
-
-**The image**
-- Anti-aliasing on by default, with nothing taken from past frames.
-- Glass, thin and solid (refraction, absorption), clear coats, index of
-  refraction and specular color (`KHR_materials_transmission`, `_volume`,
-  `_clearcoat`, `_ior`, `_specular`).
-- PBR Neutral and AgX tone maps, auto-exposure, bloom, upscaling, fog with
-  light shafts, depth of field and motion blur.
-
-**Animation**
-- glTF skins and morph targets, posed within a micrometre of Blender's own
-  evaluation, and any mesh the application deforms each frame.
-
-**Known limits:** measured on Apple silicon only; bounce light is not yet
-available with moving lights; see the README's Limits.
+**Known limits:** measured on Apple silicon only; animations do not play
+under a sky or HDRI yet; see the README's Limits.
 
 Free for noncommercial use (PolyForm Noncommercial 1.0.0). Commercial use
 needs a license from Penumbral Labs: open an issue.

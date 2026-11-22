@@ -1956,63 +1956,28 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-20, sixteenth session).** For a new
+**Start here (updated 2026-11-21, seventeenth session).** For a new
 conversation or after a compaction; history lives in git and
 `docs/results/`, the plan below.
-- **Now:** item 5 of the user's order (lighting gaps), milestone M22.
-  Bounce light is on by default in `Renderer` (G4), settles to a fresh
-  bake's (G3), and the time budget follows the frame period's median
-  (G5: settling faster, M14's frame budget held). Bounce with movers works
-  through the ledger, but its gate (G2) is parked: cost and quality sit on
-  its bars at ε 1% (§3.4 "Development for gate 2", levers listed).
-- **Next:** (1) the rest of item 5: bounce light with moving lights
-  (refused now: with it on, the moving lights' direct-light ledger breaks;
-  find why first, §3.4 "Bounce light with moving lights, tried"), emissive surfaces as lights (M10 G23), receivers next to
-  large lights (M5 G14; rays for wide windows tried and set aside,
-  `wide_rays` off: §8 "Wide light cones" says what to find first). (2) Settling
-  with bounce is 2.3–3× the frames without (its own work under the time
-  budget). (3) Parked costs: movers under a sky 331 ms a frame (M9 G3's
-  sky re-bakes), the movers' own direct light (14 ms of a 20 ms frame in
-  M22's flights), deforming 1.6–1.95× (M12 G2), solid glass 1.378× (M16
-  G3).
-- **Easy to try (the user, 2026-11-21; done):** v0.3.0 is released with a
-  macOS download (Apple silicon), the viewer has a panel (scenes, Open /
-  drag and drop, settings, frame rate, lighting settled), and the README
-  opens with "Is it right for you?" and a quick start. The user is
-  seeking funds for the NVIDIA test (item 6).
-- **Found while making the download (2026-11-21), both high in
-  priority:** (1) movers through `Renderer` in an enclosed room: the
-  showcase instanced (`Showcase::instanced`, `movers_aa_dev`) runs 8.5 ms
-  still but 80–175 ms with its ball and cube moving at 1280×720: the stale
-  pass re-bakes 58,000–91,000 texels a frame (most visible pages near the
-  light's penumbrae), 230–420 ms when profiled alone; anti-aliasing and
-  bounce are not the cost. Levers: coarser receivers while moving (the
-  lightmap path does this scene at 17 ms), or lag within a budget (as
-  deforming geometry, M12 G2). (2) Bounce light on the million-boulder
-  field never settles (`warmup_dev`): bounce rays hit thousands of
-  boulders, each wanting its own page; nearly every sample incomplete,
-  8,000–75,000 requests a frame. Not from M22 G3 (the same with
-  `bounce_settles` off). The viewer turns bounce off for the field;
-  `Renderer`'s default needs a rule for such scenes.
-- **Real-world files (item 2, 2026-11-21, in progress; the user wants
-  game assets and complex scenes tested more and made to look their
-  best):** Sponza's alpha cutouts (ivy, flowers) made 24.9 million
-  triangles and 6.7 GB; the cut now traces contours, simplifies them to
-  0.2 cell and fills them as monotone pieces within each triangle, keeping
-  the triangle's chart: 3.0 million triangles, 18,899 charts, 1.3 GB, built
-  in 8.7 s (was about 70). Glossy reflection rays now run through ray
-  queries (`hw_vc_shade`, `hw_vc_shade_edges`, `hw_vc_aa_shade`; the
-  compute hierarchy without movers no longer): Sponza's settled frame 116
-  → 36 ms at 1280×720 (shading 69 → 17 ms, the anti-aliasing samples' 34 →
-  8 ms), the image the same (mean difference 0.007 of 255). Next: the
-  other Khronos models and larger scenes (Bistro), each looked at against
-  Cycles; reflection rays for rough surfaces still cost 12 ms in Sponza.
-  `gltf_dev` loads, times, profiles and renders any file (`GD_*` options).
-- **Pitfalls:** compare renderers at a fixed bake budget
-  (`frame_target_ms` 0) and wait for every renderer's frame before timing
-  the next (M22 G1); this device's GPU timestamps arrive out of order, so
-  the frame period steers the time budget (M22 G4–G5); time at full size,
-  interleaved in one process.
+- **Now:** real-world files (item 2; the user wants game assets and complex
+  scenes tested more and made to look their best). Done 2026-11-21:
+  Sponza's cutouts (24.9M → 3.0M triangles, 6.7 → 1.3 GB, built in 8.7 s),
+  glossy rays through ray queries (frames 116 → 36 ms), a tabled split sum,
+  HDR environments (RGBM image, the HDRI's sun made a light), rough
+  reflections from cached light, sky rays turned per texel, and the
+  viewer's Lighting menu with bundled HDRIs. Against Cycles through
+  Blender's importer: `docs/results/assets-vs-cycles.md` (`gltf_dev
+  GD_CYCLES`).
+- **Next:** (1) cut v0.3.1 (dry-run the workflow first). (2) More assets
+  (Bistro, the Khronos showcase), each against Cycles; thin glass in the
+  Cycles reference (ToyCar); Sponza's arches and lion head too bright.
+  (3) Movers through `Renderer` in enclosed rooms (80–175 ms, §3.4), bounce
+  never settling on the million-boulder field.
+- **Pitfalls:** compare at a fixed bake budget (`GD_BUDGET`); Cycles needs
+  2,000+ samples in dark interiors; the compute path's sky is broken on
+  Sponza (near black); `movers_under_a_sky_at_a_small_budget` fails now and
+  then on lavapipe (sky guesses left once settled; not reproduced on
+  Metal); this device's GPU timestamps arrive out of order.
 
 - **Decided 2026-11-15 (the user): toward a full engine, in the order a
   user would hit the gaps.**

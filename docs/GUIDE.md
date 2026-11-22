@@ -178,9 +178,14 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   reads a Radiance `.hdr` or a `.png`) above the horizon; below it, the
   scene's geometry stands for the ground. Surfaces get its irradiance at
   their normal times the cache's sky visibility; rays that miss see the
-  image (8-bit over its peak, so a sun belongs in a light). 1.37% from
-  Cycles on a gradient sky (M5 gate 12), 1.04× the frame. Bounce light and
-  per-pixel rendering use its mean radiance.
+  image (RGBM over its peak, with mips: rough reflections see it blurred
+  by roughness). An outdoor HDRI's sun is taken out of the image and made
+  a sun light with exact soft shadows (`RendererOptions::
+  sun_from_environment`, on by default; `Environment::take_sun` does it by
+  hand). 1.37% from Cycles on a gradient sky (M5 gate 12), 1.04× the frame;
+  DamagedHelmet under two Poly Haven HDRIs within 0.4% of Cycles' mean
+  (`docs/results/assets-vs-cycles.md`). Bounce light and per-pixel
+  rendering use its mean radiance.
 - **Alpha blending.** `InstancedScene::geometry_blend` makes a geometry
   see-through: an opacity factor times its base color texture's alpha
   (glTF's BLEND materials are imported so). With the cache and hardware
@@ -359,15 +364,15 @@ Add the crates from GitHub (they are not on crates.io):
 
 ```toml
 [dependencies]
-continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
-continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
-continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+continuum = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+continuum-gpu = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+continuum-gltf = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
 
 # Recommended for large instanced scenes: wgpu with two fixes for
 # acceleration structures with many instances (third_party/README.md).
 [patch.crates-io]
-wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
-wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.0" }
+wgpu-core = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
+wgpu-hal = { git = "https://github.com/bupfff/continuum", tag = "v0.3.1" }
 ```
 
 (A checkout next to your project works the same with `path =` entries:
