@@ -226,7 +226,11 @@ pub struct CacheOptions {
     /// how many bounces it holds (one more than the fewest its hits hold);
     /// pages whose hits hold too few re-bake their samples, and the pages
     /// hit are asked for with samples of their own, one bounce fewer, down to
-    /// pages with none. 1 by default: direct light at hits only.
+    /// pages with none. 0 (the default): 2, with the orders past them
+    /// estimated (`bounce_rest`), where no sky or environment lights the
+    /// scene (its bounce light is all of its light but the lights'; a closed
+    /// room went from 46.55% to 7.68% from Cycles, M22 gate 8), and 1 under
+    /// a sky (direct light at hits only).
     pub bounces: u32,
     /// Moving lights (M9 gate 2): the largest change of a texel's ratio
     /// (its light's shadowed share) the cache may show before re-baking it.
@@ -273,11 +277,12 @@ pub struct CacheOptions {
     /// share) of its light (2.6% at the default 0.15). Without it every
     /// hit asks, and four bounces never let Sponza settle.
     pub bounce_tail: f32,
-    /// With one bounce: the orders past it estimated, as a geometric series
-    /// of each bounce sample's closure-weighted albedo ρ (what its rays'
-    /// hits reflect of uniform light): its bounce light times 1 / (1 − ρ),
-    /// ρ at most 0.9. Progressive radiosity's ambient term, per sample
-    /// (Cohen et al. 1988). Free, and nothing more to settle.
+    /// With more than one bounce: the orders past them estimated. The
+    /// samples of the last level (holding one bounce) take their bounce
+    /// light times 1 / (1 − ρ), ρ their closure-weighted albedo (what their
+    /// rays' hits reflect of uniform light, at most 0.9): a geometric series,
+    /// progressive radiosity's ambient term per sample (Cohen et al. 1988).
+    /// Free a frame, and nothing more to settle. On by default.
     pub bounce_rest: bool,
     /// Bounce light that settles (M22 gate 3): bounce rays read their hits'
     /// light one mip coarser than a bin's footprint, and a bin that finds
@@ -387,7 +392,7 @@ impl Default for CacheOptions {
             sky_rays: true,
             wide_rays: false,
             sky_ray_cost: 1,
-            bounces: 1,
+            bounces: 0,
             ledger_epsilon: 0.01,
             sky_lag: true,
             indirect: false,
@@ -396,7 +401,7 @@ impl Default for CacheOptions {
             bounce_epsilon: 0.01,
             bounce_share: 0.75,
             bounce_tail: 0.15,
-            bounce_rest: false,
+            bounce_rest: true,
             bounce_settles: true,
             edge_rays: false,
             deforming_budget: 512,
@@ -1266,6 +1271,11 @@ impl VirtualCache {
         pool: u32,
         lighting: Option<&crate::stream::LightingLayout>,
     ) -> Self {
+        let mut options = options;
+        // Bounces 0: two without a sky or environment, one under one.
+        if options.bounces == 0 {
+            options.bounces = if sky { 1 } else { 2 };
+        }
         let channels = lights + 1;
         assert!(
             moving.is_empty() || movers == 0,

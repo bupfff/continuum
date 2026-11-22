@@ -110,6 +110,11 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   until their hits hold enough. A closed room lit by one panel goes from
   45% to 6.5% of Cycles' 12-bounce image with 8 (M10 gate 25), settling in
   80 frames; outdoors it adds little and costs about 7× the bounce samples.
+  By default (`bounces` 0) a scene without a sky or environment gets two
+  bounces with the orders past them estimated (`bounce_rest`: the last
+  level's samples times 1 / (1 − ρ), ρ their closure-weighted albedo):
+  the closed room 7.68% from Cycles, at no cost a frame (M22 gate 8); a
+  scene under a sky keeps one.
   The setting is a floor (samples can hold a bounce or so more). Not yet
   tried with streamed levels or movers.
 - **Materials.** `InstancedScene::geometry_materials` takes

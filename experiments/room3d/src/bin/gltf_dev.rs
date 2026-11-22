@@ -269,6 +269,7 @@ fn main() {
     let mut times = Vec::new();
     let start = Instant::now();
     let mut settled = None;
+    let mut totals = [0u64; 4];
     for f in 0..frames {
         let t = Instant::now();
         r.render(camera, &view);
@@ -297,9 +298,32 @@ fn main() {
                 s.indirect_incomplete
             );
         }
+        if let Some(s) = r.stats() {
+            totals[0] += s.pages_baked as u64;
+            totals[1] += s.texels_baked as u64;
+            totals[2] += s.indirect_samples as u64;
+            totals[3] += s.sky_samples as u64;
+        }
         if settled.is_none() && f > 32 && r.is_settled(32) {
             settled = Some((f, start.elapsed().as_secs_f64()));
+            println!(
+                "settled at frame {f}: baked {} pages, {} texels, {} bounce samples, {} sky samples; resident {}",
+                totals[0],
+                totals[1],
+                totals[2],
+                totals[3],
+                r.stats().map_or(0, |s| s.resident)
+            );
         }
+    }
+    if let Some(s) = r.stats() {
+        println!(
+            "last frame: edge pixels {} ({:.1}% of {}×{})",
+            s.edge_pixels,
+            100.0 * s.edge_pixels as f64 / (w * ss * h * ss) as f64,
+            w * ss,
+            h * ss
+        );
     }
     if frames > 0 {
         let mut late = times[frames / 2..].to_vec();

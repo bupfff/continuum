@@ -202,9 +202,10 @@ Selected numbers (1280×720, Apple M4, release builds):
   (`KHR_materials_clearcoat`, `_ior`, `_specular`), sheen for fabrics
   (`KHR_materials_sheen`), double-sided faces,
   texture transforms and wrap modes.
-- **Indirect light**, in the cache: one bounce by default, more on request
-  (`CacheOptions::bounces`; a closed room goes from 45% to 6.5% of Cycles'
-  fully bounced image with eight).
+- **Indirect light**, in the cache: by default two bounces with the rest
+  estimated where no sky lights the scene (a closed room 7.7% from Cycles'
+  fully bounced image, 46.6% with one), one bounce under a sky; more on
+  request (`CacheOptions::bounces`).
 - **Moving objects**, exactly, in the same frame; glTF animations play
   through them.
 - **Animated characters:** glTF skins and morph targets, posed as Blender
@@ -259,8 +260,8 @@ Honest about where it stands:
 - **Deforming meshes are costly:** a character large on screen costs
   about 1.6× the frame, and the lighting near it lags its motion (up to
   about a second) until it stops.
-- **Bounce light** is on by default in `Renderer`, one bounce (more on
-  request): 1.06–1.12× the frame and about 190 MB of GPU memory, and a view
+- **Bounce light** is on by default in `Renderer` (two bounces with the
+  rest estimated without a sky, one under a sky; more on request): 1.06–1.12× the frame and about 190 MB of GPU memory, and a view
   settles in 1.8–3.2× the frames. With moving objects a ledger keeps it
   right (about 1.2× the moving frame in development; its gate is parked);
   not yet with moving lights; several bounces are untried with streaming.

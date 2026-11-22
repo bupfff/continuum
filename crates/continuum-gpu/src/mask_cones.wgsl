@@ -5352,12 +5352,12 @@ fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32
         // (M10 gate 25).
         var held = 1.0;
         if (job.bounces > 1u) { held = min(1.0 + ind_gen_wg[0], 15.0); }
-        // `CacheOptions::bounce_rest` (extra.y bit 10): with one bounce, the
-        // orders past it as a geometric series of the sample's closure-
-        // weighted albedo ρ (the hits' light taken as the sample's own):
-        // B / (1 − ρ), ρ at most 0.9.
+        // `CacheOptions::bounce_rest` (extra.y bit 10): below the first of
+        // several levels, a one-bounce sample's orders past it as a geometric
+        // series of its closure-weighted albedo ρ (its hits' light taken as
+        // its own): B / (1 − ρ), ρ at most 0.9.
         var rest = 1.0;
-        if (job.bounces == 1u && (vc.extra.y & 0x400u) != 0u) {
+        if (job.bounces == 1u && (vc.extra.y & 0xffu) > 1u && (vc.extra.y & 0x400u) != 0u) {
             rest = 1.0 / (1.0 - min(ind_albedo_wg[0], 0.9));
         }
         for (var ch = 0u; ch < IND_CH; ch++) {
@@ -5596,7 +5596,9 @@ fn vc_shade_edges_at(wid: vec3<u32>, li: u32) {
         if (e.x == NONE) {
             sum += sky_seen(sd) * weight;
         } else {
+            aa_sample_shading = true;
             sum += vc_hit_color(sd, hit_from(e.xyz, sd), false) * weight;
+            aa_sample_shading = false;
         }
     }
     colors[pixel] = vec4<f32>(sum, 1.0);

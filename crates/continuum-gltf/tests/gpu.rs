@@ -1038,6 +1038,9 @@ fn anti_aliasing_takes_edges_toward_their_area() {
                 cache_options: CacheOptions {
                     frame_target_ms: 0.0,
                     pages: 1 << 15,
+                    // One bounce: two settle to images that differ in the last
+                    // bits between renderers (pages become resident in GPU order).
+                    bounces: 1,
                     ..Default::default()
                 },
                 anti_aliasing,
@@ -1381,6 +1384,9 @@ fn fog_veils_the_scene() {
                 cache_options: CacheOptions {
                     frame_target_ms: 0.0,
                     pages: 1 << 15,
+                    // One bounce: two settle to images that differ in the last
+                    // bits between renderers (pages become resident in GPU order).
+                    bounces: 1,
                     ..Default::default()
                 },
                 anti_aliasing: false,
@@ -1467,6 +1473,9 @@ fn depth_of_field_blurs_what_is_out_of_focus() {
                 cache_options: CacheOptions {
                     frame_target_ms: 0.0,
                     pages: 1 << 15,
+                    // One bounce: two settle to images that differ in the last
+                    // bits between renderers (pages become resident in GPU order).
+                    bounces: 1,
                     ..Default::default()
                 },
                 depth_of_field: lens,
@@ -1552,6 +1561,9 @@ fn motion_blur_smears_along_the_motion() {
                 cache_options: CacheOptions {
                     frame_target_ms: 0.0,
                     pages: 1 << 15,
+                    // One bounce: two settle to images that differ in the last
+                    // bits between renderers (pages become resident in GPU order).
+                    bounces: 1,
                     ..Default::default()
                 },
                 motion_blur: Some(continuum_gpu::MotionBlur::default()),
@@ -1589,6 +1601,9 @@ fn motion_blur_smears_along_the_motion() {
                 cache_options: CacheOptions {
                     frame_target_ms: 0.0,
                     pages: 1 << 15,
+                    // One bounce: two settle to images that differ in the last
+                    // bits between renderers (pages become resident in GPU order).
+                    bounces: 1,
                     ..Default::default()
                 },
                 ..Default::default()
