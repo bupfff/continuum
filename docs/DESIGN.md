@@ -1956,23 +1956,26 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-22, seventeenth session).** For a new
+**Start here (updated 2026-11-22, seventeenth session, v0.3.2).** For a new
 conversation or after a compaction; history lives in git and
 `docs/results/`, the plan below.
-- **Now:** real-world files (item 2; the user wants game assets and complex
-  scenes tested more and made to look their best). v0.3.1 is out; v0.3.2
-  is prepared (`docs/RELEASE_NOTES.md`): sheen, studio lights from HDRIs,
-  animations under the sky, and sunlight through walls fixed (cones clip
-  large triangles in direction space; texels facing away trace past their
-  own triangle), lights' reflections by the exact Fresnel: Sponza
-  against Cycles 65.4% → 43.0%. Against Cycles
-  through Blender's importer: `docs/results/assets-vs-cycles.md`
-  (`gltf_dev GD_CYCLES`; `leak_probe` checks shadows by CPU rays).
-- **Next:** (1) release v0.3.2 (dry-run `release.yml`, test the artifact,
-  tag). (2) The worst left against Cycles: Sponza's fronds 22% dark,
-  ChronographWatch's metals, DragonAttenuation's backdrop,
-  ToyCar's red sheen and green line. (3) The movers' top-level structure
-  double-buffered; movers in enclosed rooms (§3.4); Bistro-class scenes.
+- **Now:** phase 1 of the user's plan (below, 2026-11-22): strengthen
+  the basics. v0.3.2 is out (2026-11-22): sheen, studio lights from
+  HDRIs, animations under the sky, sunlight through walls fixed, lights'
+  reflections by the exact Fresnel (Sponza against Cycles 65.4% →
+  43.0%). Against Cycles through Blender's importer:
+  `docs/results/assets-vs-cycles.md` (`gltf_dev GD_CYCLES`; `leak_probe`
+  checks shadows by CPU rays).
+- **Next:** (1) a basics scorecard: fixed scenes (Sponza, the
+  million-boulder field, a closed room with bounce, animated characters,
+  a showcase object) with error against Cycles, frame time, warm-up time,
+  memory and response to motion, run after each change. (2) The worst
+  rows first: the sky's warm-up on the slower paths (thousands of
+  frames), bounce never settling on the field, movers in enclosed rooms
+  (80–175 ms, §3.4), the movers' structure waited for, the path without
+  ray queries (sky near black, bounce over 29 buffers). (3) Left against
+  Cycles: Sponza's fringes 22% dark, ChronographWatch's metals,
+  DragonAttenuation's backdrop, ToyCar's sheen and green line.
 - **Pitfalls:** compare at a fixed bake budget (`GD_BUDGET`); Cycles needs
   2,000+ samples in dark interiors; without ray queries Sponza's sky is
   near black and bounce needs 30 buffers (Metal allows 29);
@@ -1980,6 +1983,13 @@ conversation or after a compaction; history lives in git and
   (sky guesses left once settled; not reproduced on Metal); this device's
   GPU timestamps arrive out of order.
 
+- **Decided 2026-11-22 (the user): three phases.** (1) **Strengthen the
+  basics:** make Continuum really good at what it set out to be strong
+  at (scale, detail, lighting: exact shadows without noise or past
+  frames, instant response to change, huge worlds) before adding more.
+  (2) **Compatibility:** all kinds of textures and VFX work. (3) **Make
+  them look good** with this engine, not only work. The list below folds
+  into these (its material breadth and effects into 2 and 3).
 - **Decided 2026-11-15 (the user): toward a full engine, in the order a
   user would hit the gaps.**
   1. **Dynamic scenes:** anything beyond rigid motion (skinned characters,
@@ -2014,7 +2024,8 @@ conversation or after a compaction; history lives in git and
   not as a ratio against unthrottled frames (which are about 4 ms on this
   scene).
 - **Releases:** `v0.2.0` tagged (2026-11-08); `v0.3.0` (2026-11-21) with
-  a downloadable macOS viewer (the user approved publishing it), built by
+  a downloadable macOS viewer (the user approved publishing it), `v0.3.1`
+  and `v0.3.2` (2026-11-22), built by
   `.github/workflows/release.yml` on version tags from
   `scripts/bundle_macos.sh`. The repository is public
   (2026-11-09) under PolyForm Noncommercial 1.0.0 ("Copyright 2026 Gabriel
