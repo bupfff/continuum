@@ -513,6 +513,13 @@ impl Renderer {
         self.inner.set_depth_of_field(lens);
     }
 
+    /// Diagnostics (M17): the auto-exposure meter's exposure and the frames
+    /// it has metered. Waits for the GPU.
+    #[doc(hidden)]
+    pub fn metered_exposure(&self) -> (f32, f32) {
+        self.inner.metered_exposure()
+    }
+
     /// The display's auto-exposure (M17; None: off), from the next frame.
     pub fn set_auto_exposure(&mut self, auto: Option<crate::AutoExposure>) {
         self.inner.set_auto_exposure(auto);

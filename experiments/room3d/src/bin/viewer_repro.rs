@@ -84,7 +84,18 @@ fn main() {
     std::fs::create_dir_all(&out).expect("the output folder");
     let field = Field::new(num("VR_BOULDERS", 1_000_000), DVec3::ZERO);
     let origin = field.origin_near_camera();
-    let (camera, light) = field.relative(origin);
+    let (mut camera, light) = field.relative(origin);
+    // `VR_UP=meters`, `VR_DOWN=degrees`: the start view raised and tilted
+    // down.
+    if let Ok(up) = std::env::var("VR_UP").map(|v| v.parse::<f32>().expect("meters")) {
+        camera.eye.z += up;
+        camera.target.z += up;
+    }
+    if let Ok(down) = std::env::var("VR_DOWN").map(|v| v.parse::<f32>().expect("degrees")) {
+        let d = (camera.target - camera.eye).normalize();
+        let right = d.cross(continuum::glam::Vec3::Z).normalize();
+        camera.target = camera.eye + continuum::glam::Quat::from_axis_angle(right, -down.to_radians()) * d;
+    }
     let kernel = MaskConeKernel::new().expect("GPU");
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let t = Instant::now();
@@ -99,6 +110,11 @@ fn main() {
             cache_options: continuum_gpu::CacheOptions {
                 sky_lag: true,
                 // `VR_FRAME_BUDGET`: the frame period's cap (ms; 0: none).
+                // `VR_PPT`: pixels a texel spans.
+                pixels_per_texel: std::env::var("VR_PPT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(continuum_gpu::CacheOptions::default().pixels_per_texel),
                 frame_budget_ms: std::env::var("VR_FRAME_BUDGET")
                     .ok()
                     .and_then(|v| v.parse().ok())
@@ -185,6 +201,65 @@ fn main() {
         }
     }
     println!("settled at the start: {settled_at:?}");
+    // `VR_PITCH=1`: from the settled start, the view tilts up a step at a
+    // time (2°, `VR_STEP` frames each), printing the meter's exposure, the
+    // share of pixels not black, and the CPU's trimmed-mean exposure
+    // (black pixels skipped), then stops.
+    if std::env::var_os("VR_PITCH").is_some() {
+        let right = start_dir.cross(continuum::glam::Vec3::Z).normalize();
+        let steps = num("VR_STEP", 60);
+        for k in 0..=25 {
+            let a = (2.0 * k as f32).to_radians();
+            let d = continuum::glam::Quat::from_axis_angle(right, a) * start_dir;
+            let cam = Camera {
+                eye: camera.eye,
+                target: camera.eye + d,
+                vertical_fov_degrees: camera.vertical_fov_degrees,
+            };
+            for _ in 0..steps {
+                render(&mut r, cam);
+            }
+            let (e, _) = r.metered_exposure();
+            let colors = r.read_colors();
+            let mut hist = [0u32; 64];
+            let mut sampled = 0u32;
+            for (i, c) in colors.iter().enumerate() {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                if x % 2 != 0 || y % 2 != 0 {
+                    continue;
+                }
+                sampled += 1;
+                let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                if l > 0.0 {
+                    hist[((l.log2() + 16.0) * 2.0).clamp(0.0, 63.0) as usize] += 1;
+                }
+            }
+            let total: u32 = hist.iter().sum();
+            let (lo, hi) = (total as f64 * 0.5, total as f64 * 0.95);
+            let (mut seen, mut weight, mut sum) = (0.0f64, 0.0f64, 0.0f64);
+            for (b, &n) in hist.iter().enumerate() {
+                let take = ((seen + n as f64).min(hi) - seen.max(lo)).max(0.0);
+                sum += take * ((b as f64 + 0.5) * 0.5 - 16.0);
+                weight += take;
+                seen += n as f64;
+            }
+            let want = if weight > 0.0 { 0.18 / (sum / weight).exp2() } else { f64::NAN };
+            let dark = colors
+                .iter()
+                .filter(|c| {
+                    let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                    l > 0.0 && l < 1e-4
+                })
+                .count();
+            println!(
+                "pitch {:2}°: exposure {e:.4}, CPU's {want:.4}, not black {:.1}%, faint (0 < l < 1e-4) {:.1}%",
+                2 * k,
+                100.0 * total as f64 / sampled as f64,
+                100.0 * dark as f64 / colors.len() as f64
+            );
+        }
+        return;
+    }
     // `VR_PRE`: frames more at the start, the last of them the reference.
     for _ in 0..num("VR_PRE", 0) {
         render(&mut r, pose(0.0));

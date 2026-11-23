@@ -1720,7 +1720,16 @@ fn main() {
         }
     }
     let path = (frames_left.is_some() && world.showcase.is_some()).then_some(0.0);
-    let camera = FlyCamera::looking_at(world.start.0, world.start.1);
+    let mut camera = FlyCamera::looking_at(world.start.0, world.start.1);
+    // `VIEWER_PITCH=degrees`: the start view tilted up (diagnostics, with
+    // `--frames`).
+    if let Some(deg) = std::env::var("VIEWER_PITCH").ok().and_then(|v| v.parse::<f32>().ok()) {
+        camera.pitch += deg.to_radians();
+    }
+    // `VIEWER_UP=meters`: the start view raised (diagnostics).
+    if let Some(up) = std::env::var("VIEWER_UP").ok().and_then(|v| v.parse::<f32>().ok()) {
+        camera.position.z += up;
+    }
     let built = settings.build_key();
     let mut app = App {
         gpu: None,
