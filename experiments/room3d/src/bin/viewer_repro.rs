@@ -98,6 +98,11 @@ fn main() {
         RendererOptions {
             cache_options: continuum_gpu::CacheOptions {
                 sky_lag: true,
+                // `VR_FRAME_BUDGET`: the frame period's cap (ms; 0: none).
+                frame_budget_ms: std::env::var("VR_FRAME_BUDGET")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(continuum_gpu::CacheOptions::default().frame_budget_ms),
                 ..Default::default()
             },
             anti_aliasing: std::env::var("VR_AA").as_deref() != Ok("0"),

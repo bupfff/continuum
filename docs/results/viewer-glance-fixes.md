@@ -89,3 +89,19 @@ Basics scorecard after the fixes, against Cycles (`SC_SPEED=0`): every
 scene unchanged (Sponza 29.94%, the field 1.68%, the room 7.68%, the
 movers 5.99%, the helmet 4.46%, Fox 2.15%, BrainStem 3.22%). Speed not
 rerun yet.
+
+## The field's starved bake, located (development)
+
+`viewer_repro`'s settle (1,200 frames at the start view, fixed exposure).
+This device's GPU timestamps never fit the bake model here
+(`gpu_bake_ms` 0 every frame), so the frame period's cap (M14 gate 9)
+steers alone: it shrinks in proportion while a frame takes over 11 ms and
+grows only below 85% of it (9.35 ms). Frames near 10 ms with occasional
+spikes ratchet it down: 14,635 units at frame 100, 1,621 at 300, 1,251
+at 1,100 (8–20 pages baked a frame). Without the cap (`frame_budget_ms`
+0) the budget stays at its 20,000 maximum (230–330 pages a frame), but
+the field still does not settle in 1,200 frames: its bounce samples keep
+asking for distant boulders' pages (187,000 resident by frame 1,100,
+from 48,000 with the cap). Two things, then: the cap's dead band (a
+change to M14 gates 9–10's design, for a gate), and the field's far,
+small hits (the cone milestone, M23).
