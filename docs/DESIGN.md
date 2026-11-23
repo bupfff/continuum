@@ -1254,6 +1254,42 @@ shutter's; means within 0.12%. The new view passed narrowly (0.343× against
 camera dollies and turns keeps more of its leaves than the sampled shutter
 (two lines sampled; motion across them missed).
 
+#### Bounce light through cones (M23 design, 2026-11-22)
+
+Basics items (1) and (2): bounce samples trace 192 rays, and a ray's hit
+counts for its whole bin (1/192 of the hemisphere). A small bright object
+(Sponza's sunlit banners seen from its gallery) is caught by a few bins at
+full weight, differently from sample to sample: blotches (more rays, or
+dense re-bakes of spiky samples, shrink them slowly at a high cost; 2026-11-22
+in `docs/results/basics-scorecard.md`). And a ray reads the page of
+whatever object it hits, so ground samples on the million-boulder field ask
+for the pages of thousands of distant boulders and the view never settles.
+
+The paradigm's primitive answers both: **gather bounce light with mask
+cones**, compositing front to back what each bin's cone covers, weighted by
+the coverage it adds (L += Δcoverage × L_covered), as voxel cone tracing
+does (Crassin et al. 2011). A small object then counts for the share of the
+bin it covers; a far cluster of boulders is splatted as one prefiltered
+node. Closest prior art: point-based global illumination (Christensen
+2008): surfels with direct light in an octree, radiance aggregated per node
+(spherical harmonics), gathered by descending until a node's solid angle
+is small; and hierarchical radiosity (Hanrahan et al. 1991).
+
+What is new here is the light of what a cone covers:
+- **Triangles** (leaves): their cached light at the covered fragment, read
+  from the page at the cone's footprint (as bounce rays read hits now).
+- **Prefiltered nodes** (triangle-hierarchy nodes and object-hierarchy nodes
+  splatted whole): a node's outgoing light, directional like its coverage
+  (the same 26 directions), aggregated upward from its contents' cached
+  light; kept current as pages bake.
+
+Steps: (a) a prototype descending to triangles everywhere (no aggregated
+light), to measure on Sponza against Cycles whether cone-gathered bounce
+removes the blotches and the gap at the arches; (b) aggregated node light,
+for cost and for the field; (c) a gate: Sponza and the field against
+Cycles and the one-ray gather, settling (the field must settle), speed side
+by side.
+
 #### Bounce light with movers (M22 design, 2026-11-16)
 
 Item 5's first gap: bounce light (`CacheOptions::indirect`) is off by
