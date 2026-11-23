@@ -1306,6 +1306,24 @@ samples of direct light on what it holds, as a page's texels are), read
 by hits whose footprint covers the node, so a hit on a distant boulder
 reads its cluster's light and requests no page of its own.
 
+**M23 as built (decided the same night): far hits lit by rays.** Simpler
+than node light, and enough for the field: a bounce hit whose footprint
+asks for its chart's top mip (the whole chart one texel: a distant
+boulder) reads no page. Its direct light is the unshadowed light at the
+hit times one hardware shadow ray toward each light; its sky one ray from
+the hit, cosine-distributed about its normal, open or not (π times the
+open share is the sky's irradiance per unit radiance); its albedo and
+emission as before. Such a hit never requests a page nor counts as
+missing, so a ground sample's rays at thousands of distant boulders no
+longer wait on thousands of pages. One bounce only (where `bounces` is
+one, as outdoors by default); with more, hits keep pages (their own
+bounce light lives there). Hardware ray queries only. Prior art: DDGI
+(Majercik et al. 2019) shades its probes' ray hits with direct light by
+shadow rays (and indirect from the probes); Lumen's far field likewise
+traces a simplified scene and shades its hits from a surface cache. The
+gate: the field settles; Sponza, the field and the view from above within
+their bars against Cycles; speed side by side.
+
 #### Bounce light with movers (M22 design, 2026-11-16)
 
 Item 5's first gap: bounce light (`CacheOptions::indirect`) is off by
@@ -2047,6 +2065,10 @@ For a new conversation or after a compaction; history lives in git and
   budget; Cycles needs 2,000+ samples in dark interiors; this device's GPU
   timestamps arrive out of order.
 
+- **Decided 2026-11-22 night (the user):** finish M23 (far bounce hits
+  without pages, so the field settles), then update the repository and its
+  README (a new or improved layout, newer GIFs and diagrams), then go on
+  down the list.
 - **Plan agreed 2026-11-22 (one long stretch):** item (3) first (deforming
   characters in motion), then a milestone for (1) and (2) together: bounce
   light gathered by cones over the prefiltered hierarchy, the hierarchy's
