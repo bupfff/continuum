@@ -361,3 +361,22 @@ stop vs settled 16.64% (13.84%), settles again in 16.49 s (12.99 s).
 Textured, the clay gain shrinks (29.94 → 25.54%): the rest of Sponza's
 gap is elsewhere (materials and the high-frequency half of the error,
 not yet split).
+
+Bounce rays a bin again, after the fix (the earlier trials read top
+mips): clay Sponza at one bounce, 4 rays a bin against 1: 14.67% against
+18.53% from Cycles (7.74% against 9.74% at an 8-pixel blur), the curtains'
+blotches gone, the end wall's mottling left. `pair_dev` (`PAIR_A=1
+PAIR_B=4`, side by side, then each against Cycles):
+
+| Scene | Against Cycles: 1, 4 rays | Settled at (s): 1, 4 | Moving frame (ratio) |
+|---|---|---|---|
+| sponza | 25.54%, **23.85%** | 45.68, 57.51 | 1.010× |
+| field | 1.79%, 1.79% | never | 1.089× |
+| room | 7.53%, 8.04% | 2.03, 2.00 | 1.094× |
+| movers | 5.40%, 5.57% | 2.06, 2.45 | 1.047× |
+| helmet | 4.46%, 4.46% | 0.90, 0.95 | 1.072× |
+| fox | 2.17%, 2.11% | 1.41, 1.50 | 0.982× |
+| brainstem | 3.28%, 3.29% | 4.97, 8.61 | 1.134× |
+
+Default left at 1: Sponza gains 1.7 points for 1.26× its settling, the
+room and the movers lose 0.5 and 0.2, BrainStem settles 1.73× slower.
