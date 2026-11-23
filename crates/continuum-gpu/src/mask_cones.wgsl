@@ -3637,9 +3637,14 @@ fn vc_fill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let e = bake_list[p];
     // A page whose stale texels did not all fit stays marked invalid (M9).
     if (bake_bounds[2u * p].w != 0.0) { return; }
-    // Baked without bounce samples (for light at hits): clear what a
-    // previous page in the slot left (M10).
-    if (bake_bounds[2u * p + 1u].w == 1.0 && vc.indirect.y == 1u) {
+    // Baked without bounce samples (for light at hits), or a new page in
+    // the slot (whose samples, if planned, the bounce pass writes after
+    // this): clear what a previous page in the slot left (M10). Kept, a
+    // previous page's samples would show as its bounce light, and their
+    // bounce count keep this page from asking for its own.
+    let previous = slot_info[3u * e.w];
+    let new_page = previous.w == 0u || any(previous.xyz != e.xyz);
+    if ((bake_bounds[2u * p + 1u].w == 1.0 || new_page) && vc.indirect.y == 1u) {
         for (var q = 0u; q < 9u * IND_CH; q++) { indirect[e.w * 9u * IND_CH + q] = vec2<u32>(0u); }
     }
     // hi.w 2: re-baked for a move, its sky still the guess; hi.w 3 (planned)

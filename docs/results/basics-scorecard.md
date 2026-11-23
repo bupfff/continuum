@@ -269,3 +269,46 @@ Seen in the same run, from M22 gate 8's default (not measured by that
 gate): with two bounces, the image when the motion stops is further from
 the settled one indoors: the room 3.95% and the movers 16.14% (one bounce:
 0.01–0.15% and 2.5–5.7%); both settle again within 1.1 s.
+
+## Sponza's gap located: bounce light reads coarse texels' sky (2026-11-22, basics item 1)
+
+Development, not a gate (`gltf_dev`, the scorecard's Sponza view, 640×360,
+2×2 supersampled; Cycles through the same glTF import).
+
+**By surface.** A render naming each pixel's geometry (`GD_IDS=1`) splits
+the 29.07% (this run) by geometry: the arch spandrels and walls (geometry
+4) 25% of the squared error, the arches (8) 17%, the floor (46) 13%, the
+red drape (56) 12%; the upper gallery's back wall (10), the blotches first
+suspected, 0.6%. Blurred, the error stays: 27.8% at full resolution
+(luminance), 20.5% at a 4-pixel Gaussian, 14.8% at 16. Low-frequency
+light, not texture or edges.
+
+**Not the materials.** Every surface Lambertian at 0.5, alpha kept, here
+and in Cycles (`GD_CLAY=1`): direct light alone matches (4.95% at an
+8-pixel blur), one bounce each does not (23.03%). The ground floor's vault
+behind the near curtain (geometry 6) is 2.6× Cycles' one bounce (0.00251
+against 0.00097); seen from below in the corridor, 9× (0.00195 against
+0.00022), evenly over the vault.
+
+**The sky's bounce.** Without the sky (sun alone, both renderers) the vault
+is darker than Cycles (0.00002 against 0.00013); the excess is all sky
+light bounced. What a vault point sees directly matches in every
+direction (five views, clay, direct only: toward the courtyard 0.0080
+against 0.0081, elsewhere both ~0). Hits read at two mips coarser than the
+bin's footprint: the vault unchanged (0.00251).
+
+**Coarse texels over-light the sky in occluded places.** The corridor's
+floor seen from the vault, sky alone, as the texels' size grows
+(`GD_PPT`, pixels a texel spans): 2 → 0.000103 (Cycles 0.000102), 16 →
+0.000289, 64 → 0.001037 (10×); the sun alone stays 0 at every size. At 16,
+whole texels deep in the corridor carry sky (up to 0.0014). Not texels
+whose centre lies off their triangle (dropping those samples changed
+nothing). Bounce rays read pages at the bins' footprint, a few times
+coarser than the camera's, so a dark corridor's hits return light from
+the open courtyard: the vault's excess, and the page-sized blotches on the
+curtains, floor and end wall (clay shows them without textures).
+
+Next: find why a coarse texel's sky sample sees the sky (its point, its
+hemicube or the bilinear spread from neighbours across the curtain line),
+then decide between fixing coarse texels' sky and gathering bounce by
+cones (M23).

@@ -21,6 +21,8 @@ Run as `blender -b --factory-startup -noaudio --python render_gltf_reference.py
   `compare_skinned_pose.py` poses it), or absent for the rest pose;
 - "ground": {"z", "half", "albedo"}: a Lambertian square 2 × half across
   at height z under the origin (the viewer's ground), or absent;
+- "cull_back_faces" (true by default): camera rays pass through the back
+  faces of single-sided materials, as glTF and Continuum cull them;
 - "out": where to write the linear image, float32 RGB rows from the top.
 """
 
@@ -130,6 +132,63 @@ if job.get("thin_glass", True):
             ):
                 thin_glass(m, n)
                 break
+
+# "clay" (a diagnostic): every surface Lambertian with albedo 0.5, its alpha
+# (cutouts) kept, without normal maps, specular or emission.
+if job.get("clay"):
+    for mat in bpy.data.materials:
+        if not mat.use_nodes:
+            continue
+        nodes, links = mat.node_tree.nodes, mat.node_tree.links
+        outs = [n for n in nodes if n.type == "OUTPUT_MATERIAL"]
+        out = next((n for n in outs if n.is_active_output), outs[0] if outs else None)
+        if out is None:
+            continue
+        principled = next((n for n in nodes if n.type == "BSDF_PRINCIPLED"), None)
+        diffuse = nodes.new("ShaderNodeBsdfDiffuse")
+        diffuse.inputs["Color"].default_value = (0.5, 0.5, 0.5, 1.0)
+        surface = diffuse.outputs["BSDF"]
+        if principled is not None:
+            alpha = principled.inputs["Alpha"]
+            if alpha.is_linked or alpha.default_value < 1.0:
+                clear = nodes.new("ShaderNodeBsdfTransparent")
+                mix = nodes.new("ShaderNodeMixShader")
+                if alpha.is_linked:
+                    links.new(alpha.links[0].from_socket, mix.inputs["Fac"])
+                else:
+                    mix.inputs["Fac"].default_value = alpha.default_value
+                links.new(clear.outputs[0], mix.inputs[1])
+                links.new(surface, mix.inputs[2])
+                surface = mix.outputs[0]
+        links.new(surface, out.inputs["Surface"])
+
+# glTF culls a single-sided material's back faces (doubleSided false), and
+# Continuum's camera rays do; Cycles never culls them. So camera rays pass
+# through such back faces here ("cull_back_faces", true by default); other
+# rays (shadows, bounces) still meet them. Without it, Sponza's upper
+# gallery showed its curtains' backs where Continuum sees the gallery.
+if job.get("cull_back_faces", True):
+    for mat in bpy.data.materials:
+        if not mat.use_nodes or not getattr(mat, "use_backface_culling", False):
+            continue
+        nodes, links = mat.node_tree.nodes, mat.node_tree.links
+        outs = [n for n in nodes if n.type == "OUTPUT_MATERIAL"]
+        out = next((n for n in outs if n.is_active_output), outs[0] if outs else None)
+        if out is None or not out.inputs["Surface"].is_linked:
+            continue
+        surface = out.inputs["Surface"].links[0].from_socket
+        geometry = nodes.new("ShaderNodeNewGeometry")
+        path = nodes.new("ShaderNodeLightPath")
+        both = nodes.new("ShaderNodeMath")
+        both.operation = "MULTIPLY"
+        links.new(geometry.outputs["Backfacing"], both.inputs[0])
+        links.new(path.outputs["Is Camera Ray"], both.inputs[1])
+        clear = nodes.new("ShaderNodeBsdfTransparent")
+        mix = nodes.new("ShaderNodeMixShader")
+        links.new(both.outputs[0], mix.inputs["Fac"])
+        links.new(surface, mix.inputs[1])
+        links.new(clear.outputs[0], mix.inputs[2])
+        links.new(mix.outputs[0], out.inputs["Surface"])
 
 if "time" in job:
     # Every animation plays, as glTF means (see compare_skinned_pose.py):

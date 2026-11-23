@@ -99,6 +99,77 @@ fn main() {
         ));
         suns.push((toward.normalize().as_vec3(), Vec3::splat(3.0)));
     }
+    // `GD_LIST=1`: each geometry's triangles, texture and the texture's mean
+    // colour (sRGB bytes), then stop.
+    if std::env::var_os("GD_LIST").is_some() {
+        for (g, geometry) in imported.scene.geometries.iter().enumerate() {
+            let t = imported.scene.geometry_textures.get(g).copied().flatten();
+            let mean = t.map(|t| {
+                let tex = &imported.scene.textures[t as usize];
+                let n = (tex.rgba.len() / 4).max(1) as f64;
+                let c = |k: usize| tex.rgba.iter().skip(k).step_by(4).map(|&b| b as f64).sum::<f64>() / n;
+                [c(0) as u32, c(1) as u32, c(2) as u32]
+            });
+            println!("geometry {g}: {} triangles, texture {t:?}, mean {mean:?}", geometry.triangles.len());
+            // Its instances' bounds, from the scene's center.
+            for i in imported.scene.instances.iter().filter(|i| i.geometry == g) {
+                let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+                for v in geometry.triangles.iter().flatten() {
+                    let w = (i.position + (i.rotation * (*v * i.scale)).as_dvec3() - origin).as_vec3();
+                    (lo, hi) = (lo.min(w), hi.max(w));
+                }
+                println!("  instance bounds {lo:.2} to {hi:.2}");
+            }
+        }
+        return;
+    }
+    // `GD_CLAY=1`: every surface Lambertian with albedo 0.5, without its
+    // textures' colours, normal maps or emission (alpha kept), here and in
+    // Cycles (a diagnostic).
+    let clay = std::env::var_os("GD_CLAY").is_some();
+    if clay {
+        let s = &mut imported.scene;
+        for tex in &mut s.textures {
+            for px in tex.rgba.chunks_mut(4) {
+                px[..3].fill(255);
+            }
+        }
+        s.geometry_materials.clear();
+        s.geometry_normal_maps.clear();
+        s.geometry_metallic_roughness.clear();
+        s.geometry_emission.clear();
+        s.geometry_emissive_textures.clear();
+        s.geometry_specular.clear();
+        s.geometry_clearcoat.clear();
+        s.geometry_sheen.clear();
+        s.geometry_transmission.clear();
+        for i in &mut s.instances {
+            i.albedo = Vec3::splat(0.5);
+        }
+    }
+    // `GD_IDS=1`: every surface black, each geometry glowing its index
+    // (red the units, green the tens, blue 0.5; tenths), alpha kept: with
+    // `GD_RAW=1`, the raw image names each pixel's geometry.
+    if std::env::var_os("GD_IDS").is_some() {
+        let s = &mut imported.scene;
+        for tex in &mut s.textures {
+            for px in tex.rgba.chunks_mut(4) {
+                px[..3].fill(0);
+            }
+        }
+        s.geometry_materials.clear();
+        s.geometry_emissive_textures.clear();
+        s.geometry_specular.clear();
+        s.geometry_clearcoat.clear();
+        s.geometry_sheen.clear();
+        s.geometry_transmission.clear();
+        s.geometry_emission = (0..s.geometries.len())
+            .map(|g| Vec3::new((g % 10) as f32 * 0.1 + 0.05, ((g / 10) % 10) as f32 * 0.1 + 0.05, 0.5))
+            .collect();
+        for i in &mut s.instances {
+            i.albedo = Vec3::ZERO;
+        }
+    }
     if std::env::var_os("GD_CUTOUTS").is_some() {
         let t = Instant::now();
         let cut = imported.scene.with_cutouts();
@@ -187,6 +258,14 @@ fn main() {
                 // Cycles').
                 bounces: num("GD_CACHE_BOUNCES", 1),
                 bounce_rest: std::env::var_os("GD_BOUNCE_REST").is_some(),
+                bounce_rays: num("GD_BOUNCE_RAYS", 1),
+                // `GD_PPT`: pixels a texel spans (2 by default).
+                pixels_per_texel: std::env::var("GD_PPT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2.0),
+                // `GD_SKY_LAG=0`: the sky baked with the rest (`sky_lag` off).
+                sky_lag: std::env::var("GD_SKY_LAG").as_deref() != Ok("0"),
                 hardware_shading: std::env::var("GD_HW_SHADE").as_deref() != Ok("0"),
                 frame_target_ms: if budget > 0 { 0.0 } else { 14.0 },
                 bake_budget: if budget > 0 {
@@ -436,7 +515,7 @@ fn main() {
             .unwrap_or(1.0);
         let raw = work.join("reference.f32");
         let job = format!(
-            "{{\"gltf\": {:?}, \"origin\": [{}, {}, {}], \"camera\": {{\"eye\": {}, \"target\": {}, \"fov\": {}}}, \"size\": [{w}, {h}], \"samples\": {samples}, \"bounces\": {}, \"environment\": {}, \"strength\": {strength}, \"sky\": {}, \"suns\": [{}], \"distribution\": {:?}, \"out\": {:?}}}",
+            "{{\"gltf\": {:?}, \"origin\": [{}, {}, {}], \"camera\": {{\"eye\": {}, \"target\": {}, \"fov\": {}}}, \"size\": [{w}, {h}], \"samples\": {samples}, \"bounces\": {}, \"environment\": {}, \"strength\": {strength}, \"sky\": {}, \"suns\": [{}], \"distribution\": {:?}, \"clay\": {}, \"out\": {:?}}}",
             path,
             origin.x,
             origin.y,
@@ -454,6 +533,7 @@ fn main() {
             },
             suns.join(", "),
             std::env::var("GD_DISTRIBUTION").unwrap_or_default(),
+            clay,
             raw.to_string_lossy()
         );
         let job_path = work.join("job.json");
