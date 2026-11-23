@@ -1290,6 +1290,22 @@ for cost and for the field; (c) a gate: Sponza and the field against
 Cycles and the one-ray gather, settling (the field must settle), speed side
 by side.
 
+**Revised the same night.** Much of Sponza's case was a bug: bounce hits
+read pages 1 / scale too coarse (each chart's single top texel on Sponza;
+fixed, `docs/results/basics-scorecard.md`). After it, clay Sponza is
+18.5% from Cycles at one ray a bin and 14.7% at four (curtains' blotches
+gone, the end wall mottled), textured 25.5% and 23.9%. So (a) is now
+weighed against more rays a bin (four cost 1.26× Sponza's settling and
+1.73× BrainStem's) rather than against blotches from wrong pages. The
+field's case stands: the frame cap (M14 gate 10, 11 ms) holds its bake
+near 1,250 units at 10 ms frames, by design, and without the cap the
+field still does not settle (187,000 pages resident after 1,200 frames):
+far hits must cost a node's light, not a page per boulder. That makes
+(b) the step that matters: a node's outgoing light baked directly (a few
+samples of direct light on what it holds, as a page's texels are), read
+by hits whose footprint covers the node, so a hit on a distant boulder
+reads its cluster's light and requests no page of its own.
+
 #### Bounce light with movers (M22 design, 2026-11-16)
 
 Item 5's first gap: bounce light (`CacheOptions::indirect`) is off by
