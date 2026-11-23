@@ -2004,6 +2004,12 @@ For a new conversation or after a compaction; history lives in git and
   budget; Cycles needs 2,000+ samples in dark interiors; this device's GPU
   timestamps arrive out of order.
 
+- **Plan agreed 2026-11-22 (one long stretch):** item (3) first (deforming
+  characters in motion), then a milestone for (1) and (2) together: bounce
+  light gathered by cones over the prefiltered hierarchy, the hierarchy's
+  nodes holding the light of the cached pages under them (averaged upward),
+  so a cone counts a small bright object for its true share and a cluster
+  of distant boulders as one value.
 - **Decided 2026-11-22 (the user, later the same day): finish the basics
   before compatibility.** Three items, in order: (1) lighting texels that
   average their area (Sponza's blotchy gallery and bright arch undersides);
