@@ -34,7 +34,9 @@ impl ToneMap {
 /// shows the frame's middle luminances (the mean of log2 luminance between
 /// two percentiles, at every other pixel in each direction) at `key`, approached over `seconds` (an exponential
 /// adaptation, as an eye or a camera; only this one number carries from
-/// frame to frame). It multiplies any exposure set by hand.
+/// frame to frame). It multiplies any exposure set by hand. Black pixels
+/// (an empty background) are not metered, and the adaptation slows where
+/// less than a quarter of the frame is metered (holding with none).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AutoExposure {
     /// The luminance the trimmed mean is shown at (0.18: middle grey).

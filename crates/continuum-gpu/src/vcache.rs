@@ -39,8 +39,15 @@ const EMPTY: u32 = u32::MAX;
 /// Pages freed per frame at most from the eviction queue (the least recently
 /// used first), so eviction never stalls a frame (M4 gate 11).
 const EVICT_PER_FRAME: usize = 2_048;
-/// Pages unused for this many frames are evicted.
+/// Pages unused for this many frames are evicted, once the pool holds
+/// `EVICT_ABOVE` of its pages.
 const EVICT_AGE: u32 = 64;
+/// The pool's share resident before unused pages are evicted by age (a
+/// full pool evicts the least recently used at once). Below it a glance
+/// away keeps the view's pages: evicted after a second of looking at the
+/// sky, the field's came back without their bounce light for seconds (the
+/// viewer, 2026-11-22).
+const EVICT_ABOVE: f32 = 0.25;
 /// The adaptive bake budget's floor and starting point (cones per frame).
 const MIN_BUDGET: f32 = 1_000.0;
 /// Frames a measure of the frame period with the bake at its floor stays
@@ -2931,7 +2938,9 @@ impl VirtualCache {
             self.merge_used(bytemuck::cast_slice(&raw));
             self.queue_stale(EVICT_AGE);
         }
-        self.evicted += self.evict_queued(EVICT_PER_FRAME, EVICT_AGE);
+        if self.map.len() as f32 > EVICT_ABOVE * self.options.pages as f32 {
+            self.evicted += self.evict_queued(EVICT_PER_FRAME, EVICT_AGE);
+        }
         self.evicting += evicting.elapsed();
         self.plan(device, requests);
         // `collect` adds its wait to `waiting`.

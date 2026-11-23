@@ -17,7 +17,8 @@
 //!
 //! Command line, all optional: a `.glb`/`.gltf` path (or `--gltf file`) or
 //! `--scene showcase|room|field` (`--boulders N`); `--no-bounce`, `--no-aa`,
-//! `--sky`, `--scale N` (render at 1/N of the window), `--vsync`,
+//! `--sky`, `--scale N` (render at 1/N of the window), `--no-vsync` (vsync
+//! is on, but off with `--frames` unless `--vsync`),
 //! `--exposure K`, `--no-cache` (a mask cone per pixel every frame),
 //! `--no-panel`; for glTF files `--no-ground` and `--emitters-as-lights`
 //! (emissive rectangles as area lights); `--env sky.hdr` (or a `.png`, or
@@ -1694,7 +1695,10 @@ fn main() {
         scale: arg("--scale").and_then(|n| n.parse().ok()).unwrap_or(1),
         bloom: true,
         tone_map: continuum_gpu::ToneMap::PbrNeutral,
-        vsync: has("--vsync"),
+        // Vsync by default: without it Metal shows frames as they finish,
+        // and a moving view tears (the user, 2026-11-22). Off for `--frames`
+        // (timings) or with `--no-vsync`.
+        vsync: !has("--no-vsync") && (frames_left.is_none() || has("--vsync")),
     };
     world.apply_lighting(&settings.lighting);
     if let Some(a) = &world.animations {

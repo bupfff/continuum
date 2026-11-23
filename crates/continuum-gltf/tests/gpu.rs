@@ -1252,7 +1252,8 @@ fn transmission_shows_what_lies_behind() {
 /// adaptation time, the target holds the colors times the exposure that
 /// shows the mean of log2 luminance between the 50th and 95th percentiles
 /// at the key, computed here on the CPU from `read_colors` with the same
-/// half-stop bins, at every other pixel in each direction.
+/// half-stop bins, at every other pixel in each direction, black pixels
+/// not metered.
 #[test]
 fn auto_exposure_shows_the_middle_at_the_key() {
     let s = scene(DVec3::ZERO);
@@ -1356,12 +1357,11 @@ fn auto_exposure_shows_the_middle_at_the_key() {
             continue;
         }
         let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-        let b = if l <= 0.0 {
-            0
-        } else {
-            ((l.log2() + 16.0) * 2.0).clamp(0.0, 63.0) as usize
-        };
-        hist[b] += 1;
+        // Black pixels are not metered.
+        if l <= 0.0 {
+            continue;
+        }
+        hist[((l.log2() + 16.0) * 2.0).clamp(0.0, 63.0) as usize] += 1;
     }
     let total: u32 = hist.iter().sum();
     let (lo, hi) = (total as f64 * 0.5, total as f64 * 0.95);

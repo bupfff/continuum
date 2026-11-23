@@ -37,7 +37,11 @@ fn meter_histogram(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local
     if (at.x < params.size.x && at.y < params.size.y) {
         let c = colors[at.y * params.size.x + at.x].xyz;
         let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-        atomicAdd(&local_hist[bin_of(l)], 1u);
+        // Black pixels (an empty background, as with no sky) are not
+        // metered: counted, looking up at nothing raised the exposure up to
+        // its bound, and looking back down flashed white (the viewer,
+        // 2026-11-22).
+        if (l > 0.0) { atomicAdd(&local_hist[bin_of(l)], 1u); }
     }
     workgroupBarrier();
     if (li < 64u) {
@@ -65,11 +69,22 @@ fn meter_resolve() {
         atomicStore(&hist[b], 0u);
     }
     var target_e = 1.0;
-    if (weight > 0.0) { target_e = params.p.x / exp2(sum / weight); }
+    if (weight > 0.0) {
+        target_e = params.p.x / exp2(sum / weight);
+    } else if (meter[1] > 0.0) {
+        // Nothing metered (all black): the exposure holds.
+        target_e = meter[0];
+    }
     target_e = clamp(target_e, params.bounds.x, params.bounds.y);
+    // The share of the frame metered (not black), up to a quarter: the
+    // adaptation slows with less, and holds with none. Metering a sun alone
+    // over an empty background sent the exposure down 17 stops, and the
+    // view came back black (the viewer, 2026-11-22).
+    let sampled = f32(((params.size.x + 1u) / 2u) * ((params.size.y + 1u) / 2u));
+    let share = clamp(f32(total) / max(sampled, 1.0) / 0.25, 0.0, 1.0);
     var e = target_e;
-    if (meter[1] > 0.0 && params.p.y < 1.0) {
-        e = exp2(mix(log2(max(meter[0], 1e-12)), log2(target_e), params.p.y));
+    if (meter[1] > 0.0) {
+        e = exp2(mix(log2(max(meter[0], 1e-12)), log2(target_e), min(params.p.y, 1.0) * share));
     }
     meter[0] = e;
     meter[1] += 1.0;
