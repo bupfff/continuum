@@ -2658,7 +2658,9 @@ impl InstancedRenderer {
             &self.meter.state,
             &self.bloom_passes.out,
         );
-        self.meter.bind(device, &self.colors);
+        // Each pixel's hit, where the cache's camera passes write it.
+        self.meter
+            .bind(device, &self.colors, self.cache.is_some().then_some(&vis));
         self.vis = Some(vis);
         self.dof_passes = None;
         self.make_dof();

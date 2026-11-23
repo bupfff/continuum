@@ -105,3 +105,30 @@ asking for distant boulders' pages (187,000 resident by frame 1,100,
 from 48,000 with the cap). Two things, then: the cap's dead band (a
 change to M14 gates 9–10's design, for a gate), and the field's far,
 small hits (the cone milestone, M23).
+
+## Looking up under a sky (the user, the same night)
+
+With the rebuilt app (the default lighting is now sun and sky), looking
+up still brightened everything, less than before. The field's sky is
+dimmer than its sunlit ground (its irradiance a quarter of the sun's), so
+a frame mostly sky raised the exposure; the first fix had removed only
+black pixels. The meter now reads each pixel's hit (with the cache): a
+light seen is not metered, and the sky goes in a histogram of its own,
+counted at most as much as the surfaces, so a view half sky is metered as
+before and looking up cannot let the sky take over. Metering surfaces
+alone held the exposure too, but darkened the usual view by about 0.8 of
+a stop (the brighter half of the ground at middle grey); lowering the
+lower percentile to 0.25 or 0.1 gave back only part of it.
+
+The viewer's field, sun and sky, 2560×1440, 200 frames at each tilt from
+the start view (`VIEWER_PITCH`), mean of the displayed image made linear:
+
+| Tilt | Before: bottom tenth, top tenth (sky) | After |
+|---|---|---|
+| 0° | 0.1678, 0.0222 | 0.1678, 0.0222 |
+| 12° | 0.3837, 0.0708 | 0.1639, 0.0233 |
+| 18° | 0.6147, 0.1209 | 0.1871, 0.0215 |
+| 24° | 0.3227, 0.1730 | 0.0478, 0.0155 |
+
+At 24° the bottom tenth is mostly sky and far ground. The glTF tests pass
+(auto-exposure's included: its view has no sky).

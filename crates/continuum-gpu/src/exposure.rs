@@ -35,8 +35,10 @@ impl ToneMap {
 /// two percentiles, at every other pixel in each direction) at `key`, approached over `seconds` (an exponential
 /// adaptation, as an eye or a camera; only this one number carries from
 /// frame to frame). It multiplies any exposure set by hand. Black pixels
-/// (an empty background) are not metered, and the adaptation slows where
-/// less than a quarter of the frame is metered (holding with none).
+/// (an empty background) and, with the cache, lights seen are not metered;
+/// the sky counts at most as much as the surfaces; and the adaptation
+/// slows where surfaces fill less than a quarter of the frame (holding
+/// with none).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AutoExposure {
     /// The luminance the trimmed mean is shown at (0.18: middle grey).
@@ -78,6 +80,8 @@ pub(crate) struct Meter {
     pub(crate) state: wgpu::Buffer,
     params: wgpu::Buffer,
     binds: Option<[wgpu::BindGroup; 2]>,
+    /// Whether the histogram reads each pixel's hit (`vis`).
+    hits: bool,
 }
 
 impl Meter {
@@ -108,15 +112,24 @@ impl Meter {
         Meter {
             histogram: pipeline("meter_histogram"),
             resolve: pipeline("meter_resolve"),
-            hist: buffer("meter histogram", 256, U::STORAGE),
+            hist: buffer("meter histogram", 512, U::STORAGE),
             state: buffer("meter", 16, U::STORAGE | U::COPY_SRC | U::COPY_DST),
             params: buffer("meter params", 48, U::UNIFORM | U::COPY_DST),
             binds: None,
+            hits: false,
         }
     }
 
-    /// Binds the colour buffer (after it is made or remade).
-    pub(crate) fn bind(&mut self, device: &wgpu::Device, colors: &wgpu::Buffer) {
+    /// Binds the colour buffer (after it is made or remade) and, where the
+    /// camera passes write it, each pixel's hit: then a light seen is not
+    /// metered, and the sky counts at most as much as the surfaces.
+    pub(crate) fn bind(
+        &mut self,
+        device: &wgpu::Device,
+        colors: &wgpu::Buffer,
+        hits: Option<&wgpu::Buffer>,
+    ) {
+        self.hits = hits.is_some();
         let group = |pipeline: &wgpu::ComputePipeline, entries: &[(u32, &wgpu::Buffer)]| {
             let entries: Vec<wgpu::BindGroupEntry> = entries
                 .iter()
@@ -134,7 +147,12 @@ impl Meter {
         self.binds = Some([
             group(
                 &self.histogram,
-                &[(0, colors), (1, &self.hist), (3, &self.params)],
+                &[
+                    (0, colors),
+                    (1, &self.hist),
+                    (3, &self.params),
+                    (4, hits.unwrap_or(colors)),
+                ],
             ),
             group(
                 &self.resolve,
@@ -156,7 +174,7 @@ impl Meter {
         let Some([h, r]) = &self.binds else { return };
         let params = MeterParams {
             size: [size.0, size.1],
-            pad: [0; 2],
+            pad: [self.hits as u32, 0],
             p: [auto.key, rate, auto.percentiles.0, auto.percentiles.1],
             bounds: [auto.bounds.0, auto.bounds.1, 0.0, 0.0],
         };

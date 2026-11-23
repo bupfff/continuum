@@ -256,9 +256,10 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   `ToneMap::Agx`, an approximation of the original AgX, not Blender 5.2's;
   `ToneMap::Reinhard`, the old curve) and `RendererOptions::auto_exposure`
   (on by default: the exposure that shows the frame's middle luminances at
-  middle grey, adapting over half a second; black pixels, such as an empty
-  background, are not metered, and the adaptation slows where less than a
-  quarter of the frame is metered; it multiplies
+  middle grey, adapting over half a second; black pixels (an empty
+  background) and lights seen are not metered, the sky counts at most as
+  much as the surfaces, and the adaptation slows where surfaces fill less
+  than a quarter of the frame; it multiplies
   `Renderer::set_exposure`, and `read_colors` stays linear). A float
   target gets linear light times the exposure, for an engine's own tone
   map.
