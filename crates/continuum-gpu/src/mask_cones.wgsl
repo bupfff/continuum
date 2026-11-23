@@ -3371,6 +3371,19 @@ fn area_point(t: PageTexel, i: u32) -> TexelSurface {
     return vc_surface_at(t.m, t.c, (vec2<f32>(t.texel) + f) / vec2<f32>(t.n));
 }
 
+// Whether texel `t` curves: a point of its 16 on the surface whose normal
+// lies more than 30° from `normal` (its centre's). A flat texel's centre
+// faces the light as all of it does, and keeps its point sample: averaged,
+// Sponza's walls' coarse texels, read by bounce rays, lost 6% of its light
+// and moved it 2 points from Cycles (M22 gate 10's rehearsal).
+fn area_curved(t: PageTexel, normal: vec3<f32>) -> bool {
+    for (var i = 0u; i < AREA_POINTS; i++) {
+        let p = area_point(t, i);
+        if (p.ok && surface_inside && dot(p.normal, normal) < 0.866) { return true; }
+    }
+    return false;
+}
+
 @compute @workgroup_size(64)
 fn vc_update(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;

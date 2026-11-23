@@ -1482,9 +1482,10 @@ fn hw_vc_bake_wide(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocati
 // light (2 × 2 over its rectangle). The light's visible share over the
 // points that face it, each weighted by its unshadowed light, replaces the
 // cone's ratio (with `light_ratio`; else the points' mean light replaces
-// the value). A texel none of whose points faces the light keeps the
-// cone's.
+// the value). A texel none of whose points faces the light, or that does
+// not curve (`area_curved`), keeps the cone's.
 var<workgroup> area_sums: array<vec3<f32>, 64>;
+var<workgroup> area_curves: atomic<u32>;
 
 @compute @workgroup_size(64)
 fn hw_vc_bake_area(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -1500,10 +1501,21 @@ fn hw_vc_bake_area(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocati
     let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
     let t = page_texel(job.x, k);
     let r = lights[l];
+    // Only a texel that curves (`area_curved`): each lane tests its point
+    // against the centre's normal.
+    let centre = vc_surface(t.m, t.c, t.n, t.texel);
+    if (li == 0u) { atomicStore(&area_curves, 0u); }
+    workgroupBarrier();
+    if (listed && t.inside && li < AREA_POINTS) {
+        let p = area_point(t, li);
+        if (p.ok && surface_inside && dot(p.normal, centre.normal) < 0.866) { atomicStore(&area_curves, 1u); }
+    }
+    workgroupBarrier();
+    let curved = atomicLoad(&area_curves) == 1u;
     // x: the visible light, y: the unshadowed light, z: points on the
     // surface (each lane a quarter of its point).
     var acc = vec3<f32>(0.0);
-    if (listed && t.inside) {
+    if (listed && t.inside && curved) {
         let s = area_point(t, li / 4u);
         if (s.ok && surface_inside) {
             acc.z = 0.25;
@@ -1525,7 +1537,7 @@ fn hw_vc_bake_area(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocati
         if (li < hh) { area_sums[li] += area_sums[li + hh]; }
         workgroupBarrier();
     }
-    if (li == 0u && listed && t.inside && area_sums[0].y > 0.0) {
+    if (li == 0u && listed && t.inside && curved && area_sums[0].y > 0.0) {
         let total = area_sums[0];
         let ratio = clamp(total.x / total.y, 0.0, 1.0);
         pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(total.x / max(total.z, 1e-6), ratio, vc.sky.w == 1u);
@@ -1583,7 +1595,7 @@ fn hw_vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     // A coarse texel's rays from its 16 points in turn (M22 gate 9): bin b
     // from point b mod 16, around that point's normal (bins whose point lies
     // off the surface count as the texel's centre's).
-    let area = on && area_texel(t);
+    let area = on && area_texel(t) && area_curved(t, s.normal);
     if (on) {
         for (var q = 0u; q < 32u; q++) {
             let b = 32u * f + q;

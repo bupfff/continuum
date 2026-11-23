@@ -330,6 +330,26 @@ pub fn gltf_case(
     }
 }
 
+/// The field seen from above (M22 gates 9–10, `altitude_dev`): `up` meters
+/// higher, tilted `down` degrees down; with `direct`, without bounce light
+/// here and in Cycles.
+pub fn field_from_above(up: f32, down: f32, direct: bool) -> Case {
+    let mut case = field_case();
+    case.name = if direct { "field_high_direct" } else { "field_high" };
+    if direct {
+        case.bounce_light = Some(false);
+        if let Reference::Field { bounces, .. } = &mut case.reference {
+            *bounces = 0;
+        }
+    }
+    let c = &mut case.camera;
+    let d = (c.target - c.eye).normalize();
+    let right = d.cross(Vec3::Z).normalize();
+    c.eye.z += up;
+    c.target = c.eye + continuum::glam::Quat::from_axis_angle(right, -down.to_radians()) * d;
+    case
+}
+
 pub fn field_case() -> Case {
     let field = Field::new(1_000_000, DVec3::ZERO).with_sun_at(1000.0);
     let origin = field.origin_near_camera();
