@@ -225,15 +225,16 @@ pub struct CacheOptions {
     /// alpha-blended objects). Unvalidated: it did not bring M5 gate 14's
     /// near view closer to Cycles. Off by default.
     pub wide_rays: bool,
-    /// Coarse texels averaging their area (M22 gate 9): texels in the top
-    /// three mips of their chart take each static light's visible share
-    /// from hardware rays at 16 points spread over them (4 a point), each
-    /// point weighted by its unshadowed light, and their sky from rays
-    /// spread over the same points, instead of from their centre alone
-    /// (whose light can stand badly for what they cover: a boulder's top
-    /// texel, on its side facing partly down, left it unlit). Where sky
-    /// samples use rays (not with movers, streamed levels or alpha-blended
-    /// objects). Off by default.
+    /// Coarse texels averaging their area (M22 gate 10): texels in the top
+    /// three mips of their chart that curve (a point of 16 over them more
+    /// than 30° from their centre's normal) take each static light's
+    /// visible share from hardware rays at those points (4 a point), each
+    /// weighted by its unshadowed light, and their sky from rays spread
+    /// over the same points, instead of from their centre alone (whose
+    /// light can stand badly for what they cover: a boulder's top texel, on
+    /// its side facing partly down, left it unlit). Where sky samples use
+    /// rays (not with movers, streamed levels or alpha-blended objects). On
+    /// by default.
     pub area_texels: bool,
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
@@ -415,7 +416,7 @@ impl Default for CacheOptions {
             sky_sample_cost: 10,
             sky_rays: true,
             wide_rays: false,
-            area_texels: false,
+            area_texels: true,
             sky_ray_cost: 1,
             bounces: 0,
             ledger_epsilon: 0.01,

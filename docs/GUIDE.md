@@ -115,7 +115,13 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   level's samples times 1 / (1 − ρ), ρ their closure-weighted albedo):
   the closed room 7.68% from Cycles, at no cost a frame (M22 gate 8). A
   scene outdoors (a sky, an environment, or a light more than 100 scene
-  radii away, such as a sun) keeps one.
+  radii away, such as a sun) keeps one. Coarse texels that curve average
+  their area (`CacheOptions::area_texels`, on by default, M22 gate 10): a
+  texel in the top three mips of its chart lights itself from 16 points
+  over its area (hardware rays) instead of its centre alone, so a distant
+  boulder (one chart) is no longer lit or left dark by one point (the
+  boulder field from above 13.83% → 10.41% from Cycles without bounce
+  light).
   The setting is a floor (samples can hold a bounce or so more). Not yet
   tried with streamed levels or movers.
 - **Materials.** `InstancedScene::geometry_materials` takes

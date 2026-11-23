@@ -2022,8 +2022,11 @@ For a new conversation or after a compaction; history lives in git and
   4.46%, Fox 2.17%, BrainStem 3.28%. Item (3) done (BrainStem 2.2% of
   pixels without a page in motion). Item (1): the bug found, bounce and
   reflection hits read pages 1 / scale too coarse (Sponza 29.94% →
-  25.54%, clay 31% → 18.5%); viewer fixes from the user's session
-  (vsync, the exposure flash, pages lost to a glance:
+  25.54%, clay 31% → 18.5%); coarse texels that curve average their
+  area by default (M22 G10 passed: the field from above 13.83% → 10.41%,
+  the boulders the viewer showed flat and dark now lit; Sponza 25.35%,
+  the field 1.29%, the room 6.93%); viewer fixes from the user's sessions
+  (vsync, auto-exposure under an empty or dim sky, pages lost to a glance:
   `docs/results/viewer-glance-fixes.md`).
 - **Next:** (a) the rest of Sponza's gap (clay is 18.5% from Cycles at one
   bounce, textured 25.5%: split it by material and by frequency; the
