@@ -1970,8 +1970,9 @@ For a new conversation or after a compaction; history lives in git and
   the closed room 46.55% → 7.68% from Cycles); outdoors (a sky, an
   environment or a sun) keeps one: more helped the field a little (1.68%
   → 1.31%), Sponza not at all, and slowed its settling 1.5–2×;
-  (b) BrainStem in motion: 7.3% of pixels without a page (pages out of view
-  invalidated, the budget at its floor); (c) Sponza: 22–28 ms settled
+  (b) BrainStem in motion: 2.2% of pixels without a page (out-of-view pages
+  deferred, from 7.3%); two bounces' lag after motion indoors (the movers
+  16% from settled at the stop, 1.1 s to settle) is the next thing there; (c) Sponza: 22–28 ms settled
   frames (anti-aliasing's passes about 13 ms: Sponza has 13% edge pixels),
   30% from Cycles (regional errors in sky and bounce light; by the error
   split, 89% of it in mid and bright pixels, means within 3%): the upper

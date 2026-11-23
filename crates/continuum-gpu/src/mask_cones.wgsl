@@ -3871,6 +3871,14 @@ fn moved_box(i: u32) -> Box3 {
 // (as rigid movers' pages are), BrainStem's first moving frame left 55% of
 // the pixels unshadowed for about 90 frames.
 const DEFERRED: u32 = 4u;
+const DEFERRED_A_FRAME: u32 = 32u;
+
+// Marks slot `s` deferred if it has no mark yet (a mark already there, an
+// invalid one above all, stands).
+fn defer_slot(s: u32) {
+    let r = atomicCompareExchangeWeak(&slot_stale[s], 0u, DEFERRED);
+    if (r.exchanged) { atomicAdd(&mover_stats[24], 1u); }
+}
 
 // Whether no mover but deforming objects catching up in slices may have
 // changed box `p`'s light: no other moved object's boxes reach it.
@@ -4027,6 +4035,12 @@ fn charge_sky(s: u32, key: vec3<u32>, lo: vec3<f32>, hi: vec3<f32>, page: Box3, 
             return true;
         }
         if (visible && sky_rebake(s, key, lo, hi)) { return true; }
+        // Out of view with `sky_lag`: kept, deferred (its sky may trail; in
+        // view again it is charged and listed as any page is).
+        if ((vc.extra.y & 0x200u) != 0u) {
+            defer_slot(s);
+            return false;
+        }
         mark_invalid(s);
         return false;
     }
@@ -4178,7 +4192,9 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (mark == DEFERRED) {
         atomicAdd(&mover_stats[24], 1u);
         if (!visible) {
-            mark_invalid(s);
+            // Kept out of view (its light may lag; re-baked once in view),
+            // unless a rigid mover's shadow reaches it.
+            if (!lag_only(page)) { mark_invalid(s); }
             return;
         }
         // Its sky charged as any page's (a page invalidated there is done).
@@ -4186,7 +4202,9 @@ fn vc_stale(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (vc.sky.y == 1u && known_sky && !charge_sky(s, info.xyz, lo, hi, page, visible)) { return; }
         let count = PAGE_TEXELS * lights_n;
         var entry = NONE;
-        if (atomicLoad(&mover_stats[5]) + count <= vc.movers.z) {
+        // At most `DEFERRED_A_FRAME` re-baked a frame (outside the bake
+        // budget: more made BrainStem's moving frames 1.17× longer).
+        if (atomicLoad(&mover_stats[5]) + count <= vc.movers.z && atomicAdd(&mover_stats[25], 1u) < DEFERRED_A_FRAME) {
             entry = append_page(s, info.xyz, lo, hi);
         }
         if (entry == NONE) {
@@ -4325,7 +4343,14 @@ fn vc_stale_texels(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var l = 0u; l < lights_n; l++) {
         if (!may_be_shadowed(apex, l, s)) { continue; }
         if (cand.y == NONE) {
-            mark_invalid(s);
+            // Out of view: kept, deferred, where only deforming objects'
+            // catch-up made it stale (their lighting may lag); invalid where
+            // a rigid mover's shadow reaches it.
+            if (lag_only(apex)) {
+                defer_slot(s);
+            } else {
+                mark_invalid(s);
+            }
             return;
         }
         let at = append_jobs(1u);

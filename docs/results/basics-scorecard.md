@@ -248,3 +248,24 @@ its vault where Cycles shows none, and Sponza no longer settled within 60 s
 hit for a whole bin's solid angle; the principled fix is bounce gathered by
 cones over the prefiltered hierarchy (coverage averaged across objects, as
 voxel cone tracing does), the primitive the cache's shadows already use.
+
+## Deferred pages out of view (2026-11-22, basics item 3)
+
+Near a deforming character, pages out of view that only its catch-up made
+stale, and (with `sky_lag`) pages out of view whose sky a mover charged
+past its threshold, were invalidated; as the animation turned them into
+view they were missing (BrainStem: 7.3% of the pixels without a page in
+motion). They are now deferred (`slot_stale` 4: kept, their light allowed
+to lag as deforming objects' and the sky's near movers already are) and
+re-baked whole once in view, at most 32 a frame (256 a frame took the bake
+pass from about 4.6 to 15.5 ms). A rigid mover's shadow on such a page
+still invalidates it.
+
+Full scorecard: BrainStem in motion, pixels without a page 7.32% → **2.20%**
+mean, 15.66% → **5.12%** worst; moving frames 32.98 ms (31.2–33.0 before).
+Other rows unchanged; against Cycles unchanged.
+
+Seen in the same run, from M22 gate 8's default (not measured by that
+gate): with two bounces, the image when the motion stops is further from
+the settled one indoors: the room 3.95% and the movers 16.14% (one bounce:
+0.01–0.15% and 2.5–5.7%); both settle again within 1.1 s.
