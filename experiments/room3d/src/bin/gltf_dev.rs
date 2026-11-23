@@ -120,6 +120,12 @@ fn main() {
                 }
                 println!("  instance bounds {lo:.2} to {hi:.2}");
             }
+            if geometry.charts.len() <= 8 {
+                for (c, size) in geometry.charts.iter().enumerate() {
+                    let tris = geometry.chart.iter().filter(|&&k| k as usize == c).count();
+                    println!("  chart {c}: {size:.2} (m), {tris} triangles");
+                }
+            }
         }
         return;
     }

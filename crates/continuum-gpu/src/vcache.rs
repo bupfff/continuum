@@ -299,7 +299,7 @@ pub struct CacheOptions {
     /// blotches. (Hardware ray queries; the compute path traces one.)
     pub bounce_rays: u32,
     /// Bounce light that settles (M22 gate 3): bounce rays read their hits'
-    /// light one mip coarser than a bin's footprint, and a bin that finds
+    /// light two mips coarser than a bin's footprint, and a bin that finds
     /// only a coarser page asks for its page and re-bakes the sample once
     /// it may have arrived, so a settled scene's bounce light matches a
     /// fresh bake. Off, the first page resident at or coarser than the

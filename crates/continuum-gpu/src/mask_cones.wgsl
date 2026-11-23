@@ -5281,14 +5281,21 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     let hc = tri_vchart[hit.tri];
     let uv = chart_uv(hit.mesh, hit.tri, p);
     let top = vc_top_mip(hc, hit.mesh);
-    let ratio = footprint * vc.params.x / object_scale(hit.mesh);
+    // The footprint in mip-0 texels: `vc.params.x` counts them per world
+    // unit (`vc_grid` scales charts to the world). Divided by the object's
+    // scale, as before, a scaled object's hits read pages 1 / scale times
+    // too coarse: Sponza (0.008) read each chart's single top texel, and its
+    // corridors' hits saw the open courtyard's sky.
+    let ratio = footprint * vc.params.x;
     var want = 0u;
     if (ratio > 1.0) { want = u32(round(log2(ratio))); }
     // Settling bounce light (M22 gate 3, `CacheOptions::bounce_settles`):
-    // hits read one mip coarser than the bin's footprint (a quarter of the
-    // pages to want), and never a coarser one for long.
+    // hits read two mips coarser than the bin's footprint (a sixteenth of
+    // the pages to want), and never a coarser one for long. One coarser,
+    // with the footprint in world units: Sponza settled in 53 s instead of
+    // 36, its error from Cycles the same (2026-11-22).
     let settles = (vc.extra.y & 0x100u) != 0u;
-    want = min(want + select(0u, 1u, settles), top);
+    want = min(want + select(0u, 2u, settles), top);
     var slot = NONE;
     var r: PageRef;
     var found = want;
@@ -6619,7 +6626,8 @@ fn reflected_light(p: vec3<f32>, refl: vec3<f32>, roughness: f32) -> vec3<f32> {
     let hc = tri_vchart[hit.tri];
     let uv = chart_uv(hit.mesh, hit.tri, q);
     let top = vc_top_mip(hc, hit.mesh);
-    let ratio = footprint * vc.params.x / object_scale(hit.mesh);
+    // In mip-0 texels, as `bounce_gather`'s (world units).
+    let ratio = footprint * vc.params.x;
     var want = 0u;
     if (ratio > 1.0) { want = min(u32(round(log2(ratio))), top); }
     var slot = NONE;

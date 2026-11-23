@@ -84,3 +84,8 @@ measured.
   start view showed mid-distance boulders flat dark brown, unshaded and
   casting no shadow (their direct light zero), right again after the turn
   re-baked them. Not reproduced since; cause unknown.
+
+Basics scorecard after the fixes, against Cycles (`SC_SPEED=0`): every
+scene unchanged (Sponza 29.94%, the field 1.68%, the room 7.68%, the
+movers 5.99%, the helmet 4.46%, Fox 2.15%, BrainStem 3.22%). Speed not
+rerun yet.

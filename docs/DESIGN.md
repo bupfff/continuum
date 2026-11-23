@@ -1520,7 +1520,11 @@ change 45–68% of the largest bounce value, in three views.
   baked ten times the pages (13,000 resident against 2,400 bounce pages)
   and settled 2–2.6× slower in time; reading one mip coarser than the
   footprint (consistently, so a fresh bake reads the same) wants a
-  quarter of the pages.
+  quarter of the pages. (2026-11-22: the footprint had been divided by
+  the hit object's scale, so scaled objects read pages 1 / scale too
+  coarse, Sponza (0.008) each chart's single top texel; with that fixed,
+  hits read two mips coarser: on Sponza the same error as one, settled in
+  36 s instead of 53.)
 - **Result in development:** 9–44 pages over ε (0.1–0.6%), the largest
   change 1.4–2.7%; settling 1.47–1.96× the old's frames (fixed budget,
   0.9–5.0 s). `CacheOptions::bounce_settles`, on by default.

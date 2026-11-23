@@ -312,3 +312,52 @@ Next: find why a coarse texel's sky sample sees the sky (its point, its
 hemicube or the bilinear spread from neighbours across the curtain line),
 then decide between fixing coarse texels' sky and gathering bounce by
 cones (M23).
+
+## The bug: bounce and reflection hits read pages 1 / scale too coarse (2026-11-22)
+
+Splitting the vault's bounced sky further (probes in `bounce_gather`, sky
+alone, clay, the vault seen from below): from hits on the corridor's side
+of the curtain 0.001913, on the courtyard's 0.000048; of the corridor's,
+all from upward-facing surfaces (the floor); all of it read at the floor
+chart's top mip, and the hits *wanted* that mip. The floor is one chart,
+9.7 × 21.8 m (5 triangles); its top mip is one texel, whose sky sample is
+the open courtyard's.
+
+The cause: `bounce_gather` (and `reflected_light`, glossy reflections)
+turned a hit's footprint into mip-0 texels as `footprint × vc.params.x /
+object_scale`, but `vc.params.x` counts texels per world unit (`vc_grid`
+multiplies charts by the scale): a scaled object's hits read pages 1 /
+scale times too coarse, 7 mips on Sponza (scale 0.008), and objects
+scaled up read pages too fine (the field's boulders, 0.6–1.4: at most
+half a mip). Since M10 gate 1. It explains the gallery's blotches (one
+value per chart), and why more rays, dense re-bakes and one mip finer
+barely helped. Fixed: the footprint in world units.
+
+Clay Sponza, one bounce, against Cycles' one bounce (luminance, blurred
+by 0 / 2 / 8 pixels): before 30.98 / 27.76 / 23.03%, after 18.27 / 14.28
+/ 10.07%; the vault 0.00109 against Cycles' 0.00097 (before 0.00251).
+Bounce hits then wanted 3–4× the pages: Sponza settled in 53.5 s (time
+budget, 1280×720; gltf_dev). Reading two mips coarser than the footprint
+instead of one (`bounce_settles`): settled in 36.2 s, the error the same
+(textured 24.13% against 23.98%, clay 18.53 against 18.27%, at an 8-pixel
+blur 16.28 against 16.35% and 9.74 against 10.07%). Chosen on Sponza
+alone (disclosed).
+
+Full scorecard (single runs; timings within heat's spread except where
+said):
+
+| Scene | Against Cycles: before, one coarser, two coarser | Settled (s): before, one, two |
+|---|---|---|
+| sponza | 29.94%, 25.34%, **25.54%** | 28.6–43.7, not in 60, **52.45** |
+| field | 1.68%, 1.68%, 1.79% | never |
+| room | 7.68%, 7.68%, **7.55%** | 2.2–2.6, 2.22, 1.77 |
+| movers | 5.99%, 5.99%, **5.40%** | 1.85, 1.85, 2.04 |
+| helmet | 4.46%, 4.46%, 4.46% | 0.9–1.1 |
+| fox | 2.15%, 2.15%, 2.17% | 1.42, 1.42, 1.44 |
+| brainstem | 3.22%, 3.22%, 3.28% | 6.72, 6.72, 6.76 |
+
+Sponza's settled frame 23.73 ms (before 24.6), moving 27.13 ms (32.25),
+stop vs settled 16.64% (13.84%), settles again in 16.49 s (12.99 s).
+Textured, the clay gain shrinks (29.94 → 25.54%): the rest of Sponza's
+gap is elsewhere (materials and the high-frequency half of the error,
+not yet split).
