@@ -1996,44 +1996,27 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-22, eighteenth session, v0.3.2 + fixes).**
+**Start here (updated 2026-11-22 night, eighteenth session, v0.3.2 + fixes).**
 For a new conversation or after a compaction; history lives in git and
 `docs/results/`, the plan below.
-- **Now:** phase 1 (strengthen the basics). Item (1) done: the basics
-  scorecard, `cargo run --release -p room3d --bin scorecard` (7 scenes,
-  about 5 minutes; `docs/results/basics-scorecard.md`). Fixed from it:
-  suns 10⁴ radii away (`SUN_RADII`; Fox 8.7% → 2.1% from Cycles), movers'
-  stale texels by one atomic add (159 → 20.5 ms a moving frame),
-  `sky_lag` on by default (Fox 14.7 → 8.8 ms, BrainStem 49 → 31 ms).
-- **Next, worst rows first:** (a) done: two bounces with the rest
-  estimated by default where local lights alone light the scene (M22 G8:
-  the closed room 46.55% → 7.68% from Cycles); outdoors (a sky, an
-  environment or a sun) keeps one: more helped the field a little (1.68%
-  → 1.31%), Sponza not at all, and slowed its settling 1.5–2×;
-  (b) BrainStem in motion: 2.2% of pixels without a page (out-of-view pages
-  deferred, from 7.3%); two bounces' lag after motion indoors (the movers
-  16% from settled at the stop, 1.1 s to settle) is the next thing there; (c) Sponza: 22–28 ms settled
-  frames (anti-aliasing's passes about 13 ms: Sponza has 13% edge pixels),
-  30% from Cycles (regional errors in sky and bounce light; by the error
-  split, 89% of it in mid and bright pixels, means within 3%): the upper
-  gallery, lit by bounce alone, shows coloured blotches where Cycles is
-  smooth and 1.47× darker (bounce samples' 192 fixed rays catch sunlit
-  scraps through the arches, and the pages they read are lit at texel
-  centres, not averaged over the area a ray stands for: coarse lighting
-  texels as area averages is the lever; reading the footprint's own mip
-  instead of one coarser gave 29.94% → 28.75%, not side by side, gallery
-  unchanged). Bounce rays per bin (`bounce_rays`, option): 2 give 27.99%
-  for 1.42× Sponza's settling; blotches remain (a hit counts for its whole
-  bin), so (1) is open: dense re-bakes of spiky samples (16 rays a bin)
-  gave 28.59% but no settling in 60 s and coloured patches left; the
-  principled lever is bounce gathered by cones over the prefiltered
-  hierarchy (coverage averaged across objects), a milestone of its own;
-  (d) the field's
-  bounce light never settles: ground samples' bounce rays hit distant
-  boulders, each with pages of its own (23k resident at 3 s, 77k at 35 s,
-  nearly every bounce sample incomplete); needs a design for far, small
-  hits (an aggregate per object or cluster) and a gate. Measure speed side
-  by side (`scorecard::speed_pair`): heat moves single runs 10–25%.
+- **Now:** phase 1 (strengthen the basics), measured by the basics
+  scorecard (`cargo run --release -p room3d --bin scorecard`, 7 scenes,
+  ~5 min; `docs/results/basics-scorecard.md`). From Cycles: Sponza
+  25.54%, the field 1.79%, the room 7.55%, the movers 5.40%, the helmet
+  4.46%, Fox 2.17%, BrainStem 3.28%. Item (3) done (BrainStem 2.2% of
+  pixels without a page in motion). Item (1): the bug found, bounce and
+  reflection hits read pages 1 / scale too coarse (Sponza 29.94% →
+  25.54%, clay 31% → 18.5%); viewer fixes from the user's session
+  (vsync, the exposure flash, pages lost to a glance:
+  `docs/results/viewer-glance-fixes.md`).
+- **Next:** (a) the rest of Sponza's gap (clay is 18.5% from Cycles at one
+  bounce, textured 25.5%: split it by material and by frequency; the
+  coarse sky's 192-ray noise in narrow openings); (b) the field's bake
+  starves (26,000 requests a frame, 13–160 pages baked, the budget model
+  shrinking it to ~1,250 units at 10 ms frames): find why before the cone
+  milestone (M23); (c) boulders shown without sunlight once in 7 runs of
+  `viewer_repro` (unexplained). Measure speed side by side
+  (`scorecard::speed_pair`): heat moves single runs 10–25%.
 - **Pitfalls:** a GPU hang logs the user out (WindowServer's 40 s
   watchdog): `APPEND_PAGES` 16,384 and building deforming meshes'
   structures in one submission each did (patches in
