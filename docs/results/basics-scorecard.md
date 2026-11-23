@@ -239,3 +239,12 @@ whose loops assume 192 bins (50.67%).
 
 Default left at 1 ray: two rays buy 2 points on Sponza for 1.42× its
 settling.
+
+Also tried (reverted): re-baking densely (16 rays a bin) the bounce samples
+one bin of which carried more than 15% of their light: Sponza 28.59%, the
+gallery's wall and ornament come through, but red-orange patches stay on
+its vault where Cycles shows none, and Sponza no longer settled within 60 s
+(32 ms frames while the dense re-bakes ran). Rays, however many, count a
+hit for a whole bin's solid angle; the principled fix is bounce gathered by
+cones over the prefiltered hierarchy (coverage averaged across objects, as
+voxel cone tracing does), the primitive the cache's shadows already use.

@@ -1983,8 +1983,11 @@ For a new conversation or after a compaction; history lives in git and
   instead of one coarser gave 29.94% → 28.75%, not side by side, gallery
   unchanged). Bounce rays per bin (`bounce_rays`, option): 2 give 27.99%
   for 1.42× Sponza's settling; blotches remain (a hit counts for its whole
-  bin), so (1) is open, the levers being averaging a bin's coverage across
-  objects or filtering bounce samples spatially; (d) the field's
+  bin), so (1) is open: dense re-bakes of spiky samples (16 rays a bin)
+  gave 28.59% but no settling in 60 s and coloured patches left; the
+  principled lever is bounce gathered by cones over the prefiltered
+  hierarchy (coverage averaged across objects), a milestone of its own;
+  (d) the field's
   bounce light never settles: ground samples' bounce rays hit distant
   boulders, each with pages of its own (23k resident at 3 s, 77k at 35 s,
   nearly every bounce sample incomplete); needs a design for far, small
