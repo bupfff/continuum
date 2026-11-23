@@ -32,7 +32,10 @@
 //! moving objects, V for vsync, `[` and `]` for exposure a stop at a time,
 //! H for the panel, Esc to quit. `--frames N` renders N frames, prints
 //! timings and exits (`--screenshot out.png` saves the last one;
-//! `VIEWER_SELFTEST=1` scripts a scene load, a rebuild and a failed load).
+//! `VIEWER_SELFTEST=1` scripts a scene load, a rebuild and a failed load;
+//! `VIEWER_PITCH`, `VIEWER_UP` tilt and raise the start view;
+//! `VIEWER_RECORD=dir` saves every frame along a scripted move, the window
+//! kept visible: macOS stops drawing a covered one).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -509,6 +512,7 @@ impl World {
     }
 }
 
+#[derive(Clone, Copy)]
 struct FlyCamera {
     position: Vec3,
     yaw: f32,
@@ -751,6 +755,8 @@ struct App {
     /// The last problem or note, shown in the panel.
     message: Option<String>,
     show_panel: bool,
+    /// `VIEWER_RECORD`'s start view.
+    record_start: Option<FlyCamera>,
     /// Boulders for the field's button.
     boulders: usize,
     /// The settings the renderer was built with.
@@ -1309,6 +1315,38 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// `VIEWER_RECORD`'s camera for this frame; the path to save it to, if
+    /// this frame is recorded.
+    fn record_frame(&mut self) -> Option<PathBuf> {
+        let dir = PathBuf::from(std::env::var_os("VIEWER_RECORD")?);
+        let total = self.all_times.len() + self.frames_left? as usize;
+        let num = |name: &str, default: usize| {
+            std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        };
+        let (warm, every) = (num("VIEWER_WARM", 300), num("VIEWER_EVERY", 1).max(1));
+        let i = self.all_times.len();
+        let start = *self.record_start.get_or_insert(self.camera);
+        if i < warm {
+            self.camera = start;
+            return None;
+        }
+        let m: Vec<f32> = std::env::var("VIEWER_MOVE")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+            .unwrap_or_default();
+        let get = |k: usize| m.get(k).copied().unwrap_or(0.0);
+        let s = (i - warm) as f32 / (total - warm).saturating_sub(1).max(1) as f32;
+        let heading = Vec3::new(start.yaw.cos(), start.yaw.sin(), 0.0);
+        let left = Vec3::new(-start.yaw.sin(), start.yaw.cos(), 0.0);
+        self.camera = FlyCamera {
+            position: start.position + s * (heading * get(0) + left * get(1) + Vec3::Z * get(2)),
+            yaw: start.yaw + s * get(3).to_radians(),
+            pitch: start.pitch + s * get(4).to_radians(),
+        };
+        let k = i - warm;
+        (k % every == 0).then(|| dir.join(format!("{:04}.png", k / every)))
+    }
+
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         // `VIEWER_SELFTEST=1` (development, with `--frames`): what the panel's
         // clicks do, scripted: load the field, turn bounce light off (a
@@ -1339,6 +1377,12 @@ impl App {
                 self.world.deforming_poses(self.time),
             )
         };
+        // `VIEWER_RECORD=dir` (with `--frames N`, for the README's clips):
+        // the start view held for `VIEWER_WARM` frames (300), then moved by
+        // `VIEWER_MOVE` (`dx,dy,dz,yaw,pitch`: meters along the view's
+        // heading, its left and up; degrees) over the frames left, each
+        // saved to `dir` (every `VIEWER_EVERY`-th, 1).
+        let recording = self.record_frame();
         let fov = self.world.fov;
         let camera = self.camera.camera(fov);
         // The panel's frame, before the scene's: its changes apply now.
@@ -1443,6 +1487,7 @@ impl App {
         let last_frame = self.frames_left == Some(1);
         let shot = match (&self.screenshot, last_frame) {
             (Some(_), true) => Some(capture(&gpu.device, &mut encoder, &texture.texture)),
+            _ if recording.is_some() => Some(capture(&gpu.device, &mut encoder, &texture.texture)),
             _ => None,
         };
         buffers.push(encoder.finish());
@@ -1450,7 +1495,9 @@ impl App {
         for id in &output.textures_delta.free {
             gpu.ui.renderer.free_texture(id);
         }
-        if let (Some(path), Some(shot)) = (&self.screenshot, shot) {
+        if let (Some(path), Some(shot)) = (&recording, shot.as_ref()) {
+            save_capture_quiet(&gpu.device, shot, gpu.config.format, path);
+        } else if let (Some(path), Some(shot)) = (&self.screenshot, shot) {
             save_capture(&gpu.device, shot, gpu.config.format, path);
         }
         gpu.queue.present(texture);
@@ -1466,7 +1513,10 @@ impl App {
             *left = left.saturating_sub(1);
             // Exercise a moving camera (the path if there is one), but not
             // for a screenshot.
-            if self.world.showcase.is_none() && self.screenshot.is_none() {
+            if self.world.showcase.is_none()
+                && self.screenshot.is_none()
+                && std::env::var_os("VIEWER_RECORD").is_none()
+            {
                 self.camera.yaw += 0.01;
             }
             if *left == 0 {
@@ -1528,6 +1578,33 @@ fn capture(
         width,
         height,
         row,
+    }
+}
+
+/// `save_capture` without printing (`VIEWER_RECORD`'s frames).
+fn save_capture_quiet(device: &wgpu::Device, c: &Capture, format: wgpu::TextureFormat, path: &Path) {
+    let slice = c.buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| ());
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the GPU");
+    let data = slice
+        .get_mapped_range()
+        .expect("the frame's buffer, mapped");
+    let bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    let mut image = flatland::img::Image::new(c.width as usize, c.height as usize, [0; 3]);
+    for y in 0..c.height as usize {
+        for x in 0..c.width as usize {
+            let i = y * c.row as usize + 4 * x;
+            let p = [data[i], data[i + 1], data[i + 2]];
+            image.set(x, y, if bgra { [p[2], p[1], p[0]] } else { p });
+        }
+    }
+    if let Err(e) = image.save(path) {
+        eprintln!("Could not save {}: {e}", path.display());
     }
 }
 
@@ -1752,6 +1829,7 @@ fn main() {
         pending: None,
         message,
         show_panel: !has("--no-panel"),
+        record_start: None,
         boulders,
         built,
         scale_given: arg("--scale").is_some(),

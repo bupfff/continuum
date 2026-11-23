@@ -18,12 +18,23 @@
 </p>
 
 <p align="center">
-  <img alt="A boulder moving among five lamps while one lamp changes color" src="docs/images/media-lamps.gif" width="720">
+  <img alt="Walking through Sponza's courtyard under an outdoor sky: red, green and blue curtains between stone arches" src="docs/images/media-sponza.webp" width="860">
   <br>
-  <sub>Real frames from the engine: a boulder moves among five lamps while the brightest one cycles through colors. Each move re-computes exactly the light it changes, in the same frame; changing a light's color re-computes nothing.</sub>
+  <sub>Real frames: Sponza (3 million triangles) under an outdoor HDRI, its sun and three more lights taken from the image, with bounce light, anti-aliasing, tone mapping and bloom, as the viewer shows it. Nothing in any frame comes from an earlier one.</sub>
 </p>
 
-## What is Continuum?
+<p align="center">
+  <a href="#at-a-glance">At a glance</a> ·
+  <a href="#gallery">Gallery</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#measured-not-claimed">Measured</a> ·
+  <a href="#try-it">Try it</a> ·
+  <a href="#use-it">Use it</a> ·
+  <a href="#where-it-stands">Where it stands</a> ·
+  <a href="#where-it-is-going">Where it is going</a>
+</p>
+
+## At a glance
 
 Continuum is a real-time renderer, written in Rust on
 [wgpu](https://wgpu.rs) compute shaders. It does the expensive part of
@@ -32,15 +43,33 @@ the answers until they could actually have changed. Every claim it makes is
 measured against [Blender's Cycles](https://www.cycles-renderer.org/), a
 reference path tracer.
 
+| **Exact** | **Instant** | **Huge** |
+|---|---|---|
+| One cone from a point to a whole light answers what it can see: soft shadows from area lights, with no random samples and no noise, within 0.4–3% of Cycles in our tests. | Light is cached on surfaces and recomputed only where it could have changed, in the same frame. Re-coloring a light costs nothing; nothing is blended from past frames. | Instanced and streamed worlds: a million boulders (ten billion triangles) or 36,864 unique streamed rocks, flown at 60 fps on a fanless laptop. |
+
 It ships as a library, a [Bevy](https://bevyengine.org) plugin, and a
 viewer that flies through your own glTF files. It is experimental: v0.3
 works and is measured, but the API will change.
 
-### Real assets in the viewer
+| | |
+|---|---|
+| **Try it in a minute** | On a Mac with Apple silicon, one Terminal command installs the viewer ([Try it](#try-it)); drop a `.glb` file on it and fly around. |
+| **Good at** | Soft shadows from area lights that are exact and free of noise in every frame; very large instanced or streamed worlds; lights that change color at no cost. |
+| **Runs on** | Apple silicon Macs (Metal): tested and measured. Linux (Vulkan): the tests pass on a software GPU. Windows, NVIDIA and AMD: untested, and may not run yet. Needs a GPU with compute shaders; glass and streaming need hardware ray tracing. |
+| **Not yet** | Bounce light from moving lights, phones and the web, a stable API. See [Where it stands](#where-it-stands). |
+| **License** | Free for noncommercial use ([PolyForm Noncommercial 1.0.0](LICENSE.md)). Commercial use needs a license from Penumbral Labs: [open an issue](https://github.com/bupfff/continuum/issues). |
 
-Each opened as it is, with the viewer's defaults (an object in the studio
-HDRI, its softboxes made lights with exact soft shadows; a larger scene
-outdoors), on an M4 MacBook Air.
+## Gallery
+
+Real assets opened as they are, with the viewer's defaults (an object in the
+studio HDRI, its softboxes made lights with exact soft shadows; a larger
+scene outdoors), on an M4 MacBook Air.
+
+<p align="center">
+  <img alt="Orbiting FlightHelmet in a studio: leather, glass, brass and wood on a grey floor, soft shadows from the studio's softboxes" src="docs/images/media-helmet.webp" width="720">
+  <br>
+  <sub>FlightHelmet (CC0) in the studio HDRI: its softboxes are lights with exact soft shadows; the camera orbits, the lighting stays still and exact.</sub>
+</p>
 
 | | | |
 |---|---|---|
@@ -59,19 +88,9 @@ Models from the [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glT
 HDRIs Studio Small 09 and Kloofendal 48d Partly Cloudy (Pure Sky) from [Poly Haven](https://polyhaven.com) (CC0). Each
 is compared with Cycles in [`docs/results/assets-vs-cycles.md`](docs/results/assets-vs-cycles.md).
 
-## Is it right for you?
+## How it works
 
-| | |
-|---|---|
-| **Try it in a minute** | On a Mac with Apple silicon, one Terminal command installs the viewer ([Try it](#try-it)); drop a `.glb` file on it and fly around. |
-| **Good at** | Soft shadows from area lights that are exact and free of noise in every frame; very large instanced or streamed worlds; lights that change color at no cost. |
-| **Runs on** | Apple silicon Macs (Metal): tested and measured. Linux (Vulkan): the tests pass on a software GPU. Windows, NVIDIA and AMD: untested, and may not run yet. Needs a GPU with compute shaders; glass and streaming need hardware ray tracing. |
-| **Not yet** | Bounce light from moving lights, phones and the web, a stable API. See [Limits](#limits). |
-| **License** | Free for noncommercial use ([PolyForm Noncommercial 1.0.0](LICENSE.md)). Commercial use needs a license from Penumbral Labs: [open an issue](https://github.com/bupfff/continuum/issues). |
-
-## Why it is different
-
-### 1. One cone answers what a thousand rays would
+### One cone answers what a thousand rays would
 
 To light a point, a renderer has to know how much of each light the point
 can see. Most real-time engines estimate it, and ray tracers sample it with
@@ -90,29 +109,38 @@ same scene gives the same image every frame.
   <img alt="Diagram comparing shadow maps, sampled rays and a mask cone" src="docs/images/how/three-ways.svg" width="860">
 </p>
 
-### 2. A cache that knows what can change
+### A cache that knows what can change
 
 Computing that for every pixel, every frame, would be too slow, so
 Continuum stores the light it computes on the surfaces themselves, in pages
 baked for the parts of the world you look at. The trick is knowing when a
-stored answer is still right:
+stored answer is still right.
 
 <p align="center">
   <img alt="Diagram: lighting cached on surface pages; when an object moves, only the pages it can affect are re-computed" src="docs/images/how/cache.svg" width="860">
 </p>
 
-- **Changing a light's color or brightness** re-uses everything: light is
-  stored per unit of brightness.
-- **Moving an object** re-computes only the pages whose light it could have
-  changed, within the same frame. Everything else is provably the same, so
-  light is never shown stale (measured: 65 moving objects among a million
-  static ones cost 1.06–1.09× a still frame).
-- **Nothing is blended from previous frames.** Most real-time renderers
-  smooth over noise or missing work by mixing in past frames, which leaves
-  ghosts and lag behind moving things. Here each frame comes from the cache
-  as it is now.
+<p align="center">
+  <img alt="A boulder moving among five lamps while one lamp changes color" src="docs/images/media-lamps.gif" width="640">
+  <br>
+  <sub>A boulder moves among five lamps while the brightest one cycles through colors: each move re-computes exactly the light it changes, in the same frame (65 moving objects among a million static ones cost 1.06–1.09× a still frame); re-coloring re-computes nothing.</sub>
+</p>
 
-### 3. It scales to huge worlds
+### What one frame does
+
+<p align="center">
+  <img alt="Diagram: one frame in five steps: camera rays, pages, bake within a time budget, shade, display" src="docs/images/how/frame.svg" width="860">
+</p>
+
+A texel's light is computed at its centre. Far away, one texel can cover a
+whole curved object, and its centre can stand for it badly, so texels that
+cover a curve take their light from points spread over their area:
+
+<p align="center">
+  <img alt="Diagram: a boulder far away is one texel; lit from one point on its shaded side it renders unlit; lit from 16 points over it, it renders lit and shaded" src="docs/images/how/texels.svg" width="860">
+</p>
+
+### It scales to huge worlds
 
 <p align="center">
   <img alt="Flying low over a field of a million boulders" src="docs/images/media-field.gif" width="640">
@@ -123,35 +151,28 @@ stored answer is still right:
 Geometry is instanced and organized in hierarchies whose coverage is
 pre-filtered, so a cone crossing a distant crowd of objects reads one
 summary instead of every triangle. Positions are stored in double
-precision, so worlds can be kilometers across.
-
-## How it compares
-
-How the usual ways of lighting a scene handle soft shadows from area
-lights:
-
-| | Used in | Soft shadows | Noise and lag | Moving objects |
-|---|---|---|---|---|
-| Shadow maps, filtered | Most real-time engines | Approximated: the edge is blurred to an estimated width | No noise; aliasing and light leaks | Yes |
-| Ray-traced shadows | Games with ray-tracing GPUs | Sampled with a few rays per pixel | Noisy; denoisers and past frames hide it, at the cost of lag and smearing | Yes |
-| Real-time GI with caches and temporal accumulation (e.g. Unreal's Lumen) | Recent engines | From simplified versions of the scene | Accumulated over frames, so lighting trails behind changes | Yes, with lag |
-| Baked lightmaps | Many games, architecture | Exact, computed offline | None | No: any change needs a new bake |
-| Path tracing | Film, Blender's Cycles | The reference | Noisy until many samples converge; seconds or more a frame | Yes |
-| **Continuum** | | **Computed per point and light by one cone: within 0.4–3% of Cycles in our tests** | **None: no random samples, no past frames** | **Yes: exact, in the same frame** |
-
-A fair note: this compares *methods*. Continuum's numbers are measured
-against Cycles; we have not benchmarked against Unreal, Unity or Godot, and
-have measured speed only on an Apple M4 laptop. The table describes what
-each approach approximates, not who wins a race.
+precision, so worlds can be kilometers across, and unique geometry can
+stream in as the camera needs it, within a fixed memory budget.
 
 ## Measured, not claimed
 
 Every feature passes a *gate*: a test whose pass criterion is written down
 and committed before it runs, and whose result is recorded with exact
-numbers, failures included ([docs/results/](docs/results/)). The
-comparisons below are Continuum's cached lighting, settled, against Cycles
-at 4,096 samples per pixel. The percentage is the relative error over the
-image.
+numbers, failures included ([docs/results/](docs/results/)). Gates that
+fail stay failed; fixes go into new gates.
+
+The **basics scorecard** checks seven fixed scenes, from a closed room to
+skinned characters, a million boulders and Sponza, for speed and against
+Cycles, after every change that may move them
+([`docs/results/basics-scorecard.md`](docs/results/basics-scorecard.md)):
+
+<p align="center">
+  <img alt="Bar chart: error from Cycles for seven scenes at the start of phase 1 and now: Sponza 30.43% to 25.35%, closed room 46.55% to 6.93%, room with movers 44.46% to 5.40%, boulder field 1.68% to 1.29%, DamagedHelmet 4.46%, Fox 8.73% to 2.17%, BrainStem 9.47% to 3.28%" src="docs/images/how/scorecard.svg" width="860">
+</p>
+
+The comparisons below are Continuum's cached lighting, settled, against
+Cycles at 4,096 samples per pixel. The percentage is the relative error over
+the image.
 
 <p align="center">
   <img alt="Continuum and Cycles side by side: metallic-roughness materials, 5.85% from Cycles" src="docs/images/compare/materials.jpg" width="860">
@@ -175,180 +196,37 @@ Selected numbers (1280×720, Apple M4, release builds):
 | What | Result | Gate |
 |---|---|---|
 | A million instanced boulders (10¹⁰ triangles), flying | 14.6–15.0 ms a frame | M4 G11 |
+| 36,864 unique streamed rocks with a sky and bounce light, flying | 9.2–10.2 ms a frame, 99th percentile under 16.7 ms | M14 G10 |
 | A textured glTF scene against Cycles | 0.43% error; 1.5 ms a warm frame | M6 G1 |
 | Three colored lights over the field | 1.22% from Cycles; flights 14–15 ms | M5 G6 |
 | Point and spot lights | 1.35% from Cycles | M5 G8 |
-| One bounce of light | 1.79% from Cycles (7.09% without it) | M10 G1 |
+| A closed room's bounce light, by default | 6.93% from Cycles' fully bounced image (46.55% with one bounce) | M22 G8, G10 |
 | Moving objects among a million | 1.06–1.09× a still frame, never stale | M9 G1 |
 | A sun moving at real speed over the million | 0.98–1.02× a still sun, every shown result within a certified bound | M9 G6 |
-| A view with a sky, from an empty cache | warm in 166–400 frames (cones: 1,827–15,905) | M5 G13 |
-| Light bouncing around a closed room | 6.5% from Cycles with 8 bounces (45% with one) | M10 G25 |
+| The boulder field from 40 m up | 10.41% from Cycles (13.83% before coarse texels averaged their area) | M22 G10 |
 | Changing a light's color | free and exact: nothing is re-computed | M5 G6 |
 | Anti-aliasing at edges, in a slow turn | 0.31–0.38× one ray's error; frame-to-frame 0.30–0.42× | M15 G1 |
 | Thin glass against Cycles | 5.08% (drawn opaque 85%, as alpha blending 14%); 1.22× the frame | M16 G2 |
 
-## What it can do today
+### How it compares
 
-- **Lights:** rectangular area lights, suns, point and spot lights with a
-  size, up to 16 of them, colored, re-colorable for free.
-- **Sky:** a uniform sky, or an environment image (`.hdr`, `.png`).
-- **Materials:** glTF metallic-roughness with glossy reflections, normal
-  maps, emission (which lights its surroundings), emissive textures, vertex
-  colors, alpha cutouts, alpha blending, transmissive glass, thin
-  (`KHR_materials_transmission`: full reflections, tinted light through,
-  5.08% from Cycles) or solid (`KHR_materials_volume`: refraction in and
-  out, absorption, total internal reflection; 8.3% from Cycles), clear
-  coats and a surface's index of refraction and tinted reflectance
-  (`KHR_materials_clearcoat`, `_ior`, `_specular`), sheen for fabrics
-  (`KHR_materials_sheen`), double-sided faces,
-  texture transforms and wrap modes.
-- **Indirect light**, in the cache: by default two bounces with the rest
-  estimated where only local lights light the scene (a closed room 7.7%
-  from Cycles' fully bounced image, 46.6% with one), one bounce outdoors
-  (a sky, an environment or a sun); more on request
-  (`CacheOptions::bounces`).
-- **Moving objects**, exactly, in the same frame; glTF animations play
-  through them.
-- **Animated characters:** glTF skins and morph targets, posed as Blender
-  poses them (within a micrometre); any mesh the application deforms each
-  frame. Lighting near a deforming object catches up within a budget.
-- **Anti-aliasing,** on by default, with nothing taken from past frames:
-  edge pixels trace up to eight more rays, shaded where they meet another
-  surface. Edges come within a third of one ray's error from the
-  supersampled image and stay steady as the camera moves (1.45× the frame
-  on a textured scene with foliage at 720p).
-- **Fog with light shafts:** a layer of fog, even or thinning with
-  height, lit by the sun through its shadows and by the sky; within 6–10%
-  of Cycles' volumes, 0.8 ms at 720p.
-- **Display:** Khronos PBR Neutral tone mapping (within half a level in
-  255 of Blender's view of it) or an AgX approximation, and
-  auto-exposure that adapts like a camera (0.08 ms at 720p).
-- **Bloom and upscaling:** a soft glow around bright light that keeps the
-  image's light (0.26 ms at 720p), and rendering below the display's size
-  drawn up by a clamped bicubic (half size: half the frame, 0.87× the
-  error of the nearest pixel).
-- **Depth of field:** a thin lens's blur from each frame alone, bright
-  lights blurred into clean discs; 0.03–0.13× a pinhole's error from the
-  lens sampled outright, as close to Cycles' lens as that is, 1.8–2.5 ms
-  at 720p.
-- **Motion blur:** a shutter centred on the frame, from the camera's and
-  moving objects' motion since the last frame; 0.07–0.34× a still image's
-  error from the shutter sampled outright, within 1.1× of its distance
-  from Cycles, 0.6–1.4 ms at 720p.
-- **glTF 2.0** import and export, with cameras, lights and animations.
-- **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
-  entities moving its objects.
-- **Viewer:** fly through the showcase, the boulder field, or your own
-  file, with a panel for its settings; a download for Apple silicon Macs.
+How the usual ways of lighting a scene handle soft shadows from area
+lights:
 
-## Limits
+| | Used in | Soft shadows | Noise and lag | Moving objects |
+|---|---|---|---|---|
+| Shadow maps, filtered | Most real-time engines | Approximated: the edge is blurred to an estimated width | No noise; aliasing and light leaks | Yes |
+| Ray-traced shadows | Games with ray-tracing GPUs | Sampled with a few rays per pixel | Noisy; denoisers and past frames hide it, at the cost of lag and smearing | Yes |
+| Real-time GI with caches and temporal accumulation (e.g. Unreal's Lumen) | Recent engines | From simplified versions of the scene | Accumulated over frames, so lighting trails behind changes | Yes, with lag |
+| Baked lightmaps | Many games, architecture | Exact, computed offline | None | No: any change needs a new bake |
+| Path tracing | Film, Blender's Cycles | The reference | Noisy until many samples converge; seconds or more a frame | Yes |
+| **Continuum** | | **Computed per point and light by one cone: direct soft shadows within 0.4–3% of Cycles in our tests** | **None: no random samples, no past frames** | **Yes: exact, in the same frame** |
 
-Honest about where it stands:
-
-- **Measured on Apple Silicon (Metal) only.** CI checks correctness on Linux
-  (Vulkan, software adapter) and that the shaders compile for Windows
-  (DX12). NVIDIA, AMD and real Windows GPUs are untested.
-- **Detail smaller than a pixel** still shimmers far away: anti-aliasing
-  smooths edges, but a field of tiny distant objects needs the
-  experimental sub-pixel path (static scenes), and there anti-aliasing
-  costs about 2× the frame.
-- **The sky warms in a few hundred frames** (hardware rays, moving
-  objects included); with streamed detail or glass it falls back to a
-  slower path that takes thousands of frames. Around moving objects the
-  sky catches up within a few frames (`CacheOptions::sky_lag`, on by
-  default); kept exact, it re-bakes every page in their reach each frame
-  (an animated fox: 92 ms a frame instead of 9).
-- **Deforming meshes are costly:** a character large on screen costs
-  about 1.6× the frame, and the lighting near it lags its motion (up to
-  about a second) until it stops.
-- **Bounce light** is on by default in `Renderer` (two bounces with the
-  rest estimated under local lights alone, one outdoors; more on request): 1.06–1.12× the frame and about 190 MB of GPU memory, and a view
-  settles in 1.8–3.2× the frames. With moving objects a ledger keeps it
-  right (about 1.2× the moving frame in development; its gate is parked);
-  not yet with moving lights; several bounces are untried with streaming.
-  In very large instanced worlds (a field of a million boulders) bounce
-  rays reach thousands of objects that each want lighting of their own,
-  and the view does not settle: turn it off there (the viewer does).
-- **Moving objects near a light can be slow:** shadows of moving objects
-  stay exact by re-baking every texel they touch in the same frame. In a
-  closed room with a large light that is tens of thousands of texels a
-  frame (the showcase's two movers cost 10–35× the still frame through
-  `Renderer`); the viewer's showcase uses the older lightmap path.
-- **Transparency** needs hardware ray queries. Glass is sharp even when
-  rough, its shadows are grey rather than tinted and carry no caustics,
-  and solid glass costs about 1.4× the frame where it covers a ninth of
-  the image.
-- **Fanless laptops** slow down under minutes of sustained load.
-- **Streaming is new:** it needs hardware ray queries; streamed lighting
-  works with lights, a sky and bounce light but not yet with moving
-  objects; coarser versions of objects shade slightly differently
-  (about 1.2–1.5% colour difference when settled, with the finest
-  version's normals); imported meshes have no coarser versions yet.
-
-## Where it is going
-
-The aim is to be excellent at three things: **scale, detail and
-lighting**, in huge, extremely detailed worlds where detail follows the
-screen (zoom in and it resolves further; what you cannot see costs
-nothing). Four landmarks, in order:
-
-1. **A unique world beyond memory** (the mechanism is there). Each
-   object's finer versions load as the camera needs them, within a fixed
-   budget, and detail follows the zoom: zooming in onto a rock 100 m away
-   resolves it fully. What lighting sees streams too, generated as needed,
-   and the lighting stays exact: every cached result shown matches one
-   computed with everything loaded. 36,864 unique rocks (lighting alone
-   would need 7.6 GB more GPU memory) fly at about 5 ms a frame on a
-   fanless laptop, no frame over 16.7 ms, keeping about 18 KB of GPU
-   memory per rock, with 900,000 cached results checked against an
-   independent reference. With a sky and bounce light too, it still flies
-   within 60 fps (about 10 ms a frame, direct light exact, bounce within
-   3.1% of Cycles on a reference scene). Meshes that come with a single
-   level, such as imported ones, can now be simplified into coarser levels
-   that stream the same way and shade as close to the original as
-   hand-made levels. Still to come: faster settling on new ground, and
-   moving objects with it.
-2. **Lighting you can trust in motion.** The cache now always converges
-   with bounce light (a loop that never settled is fixed); a sun moving at
-   real speed costs what a still one does, with every cached result shown
-   within a certified bound of a fresh one; and a view with a sky warms in
-   a few hundred frames instead of thousands (sky light through hardware
-   rays, closer to Cycles than before). The error while flying is now
-   measured against fully settled views (about a fifth of the image on a
-   fast flight over the boulder field, mostly from the number of distinct
-   objects needing lighting at once), and light can bounce more than once
-   (interiors from 45% to 6.5% of Cycles' fully bounced image). The
-   renderer can now report each frame an estimate of its error against
-   exact lighting, with a 95% bound, from 512 probe pixels (on that
-   flight the bound held in every check, for 2% of the frame).
-3. **Detail smaller than a pixel, without shimmer.** Each object type
-   gets a small precomputed map of how it looks from every direction, and
-   pixels read those instead of tracing every tiny surface. Accuracy is
-   answered (a fifth to an eighth of one-ray-per-pixel's error on the
-   million-boulder field), and the coverage pass now takes about 9 ms a
-   frame standing and from 150 m up (from 105–135 ms). Rays go only near large
-   objects, a tile of pixels shares the top of its walk, and far groups of
-   boulders hold small images of their own coverage, re-made as the
-   viewpoint moves, so a pixel at the horizon reads one image instead of
-   hundreds of boulders. They keep up with walking and with a 10 m/s
-   flight. Colour through the same path is about a third of
-   one-ray-per-pixel's error from both views, in 13.9–14.7 ms a frame once
-   the view has settled (target 15): where a pixel's corners disagree (a
-   sun shadow's edge, a fold of rock), its sub-pixel samples are shaded one
-   by one, and the sun's visibility of still surfaces is kept in a
-   world-space cache instead of re-traced each frame. Lit by the
-   renderer's own lighting instead (soft shadows from every light, the
-   sky, bounce light), colour stays under half one-ray-per-pixel's error
-   and a frame costs 1–5% more than with the simpler lighting (measured
-   side by side; 17.1–17.9 ms a frame on this machine with its external
-   displays running, where the simpler lighting takes 16.1–17.6). It is a
-   renderer option now (`RendererOptions::sub_pixel`, experimental), and
-   draws lights seen directly by the sub-pixel parts they cover; flying
-   with colour is not measured.
-4. **One showcase scene** with all three, at 60 fps, against Cycles.
-
-A quality dial grows alongside: one setting for "how close to the
-reference" against "how fast", instead of fixed presets.
+A fair note: this compares *methods*. Continuum's numbers are measured
+against Cycles; we have not benchmarked against Unreal, Unity or Godot, and
+have measured speed only on an Apple M4 laptop. Whole scenes with bounce
+light come further from Cycles than direct light alone (the scorecard
+above: 1.3% to 25%).
 
 ## Try it
 
@@ -454,12 +332,135 @@ App::new()
     .run();
 ```
 
-## How it was built
+## Where it stands
+
+<details open>
+<summary><b>What it can do today</b></summary>
+
+- **Lights:** rectangular area lights, suns, point and spot lights with a
+  size, up to 16 of them, colored, re-colorable for free.
+- **Sky:** a uniform sky, or an environment image (`.hdr`, `.png`).
+- **Materials:** glTF metallic-roughness with glossy reflections, normal
+  maps, emission (which lights its surroundings), emissive textures, vertex
+  colors, alpha cutouts, alpha blending, transmissive glass, thin
+  (`KHR_materials_transmission`: full reflections, tinted light through,
+  5.08% from Cycles) or solid (`KHR_materials_volume`: refraction in and
+  out, absorption, total internal reflection; 8.3% from Cycles), clear
+  coats and a surface's index of refraction and tinted reflectance
+  (`KHR_materials_clearcoat`, `_ior`, `_specular`), sheen for fabrics
+  (`KHR_materials_sheen`), double-sided faces, texture transforms and wrap
+  modes.
+- **Indirect light**, in the cache: by default two bounces with the rest
+  estimated where only local lights light the scene (a closed room 6.9%
+  from Cycles' fully bounced image, 46.6% with one), one bounce outdoors
+  (a sky, an environment or a sun); more on request
+  (`CacheOptions::bounces`).
+- **Moving objects**, exactly, in the same frame; glTF animations play
+  through them.
+- **Animated characters:** glTF skins and morph targets, posed as Blender
+  poses them (within a micrometre); any mesh the application deforms each
+  frame. Lighting near a deforming object catches up within a budget.
+- **Anti-aliasing,** on by default, with nothing taken from past frames:
+  edge pixels trace up to eight more rays, shaded where they meet another
+  surface.
+- **Fog with light shafts:** a layer of fog, even or thinning with height,
+  lit by the sun through its shadows and by the sky; within 6–10% of
+  Cycles' volumes, 0.8 ms at 720p.
+- **Display:** Khronos PBR Neutral tone mapping (within half a level in 255
+  of Blender's view of it) or an AgX approximation; auto-exposure that
+  adapts like a camera, metering surfaces so an empty or dim sky does not
+  flood the view; bloom that keeps the image's light; rendering below the
+  display's size drawn up by a clamped bicubic.
+- **Depth of field** and **motion blur,** each from the frame alone (a thin
+  lens: 0.03–0.13× a pinhole's error from the lens sampled outright; a
+  shutter: 0.07–0.34× a still image's error), 0.6–2.5 ms at 720p.
+- **glTF 2.0** import and export, with cameras, lights and animations.
+- **Bevy 0.20 plugin:** a camera's view rendered by Continuum, with
+  entities moving its objects.
+- **Viewer:** fly through the showcase, the boulder field, or your own
+  file, with a panel for its settings; a download for Apple silicon Macs.
+
+</details>
+
+<details open>
+<summary><b>Limits</b></summary>
+
+- **Measured on Apple silicon (Metal) only.** CI checks correctness on Linux
+  (Vulkan, software adapter) and that the shaders compile for Windows
+  (DX12). NVIDIA, AMD and real Windows GPUs are untested.
+- **Bounce light in very large instanced worlds does not settle.** On the
+  million-boulder field, bounce samples keep re-baking as their hits' pages
+  come and go; the viewer turns bounce light off there. Elsewhere it is on
+  by default: 1.06–1.12× the frame and about 190 MB of GPU memory, and a
+  view settles in 1.8–3.2× the frames. Not yet with moving lights.
+- **Real assets still come further from Cycles than test scenes:** Sponza
+  is 25% from Cycles (bounce light's sampling of small bright patches, and
+  materials), against 1.3–7% for the scorecard's other scenes.
+- **Detail smaller than a pixel** still shimmers far away: anti-aliasing
+  smooths edges, but a field of tiny distant objects needs the
+  experimental sub-pixel path (static scenes), where anti-aliasing costs
+  about 2× the frame.
+- **The sky warms in a few hundred frames** (hardware rays); with streamed
+  detail or glass it falls back to a slower path that takes thousands of
+  frames. Around moving objects the sky catches up within a few frames
+  (`CacheOptions::sky_lag`, on by default).
+- **Deforming meshes are costly:** a character large on screen costs about
+  1.6× the frame, and the lighting near it lags its motion (up to about a
+  second) until it stops.
+- **Moving objects near a large light can be slow:** shadows of moving
+  objects stay exact by re-baking every texel they touch in the same frame;
+  in a closed room with a large light that is tens of thousands of texels a
+  frame.
+- **Transparency** needs hardware ray queries. Glass is sharp even when
+  rough, its shadows are grey rather than tinted and carry no caustics.
+- **Fanless laptops** slow down under minutes of sustained load.
+- **Streaming is new:** it needs hardware ray queries, and does not yet work
+  with moving objects; imported meshes stream once simplified into coarser
+  levels.
+
+</details>
+
+## Where it is going
+
+The aim is to be excellent at three things: **scale, detail and
+lighting**, in huge, extremely detailed worlds where detail follows the
+screen (zoom in and it resolves further; what you cannot see costs
+nothing). The work runs in three phases:
+
+1. **Strengthen the basics** (now): every scene on the
+   [scorecard](docs/results/basics-scorecard.md) settling, no visible gaps
+   in motion, and real scenes within a stated bar of Cycles. Done so far:
+   bounce light by default (a closed room 46.6% → 6.9% from Cycles),
+   characters in motion (pixels without lighting 38% → 2.2%), a fix that
+   brought Sponza from 30.4% to 25.4%, and coarse texels that average
+   their area. Next: the boulder field's bounce light settling.
+2. **Compatibility:** the glTF features and effects still missing (a second
+   texture coordinate set, the remaining material extensions, particles,
+   decals, animated emission), checked by a compatibility scorecard.
+3. **Make it look good:** scenes that look their best with this engine, not
+   only correct.
+
+Along the way, four landmarks, each with its mechanism in place:
+
+- **A unique world beyond memory:** 36,864 unique rocks stream geometry and
+  lighting within a fixed budget, flown within 60 fps, every cached result
+  shown matching one computed with everything loaded.
+- **Lighting you can trust in motion:** a moving sun costs what a still one
+  does, every shown result within a certified bound; the renderer can
+  report each frame an estimate of its error with a 95% bound.
+- **Detail smaller than a pixel, without shimmer:** objects carry small
+  precomputed maps of their coverage from every direction, so a pixel at
+  the horizon reads one image instead of hundreds of boulders
+  (`RendererOptions::sub_pixel`, experimental).
+- **One showcase scene** with all three, at 60 fps, against Cycles.
 
 The design and an honest status live in [docs/DESIGN.md](docs/DESIGN.md)
-(§3.6 for where it stands, §3.8 for what is next). Work proceeds in
-milestones of gates: M0 tested the core bets in 2D, M1 in 3D on the CPU,
-and M2 onward on the GPU.
+(§3.6 for where it stands, §3.8 for what is next).
+
+## How it was built
+
+Work proceeds in milestones of gates: M0 tested the core bets in 2D, M1 in
+3D on the CPU, and M2 onward on the GPU.
 
 **Ideas it builds on.** Cone tracing (Amanatides 1984), coverage masks
 (Carpenter's A-buffer, 1984), voxel cone tracing (Crassin et al. 2011),
@@ -509,7 +510,7 @@ kept while they stay in view.
 - `--env sky.hdr` (or a `.png`, or `gradient`) lights the scene with an
   equirectangular environment image in Blender's orientation;
   `--env-strength K` scales it (1.37% from Cycles, M5 gate 12).
-- `--exposure K` sets the starting exposure.
+- `--exposure K` sets the starting exposure; `--no-vsync` turns vsync off.
 
 **Your own glTF files** (`--gltf scene.glb`): lit by the file's own lights
 and the sky, or else a studio HDRI (objects under 10 m across) or an
@@ -563,6 +564,9 @@ textures (M6 gate 1).
   `BLENDER` if it is not in `/Applications`).
   `cargo run --release -p room3d --bin cycles_calibration` checks the
   pipeline on a scene with a known answer.
+- `cargo run --release -p room3d --bin scorecard` runs the basics scorecard
+  (seven scenes, speed then error against Cycles; about 5 minutes once the
+  references are cached).
 - `cargo run --release -p room3d --bin bench` repeats the gates' timings in
   one headless run, to compare GPUs (`docs/BENCHMARK.md`;
   `docs/results/bench-m4.md` holds the M4 baseline).
@@ -583,11 +587,12 @@ textures (M6 gate 1).
 - `experiments/flatland`: the 2D experiments that tested the core bets
   (M0).
 - `experiments/room3d`: the 3D experiments and gates
-  (`src/bin/m<milestone>_gate<n>.rs`), test scenes, and the Cycles
-  pipeline.
+  (`src/bin/m<milestone>_gate<n>.rs`), test scenes, the basics scorecard,
+  and the Cycles pipeline.
 - `docs/`: the design document, the guide, and every result.
-- `scripts/`: the README's diagrams (`readme_diagrams.py`) and GIFs
-  (`make_gif.py`, from frames written by the `readme_media` binary).
+- `scripts/`: the README's diagrams (`readme_diagrams.py`) and animations
+  (`make_gif.py`, GIF or WebP, from frames written by the `readme_media`
+  and `readme_clips` binaries).
 - `third_party/`: a small patch to wgpu-core (see its README).
 
 </details>
@@ -605,7 +610,7 @@ Each gate is a binary that prints its verdict and writes its images to
 ```bash
 cargo run --release -p flatland --bin gate1
 cargo run --release -p room3d --bin m3_gate3        # needs Blender
-cargo run --release -p room3d --bin m10_gate20      # needs Blender
+cargo run --release -p room3d --bin m22_gate10      # needs Blender
 ```
 
 The pattern is `cargo run --release -p room3d --bin m<milestone>_gate<n>`;

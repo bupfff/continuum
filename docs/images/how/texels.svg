@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="380" viewBox="0 0 900 380" role="img" aria-label="Coarse texels average their area">
+<title>Coarse texels average their area</title>
+<rect width="900" height="380" rx="14" fill="#0f141c"/>
+<defs><radialGradient id="lit" cx="0.72" cy="0.2" r="0.95"><stop offset="0" stop-color="#e9dcc2"/><stop offset="0.55" stop-color="#a99f8c"/><stop offset="1" stop-color="#3b3a37"/></radialGradient></defs>
+<text x="30" y="36" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#f2eee6" text-anchor="start">A coarse texel lights its whole area, not one point</text>
+<text x="30" y="70" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">One point (before)</text>
+<circle cx="390" cy="92" r="16" fill="#ffc15e"/><line x1="412.0" y1="92.0" x2="420.0" y2="92.0" stroke="#ffc15e" stroke-width="2"/><line x1="405.6" y1="107.6" x2="411.2" y2="113.2" stroke="#ffc15e" stroke-width="2"/><line x1="390.0" y1="114.0" x2="390.0" y2="122.0" stroke="#ffc15e" stroke-width="2"/><line x1="374.4" y1="107.6" x2="368.8" y2="113.2" stroke="#ffc15e" stroke-width="2"/><line x1="368.0" y1="92.0" x2="360.0" y2="92.0" stroke="#ffc15e" stroke-width="2"/><line x1="374.4" y1="76.4" x2="368.8" y2="70.8" stroke="#ffc15e" stroke-width="2"/><line x1="390.0" y1="70.0" x2="390.0" y2="62.0" stroke="#ffc15e" stroke-width="2"/><line x1="405.6" y1="76.4" x2="411.2" y2="70.8" stroke="#ffc15e" stroke-width="2"/>
+<line x1="30" y1="250" x2="430" y2="250" stroke="#5b6577" stroke-width="2"/>
+<path d="M271.9,250.0 L273.4,246.9 L274.5,243.7 L275.1,240.4 L275.1,237.1 L274.4,233.9 L273.1,230.8 L271.0,227.9 L268.4,225.1 L265.1,222.6 L261.5,220.4 L257.4,218.4 L253.2,216.8 L248.8,215.3 L244.5,214.0 L240.2,212.9 L236.2,211.8 L232.4,210.7 L228.8,209.6 L225.5,208.3 L222.4,206.8 L219.5,205.2 L216.6,203.4 L213.8,201.4 L210.9,199.3 L207.9,197.0 L204.6,194.8 L201.1,192.7 L197.4,190.7 L193.3,188.9 L189.1,187.5 L184.6,186.4 L180.0,185.7 L175.3,185.5 L170.7,185.7 L166.1,186.4 L161.7,187.4 L157.5,188.8 L153.4,190.4 L149.6,192.2 L146.0,194.2 L142.6,196.2 L139.3,198.2 L136.0,200.1 L132.8,202.0 L129.6,203.8 L126.3,205.5 L122.9,207.2 L119.4,208.8 L115.9,210.5 L112.3,212.2 L108.8,214.1 L105.4,216.1 L102.2,218.3 L99.3,220.7 L96.8,223.2 L94.7,226.0 L93.2,228.9 L92.3,231.9 L91.9,235.0 L92.0,238.1 L92.7,241.2 L93.8,244.2 L95.2,247.2 L96.9,250.0 Z" fill="#2b313d" stroke="#a9aeb8" stroke-width="1.5"/>
+<rect x="83.7" y="175.6" width="192.5" height="74.4" fill="none" stroke="#ffc15e" stroke-opacity="0.45" stroke-dasharray="5 5"/>
+<line x1="92.7" y1="241.2" x2="372.0" y2="104.0" stroke="#e5674e" stroke-width="2" stroke-dasharray="6 4" stroke-opacity="0.85"/>
+<text x="88.7091697370695" y="263.195107373136" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#e5674e" text-anchor="start">ray blocked by the boulder</text>
+<circle cx="92.7" cy="241.2" r="5" fill="#e5674e"/>
+<path d="M374.6,250.0 L375.4,248.5 L375.9,246.9 L376.2,245.3 L376.2,243.8 L375.9,242.2 L375.2,240.7 L374.2,239.2 L372.9,237.9 L371.4,236.7 L369.6,235.6 L367.6,234.7 L365.5,233.9 L363.4,233.1 L361.3,232.5 L359.3,232.0 L357.3,231.4 L355.4,230.9 L353.7,230.4 L352.1,229.7 L350.6,229.0 L349.2,228.2 L347.8,227.4 L346.4,226.4 L345.0,225.4 L343.5,224.3 L342.0,223.2 L340.3,222.2 L338.4,221.2 L336.5,220.3 L334.4,219.6 L332.2,219.1 L330.0,218.8 L327.7,218.7 L325.5,218.8 L323.3,219.1 L321.1,219.6 L319.0,220.3 L317.1,221.1 L315.2,221.9 L313.5,222.9 L311.8,223.9 L310.2,224.8 L308.6,225.8 L307.1,226.7 L305.5,227.5 L303.9,228.4 L302.3,229.2 L300.6,230.0 L298.9,230.8 L297.1,231.7 L295.4,232.6 L293.8,233.5 L292.2,234.6 L290.8,235.8 L289.6,237.0 L288.6,238.3 L287.8,239.7 L287.4,241.2 L287.2,242.7 L287.3,244.2 L287.6,245.7 L288.1,247.2 L288.8,248.6 L289.6,250.0 Z" fill="#2a2722" stroke="#5b6577" stroke-width="1"/>
+<text x="330" y="268" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="middle">shown</text>
+<text x="30" y="298" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Each boulder is one chart, so far away one texel covers it.</text>
+<text x="30" y="318" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Its centre faces down: no light, and it renders unlit.</text>
+<text x="470" y="70" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">16 points over it (now)</text>
+<circle cx="830" cy="92" r="16" fill="#ffc15e"/><line x1="852.0" y1="92.0" x2="860.0" y2="92.0" stroke="#ffc15e" stroke-width="2"/><line x1="845.6" y1="107.6" x2="851.2" y2="113.2" stroke="#ffc15e" stroke-width="2"/><line x1="830.0" y1="114.0" x2="830.0" y2="122.0" stroke="#ffc15e" stroke-width="2"/><line x1="814.4" y1="107.6" x2="808.8" y2="113.2" stroke="#ffc15e" stroke-width="2"/><line x1="808.0" y1="92.0" x2="800.0" y2="92.0" stroke="#ffc15e" stroke-width="2"/><line x1="814.4" y1="76.4" x2="808.8" y2="70.8" stroke="#ffc15e" stroke-width="2"/><line x1="830.0" y1="70.0" x2="830.0" y2="62.0" stroke="#ffc15e" stroke-width="2"/><line x1="845.6" y1="76.4" x2="851.2" y2="70.8" stroke="#ffc15e" stroke-width="2"/>
+<line x1="470" y1="250" x2="870" y2="250" stroke="#5b6577" stroke-width="2"/>
+<path d="M711.9,250.0 L713.4,246.9 L714.5,243.7 L715.1,240.4 L715.1,237.1 L714.4,233.9 L713.1,230.8 L711.0,227.9 L708.4,225.1 L705.1,222.6 L701.5,220.4 L697.4,218.4 L693.2,216.8 L688.8,215.3 L684.5,214.0 L680.2,212.9 L676.2,211.8 L672.4,210.7 L668.8,209.6 L665.5,208.3 L662.4,206.8 L659.5,205.2 L656.6,203.4 L653.8,201.4 L650.9,199.3 L647.9,197.0 L644.6,194.8 L641.1,192.7 L637.4,190.7 L633.3,188.9 L629.1,187.5 L624.6,186.4 L620.0,185.7 L615.3,185.5 L610.7,185.7 L606.1,186.4 L601.7,187.4 L597.5,188.8 L593.4,190.4 L589.6,192.2 L586.0,194.2 L582.6,196.2 L579.3,198.2 L576.0,200.1 L572.8,202.0 L569.6,203.8 L566.3,205.5 L562.9,207.2 L559.4,208.8 L555.9,210.5 L552.3,212.2 L548.8,214.1 L545.4,216.1 L542.2,218.3 L539.3,220.7 L536.8,223.2 L534.7,226.0 L533.2,228.9 L532.3,231.9 L531.9,235.0 L532.0,238.1 L532.7,241.2 L533.8,244.2 L535.2,247.2 L536.9,250.0 Z" fill="#2b313d" stroke="#a9aeb8" stroke-width="1.5"/>
+<rect x="523.8" y="175.6" width="192.5" height="74.4" fill="none" stroke="#ffc15e" stroke-opacity="0.45" stroke-dasharray="5 5"/>
+<line x1="715.1" y1="237.1" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="715.1" cy="237.1" r="4" fill="#ffc15e"/>
+<line x1="708.4" y1="225.1" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="708.4" cy="225.1" r="4" fill="#ffc15e"/>
+<line x1="693.2" y1="216.8" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="693.2" cy="216.8" r="4" fill="#ffc15e"/>
+<line x1="676.2" y1="211.8" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="676.2" cy="211.8" r="4" fill="#ffc15e"/>
+<line x1="662.4" y1="206.8" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="662.4" cy="206.8" r="4" fill="#ffc15e"/>
+<line x1="650.9" y1="199.3" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="650.9" cy="199.3" r="4" fill="#ffc15e"/>
+<line x1="637.4" y1="190.7" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="637.4" cy="190.7" r="4" fill="#ffc15e"/>
+<line x1="620.0" y1="185.7" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="620.0" cy="185.7" r="4" fill="#ffc15e"/>
+<line x1="601.7" y1="187.4" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="601.7" cy="187.4" r="4" fill="#ffc15e"/>
+<line x1="586.0" y1="194.2" x2="816.0" y2="102.0" stroke="#ffc15e" stroke-opacity="0.35" stroke-width="1.2"/>
+<circle cx="586.0" cy="194.2" r="4" fill="#ffc15e"/>
+<circle cx="572.8" cy="202.0" r="4" fill="#5b6577"/>
+<circle cx="559.4" cy="208.8" r="4" fill="#5b6577"/>
+<circle cx="545.4" cy="216.1" r="4" fill="#5b6577"/>
+<circle cx="534.7" cy="226.0" r="4" fill="#5b6577"/>
+<circle cx="532.0" cy="238.1" r="4" fill="#5b6577"/>
+<path d="M814.6,250.0 L815.4,248.5 L815.9,246.9 L816.2,245.3 L816.2,243.8 L815.9,242.2 L815.2,240.7 L814.2,239.2 L812.9,237.9 L811.4,236.7 L809.6,235.6 L807.6,234.7 L805.5,233.9 L803.4,233.1 L801.3,232.5 L799.3,232.0 L797.3,231.4 L795.4,230.9 L793.7,230.4 L792.1,229.7 L790.6,229.0 L789.2,228.2 L787.8,227.4 L786.4,226.4 L785.0,225.4 L783.5,224.3 L782.0,223.2 L780.3,222.2 L778.4,221.2 L776.5,220.3 L774.4,219.6 L772.2,219.1 L770.0,218.8 L767.7,218.7 L765.5,218.8 L763.3,219.1 L761.1,219.6 L759.0,220.3 L757.1,221.1 L755.2,221.9 L753.5,222.9 L751.8,223.9 L750.2,224.8 L748.6,225.8 L747.1,226.7 L745.5,227.5 L743.9,228.4 L742.3,229.2 L740.6,230.0 L738.9,230.8 L737.1,231.7 L735.4,232.6 L733.8,233.5 L732.2,234.6 L730.8,235.8 L729.6,237.0 L728.6,238.3 L727.8,239.7 L727.4,241.2 L727.2,242.7 L727.3,244.2 L727.6,245.7 L728.1,247.2 L728.8,248.6 L729.6,250.0 Z" fill="url(#lit)" stroke="#5b6577" stroke-width="1"/>
+<text x="770" y="268" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="middle">shown</text>
+<text x="470" y="298" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Each point that faces the sun counts what it sees, weighted</text>
+<text x="470" y="318" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">by its light: the texel holds the boulder's average.</text>
+<text x="30" y="358" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">Texels in the top three mips of a chart that curves (M22 gate 10): the boulder field from above, 13.83% → 10.41% from Cycles.</text>
+</svg>

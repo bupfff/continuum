@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300" viewBox="0 0 900 300" role="img" aria-label="One frame">
+<title>One frame</title>
+<rect width="900" height="300" rx="14" fill="#0f141c"/>
+<defs><marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#a9aeb8"/></marker></defs>
+<text x="30" y="36" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#f2eee6" text-anchor="start">One frame</text>
+<rect x="30" y="66" width="150" height="128" rx="10" fill="#1a212c" stroke="#26303f" stroke-width="1.5"/>
+<text x="44" y="96" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">1. Camera rays</text>
+<text x="44" y="124" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Hardware ray queries</text>
+<text x="44" y="144" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">find what each pixel</text>
+<text x="44" y="164" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">sees.</text>
+<line x1="183" y1="130" x2="198" y2="130" stroke="#a9aeb8" stroke-width="2" marker-end="url(#arr2)"/>
+<rect x="202" y="66" width="150" height="128" rx="10" fill="#1a212c" stroke="#26303f" stroke-width="1.5"/>
+<text x="216" y="96" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">2. Pages</text>
+<text x="216" y="124" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Each pixel finds its</text>
+<text x="216" y="144" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">page of light; missing</text>
+<text x="216" y="164" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">pages are requested.</text>
+<line x1="355" y1="130" x2="370" y2="130" stroke="#a9aeb8" stroke-width="2" marker-end="url(#arr2)"/>
+<rect x="374" y="66" width="150" height="128" rx="10" fill="#1a212c" stroke="#ffc15e" stroke-width="1.5"/>
+<text x="388" y="96" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#ffc15e" text-anchor="start">3. Bake</text>
+<text x="388" y="124" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Within a time budget:</text>
+<text x="388" y="144" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">a mask cone per light,</text>
+<text x="388" y="164" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">rays for sky, bounce.</text>
+<line x1="527" y1="130" x2="542" y2="130" stroke="#a9aeb8" stroke-width="2" marker-end="url(#arr2)"/>
+<rect x="546" y="66" width="150" height="128" rx="10" fill="#1a212c" stroke="#26303f" stroke-width="1.5"/>
+<text x="560" y="96" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">4. Shade</text>
+<text x="560" y="124" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Pixels read their pages;</text>
+<text x="560" y="144" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">reflections and glass</text>
+<text x="560" y="164" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">trace on.</text>
+<line x1="699" y1="130" x2="714" y2="130" stroke="#a9aeb8" stroke-width="2" marker-end="url(#arr2)"/>
+<rect x="718" y="66" width="150" height="128" rx="10" fill="#1a212c" stroke="#26303f" stroke-width="1.5"/>
+<text x="732" y="96" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">5. Display</text>
+<text x="732" y="124" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">Anti-aliased edges,</text>
+<text x="732" y="144" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">tone map, bloom,</text>
+<text x="732" y="164" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">exposure.</text>
+<text x="30" y="236" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">What the budget cannot bake yet shows its page's nearest coarser version; nothing is blended from past frames,</text>
+<text x="30" y="256" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">so a frame is the scene as it is now. Pages stay while they can still be right, and a move re-bakes only what it can change.</text>
+</svg>

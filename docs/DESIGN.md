@@ -2075,7 +2075,12 @@ For a new conversation or after a compaction; history lives in git and
   without pages, so the field settles), then update the repository and its
   README (a new or improved layout, newer GIFs and diagrams), then go on
   down the list. M23 G1 parked unrun the same night (its premise did not
-  hold); the README next, then the field's re-bake cycle.
+  hold). README rebuilt 2026-11-23 (a Sponza walk and a FlightHelmet orbit
+  as animated WebP, `readme_clips`; diagrams of a frame, area texels and
+  the scorecard). Next: the field's bounce re-bake cycle, and its lag from
+  above (a rising flight shows new coarse ground pages darker until their
+  sky bakes: a dark band in the middle distance; the user's "shading that
+  fixes itself, sometimes not").
 - **Plan agreed 2026-11-22 (one long stretch):** item (3) first (deforming
   characters in motion), then a milestone for (1) and (2) together: bounce
   light gathered by cones over the prefiltered hierarchy, the hierarchy's

@@ -9,6 +9,11 @@
   mask cone.
 - cache.svg: lighting cached on surface pages; a move re-bakes only the
   pages it can change.
+- scorecard.svg: the basics scorecard against Cycles, at the start of
+  phase 1 and now.
+- texels.svg: a coarse texel lit from one point, and from points over its
+  area (M22 gate 10).
+- frame.svg: what one frame does.
 
 Geometry is computed here, so the animation's parts stay in step.
 """
@@ -282,21 +287,21 @@ def cache():
     body.append(text(gx + 22, gy + n * cell + 24, "re-baked this frame", 13, DIM))
     body.append(f'<rect x="{gx + 170}" y="{gy + n * cell + 12}" width="14" height="14" rx="2" fill="#26303f"/>')
     body.append(text(gx + 192, gy + n * cell + 24, "kept: cannot have changed", 13, DIM))
-    tx = 360
+    tx = 340
     lines = [
         ("Pages of light on every surface", 600, INK),
-        ("Each page holds the light from each lamp per unit", 400, DIM),
-        ("brightness, so changing a light's color or power", 400, DIM),
+        ("Each page holds each lamp's light per unit of", 400, DIM),
+        ("brightness: changing a light's color or power", 400, DIM),
         ("re-weights the cache and bakes nothing.", 400, DIM),
         ("", 400, DIM),
         ("Only what can change is recomputed", 600, INK),
-        ("When an object moves, the pages whose light it could", 400, DIM),
-        ("touch are re-baked in the same frame; everything else is", 400, DIM),
-        ("provably unchanged and kept. No light is ever shown stale.", 400, DIM),
+        ("When an object moves, the pages whose light it", 400, DIM),
+        ("could touch re-bake in the same frame; the rest", 400, DIM),
+        ("is provably unchanged. Nothing is shown stale.", 400, DIM),
         ("", 400, DIM),
         ("No blending of past frames", 600, INK),
-        ("Each frame is computed from the cache as it is now, so", 400, DIM),
-        ("there is no ghosting or lag behind moving things.", 400, DIM),
+        ("Each frame comes from the cache as it is now:", 400, DIM),
+        ("no ghosting or lag behind moving things.", 400, DIM),
     ]
     y = 84
     for s, wgt, col in lines:
@@ -306,7 +311,154 @@ def cache():
     return card(W, H, "\n".join(body), "The lighting cache")
 
 
-for name, svg in [("mask-cone.svg", mask_cone()), ("three-ways.svg", three_ways()), ("cache.svg", cache())]:
+# ---------------------------------------------------------------- scorecard
+def scorecard():
+    rows = [
+        ("Sponza", "3 million triangles, sun and sky", 30.43, 25.35),
+        ("Closed room", "one skylight panel, light bouncing", 46.55, 6.93),
+        ("Room with movers", "a ball and a cube moving", 44.46, 5.40),
+        ("Boulder field", "a million boulders, sun and sky", 1.68, 1.29),
+        ("DamagedHelmet", "metal, normal maps, emission", 4.46, 4.46),
+        ("Fox", "a skinned character", 8.73, 2.17),
+        ("BrainStem", "59 skinned meshes", 9.47, 3.28),
+    ]
+    W, row = 900, 50
+    top = 96
+    H = top + len(rows) * row + 56
+    x0, x1, vmax = 300, 800, 50.0
+    sx = lambda v: x0 + (x1 - x0) * v / vmax
+    body = [text(30, 36, "The basics scorecard: seven scenes against Cycles", 17, INK, 600)]
+    body.append(text(30, 60, "Error from Blender's Cycles (clamped relative RMSE, lower is better), at the start of phase 1 and now", 13, DIM))
+    for v in (0, 10, 20, 30, 40, 50):
+        x = sx(v)
+        body.append(f'<line x1="{x:.1f}" y1="{top - 10}" x2="{x:.1f}" y2="{top + len(rows) * row - 8}" stroke="#26303f" stroke-width="1"/>')
+        body.append(text(x, top + len(rows) * row + 8, f"{v}%", 12, DIM, 400, "middle"))
+    for k, (name, what, before, now) in enumerate(rows):
+        y = top + k * row
+        body.append(text(30, y + 10, name, 15, INK, 600))
+        body.append(text(30, y + 28, what, 12, DIM))
+        body.append(f'<rect x="{x0}" y="{y - 2}" width="{sx(before) - x0:.1f}" height="12" rx="3" fill="{SHADE}"/>')
+        body.append(text(sx(before) + 6, y + 9, f"{before:.2f}%", 12, DIM))
+        body.append(f'<rect x="{x0}" y="{y + 14}" width="{max(sx(now) - x0, 2):.1f}" height="12" rx="3" fill="{SUN}"/>')
+        body.append(text(sx(now) + 6, y + 25, f"{now:.2f}%", 12, INK, 600))
+    ly = H - 22
+    body.append(f'<rect x="30" y="{ly - 11}" width="14" height="12" rx="3" fill="{SHADE}"/>')
+    body.append(text(52, ly, "start of phase 1 (2026-11-22)", 13, DIM))
+    body.append(f'<rect x="260" y="{ly - 11}" width="14" height="12" rx="3" fill="{SUN}"/>')
+    body.append(text(282, ly, "now", 13, DIM))
+    body.append(text(W - 30, ly, "Apple M4 · docs/results/basics-scorecard.md", 12, DIM, 400, "end"))
+    return card(W, H, "\n".join(body), "The basics scorecard against Cycles")
+
+
+# ---------------------------------------------------------------- texels
+def blob(cx, cy, s):
+    """A boulder's outline: a lumpy dome on the ground, scale s."""
+    pts = []
+    for i in range(65):
+        a = math.pi * i / 64
+        r = s * (1 + 0.08 * math.sin(5 * a) + 0.05 * math.cos(3 * a))
+        pts.append((cx + 1.25 * r * math.cos(a), cy - 0.85 * r * math.sin(a)))
+    d = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts) + " Z"
+    return d, pts
+
+
+def texels():
+    W, H = 900, 380
+    body = [text(30, 36, "A coarse texel lights its whole area, not one point", 17, INK, 600)]
+    body.insert(
+        0,
+        f'<defs><radialGradient id="lit" cx="0.72" cy="0.2" r="0.95"><stop offset="0" stop-color="#e9dcc2"/><stop offset="0.55" stop-color="#a99f8c"/><stop offset="1" stop-color="#3b3a37"/></radialGradient></defs>',
+    )
+    sun = lambda x, y: (
+        f'<circle cx="{x}" cy="{y}" r="16" fill="{SUN}"/>'
+        + "".join(
+            f'<line x1="{x + 22 * math.cos(a):.1f}" y1="{y + 22 * math.sin(a):.1f}" x2="{x + 30 * math.cos(a):.1f}" y2="{y + 30 * math.sin(a):.1f}" stroke="{SUN}" stroke-width="2"/>'
+            for a in [k * math.pi / 4 for k in range(8)]
+        )
+    )
+    for panel in (0, 1):
+        ox = 30 + panel * 440
+        cx, cy, sc = ox + 150, 250, 70
+        sx, sy = ox + 360, 92
+        body.append(text(ox, 70, ["One point (before)", "16 points over it (now)"][panel], 15, INK, 600))
+        body.append(sun(sx, sy))
+        body.append(f'<line x1="{ox}" y1="{cy}" x2="{ox + 400}" y2="{cy}" stroke="{SHADE}" stroke-width="2"/>')
+        d, pts = blob(cx, cy, sc)
+        body.append(f'<path d="{d}" fill="#2b313d" stroke="{DIM}" stroke-width="1.5"/>')
+        # The texel: the whole boulder.
+        body.append(f'<rect x="{cx - 1.25 * sc * 1.1:.1f}" y="{cy - 0.85 * sc * 1.25:.1f}" width="{2.5 * sc * 1.1:.1f}" height="{0.85 * sc * 1.25:.1f}" fill="none" stroke="{SUN}" stroke-opacity="0.45" stroke-dasharray="5 5"/>')
+        if panel == 0:
+            # The texel's centre lands on the far side, low, facing away: its
+            # ray to the sun runs through the boulder.
+            px, py = pts[61]
+            # Where the ray leaves the boulder (first outline point past it).
+            ex, ey = sx - 18, sy + 12
+            body.append(f'<line x1="{px:.1f}" y1="{py:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" stroke="{BLOCK}" stroke-width="2" stroke-dasharray="6 4" stroke-opacity="0.85"/>')
+            body.append(text(px - 4, py + 22, "ray blocked by the boulder", 12, BLOCK))
+            body.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="5" fill="{BLOCK}"/>')
+        else:
+            for k in range(4, 61, 4):
+                px, py = pts[k]
+                nx, ny = px - cx, (py - cy) / 0.85 * 1.25
+                l = math.hypot(nx, ny) or 1
+                face = (nx * (sx - px) + ny * (sy - py)) > 0
+                if face:
+                    body.append(f'<line x1="{px:.1f}" y1="{py:.1f}" x2="{sx - 14:.1f}" y2="{sy + 10:.1f}" stroke="{SUN}" stroke-opacity="0.35" stroke-width="1.2"/>')
+                body.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="4" fill="{SUN if face else SHADE}"/>')
+        # What the boulder looks like with that texel.
+        tx, ty = ox + 300, 210
+        d2, _ = blob(tx, ty + 40, 34)
+        fill = "#2a2722" if panel == 0 else "url(#lit)"
+        body.append(f'<path d="{d2}" fill="{fill}" stroke="{SHADE}" stroke-width="1"/>')
+        body.append(text(tx, ty + 58, "shown", 12, DIM, 400, "middle"))
+        cap = [
+            ("Each boulder is one chart, so far away one texel covers it.", "Its centre faces down: no light, and it renders unlit."),
+            ("Each point that faces the sun counts what it sees, weighted", "by its light: the texel holds the boulder's average."),
+        ][panel]
+        body.append(text(ox, 298, cap[0], 13, DIM))
+        body.append(text(ox, 318, cap[1], 13, DIM))
+    body.append(text(30, H - 22, "Texels in the top three mips of a chart that curves (M22 gate 10): the boulder field from above, 13.83% → 10.41% from Cycles.", 12, DIM))
+    return card(W, H, "\n".join(body), "Coarse texels average their area")
+
+
+# ---------------------------------------------------------------- frame
+def frame():
+    W, H = 900, 300
+    body = [text(30, 36, "One frame", 17, INK, 600)]
+    body.insert(
+        0,
+        f'<defs><marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="{DIM}"/></marker></defs>',
+    )
+    steps = [
+        ("Camera rays", ["Hardware ray queries", "find what each pixel", "sees."]),
+        ("Pages", ["Each pixel finds its", "page of light; missing", "pages are requested."]),
+        ("Bake", ["Within a time budget:", "a mask cone per light,", "rays for sky, bounce."]),
+        ("Shade", ["Pixels read their pages;", "reflections and glass", "trace on."]),
+        ("Display", ["Anti-aliased edges,", "tone map, bloom,", "exposure."]),
+    ]
+    bw, gap, y0 = 150, 22, 66
+    for k, (title, lines) in enumerate(steps):
+        x = 30 + k * (bw + gap)
+        col = SUN if k == 2 else INK
+        body.append(f'<rect x="{x}" y="{y0}" width="{bw}" height="128" rx="10" fill="#1a212c" stroke="{SUN if k == 2 else "#26303f"}" stroke-width="1.5"/>')
+        body.append(text(x + 14, y0 + 30, f"{k + 1}. {title}", 15, col, 600))
+        for j, l in enumerate(lines):
+            body.append(text(x + 14, y0 + 58 + 20 * j, l, 13, DIM))
+        if k < len(steps) - 1:
+            body.append(f'<line x1="{x + bw + 3}" y1="{y0 + 64}" x2="{x + bw + gap - 4}" y2="{y0 + 64}" stroke="{DIM}" stroke-width="2" marker-end="url(#arr2)"/>')
+    body.append(text(30, 236, "What the budget cannot bake yet shows its page's nearest coarser version; nothing is blended from past frames,", 13, DIM))
+    body.append(text(30, 256, "so a frame is the scene as it is now. Pages stay while they can still be right, and a move re-bakes only what it can change.", 13, DIM))
+    return card(W, H, "\n".join(body), "One frame")
+
+
+for name, svg in [
+    ("mask-cone.svg", mask_cone()),
+    ("three-ways.svg", three_ways()),
+    ("cache.svg", cache()),
+    ("scorecard.svg", scorecard()),
+    ("texels.svg", texels()),
+    ("frame.svg", frame()),
+]:
     with open(os.path.join(OUT, name), "w") as f:
         f.write(svg)
     print(name, len(svg) // 1024, "KB")

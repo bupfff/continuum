@@ -154,15 +154,15 @@
 <text x="62" y="358" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">re-baked this frame</text>
 <rect x="210" y="346" width="14" height="14" rx="2" fill="#26303f"/>
 <text x="232" y="358" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">kept: cannot have changed</text>
-<text x="400" y="84" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">Pages of light on every surface</text>
-<text x="400" y="105" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">Each page holds the light from each lamp per unit</text>
-<text x="400" y="126" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">brightness, so changing a light's color or power</text>
-<text x="400" y="147" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">re-weights the cache and bakes nothing.</text>
-<text x="400" y="189" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">Only what can change is recomputed</text>
-<text x="400" y="210" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">When an object moves, the pages whose light it could</text>
-<text x="400" y="231" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">touch are re-baked in the same frame; everything else is</text>
-<text x="400" y="252" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">provably unchanged and kept. No light is ever shown stale.</text>
-<text x="400" y="294" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">No blending of past frames</text>
-<text x="400" y="315" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">Each frame is computed from the cache as it is now, so</text>
-<text x="400" y="336" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">there is no ghosting or lag behind moving things.</text>
+<text x="380" y="84" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">Pages of light on every surface</text>
+<text x="380" y="105" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">Each page holds each lamp's light per unit of</text>
+<text x="380" y="126" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">brightness: changing a light's color or power</text>
+<text x="380" y="147" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">re-weights the cache and bakes nothing.</text>
+<text x="380" y="189" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">Only what can change is recomputed</text>
+<text x="380" y="210" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">When an object moves, the pages whose light it</text>
+<text x="380" y="231" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">could touch re-bake in the same frame; the rest</text>
+<text x="380" y="252" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">is provably unchanged. Nothing is shown stale.</text>
+<text x="380" y="294" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">No blending of past frames</text>
+<text x="380" y="315" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">Each frame comes from the cache as it is now:</text>
+<text x="380" y="336" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" font-weight="400" fill="#a9aeb8" text-anchor="start">no ghosting or lag behind moving things.</text>
 </svg>
