@@ -1338,6 +1338,65 @@ fn hw_bounce_hit(eye: vec3<f32>, dir: vec3<f32>, own: u32) -> Hit {
     return hit;
 }
 
+// Far bounce hits lit by rays (M23 gate 1, `CacheOptions::far_rays`,
+// extra.y bit 15): with one bounce, a hit whose footprint asks for its
+// chart's top mip (the whole chart one texel: a distant boulder) reads no
+// page, so it never requests one nor counts as missing.
+const FAR_BIT: u32 = 0x8000u;
+
+fn far_hit(hit: Hit, bounces: u32) -> bool {
+    if ((vc.extra.y & FAR_BIT) == 0u || bounces != 1u || hit.mesh == NONE) { return false; }
+    // `bounce_gather`'s wanted mip.
+    let ratio = hit.distance * IND_BIN_ANGLE * vc.params.x;
+    var want = 0u;
+    if (ratio > 1.0) { want = u32(round(log2(ratio))); }
+    if ((vc.extra.y & 0x100u) != 0u) { want += 2u; }
+    return want >= vc_top_mip(tri_vchart[hit.tri], hit.mesh);
+}
+
+// A far hit's light (as `bounce_gather` adds a page's): its emission; each
+// light's unshadowed light at the hit times one shadow ray toward the
+// light's centre; its sky from one ray cosine-distributed about its normal
+// (π times open: the sky's irradiance per unit radiance), turned by `key`.
+fn far_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>, key: vec3<u32>) {
+    let p = apex + dir * hit.distance;
+    let tv = 3u * hit.tri;
+    let geometric = normal_to_world(hit.mesh, cross(tris[tv + 1u].xyz - tris[tv].xyz, tris[tv + 2u].xyz - tris[tv].xyz));
+    // A back face: the sample sees inside geometry; no light.
+    if (dot(geometric, dir) > 0.0) { return; }
+    let footprint = hit.distance * IND_BIN_ANGLE;
+    if (vc.extra.x == 1u) {
+        (*sum)[IND_GLOW] += bounce_emission_at(hit.mesh, hit.tri, p, footprint) * w;
+    }
+    let hn = shading_normal(hit.mesh, hit.tri, p, -dir);
+    let hp = p + hit.normal * surface_offset(length(p));
+    let reflect = bounce_albedo(hit.mesh, hit.tri, p, footprint) * (w / 3.14159265);
+    ind_albedo += dot(reflect, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let lights_n = min(arrayLength(&lights), IND_SKY);
+    for (var l = 0u; l < arrayLength(&lights); l++) {
+        let r = lights[l];
+        let e = unshadowed_rect(hp, hn, r) * spot_falloff(r, normalize(hp - light_center(r)));
+        if (e <= 0.0) { continue; }
+        let d = light_center(r) - hp;
+        let dist = length(d);
+        if (!hw_segment_open_but(hp, d / dist, dist * 0.999, NONE)) { continue; }
+        if (l < lights_n) {
+            (*sum)[l] += reflect * e;
+        } else {
+            (*sum)[IND_GLOW] += reflect * e * r.radiance.xyz;
+        }
+    }
+    let h = vc_hash(key);
+    let u1 = f32(h & 0xffffu) / 65536.0;
+    let u2 = f32(h >> 16u) / 65536.0;
+    let rr = sqrt(u1);
+    let a = 6.2831853 * u2;
+    let sky_dir = normalize(bin_world(hn, vec3<f32>(rr * cos(a), rr * sin(a), sqrt(max(1.0 - u1, 0.0)))));
+    if (sky_dir.z > 0.0 && hw_sky_open(hp, sky_dir)) {
+        (*sum)[IND_SKY] += reflect * 3.14159265;
+    }
+}
+
 // `vc_bake_indirect` with its rays through hardware ray queries (M14 gate
 // 10).
 @compute @workgroup_size(64)
@@ -1357,7 +1416,11 @@ fn hw_vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invo
             for (var q = 0u; q < rays; q++) {
                 let dir = bounce_ray(job.surf.normal, b, q);
                 let hit = hw_bounce_hit(job.surf.apex, dir, job.e.x);
-                missing += bounce_gather(job.surf.apex, dir, hit, wb, &sum, job.bounces);
+                if (far_hit(hit, job.bounces)) {
+                    far_gather(job.surf.apex, dir, hit, wb, &sum, vec3<u32>(job.e.w * 9u + job.k, b, q));
+                } else {
+                    missing += bounce_gather(job.surf.apex, dir, hit, wb, &sum, job.bounces);
+                }
             }
         }
     }

@@ -236,6 +236,15 @@ pub struct CacheOptions {
     /// rays (not with movers, streamed levels or alpha-blended objects). On
     /// by default.
     pub area_texels: bool,
+    /// Far bounce hits lit by rays (M23 gate 1): with one bounce, a hit whose
+    /// footprint asks for its chart's top mip (a distant boulder) reads no
+    /// page; its direct light is the unshadowed light at the hit times one
+    /// hardware shadow ray toward each light, its sky one ray
+    /// cosine-distributed about its normal. It never requests a page, so a
+    /// ground sample's rays at thousands of distant objects wait on none.
+    /// Hardware ray queries, without movers. Off by default; experimental
+    /// (M23 gate 1 parked unrun: the field's misses are near pages).
+    pub far_rays: bool,
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
     pub sky_ray_cost: u32,
@@ -417,6 +426,7 @@ impl Default for CacheOptions {
             sky_rays: true,
             wide_rays: false,
             area_texels: true,
+            far_rays: false,
             sky_ray_cost: 1,
             bounces: 0,
             ledger_epsilon: 0.01,
@@ -2218,7 +2228,8 @@ impl VirtualCache {
                     | (self.options.sky_lag as u32) << 9
                     | (self.options.bounce_rest as u32) << 10
                     | self.options.bounce_rays.clamp(1, 4) << 11
-                    | ((self.options.area_texels && self.area_rays) as u32) << 14,
+                    | ((self.options.area_texels && self.area_rays) as u32) << 14
+                    | (self.options.far_rays as u32) << 15,
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
@@ -2565,7 +2576,8 @@ impl VirtualCache {
                 | (self.options.sky_lag as u32) << 9
                 | (self.options.bounce_rest as u32) << 10
                 | self.options.bounce_rays.clamp(1, 4) << 11
-                | ((self.options.area_texels && self.area_rays) as u32) << 14,
+                | ((self.options.area_texels && self.area_rays) as u32) << 14
+                | (self.options.far_rays as u32) << 15,
             0,
             0,
         ];

@@ -110,8 +110,8 @@ fn main() {
             cache_options: continuum_gpu::CacheOptions {
                 sky_lag: true,
                 // `VR_FRAME_BUDGET`: the frame period's cap (ms; 0: none).
-                // `VR_AREA=1`: coarse texels averaging their area.
-                area_texels: std::env::var_os("VR_AREA").is_some(),
+                // `VR_FAR=1`: far bounce hits lit by rays.
+                far_rays: std::env::var_os("VR_FAR").is_some(),
                 // `VR_PPT`: pixels a texel spans.
                 pixels_per_texel: std::env::var("VR_PPT")
                     .ok()
@@ -181,6 +181,14 @@ fn main() {
     let mut settled_at = None;
     for f in 0..num("VR_SETTLE", 600) {
         render(&mut r, pose(0.0));
+        if std::env::var_os("VR_STATS2").is_some() && f >= 1000 && f % 25 == 0 {
+            let st = r.stats().unwrap_or_default();
+            println!(
+                "settle {f}: baked {} requests {} at_wanted {}/{} rebaked {} sky_listed {} sky_rebaked {} deferred {} invalidated {} missed {} evicted {} resident {} bounce {} incomplete {}",
+                st.pages_baked, st.requests, st.at_wanted, st.samples, st.rebaked_pages, st.sky_listed, st.sky_rebaked,
+                st.deferred, st.invalidated, st.missed, st.evicted, st.resident, st.indirect_samples, st.indirect_incomplete
+            );
+        }
         if std::env::var_os("VR_STATS").is_some() && f % 50 == 0 {
             let st = r.stats().unwrap_or_default();
             println!(

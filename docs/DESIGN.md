@@ -1322,7 +1322,13 @@ bounce light lives there). Hardware ray queries only. Prior art: DDGI
 shadow rays (and indirect from the probes); Lumen's far field likewise
 traces a simplified scene and shades its hits from a surface cache. The
 gate: the field settles; Sponza, the field and the view from above within
-their bars against Cycles; speed side by side.
+their bars against Cycles; speed side by side. **G1 not run, parked**
+(`docs/results/m23-gate1.md`): the far branch is barely taken at the
+field's start view (its misses are near boulders' and the 2 km ground's
+pages), and with every camera pixel at its page the bounce samples still
+re-bake in bursts every ~250 frames, residency past `EVICT_ABOVE` evicting
+again: the field's settling is a cycle among re-bakes, near hits' pages
+and eviction. `far_rays` kept, off, experimental.
 
 #### Bounce light with movers (M22 design, 2026-11-16)
 
@@ -2068,7 +2074,8 @@ For a new conversation or after a compaction; history lives in git and
 - **Decided 2026-11-22 night (the user):** finish M23 (far bounce hits
   without pages, so the field settles), then update the repository and its
   README (a new or improved layout, newer GIFs and diagrams), then go on
-  down the list.
+  down the list. M23 G1 parked unrun the same night (its premise did not
+  hold); the README next, then the field's re-bake cycle.
 - **Plan agreed 2026-11-22 (one long stretch):** item (3) first (deforming
   characters in motion), then a milestone for (1) and (2) together: bounce
   light gathered by cones over the prefiltered hierarchy, the hierarchy's

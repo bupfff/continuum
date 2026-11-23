@@ -87,6 +87,8 @@ pub struct Case {
     pub area_texels: Option<bool>,
     /// Bounce light (`RendererOptions::bounce`) instead of the default.
     pub bounce_light: Option<bool>,
+    /// `CacheOptions::far_rays` instead of the default (M23 gate 1).
+    pub far_rays: Option<bool>,
     pub reference: Reference,
 }
 
@@ -154,6 +156,13 @@ impl Case {
         }
         if let Some(a) = self.area_texels {
             cache_options.area_texels = a;
+        }
+        if let Some(f) = self.far_rays {
+            cache_options.far_rays = f;
+        }
+        // Development: `SC_FAR=1` for `CacheOptions::far_rays`.
+        if std::env::var_os("SC_FAR").is_some() {
+            cache_options.far_rays = true;
         }
         // Development: `SC_AREA=1` for `CacheOptions::area_texels`.
         if std::env::var_os("SC_AREA").is_some() {
@@ -321,6 +330,7 @@ pub fn gltf_case(
         bounce_rays: None,
         area_texels: None,
         bounce_light: None,
+        far_rays: None,
         reference: Reference::Gltf {
             path,
             samples,
@@ -368,6 +378,7 @@ pub fn field_case() -> Case {
         bounce_rays: None,
         area_texels: None,
         bounce_light: None,
+        far_rays: None,
         reference: Reference::Field {
             light,
             radiance: field.radiance,
@@ -424,6 +435,7 @@ pub fn room_case(with_movers: bool) -> Case {
         bounce_rays: None,
         area_texels: None,
         bounce_light: None,
+        far_rays: None,
         reference: Reference::Room,
     }
 }
