@@ -3,7 +3,8 @@
 //! as the scorecard measures (`scorecard::quality`: 640×360, 4×4
 //! supersampled, a fixed bake budget, at most 600 frames) against Cycles.
 //! Far boulders show coarse pages there, whose texels light their whole area
-//! from one point (the viewer's dark blocks, 2026-11-22).
+//! from one point (the viewer's dark blocks, 2026-11-22). `AD_DIRECT=1`:
+//! without bounce light, here and in Cycles.
 //!
 //! `cargo run --release -p room3d --bin altitude_dev`
 
@@ -21,6 +22,15 @@ fn main() -> std::io::Result<()> {
     };
     let mut case = field_case();
     case.name = "field_high";
+    // `AD_DIRECT=1`: direct light and the sky only, here and in Cycles (no
+    // bounce light): what coarse texels hold.
+    if std::env::var_os("AD_DIRECT").is_some() {
+        case.name = "field_high_direct";
+        case.bounce_light = Some(false);
+        if let room3d::scorecard::Reference::Field { bounces, .. } = &mut case.reference {
+            *bounces = 0;
+        }
+    }
     let up = num("AD_UP", 40.0);
     let down = num("AD_DOWN", 15.0);
     let c = &mut case.camera;

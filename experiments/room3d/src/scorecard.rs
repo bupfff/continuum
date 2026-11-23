@@ -53,8 +53,12 @@ pub enum Reference {
         suns: Vec<(Vec3, Vec3)>,
         ground: Option<(f32, f32)>,
     },
-    /// Instanced Cycles, one rect light, 4 bounces.
-    Field { light: RectLight, radiance: f32 },
+    /// Instanced Cycles, one rect light, `bounces` (4 in the scorecard).
+    Field {
+        light: RectLight,
+        radiance: f32,
+        bounces: u32,
+    },
     /// M10 gate 25's reference: 12 bounces, 4,096 samples (with movers:
     /// the same, in a folder of its own).
     Room,
@@ -79,6 +83,10 @@ pub struct Case {
     pub bounce_rest: Option<bool>,
     /// `CacheOptions::bounce_rays` instead of the default.
     pub bounce_rays: Option<u32>,
+    /// `CacheOptions::area_texels` instead of the default (M22 gate 9).
+    pub area_texels: Option<bool>,
+    /// Bounce light (`RendererOptions::bounce`) instead of the default.
+    pub bounce_light: Option<bool>,
     pub reference: Reference,
 }
 
@@ -144,6 +152,13 @@ impl Case {
         if let Some(r) = self.bounce_rays {
             cache_options.bounce_rays = r;
         }
+        if let Some(a) = self.area_texels {
+            cache_options.area_texels = a;
+        }
+        // Development: `SC_AREA=1` for `CacheOptions::area_texels`.
+        if std::env::var_os("SC_AREA").is_some() {
+            cache_options.area_texels = true;
+        }
         // Development: `SC_BOUNCE_RAYS` for `CacheOptions::bounce_rays`.
         if let Some(r) = std::env::var("SC_BOUNCE_RAYS")
             .ok()
@@ -182,7 +197,9 @@ impl Case {
                 deforming: self.deforming.clone(),
                 movable: self.movers.clone(),
                 // Development: `SC_NOBOUNCE=1` without bounce light.
-                bounce: std::env::var_os("SC_NOBOUNCE").is_none(),
+                bounce: self
+                    .bounce_light
+                    .unwrap_or(std::env::var_os("SC_NOBOUNCE").is_none()),
                 cache_options,
                 ..Default::default()
             },
@@ -302,6 +319,8 @@ pub fn gltf_case(
         bounces: None,
         bounce_rest: None,
         bounce_rays: None,
+        area_texels: None,
+        bounce_light: None,
         reference: Reference::Gltf {
             path,
             samples,
@@ -327,9 +346,12 @@ pub fn field_case() -> Case {
         bounces: None,
         bounce_rest: None,
         bounce_rays: None,
+        area_texels: None,
+        bounce_light: None,
         reference: Reference::Field {
             light,
             radiance: field.radiance,
+            bounces: 4,
         },
         origin,
         scene: field.scene,
@@ -380,6 +402,8 @@ pub fn room_case(with_movers: bool) -> Case {
         bounces: None,
         bounce_rest: None,
         bounce_rays: None,
+        area_texels: None,
+        bounce_light: None,
         reference: Reference::Room,
     }
 }
@@ -651,7 +675,11 @@ pub fn reference(case: &Case, out: &Path) -> std::io::Result<Vec<[f32; 3]>> {
             },
         )?
         .pixels),
-        Reference::Field { light, radiance } => Ok(render_instanced(
+        Reference::Field {
+            light,
+            radiance,
+            bounces,
+        } => Ok(render_instanced(
             &case.scene,
             case.origin,
             *light,
@@ -660,7 +688,7 @@ pub fn reference(case: &Case, out: &Path) -> std::io::Result<Vec<[f32; 3]>> {
             camera,
             (QW, QH),
             1024,
-            4,
+            *bounces,
             1,
             &out.join("cycles_field"),
         )?

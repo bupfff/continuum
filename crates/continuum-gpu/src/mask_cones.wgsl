@@ -3272,13 +3272,23 @@ struct TexelSurface {
 };
 
 fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
+    return vc_surface_at(m, c, (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n));
+}
+
+// Whether `vc_surface_at`'s latest point lay inside its triangle (within a
+// fiftieth of it), not clamped onto it from outside (M22 gate 9).
+var<private> surface_inside: bool = false;
+
+// `vc_surface` at chart coordinates `uv` (M22 gate 9: points spread over a
+// texel).
+fn vc_surface_at(m: u32, c: u32, uv: vec2<f32>) -> TexelSurface {
     if (meshes[m].x == NONE) {
         // The object's lighting level is absent (M14 gate 4).
         lit_missing = m;
+        surface_inside = false;
         return TexelSurface(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), false, NONE);
     }
     let ch = vcharts[c];
-    let uv = (vec2<f32>(texel) + vec2<f32>(0.5)) / vec2<f32>(n);
     let cell = min(vec2<u32>(uv * vec2<f32>(ch.grid)), ch.grid - vec2<u32>(1u));
     let list = cells[ch.first_cell + cell.y * ch.grid.x + cell.x];
     var best_t = NONE;
@@ -3294,6 +3304,7 @@ fn vc_surface(m: u32, c: u32, n: vec2<u32>, texel: vec2<u32>) -> TexelSurface {
             best_b = b;
         }
     }
+    surface_inside = best_t != NONE && best_score > -0.02;
     let b0 = clamp(best_b, vec3<f32>(0.0), vec3<f32>(1.0));
     let b = b0 / max(b0.x + b0.y + b0.z, 1e-20);
     let t = select(0u, best_t, best_t != NONE);
@@ -3335,6 +3346,29 @@ fn page_texel(page_index: u32, k: u32) -> PageTexel {
     t.texel = page * PAGE + vec2<u32>(k % PAGE_STRIDE, k / PAGE_STRIDE);
     t.inside = t.texel.x < t.n.x && t.texel.y < t.n.y;
     return t;
+}
+
+// Coarse texels averaging their area (M22 gate 9, `CacheOptions::
+// area_texels`, extra.y bit 14 where the hardware pass runs): a texel in the
+// top three mips of its chart, whose centre stands badly for what it
+// covers (a boulder's single chart: its top texel lies on its side, facing
+// partly down).
+const AREA_BIT: u32 = 0x4000u;
+// A listed texel's tag in `wide_list` (beside wide lights' texels).
+const AREA_TAG: u32 = 0x80000000u;
+const AREA_POINTS: u32 = 16u;
+
+fn area_texel(t: PageTexel) -> bool {
+    if ((vc.extra.y & AREA_BIT) == 0u) { return false; }
+    let mip = t.e.y >> KEY_MIP_SHIFT;
+    return mip + 2u >= vc_top_mip(t.c, t.m);
+}
+
+// Point `i` (of 16, 4 × 4) of texel `t`, placed on the surface as a texel's
+// centre is; `surface_inside` says whether it lies on the surface.
+fn area_point(t: PageTexel, i: u32) -> TexelSurface {
+    let f = vec2<f32>(f32(i % 4u) + 0.5, f32(i / 4u) + 0.5) * 0.25;
+    return vc_surface_at(t.m, t.c, (vec2<f32>(t.texel) + f) / vec2<f32>(t.n));
 }
 
 @compute @workgroup_size(64)
@@ -3473,6 +3507,12 @@ fn vc_bake(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     }
     if (listed && t.inside) {
         pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(select(0.0, light_value, on), ratio, vc.sky.w == 1u);
+    }
+    // A coarse texel (M22 gate 9): listed for rays from points over its
+    // area, which overwrite the cone's value (static lights).
+    if (listed && on && mj == NONE && area_texel(t)) {
+        let q = atomicAdd(&wide_list[0], 1u);
+        if (q + 1u < arrayLength(&wide_list)) { atomicStore(&wide_list[q + 1u], j | AREA_TAG); }
     }
     // A texel that needed an absent lighting level (M14 gate 4): its page
     // shows as missing (`vc_fill` keeps this frame's mark; a mark from an

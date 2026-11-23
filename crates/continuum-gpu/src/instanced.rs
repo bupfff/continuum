@@ -135,8 +135,9 @@ impl Cache {
             let g = n.div_ceil(64);
             Dispatch::Groups(g.min(65_535), g.div_ceil(65_535))
         };
-        // The bake lists wide texels afresh (M5 gate 15).
-        if self.wide.is_some() && only.is_none_or(|o| o == 0) {
+        // The bake lists wide texels and coarse ones afresh (M5 gate 15, M22
+        // gate 9).
+        if (self.wide.is_some() || self.area.is_some()) && only.is_none_or(|o| o == 0) {
             encoder.clear_buffer(self.state.buffer(117), 0, Some(4));
         }
         let mut list: Vec<(
@@ -209,6 +210,22 @@ impl Cache {
             };
             list.push((
                 "wide",
+                pipeline,
+                bind,
+                Dispatch::Groups(n.min(65_535), n.div_ceil(65_535)),
+            ));
+        }
+        // Coarse texels averaging their area (M22 gate 9): likewise.
+        if let Some((pipeline, Some(bind))) = &self.area
+            && (indirect || counts[1] > 0)
+        {
+            let n = if indirect {
+                crate::vcache::WIDE_CAP
+            } else {
+                counts[1].min(crate::vcache::WIDE_CAP)
+            };
+            list.push((
+                "area",
                 pipeline,
                 bind,
                 Dispatch::Groups(n.min(65_535), n.div_ceil(65_535)),
@@ -315,6 +332,9 @@ struct Cache {
     sky_hw: bool,
     /// Rays to wide lights (M5 gate 15): the pass and its bind group.
     wide: Option<(wgpu::ComputePipeline, Option<wgpu::BindGroup>)>,
+    /// Coarse texels averaging their area (M22 gate 9): the pass and its
+    /// bind group.
+    area: Option<(wgpu::ComputePipeline, Option<wgpu::BindGroup>)>,
 }
 
 /// What [`InstancedRenderer::verify_cache`] found: resident pages that
@@ -1997,6 +2017,9 @@ impl InstancedRenderer {
                 && stream.is_none()
                 && !scene.sees_through())
             .then(|| (kernel.entry("hw_vc_bake_wide"), None)),
+            // Coarse texels averaging their area where sky samples use rays.
+            area: (sky_rays && cache.is_some_and(|o| o.area_texels) && movable.is_empty())
+                .then(|| (kernel.entry("hw_vc_bake_area"), None)),
             passes: [
                 kernel.entry("vc_update"),
                 kernel.entry("vc_bake"),
@@ -2029,6 +2052,11 @@ impl InstancedRenderer {
             && c.sky_hw
         {
             c.state.set_sky_rays();
+        }
+        if let Some(c) = &mut cache
+            && c.area.is_some()
+        {
+            c.state.set_area_rays();
         }
         let colors = Self::colors_buffer(&device, width, height);
         let mut renderer = InstancedRenderer {
@@ -2632,6 +2660,11 @@ impl InstancedRenderer {
                 )
             })
         });
+        let area_bind = self.cache.as_ref().and_then(|cache| {
+            cache.area.as_ref().map(|(pipeline, _)| {
+                bind_group(device, pipeline, &all, &tlas, None, HW_VC_BAKE_WIDE_BINDINGS)
+            })
+        });
         if let (Some(cache), Some(bind)) = (&mut self.cache, bounce_bind)
             && let Some((_, b)) = &mut cache.indirect
         {
@@ -2639,6 +2672,11 @@ impl InstancedRenderer {
         }
         if let (Some(cache), Some(bind)) = (&mut self.cache, wide_bind)
             && let Some((_, b)) = &mut cache.wide
+        {
+            *b = Some(bind);
+        }
+        if let (Some(cache), Some(bind)) = (&mut self.cache, area_bind)
+            && let Some((_, b)) = &mut cache.area
         {
             *b = Some(bind);
         }

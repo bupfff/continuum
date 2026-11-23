@@ -225,6 +225,16 @@ pub struct CacheOptions {
     /// alpha-blended objects). Unvalidated: it did not bring M5 gate 14's
     /// near view closer to Cycles. Off by default.
     pub wide_rays: bool,
+    /// Coarse texels averaging their area (M22 gate 9): texels in the top
+    /// three mips of their chart take each static light's visible share
+    /// from hardware rays at 16 points spread over them (4 a point), each
+    /// point weighted by its unshadowed light, and their sky from rays
+    /// spread over the same points, instead of from their centre alone
+    /// (whose light can stand badly for what they cover: a boulder's top
+    /// texel, on its side facing partly down, left it unlit). Where sky
+    /// samples use rays (not with movers, streamed levels or alpha-blended
+    /// objects). Off by default.
+    pub area_texels: bool,
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
     pub sky_ray_cost: u32,
@@ -405,6 +415,7 @@ impl Default for CacheOptions {
             sky_sample_cost: 10,
             sky_rays: true,
             wide_rays: false,
+            area_texels: false,
             sky_ray_cost: 1,
             bounces: 0,
             ledger_epsilon: 0.01,
@@ -1173,6 +1184,8 @@ pub(crate) struct VirtualCache {
     hardware_edges: bool,
     /// Sky samples trace hardware rays (M5 gate 13).
     sky_rays: bool,
+    /// Coarse texels average their area (M22 gate 9): the pass exists.
+    area_rays: bool,
     /// Per slot: the bounces its samples should hold (0: no samples), and
     /// its samples' retries since it was allocated (M10 gate 25).
     slot_target: Vec<u8>,
@@ -1734,6 +1747,7 @@ impl VirtualCache {
             sky_due: HashMap::new(),
             hardware_edges: false,
             sky_rays: false,
+            area_rays: false,
             slot_target: vec![0; options.pages as usize],
             slot_retries: vec![0; options.pages as usize],
             extra_samples: false,
@@ -2202,7 +2216,8 @@ impl VirtualCache {
                     | (self.options.bounce_settles as u32) << 8
                     | (self.options.sky_lag as u32) << 9
                     | (self.options.bounce_rest as u32) << 10
-                    | self.options.bounce_rays.clamp(1, 4) << 11,
+                    | self.options.bounce_rays.clamp(1, 4) << 11
+                    | ((self.options.area_texels && self.area_rays) as u32) << 14,
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
@@ -2548,7 +2563,8 @@ impl VirtualCache {
                 | (self.options.bounce_settles as u32) << 8
                 | (self.options.sky_lag as u32) << 9
                 | (self.options.bounce_rest as u32) << 10
-                | self.options.bounce_rays.clamp(1, 4) << 11,
+                | self.options.bounce_rays.clamp(1, 4) << 11
+                | ((self.options.area_texels && self.area_rays) as u32) << 14,
             0,
             0,
         ];
@@ -2597,6 +2613,12 @@ impl VirtualCache {
     /// Sky samples trace hardware rays from now on (M5 gate 13).
     pub(crate) fn set_sky_rays(&mut self) {
         self.sky_rays = true;
+    }
+
+    /// Coarse texels average their area from now on (M22 gate 9; the pass
+    /// that does it exists).
+    pub(crate) fn set_area_rays(&mut self) {
+        self.area_rays = true;
     }
 
     /// The bounces a request's page should hold in its samples: a pixel's,

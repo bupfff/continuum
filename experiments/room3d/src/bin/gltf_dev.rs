@@ -270,6 +270,8 @@ fn main() {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2.0),
+                // `GD_AREA=1`: coarse texels averaging their area.
+                area_texels: std::env::var_os("GD_AREA").is_some(),
                 // `GD_SKY_LAG=0`: the sky baked with the rest (`sky_lag` off).
                 sky_lag: std::env::var("GD_SKY_LAG").as_deref() != Ok("0"),
                 hardware_shading: std::env::var("GD_HW_SHADE").as_deref() != Ok("0"),

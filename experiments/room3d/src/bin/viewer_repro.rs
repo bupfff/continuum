@@ -110,6 +110,8 @@ fn main() {
             cache_options: continuum_gpu::CacheOptions {
                 sky_lag: true,
                 // `VR_FRAME_BUDGET`: the frame period's cap (ms; 0: none).
+                // `VR_AREA=1`: coarse texels averaging their area.
+                area_texels: std::env::var_os("VR_AREA").is_some(),
                 // `VR_PPT`: pixels a texel spans.
                 pixels_per_texel: std::env::var("VR_PPT")
                     .ok()

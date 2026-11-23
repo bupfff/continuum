@@ -1425,8 +1425,10 @@ fn hw_vc_bake_wide(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocati
     if (li == 0u) { wide_count = min(atomicLoad(&wide_list[0]), arrayLength(&wide_list) - 1u); }
     let count = workgroupUniformLoad(&wide_count);
     let w = wg.x + wg.y * 65535u;
-    let listed = w < count;
-    let j = select(0u, atomicLoad(&wide_list[min(w, max(count, 1u) - 1u) + 1u]), listed);
+    let entry = select(AREA_TAG, atomicLoad(&wide_list[min(w, max(count, 1u) - 1u) + 1u]), w < count);
+    // Coarse texels' entries (M22 gate 9) are `hw_vc_bake_area`'s.
+    let listed = w < count && (entry & AREA_TAG) == 0u;
+    let j = select(0u, entry, listed);
     let job = bake_jobs[j];
     let k = job.y & 0xffu;
     let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
@@ -1470,6 +1472,63 @@ fn hw_vc_bake_wide(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocati
         let spot = spot_falloff(r, normalize(s.apex - light_center(r)));
         let ratio = select(0.0, spot * clamp(total.x / total.y, 0.0, 1.0), open > 0.0);
         pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(ratio * open, ratio, vc.sky.w == 1u);
+    }
+}
+
+// Coarse texels averaging their area (M22 gate 9): one workgroup per
+// texel listed with `AREA_TAG` in `wide_list`. Its 16 points (4 × 4 over
+// the texel's cell of the chart, each placed on the surface as a texel's
+// centre is; points off the surface skipped) each trace 4 rays toward the
+// light (2 × 2 over its rectangle). The light's visible share over the
+// points that face it, each weighted by its unshadowed light, replaces the
+// cone's ratio (with `light_ratio`; else the points' mean light replaces
+// the value). A texel none of whose points faces the light keeps the
+// cone's.
+var<workgroup> area_sums: array<vec3<f32>, 64>;
+
+@compute @workgroup_size(64)
+fn hw_vc_bake_area(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    lane = li;
+    if (li == 0u) { wide_count = min(atomicLoad(&wide_list[0]), arrayLength(&wide_list) - 1u); }
+    let count = workgroupUniformLoad(&wide_count);
+    let w = wg.x + wg.y * 65535u;
+    let entry = select(0u, atomicLoad(&wide_list[min(w, max(count, 1u) - 1u) + 1u]), w < count);
+    let listed = w < count && (entry & AREA_TAG) != 0u;
+    let j = select(0u, entry & ~AREA_TAG, listed);
+    let job = bake_jobs[j];
+    let k = job.y & 0xffu;
+    let l = min(job.y >> 8u, arrayLength(&lights) - 1u);
+    let t = page_texel(job.x, k);
+    let r = lights[l];
+    // x: the visible light, y: the unshadowed light, z: points on the
+    // surface (each lane a quarter of its point).
+    var acc = vec3<f32>(0.0);
+    if (listed && t.inside) {
+        let s = area_point(t, li / 4u);
+        if (s.ok && surface_inside) {
+            acc.z = 0.25;
+            let seen = unshadowed_rect(s.apex, s.normal, r) * spot_falloff(r, normalize(s.apex - light_center(r)));
+            if (seen > 0.0) {
+                let q = li % 4u;
+                let target_p = r.corner.xyz + r.edge_u.xyz * (0.25 + 0.5 * f32(q & 1u)) + r.edge_v.xyz * (0.25 + 0.5 * f32(q >> 1u));
+                let o = s.apex + s.normal * surface_offset(length(s.apex));
+                let d = target_p - o;
+                let dist = length(d);
+                acc.y = 0.25 * seen;
+                if (hw_segment_open_but(o, d / dist, dist * 0.999, NONE)) { acc.x = 0.25 * seen; }
+            }
+        }
+    }
+    area_sums[li] = acc;
+    workgroupBarrier();
+    for (var hh = 32u; hh > 0u; hh >>= 1u) {
+        if (li < hh) { area_sums[li] += area_sums[li + hh]; }
+        workgroupBarrier();
+    }
+    if (li == 0u && listed && t.inside && area_sums[0].y > 0.0) {
+        let total = area_sums[0];
+        let ratio = clamp(total.x / total.y, 0.0, 1.0);
+        pool[pool_at(t.e.w * PAGE_TEXELS + k, l)] = select(total.x / max(total.z, 1e-6), ratio, vc.sky.w == 1u);
     }
 }
 
@@ -1521,12 +1580,25 @@ fn hw_vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     // fixed directions made Sponza's floor under its roof opening a sharp
     // strip one tile wide, 45% over Cycles.
     let spin = hemicube_spin(vec3<u32>(t.e.x, t.e.y, t.e.z ^ (t.texel.x * 0x9E3779B1u) ^ (t.texel.y * 0x85EBCA77u)));
+    // A coarse texel's rays from its 16 points in turn (M22 gate 9): bin b
+    // from point b mod 16, around that point's normal (bins whose point lies
+    // off the surface count as the texel's centre's).
+    let area = on && area_texel(t);
     if (on) {
         for (var q = 0u; q < 32u; q++) {
             let b = 32u * f + q;
-            let dir = turned_bin(s.normal, b, spin);
+            var o = s.apex;
+            var n = s.normal;
+            if (area) {
+                let p = area_point(t, b % AREA_POINTS);
+                if (p.ok && surface_inside) {
+                    o = p.apex;
+                    n = p.normal;
+                }
+            }
+            let dir = turned_bin(n, b, spin);
             // The uniform sky lies above the horizon.
-            if (dir.z > 0.0 && hw_sky_open(s.apex, dir)) { value += hemicube_weight(b); }
+            if (dir.z > 0.0 && hw_sky_open(o, dir)) { value += hemicube_weight(b); }
         }
     }
     if (listed) { sky_partial[6u * k + f] = select(0.0, value, on); }
