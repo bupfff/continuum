@@ -2590,6 +2590,35 @@ fn turned_bin(n: vec3<f32>, b: u32, spin: f32) -> vec3<f32> {
     return normalize(bin_world(n, vec3<f32>(l.x * c - l.y * s, l.x * s + l.y * c, l.z)));
 }
 
+// Bounce samples' rays per hemicube bin (`CacheOptions::bounce_rays`,
+// extra.y bits 11–13): 1 through its centre, 2 through the centres of its
+// diagonal quarters, 4 through all four. One a bin (192 a sample) caught
+// sunlit scraps through Sponza's arches differently from sample to sample:
+// blotches in its upper gallery.
+fn bounce_rays_a_bin() -> u32 {
+    let r = (vc.extra.y >> 11u) & 7u;
+    return select(1u, r, r == 2u || r == 4u);
+}
+
+// Ray `q` of bin `b` about normal `n`.
+fn bounce_ray(n: vec3<f32>, b: u32, q: u32) -> vec3<f32> {
+    let r = bounce_rays_a_bin();
+    if (r == 1u) { return bounce_sub_dir(n, b, 0u, 1u); }
+    if (r == 2u) { return bounce_sub_dir(n, b, select(0u, 3u, q == 1u), 2u); }
+    return bounce_sub_dir(n, b, q, 2u);
+}
+
+fn bounce_sub_dir(n: vec3<f32>, b: u32, q: u32, sub: u32) -> vec3<f32> {
+    let s = (f32(q % sub) + 0.5) / f32(sub);
+    let t = (f32(q / sub) + 0.5) / f32(sub);
+    let c0 = hemicube_corner(b, 0u);
+    let c1 = hemicube_corner(b, 1u);
+    let c2 = hemicube_corner(b, 2u);
+    let c3 = hemicube_corner(b, 3u);
+    let p = mix(mix(c0, c1, s), mix(c3, c2, s), t);
+    return normalize(bin_world(n, p));
+}
+
 // A turn of the hemicube of its own for key `k` (stable: the same at every
 // re-bake).
 fn hemicube_spin(k: vec3<u32>) -> f32 {

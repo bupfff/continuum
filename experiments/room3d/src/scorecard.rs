@@ -77,6 +77,8 @@ pub struct Case {
     pub bounces: Option<u32>,
     /// `CacheOptions::bounce_rest` instead of the default.
     pub bounce_rest: Option<bool>,
+    /// `CacheOptions::bounce_rays` instead of the default.
+    pub bounce_rays: Option<u32>,
     pub reference: Reference,
 }
 
@@ -138,6 +140,16 @@ impl Case {
         }
         if let Some(r) = self.bounce_rest {
             cache_options.bounce_rest = r;
+        }
+        if let Some(r) = self.bounce_rays {
+            cache_options.bounce_rays = r;
+        }
+        // Development: `SC_BOUNCE_RAYS` for `CacheOptions::bounce_rays`.
+        if let Some(r) = std::env::var("SC_BOUNCE_RAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            cache_options.bounce_rays = r;
         }
         // Development: `SC_BOUNCE_REST=1` for `CacheOptions::bounce_rest`.
         if std::env::var_os("SC_BOUNCE_REST").is_some() {
@@ -289,6 +301,7 @@ pub fn gltf_case(
         movers: Vec::new(),
         bounces: None,
         bounce_rest: None,
+        bounce_rays: None,
         reference: Reference::Gltf {
             path,
             samples,
@@ -313,6 +326,7 @@ pub fn field_case() -> Case {
         movers: Vec::new(),
         bounces: None,
         bounce_rest: None,
+        bounce_rays: None,
         reference: Reference::Field {
             light,
             radiance: field.radiance,
@@ -365,6 +379,7 @@ pub fn room_case(with_movers: bool) -> Case {
         },
         bounces: None,
         bounce_rest: None,
+        bounce_rays: None,
         reference: Reference::Room,
     }
 }

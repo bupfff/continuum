@@ -211,3 +211,31 @@ the room 7.67% from Cycles (7.74% without), but Sponza still does not settle
 within 60 s (39.7 ms frames before the change above): its arcades are mostly
 lit by bounce, so the cascade is needed there. Next: four bounces by default
 once settling is fast enough (M22 gate 6).
+
+## Bounce rays per bin (2026-11-22, development)
+
+Sponza's upper gallery, lit by bounce alone, shows coloured blotches where
+Cycles is smooth: a bounce sample's 192 rays (one a hemicube bin, the same
+directions in every sample) catch small sunlit sources across the courtyard
+(the banners) in a few bins each, counted at a whole bin's weight, and
+samples side by side catch different ones. `CacheOptions::bounce_rays`
+(hardware ray queries) traces 1, 2 (the bin's diagonal quarters) or 4 rays a
+bin. `pair_dev`, side by side against 1 ray (speed) and against Cycles:
+
+| Rays a bin | Sponza | Room | Sponza settles (time budget) | Frames |
+|---|---|---|---|---|
+| 1 (default) | 29.94% | 7.68% | 28.6–31.2 s | — |
+| 2 | 27.99% | 7.34% | 1.42× | 1.004× settled, 1.08× moving |
+| 4 | 27.91% | 7.33% | 1.59× | 0.999×, 0.98× |
+
+The field and the helmet are unchanged with 4. The gallery keeps some
+blotches even with 4: a hit counts for its whole bin, and a few hits on a
+small bright source cannot average it as Cycles does; averaging what a bin
+covers across objects is beyond what rays give. Also tried: the four
+quarters interleaved over a page's samples (one ray a bin): 28.35%, but a
+visible grid of coloured dots in the gallery (rejected); every bin split
+through the shared hemicube constant (`IND_R` 16): broke the sky bake,
+whose loops assume 192 bins (50.67%).
+
+Default left at 1 ray: two rays buy 2 points on Sponza for 1.42× its
+settling.

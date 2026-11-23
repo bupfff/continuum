@@ -285,6 +285,12 @@ pub struct CacheOptions {
     /// progressive radiosity's ambient term per sample (Cohen et al. 1988).
     /// Free a frame, and nothing more to settle. On by default.
     pub bounce_rest: bool,
+    /// Bounce samples' rays in each of their 192 hemicube bins: 1 (through
+    /// its centre), 2 (its diagonal quarters') or 4 (all four quarters').
+    /// Too few let samples next to each other catch small bright patches
+    /// (sunlit surfaces seen through openings) differently, which shows as
+    /// blotches. (Hardware ray queries; the compute path traces one.)
+    pub bounce_rays: u32,
     /// Bounce light that settles (M22 gate 3): bounce rays read their hits'
     /// light one mip coarser than a bin's footprint, and a bin that finds
     /// only a coarser page asks for its page and re-bakes the sample once
@@ -403,6 +409,7 @@ impl Default for CacheOptions {
             bounce_share: 0.75,
             bounce_tail: 0.15,
             bounce_rest: true,
+            bounce_rays: 1,
             bounce_settles: true,
             edge_rays: false,
             deforming_budget: 512,
@@ -2187,7 +2194,8 @@ impl VirtualCache {
                 self.options.bounces.clamp(1, 8)
                     | (self.options.bounce_settles as u32) << 8
                     | (self.options.sky_lag as u32) << 9
-                    | (self.options.bounce_rest as u32) << 10,
+                    | (self.options.bounce_rest as u32) << 10
+                    | self.options.bounce_rays.clamp(1, 4) << 11,
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
@@ -2532,7 +2540,8 @@ impl VirtualCache {
             self.options.bounces.clamp(1, 8)
                 | (self.options.bounce_settles as u32) << 8
                 | (self.options.sky_lag as u32) << 9
-                | (self.options.bounce_rest as u32) << 10,
+                | (self.options.bounce_rest as u32) << 10
+                | self.options.bounce_rays.clamp(1, 4) << 11,
             0,
             0,
         ];
