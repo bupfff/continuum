@@ -214,3 +214,14 @@ little smoother, far short of four rays a bin). Four rays a bin
 everywhere: Sponza 25.04% → 23.43% from Cycles, but settling 1.16–1.74×.
 Next: the hits' sky from a resident page where there is one (no request),
 rays only where none is; then measure four rays a bin against it.
+
+Then (2026-11-28): hits' sky from resident pages where any (no request),
+one ray where none: Sponza 25.04% → 25.76% from Cycles (worse; the upper
+gallery's hits land on pages nobody asked for, and coarse pages' sky);
+dropped. Two rays a bin (the diagonal quarters) side by side over three
+motions (`pair_dev PAIR_A=1 PAIR_B=2 PAIR_PASSES=3`): Sponza 25.09% →
+23.61%, the movers 5.30% → 5.04%, the room 6.66% → 6.52%, Fox 2.11% →
+2.06%, the rest equal; settled frames 1.00×, moving 0.97–1.06×; settled
+at 0.71–1.23× (the field 7.20 → 8.48 s, Sponza 37.38 → 26.71 s). M24 gate
+1 stub: two rays a bin by default. Kept: ray-lit hits trace no sky ray
+without a sky.

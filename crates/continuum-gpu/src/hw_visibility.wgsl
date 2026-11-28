@@ -1431,6 +1431,8 @@ fn far_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<functi
         if (!hw_segment_open(f.hp, d / dist, dist * 0.999)) { continue; }
         far_add(f, l, e, sum);
     }
+    // No sky, no sky ray.
+    if (vc.sky.y != 1u) { return; }
     let sky_dir = far_sky_dir(f, key);
     if (hw_sky_open(f.hp, sky_dir)) {
         (*sum)[IND_SKY] += f.reflect * 3.14159265;
@@ -1459,6 +1461,8 @@ fn far_gather_movers(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr
         if (!hw_segment_open(f.hp, u, dist * 0.999) || !hw_movers_open(f.hp, u, dist * 0.999)) { continue; }
         far_add(f, l, e, sum);
     }
+    // No sky, no sky ray.
+    if (vc.sky.y != 1u) { return; }
     let sky_dir = far_sky_dir(f, key);
     if (hw_sky_open_movers(f.hp, sky_dir)) {
         (*sum)[IND_SKY] += f.reflect * 3.14159265;
