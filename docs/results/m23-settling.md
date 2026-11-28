@@ -194,3 +194,23 @@ indoors. The sun-only field against Cycles (`pair_dev SC_ONLY=field_sun`,
 new) is not measurable at the scorecard's samples: its mean is 0.0003
 (the sky gives nearly all of the sky-lit field's 0.03), and Cycles' noise
 gives 150–163% either way.
+
+## Sponza's blotches (2026-11-28, development; code kept as a patch)
+
+Sponza's remaining gap is mostly low-frequency (62% of the error survives a
+33-pixel blur), ours about 6% darker; not bounce depth (Cycles at 1 and 4
+bounces give the same error, 41.46% and 41.00% in `gltf_dev`). The visible
+part: recessed walls (the lion wall, the upper gallery) blotchy, in
+page-sized cells. Bisected: bounce light; with `hit_rays` the hits' one
+sky ray a hit makes it worse, a checker of pages (sky-only clay: pages
+smooth, rays checkered), since each hit's sky is a binary estimate (~14%
+noise a sample where hits see a fifth of the sky) and each page rebuilds
+its nine samples. Not the hash (PCG3D: the same). Tried, in
+`experiments/room3d/out/patches/bounce-refine-and-sky-rays.patch` (not
+committed): four stratified sky rays a hit (about half the noise, still
+noisier than pages); one stratum a hit across a sample's 192 hits (worse:
+banded); `bounce_refine` (four rays only in bins at a bright edge: a
+little smoother, far short of four rays a bin). Four rays a bin
+everywhere: Sponza 25.04% → 23.43% from Cycles, but settling 1.16–1.74×.
+Next: the hits' sky from a resident page where there is one (no request),
+rays only where none is; then measure four rays a bin against it.
