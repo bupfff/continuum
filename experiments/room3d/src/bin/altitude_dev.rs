@@ -5,13 +5,14 @@
 //! Far boulders show coarse pages there, whose texels light their whole area
 //! from one point (the viewer's dark blocks, 2026-11-22). `AD_DIRECT=1`:
 //! without bounce light, here and in Cycles. `SC_AREA=1`: with
-//! `CacheOptions::area_texels`.
+//! `CacheOptions::area_texels`. `AD_CYCLES_BOUNCES=<n>`: Cycles at n bounces
+//! (4 by default; 1 matches the field's own one bounce).
 //!
 //! `cargo run --release -p room3d --bin altitude_dev`
 
 use std::path::Path;
 
-use room3d::scorecard::{field_from_above, quality};
+use room3d::scorecard::{Reference, field_from_above, quality};
 
 fn main() -> std::io::Result<()> {
     let num = |name: &str, default: f32| -> f32 {
@@ -21,7 +22,14 @@ fn main() -> std::io::Result<()> {
             .unwrap_or(default)
     };
     let (up, down) = (num("AD_UP", 40.0), num("AD_DOWN", 15.0));
-    let case = field_from_above(up, down, std::env::var_os("AD_DIRECT").is_some());
+    let mut case = field_from_above(up, down, std::env::var_os("AD_DIRECT").is_some());
+    if let Some(n) = std::env::var("AD_CYCLES_BOUNCES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        && let Reference::Field { bounces, .. } = &mut case.reference
+    {
+        *bounces = n;
+    }
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("out/scorecard");
     std::fs::create_dir_all(&out)?;
     let q = quality(&case, &out)?;

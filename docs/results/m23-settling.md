@@ -124,3 +124,19 @@ bake cleared it, and does not list it again (listed once per sky bake), so
 the guess stayed. Secondary pages used to take that frame's budget first
 and push the sky later. Fix: a sky baked alone on an object that moves in
 the same frame is due again `SKY_SETTLE` frames later.
+
+## Rehearsal 1 (`M23G2_REHEARSE=1`, 2026-11-27): missed, fixed
+
+Field settles (7.37 s; again 2.35 s), the movers within their bars, but
+the field from above 11.84% → 12.44% from Cycles (bar +0.5). Against a
+one-bounce Cycles render (`altitude_dev`, new `AD_CYCLES_BOUNCES=1`; mean
+0.0334 against four bounces' 0.0337) the same gap (10.81% → 11.42%), so not
+bounce depth. The loss sat in a strip at the ground's far edge: `far_gather`
+(M23's, reused) counted its sky ray only above the horizon, where the sky's
+own bake and Cycles count any ray that escapes, and past the ground's edge
+rays escape below it. Counted there too: 12.17% (one bounce: 11.16%); the
+rest of the gap is in the same saturated far strip, both under Cycles.
+Nearer bands with `hit_rays` are closer to Cycles than without (band RMSE
+0.0026–0.0035 against 0.0047–0.0049). Without `hit_rays`, the retries'
+`EVICT_AGE` timeout brought the field back to 1.22% (2.22% with tickets
+alone).

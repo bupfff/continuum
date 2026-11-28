@@ -1406,7 +1406,9 @@ fn far_add(f: FarPoint, l: u32, e: f32, sum: ptr<function, array<vec3<f32>, 5>>)
     }
 }
 
-// The sky ray's direction (cosine-distributed about the normal).
+// The sky ray's direction (cosine-distributed about the normal). Open below
+// the horizon too, as the sky's bake and Cycles count it (past the ground's
+// edge; above the horizon only, the field's far edge lost 1.5%).
 fn far_sky_dir(f: FarPoint, key: vec3<u32>) -> vec3<f32> {
     let h = vc_hash(key);
     let u1 = f32(h & 0xffffu) / 65536.0;
@@ -1428,7 +1430,7 @@ fn far_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<functi
         far_add(f, l, e, sum);
     }
     let sky_dir = far_sky_dir(f, key);
-    if (sky_dir.z > 0.0 && hw_sky_open(f.hp, sky_dir)) {
+    if (hw_sky_open(f.hp, sky_dir)) {
         (*sum)[IND_SKY] += f.reflect * 3.14159265;
     }
 }
@@ -1456,7 +1458,7 @@ fn far_gather_movers(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr
         far_add(f, l, e, sum);
     }
     let sky_dir = far_sky_dir(f, key);
-    if (sky_dir.z > 0.0 && hw_sky_open_movers(f.hp, sky_dir)) {
+    if (hw_sky_open_movers(f.hp, sky_dir)) {
         (*sum)[IND_SKY] += f.reflect * 3.14159265;
     }
 }
