@@ -2064,8 +2064,8 @@ estimates, and gates fail often, so treat them as ranges.
 History lives in git and `docs/results/`; the plan below.
 - **Now:** phase 1 (strengthen the basics), measured by the basics
   scorecard (`cargo run --release -p room3d --bin scorecard`). From
-  Cycles: Sponza 23.76%, the field 1.26%, the room 6.12%, the movers
-  5.04%, the helmet 4.45%, Fox 2.06%, BrainStem 3.28%; every scene
+  Cycles: Sponza 23.90%, the field 1.24%, the room 5.84%, the movers
+  5.04%, the helmet 4.44%, Fox 2.06%, BrainStem 3.28%; every scene
   settles (Sponza 31 s, the field 9 s). This session: M23 G3 (one-bounce
   hits lit by rays, hit requests queued, retries ticketed), M24 G1 (two
   rays a bounce bin), M25 G1 (flat coarse texels average their area: no

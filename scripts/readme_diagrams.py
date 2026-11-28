@@ -314,11 +314,11 @@ def cache():
 # ---------------------------------------------------------------- scorecard
 def scorecard():
     rows = [
-        ("Sponza", "3 million triangles, sun and sky", 30.43, 23.60),
-        ("Closed room", "one skylight panel, light bouncing", 46.55, 6.52),
+        ("Sponza", "3 million triangles, sun and sky", 30.43, 23.90),
+        ("Closed room", "one skylight panel, light bouncing", 46.55, 5.84),
         ("Room with movers", "a ball and a cube moving", 44.46, 5.04),
-        ("Boulder field", "a million boulders, sun and sky", 1.68, 1.12),
-        ("DamagedHelmet", "metal, normal maps, emission", 4.46, 4.47),
+        ("Boulder field", "a million boulders, sun and sky", 1.68, 1.24),
+        ("DamagedHelmet", "metal, normal maps, emission", 4.46, 4.44),
         ("Fox", "a skinned character", 8.73, 2.06),
         ("BrainStem", "59 skinned meshes", 9.47, 3.28),
     ]

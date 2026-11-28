@@ -167,7 +167,7 @@ Cycles, after every change that may move them
 ([`docs/results/basics-scorecard.md`](docs/results/basics-scorecard.md)):
 
 <p align="center">
-  <img alt="Bar chart: error from Cycles for seven scenes at the start of phase 1 and now: Sponza 30.43% to 23.60%, closed room 46.55% to 6.52%, room with movers 44.46% to 5.04%, boulder field 1.68% to 1.12%, DamagedHelmet 4.46% to 4.47%, Fox 8.73% to 2.06%, BrainStem 9.47% to 3.28%" src="docs/images/how/scorecard.svg" width="860">
+  <img alt="Bar chart: error from Cycles for seven scenes at the start of phase 1 and now: Sponza 30.43% to 23.90%, closed room 46.55% to 5.84%, room with movers 44.46% to 5.04%, boulder field 1.68% to 1.24%, DamagedHelmet 4.46% to 4.44%, Fox 8.73% to 2.06%, BrainStem 9.47% to 3.28%" src="docs/images/how/scorecard.svg" width="860">
 </p>
 
 The comparisons below are Continuum's cached lighting, settled, against
@@ -200,11 +200,11 @@ Selected numbers (1280×720, Apple M4, release builds):
 | A textured glTF scene against Cycles | 0.43% error; 1.5 ms a warm frame | M6 G1 |
 | Three colored lights over the field | 1.22% from Cycles; flights 14–15 ms | M5 G6 |
 | Point and spot lights | 1.35% from Cycles | M5 G8 |
-| A closed room's bounce light, by default | 6.52% from Cycles' fully bounced image (46.55% with one bounce) | M22 G8, M24 G1 |
-| The million-boulder field with bounce light settling | 11 s (never within a minute before), 1.13% from Cycles | M23 G3 |
+| A closed room's bounce light, by default | 5.84% from Cycles' fully bounced image (46.55% with one bounce) | M22 G8, M25 G1 |
+| The million-boulder field with bounce light settling | 10 s (never within a minute before), 1.24% from Cycles | M23 G3 |
 | Moving objects among a million | 1.06–1.09× a still frame, never stale | M9 G1 |
 | A sun moving at real speed over the million | 0.98–1.02× a still sun, every shown result within a certified bound | M9 G6 |
-| The boulder field from 40 m up | 10.41% from Cycles (13.83% before coarse texels averaged their area) | M22 G10 |
+| The boulder field from 40 m up | 11.67% from Cycles with bounce light; 10.41% without (13.83% before coarse texels averaged their area) | M22 G10, M25 G1 |
 | Changing a light's color | free and exact: nothing is re-computed | M5 G6 |
 | Anti-aliasing at edges, in a slow turn | 0.31–0.38× one ray's error; frame-to-frame 0.30–0.42× | M15 G1 |
 | Thin glass against Cycles | 5.08% (drawn opaque 85%, as alpha blending 14%); 1.22× the frame | M16 G2 |
@@ -352,7 +352,7 @@ App::new()
   (`KHR_materials_sheen`), double-sided faces, texture transforms and wrap
   modes.
 - **Indirect light**, in the cache: by default two bounces with the rest
-  estimated where only local lights light the scene (a closed room 6.5%
+  estimated where only local lights light the scene (a closed room 5.8%
   from Cycles' fully bounced image, 46.6% with one), one bounce outdoors
   (a sky, an environment or a sun); more on request
   (`CacheOptions::bounces`). Bounce rays' hits are lit by rays, so a view
