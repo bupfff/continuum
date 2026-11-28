@@ -145,6 +145,17 @@ fn main() {
     // textures' colours, normal maps or emission (alpha kept), here and in
     // Cycles (a diagnostic).
     let clay = std::env::var_os("GD_CLAY").is_some();
+    // `GD_NOSPEC=1` (a diagnostic): every material Lambertian (no specular
+    // layer, metals as diffuse), here and in Cycles; textures kept.
+    let nospec = std::env::var_os("GD_NOSPEC").is_some();
+    if nospec {
+        let s = &mut imported.scene;
+        s.geometry_materials.clear();
+        s.geometry_metallic_roughness.clear();
+        s.geometry_specular.clear();
+        s.geometry_clearcoat.clear();
+        s.geometry_sheen.clear();
+    }
     if clay {
         let s = &mut imported.scene;
         for tex in &mut s.textures {
@@ -547,7 +558,7 @@ fn main() {
             .unwrap_or(1.0);
         let raw = work.join("reference.f32");
         let job = format!(
-            "{{\"gltf\": {:?}, \"origin\": [{}, {}, {}], \"camera\": {{\"eye\": {}, \"target\": {}, \"fov\": {}}}, \"size\": [{w}, {h}], \"samples\": {samples}, \"bounces\": {}, \"environment\": {}, \"strength\": {strength}, \"sky\": {}, \"suns\": [{}], \"distribution\": {:?}, \"clay\": {}, \"out\": {:?}}}",
+            "{{\"gltf\": {:?}, \"origin\": [{}, {}, {}], \"camera\": {{\"eye\": {}, \"target\": {}, \"fov\": {}}}, \"size\": [{w}, {h}], \"samples\": {samples}, \"bounces\": {}, \"environment\": {}, \"strength\": {strength}, \"sky\": {}, \"suns\": [{}], \"distribution\": {:?}, \"clay\": {}, \"nospec\": {nospec}, \"out\": {:?}}}",
             path,
             origin.x,
             origin.y,

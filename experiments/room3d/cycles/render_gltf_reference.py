@@ -162,6 +162,23 @@ if job.get("clay"):
                 surface = mix.outputs[0]
         links.new(surface, out.inputs["Surface"])
 
+# "nospec" (a diagnostic): every Principled BSDF without its specular
+# layer and metals as diffuse (Specular IOR Level 0, Metallic 0, no coat or
+# sheen); textures kept.
+if job.get("nospec"):
+    for mat in bpy.data.materials:
+        if not mat.use_nodes:
+            continue
+        for n in mat.node_tree.nodes:
+            if n.type != "BSDF_PRINCIPLED":
+                continue
+            for name, value in (("Specular IOR Level", 0.0), ("Metallic", 0.0), ("Coat Weight", 0.0), ("Sheen Weight", 0.0)):
+                if name in n.inputs:
+                    socket = n.inputs[name]
+                    for link in list(socket.links):
+                        mat.node_tree.links.remove(link)
+                    socket.default_value = value
+
 # glTF culls a single-sided material's back faces (doubleSided false), and
 # Continuum's camera rays do; Cycles never culls them. So camera rays pass
 # through such back faces here ("cull_back_faces", true by default); other

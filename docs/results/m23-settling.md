@@ -312,3 +312,37 @@ hardware shadow rays (a movers-aware area pass; `vc_bake` is at Metal's 29
 buffers a stage, so not there), and refitting the structures instead of
 rebuilding them, which is where BrainStem's GPU hangs happened
 (2026-11-22): not to be tried unattended.
+
+## Sponza's gap is the specular layer (2026-11-28)
+
+New diagnostic `GD_NOSPEC=1` (`gltf_dev`; Cycles' job `"nospec"`: every
+Principled BSDF's specular level, metallic, coat and sheen 0; ours: every
+material Lambertian; textures kept). At the scorecard's Sponza view
+(4×4 supersampled, a fixed budget, Cycles 8,192 samples, four bounces):
+
+| | Against Cycles | The drape (ours / Cycles) | Every other surface |
+|---|---|---|---|
+| As shipped | 24.34% | 0.62 (blue 0.47) | 0.81–1.05 |
+| Diffuse only, both | **15.59%** | 0.97 | 0.97–1.00 |
+
+So the diffuse light is right to about 3% everywhere; the rest is the
+specular layer. What it adds (linear RGB, mean over each surface):
+
+| Surface | Cycles' specular adds | Ours adds |
+|---|---|---|
+| The red drape (rough 0.98) | 0.00083, 0.00074, 0.00060 | 0.00006, 0.00015, 0.00020 |
+| The arches | 0.00017, 0.00019, 0.00020 | 0.00012, 0.00014, 0.00016 |
+| The floor | 0.00016, 0.00024, 0.00037 | 0.00044, 0.00056, 0.00077 |
+| The blue curtain | 0.00002, 0.00004, 0.00013 | ≈ 0 |
+| The whole frame | 0.00020, 0.00023, 0.00028 | 0.00015, 0.00018, 0.00023 |
+
+Rough surfaces (from roughness 0.8) take the lobe's light as the
+hemisphere's average at the point (sky and bounce over π), and a vertical
+drape seen from below averages in the dark half below it where the GGX
+lobe at that grazing angle leans toward the sunlit walls (Cycles' added
+light there is warm, ours blue: sky); smoother ones take one mirror ray,
+which on the floor sees the bright courtyard and sky where the lobe also
+takes darker directions. The next lever: glossy light integrated over the
+lobe (several rays a pixel reading the cache at the lobe's footprint, or a
+directional estimate per texel), worth up to about 8 of Sponza's 24
+points.
