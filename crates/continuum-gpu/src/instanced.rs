@@ -2662,7 +2662,14 @@ impl InstancedRenderer {
         });
         let area_bind = self.cache.as_ref().and_then(|cache| {
             cache.area.as_ref().map(|(pipeline, _)| {
-                bind_group(device, pipeline, &all, &tlas, None, HW_VC_BAKE_WIDE_BINDINGS)
+                bind_group(
+                    device,
+                    pipeline,
+                    &all,
+                    &tlas,
+                    None,
+                    HW_VC_BAKE_WIDE_BINDINGS,
+                )
             })
         });
         if let (Some(cache), Some(bind)) = (&mut self.cache, bounce_bind)

@@ -1321,7 +1321,10 @@ impl App {
         let dir = PathBuf::from(std::env::var_os("VIEWER_RECORD")?);
         let total = self.all_times.len() + self.frames_left? as usize;
         let num = |name: &str, default: usize| {
-            std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
         };
         let (warm, every) = (num("VIEWER_WARM", 300), num("VIEWER_EVERY", 1).max(1));
         let i = self.all_times.len();
@@ -1344,7 +1347,8 @@ impl App {
             pitch: start.pitch + s * get(4).to_radians(),
         };
         let k = i - warm;
-        (k % every == 0).then(|| dir.join(format!("{:04}.png", k / every)))
+        k.is_multiple_of(every)
+            .then(|| dir.join(format!("{:04}.png", k / every)))
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -1582,7 +1586,12 @@ fn capture(
 }
 
 /// `save_capture` without printing (`VIEWER_RECORD`'s frames).
-fn save_capture_quiet(device: &wgpu::Device, c: &Capture, format: wgpu::TextureFormat, path: &Path) {
+fn save_capture_quiet(
+    device: &wgpu::Device,
+    c: &Capture,
+    format: wgpu::TextureFormat,
+    path: &Path,
+) {
     let slice = c.buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| ());
     device
@@ -1800,11 +1809,17 @@ fn main() {
     let mut camera = FlyCamera::looking_at(world.start.0, world.start.1);
     // `VIEWER_PITCH=degrees`: the start view tilted up (diagnostics, with
     // `--frames`).
-    if let Some(deg) = std::env::var("VIEWER_PITCH").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(deg) = std::env::var("VIEWER_PITCH")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
         camera.pitch += deg.to_radians();
     }
     // `VIEWER_UP=meters`: the start view raised (diagnostics).
-    if let Some(up) = std::env::var("VIEWER_UP").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(up) = std::env::var("VIEWER_UP")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
         camera.position.z += up;
     }
     let built = settings.build_key();

@@ -78,10 +78,15 @@ fn main() -> std::io::Result<()> {
         writeln!(report, "{line}").unwrap();
     };
     if rehearse {
-        say("REHEARSAL: the view from above, Sponza and the field only; not the gate's numbers".into());
+        say(
+            "REHEARSAL: the view from above, Sponza and the field only; not the gate's numbers"
+                .into(),
+        );
     }
     let opt = |v: Option<(usize, f64)>| {
-        v.map_or("not within 120 s".into(), |(f, t)| format!("{t:.2} s ({f})"))
+        v.map_or("not within 120 s".into(), |(f, t)| {
+            format!("{t:.2} s ({f})")
+        })
     };
     // 3. Speed, side by side, first.
     say("| Scene | Settled frame: current, candidate (ratio) | Moving frame (ratio) | Settled at: current, candidate (ratio) |".into());
@@ -122,8 +127,14 @@ fn main() -> std::io::Result<()> {
         case
     };
     let q_cur = quality(&above(false), &card_out)?;
-    for (from, to) in [("png", "above.current.png"), ("diff.png", "above.current.diff.png")] {
-        let _ = std::fs::copy(card_out.join(format!("field_high_direct.{from}")), gate_out.join(to));
+    for (from, to) in [
+        ("png", "above.current.png"),
+        ("diff.png", "above.current.diff.png"),
+    ] {
+        let _ = std::fs::copy(
+            card_out.join(format!("field_high_direct.{from}")),
+            gate_out.join(to),
+        );
     }
     let q_cand = quality(&above(true), &card_out)?;
     for (from, to) in [
@@ -131,11 +142,18 @@ fn main() -> std::io::Result<()> {
         ("diff.png", "above.candidate.diff.png"),
         ("cycles.png", "above.cycles.png"),
     ] {
-        let _ = std::fs::copy(card_out.join(format!("field_high_direct.{from}")), gate_out.join(to));
+        let _ = std::fs::copy(
+            card_out.join(format!("field_high_direct.{from}")),
+            gate_out.join(to),
+        );
     }
     let short = |q: &Quality| ((q.mean_cycles - q.mean_ours) / q.mean_cycles).max(0.0);
     let ratio = q_cand.rmse / q_cur.rmse;
-    let short_ratio = if short(&q_cur) > 0.0 { short(&q_cand) / short(&q_cur) } else { 0.0 };
+    let short_ratio = if short(&q_cur) > 0.0 {
+        short(&q_cand) / short(&q_cur)
+    } else {
+        0.0
+    };
     let above_ok = ratio <= 0.85 && short_ratio <= 0.8;
     say("| From above, no bounce | Current | Candidate | Ratio | Bar |".into());
     say("|---|---|---|---|---|".into());
@@ -169,7 +187,10 @@ fn main() -> std::io::Result<()> {
         let (a, b) = (100.0 * cur.rmse, 100.0 * cand.rmse);
         let slack = if *name == "sponza" { 0.5 } else { 0.2 };
         elsewhere_ok &= b <= a + slack;
-        say(format!("| {name} | {a:.2}% | {b:.2}% | at most {:.2}% |", a + slack));
+        say(format!(
+            "| {name} | {a:.2}% | {b:.2}% | at most {:.2}% |",
+            a + slack
+        ));
     }
     say(String::new());
     let verdict = |ok: bool| if ok { "PASS" } else { "FAIL" };
@@ -182,7 +203,11 @@ fn main() -> std::io::Result<()> {
         start.elapsed().as_secs_f64() / 60.0
     ));
     std::fs::write(
-        gate_out.join(if rehearse { "rehearsal.md" } else { "report.md" }),
+        gate_out.join(if rehearse {
+            "rehearsal.md"
+        } else {
+            "report.md"
+        }),
         report,
     )?;
     Ok(())

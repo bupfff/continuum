@@ -345,7 +345,11 @@ pub fn gltf_case(
 /// here and in Cycles.
 pub fn field_from_above(up: f32, down: f32, direct: bool) -> Case {
     let mut case = field_case();
-    case.name = if direct { "field_high_direct" } else { "field_high" };
+    case.name = if direct {
+        "field_high_direct"
+    } else {
+        "field_high"
+    };
     if direct {
         case.bounce_light = Some(false);
         if let Reference::Field { bounces, .. } = &mut case.reference {

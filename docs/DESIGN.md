@@ -2036,40 +2036,24 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-22 night, eighteenth session, v0.3.2 + fixes).**
-For a new conversation or after a compaction; history lives in git and
-`docs/results/`, the plan below.
+**Start here (updated 2026-11-27, end of the eighteenth session, v0.3.2 + fixes).**
+History lives in git and `docs/results/`; the plan below.
 - **Now:** phase 1 (strengthen the basics), measured by the basics
-  scorecard (`cargo run --release -p room3d --bin scorecard`, 7 scenes,
-  ~5 min; `docs/results/basics-scorecard.md`). From Cycles: Sponza
-  25.54%, the field 1.79%, the room 7.55%, the movers 5.40%, the helmet
-  4.46%, Fox 2.17%, BrainStem 3.28%. Item (3) done (BrainStem 2.2% of
-  pixels without a page in motion). Item (1): the bug found, bounce and
-  reflection hits read pages 1 / scale too coarse (Sponza 29.94% →
-  25.54%, clay 31% → 18.5%); coarse texels that curve average their
-  area by default (M22 G10 passed: the field from above 13.83% → 10.41%,
-  the boulders the viewer showed flat and dark now lit; Sponza 25.35%,
-  the field 1.29%, the room 6.93%); viewer fixes from the user's sessions
-  (vsync, auto-exposure under an empty or dim sky, pages lost to a glance:
-  `docs/results/viewer-glance-fixes.md`).
-- **Next:** (a) the rest of Sponza's gap (clay is 18.5% from Cycles at one
-  bounce, textured 25.5%: split it by material and by frequency; the
-  coarse sky's 192-ray noise in narrow openings); (b) the field's bake
-  starves (26,000 requests a frame, 13–160 pages baked, the budget model
-  shrinking it to ~1,250 units at 10 ms frames): find why before the cone
-  milestone (M23); (c) boulders shown without sunlight once in 7 runs of
-  `viewer_repro` (unexplained). Measure speed side by side
-  (`scorecard::speed_pair`): heat moves single runs 10–25%.
-- **Pitfalls:** a GPU hang logs the user out (WindowServer's 40 s
-  watchdog): `APPEND_PAGES` 16,384 and building deforming meshes'
-  structures in one submission each did (patches in
-  `experiments/room3d/out/scorecard/`); read
-  `/Library/Logs/DiagnosticReports/gpuEvent-*.ips` after any hang, try
-  such changes alone and short first. GPU tests pin one bounce (their
-  scenes have no sky; two took lavapipe's CI past 45 minutes). Test assets live in
-  `experiments/room3d/out/assets/` (gitignored); compare at a fixed bake
-  budget; Cycles needs 2,000+ samples in dark interiors; this device's GPU
-  timestamps arrive out of order.
+  scorecard (`cargo run --release -p room3d --bin scorecard`). From
+  Cycles: Sponza 25.35%, the field 1.29%, the room 6.93%, the movers
+  5.40%, the helmet 4.46%, Fox 2.17%, BrainStem 3.28%. M22 G10 passed
+  (area texels); M23 G1 parked unrun; README rebuilt.
+- **Next:** (a) the field's bounce samples re-bake in bursts every ~250
+  frames at rest (`docs/results/m23-gate1.md`): find why, so it settles;
+  (b) flying high, new coarse ground pages show darker until their sky
+  bakes; (c) the rest of Sponza's gap (clay 18.5% at one bounce).
+- **Pitfalls:** a GPU hang logs the user out: try dispatch-lengthening
+  changes alone and short first, read `gpuEvent-*.ips` after one. The
+  user runs `dist/Continuum Viewer.app`: rebuild it after viewer changes
+  (copy `target/release/viewer`, `strip -x`, `codesign --force --deep
+  --sign -`). `cargo fmt --all` and clippy (`-D warnings`) before pushing.
+  zsh does not word-split `$var`. This device's GPU timestamps arrive out
+  of order, so the bake budget runs on the 11 ms frame cap.
 
 - **Decided 2026-11-22 night (the user):** finish M23 (far bounce hits
   without pages, so the field settles), then update the repository and its

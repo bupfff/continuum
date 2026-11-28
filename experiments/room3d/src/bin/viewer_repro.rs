@@ -94,7 +94,8 @@ fn main() {
     if let Ok(down) = std::env::var("VR_DOWN").map(|v| v.parse::<f32>().expect("degrees")) {
         let d = (camera.target - camera.eye).normalize();
         let right = d.cross(continuum::glam::Vec3::Z).normalize();
-        camera.target = camera.eye + continuum::glam::Quat::from_axis_angle(right, -down.to_radians()) * d;
+        camera.target =
+            camera.eye + continuum::glam::Quat::from_axis_angle(right, -down.to_radians()) * d;
     }
     let kernel = MaskConeKernel::new().expect("GPU");
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -136,20 +137,23 @@ fn main() {
     );
     r.wait();
     println!("renderer {:.1} s", t.elapsed().as_secs_f64());
-    let texture = r.kernel().device().create_texture(&wgpu::TextureDescriptor {
-        label: Some("display"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
+    let texture = r
+        .kernel()
+        .device()
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("display"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
     let view = texture.create_view(&Default::default());
     let start_dir = (camera.target - camera.eye).normalize();
     let sun = light.corner + 0.5 * (light.edge_u + light.edge_v);
@@ -185,8 +189,20 @@ fn main() {
             let st = r.stats().unwrap_or_default();
             println!(
                 "settle {f}: baked {} requests {} at_wanted {}/{} rebaked {} sky_listed {} sky_rebaked {} deferred {} invalidated {} missed {} evicted {} resident {} bounce {} incomplete {}",
-                st.pages_baked, st.requests, st.at_wanted, st.samples, st.rebaked_pages, st.sky_listed, st.sky_rebaked,
-                st.deferred, st.invalidated, st.missed, st.evicted, st.resident, st.indirect_samples, st.indirect_incomplete
+                st.pages_baked,
+                st.requests,
+                st.at_wanted,
+                st.samples,
+                st.rebaked_pages,
+                st.sky_listed,
+                st.sky_rebaked,
+                st.deferred,
+                st.invalidated,
+                st.missed,
+                st.evicted,
+                st.resident,
+                st.indirect_samples,
+                st.indirect_incomplete
             );
         }
         if std::env::var_os("VR_STATS").is_some() && f % 50 == 0 {
@@ -253,7 +269,11 @@ fn main() {
                 weight += take;
                 seen += n as f64;
             }
-            let want = if weight > 0.0 { 0.18 / (sum / weight).exp2() } else { f64::NAN };
+            let want = if weight > 0.0 {
+                0.18 / (sum / weight).exp2()
+            } else {
+                f64::NAN
+            };
             let dark = colors
                 .iter()
                 .filter(|c| {

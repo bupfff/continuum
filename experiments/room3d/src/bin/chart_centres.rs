@@ -56,12 +56,24 @@ fn main() {
             let b = b / (b.x + b.y + b.z).max(1e-20);
             let t = s.triangles[best.1];
             let p = t[0] * b.x + t[1] * b.y + t[2] * b.z;
-            let n = s.normals[best.1][0] * b.x + s.normals[best.1][1] * b.y + s.normals[best.1][2] * b.z;
+            let n = s.normals[best.1][0] * b.x
+                + s.normals[best.1][1] * b.y
+                + s.normals[best.1][2] * b.z;
             let tris = s.chart.iter().filter(|&&k| k as usize == c).count();
-            rows.push(((p.z - lo.z) / (hi.z - lo.z).max(1e-6), n.normalize_or_zero().z, best.0, tris, s.charts[c]));
+            rows.push((
+                (p.z - lo.z) / (hi.z - lo.z).max(1e-6),
+                n.normalize_or_zero().z,
+                best.0,
+                tris,
+                s.charts[c],
+            ));
         }
         if s.triangles.len() < 100 {
-            println!("geometry {g}: {} triangles, {} charts (ground or small)", s.triangles.len(), s.charts.len());
+            println!(
+                "geometry {g}: {} triangles, {} charts (ground or small)",
+                s.triangles.len(),
+                s.charts.len()
+            );
             continue;
         }
         let low = rows.iter().filter(|r| r.0 < 0.25).count();
@@ -75,7 +87,10 @@ fn main() {
             down
         );
         for r in rows.iter().take(12) {
-            println!("  height {:.2}, normal z {:+.2}, score {:+.3}, {} triangles, size {:.2?}", r.0, r.1, r.2, r.3, r.4);
+            println!(
+                "  height {:.2}, normal z {:+.2}, score {:+.3}, {} triangles, size {:.2?}",
+                r.0, r.1, r.2, r.3, r.4
+            );
         }
     }
 }

@@ -107,15 +107,27 @@ fn main() {
             let mean = t.map(|t| {
                 let tex = &imported.scene.textures[t as usize];
                 let n = (tex.rgba.len() / 4).max(1) as f64;
-                let c = |k: usize| tex.rgba.iter().skip(k).step_by(4).map(|&b| b as f64).sum::<f64>() / n;
+                let c = |k: usize| {
+                    tex.rgba
+                        .iter()
+                        .skip(k)
+                        .step_by(4)
+                        .map(|&b| b as f64)
+                        .sum::<f64>()
+                        / n
+                };
                 [c(0) as u32, c(1) as u32, c(2) as u32]
             });
-            println!("geometry {g}: {} triangles, texture {t:?}, mean {mean:?}", geometry.triangles.len());
+            println!(
+                "geometry {g}: {} triangles, texture {t:?}, mean {mean:?}",
+                geometry.triangles.len()
+            );
             // Its instances' bounds, from the scene's center.
             for i in imported.scene.instances.iter().filter(|i| i.geometry == g) {
                 let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
                 for v in geometry.triangles.iter().flatten() {
-                    let w = (i.position + (i.rotation * (*v * i.scale)).as_dvec3() - origin).as_vec3();
+                    let w =
+                        (i.position + (i.rotation * (*v * i.scale)).as_dvec3() - origin).as_vec3();
                     (lo, hi) = (lo.min(w), hi.max(w));
                 }
                 println!("  instance bounds {lo:.2} to {hi:.2}");
@@ -170,7 +182,13 @@ fn main() {
         s.geometry_sheen.clear();
         s.geometry_transmission.clear();
         s.geometry_emission = (0..s.geometries.len())
-            .map(|g| Vec3::new((g % 10) as f32 * 0.1 + 0.05, ((g / 10) % 10) as f32 * 0.1 + 0.05, 0.5))
+            .map(|g| {
+                Vec3::new(
+                    (g % 10) as f32 * 0.1 + 0.05,
+                    ((g / 10) % 10) as f32 * 0.1 + 0.05,
+                    0.5,
+                )
+            })
             .collect();
         for i in &mut s.instances {
             i.albedo = Vec3::ZERO;

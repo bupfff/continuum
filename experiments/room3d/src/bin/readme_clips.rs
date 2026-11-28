@@ -41,20 +41,22 @@ fn num(name: &str, default: usize) -> usize {
 
 /// The display texture, readable.
 fn display(r: &Renderer) -> wgpu::Texture {
-    r.kernel().device().create_texture(&wgpu::TextureDescriptor {
-        label: Some("display"),
-        size: wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    })
+    r.kernel()
+        .device()
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("display"),
+            size: wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
 }
 
 /// Saves the displayed image as `dir/kkkk.png`.
@@ -209,8 +211,9 @@ fn field(kernel: MaskConeKernel, dir: &Path) -> std::io::Result<()> {
 }
 
 fn helmet(kernel: MaskConeKernel, dir: &Path) -> std::io::Result<()> {
-    let imported = continuum_gltf::load(&assets().join("khronos/Models/FlightHelmet/glTF/FlightHelmet.gltf"))
-        .expect("FlightHelmet");
+    let imported =
+        continuum_gltf::load(&assets().join("khronos/Models/FlightHelmet/glTF/FlightHelmet.gltf"))
+            .expect("FlightHelmet");
     let (lo, hi) = imported.bounds;
     let origin = (lo + hi) * 0.5;
     let radius = ((hi - lo).length() * 0.5).max(1e-3);
@@ -218,9 +221,10 @@ fn helmet(kernel: MaskConeKernel, dir: &Path) -> std::io::Result<()> {
     // The viewer's ground: 20 radii across, just below the object.
     let h = (10.0 * radius) as f32;
     let c = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(x, y)| Vec3::new(x, y, 0.0));
-    scene
-        .geometries
-        .push(Surface::from_triangles(vec![[c[0], c[1], c[2]], [c[0], c[2], c[3]]]));
+    scene.geometries.push(Surface::from_triangles(vec![
+        [c[0], c[1], c[2]],
+        [c[0], c[2], c[3]],
+    ]));
     scene.geometry_textures.resize(scene.geometries.len(), None);
     scene.instances.push(Instance {
         geometry: scene.geometries.len() - 1,
