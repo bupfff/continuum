@@ -85,6 +85,8 @@ pub struct Case {
     pub bounce_rays: Option<u32>,
     /// `CacheOptions::hit_rays` instead of the default.
     pub hit_rays: Option<bool>,
+    /// `CacheOptions::one_level` instead of the default.
+    pub one_level: Option<bool>,
     /// `CacheOptions::area_texels` instead of the default (M22 gate 9).
     pub area_texels: Option<bool>,
     /// Bounce light (`RendererOptions::bounce`) instead of the default.
@@ -158,6 +160,9 @@ impl Case {
         }
         if let Some(h) = self.hit_rays {
             cache_options.hit_rays = h;
+        }
+        if let Some(o) = self.one_level {
+            cache_options.one_level = o;
         }
         if let Some(a) = self.area_texels {
             cache_options.area_texels = a;
@@ -334,6 +339,7 @@ pub fn gltf_case(
         bounce_rest: None,
         bounce_rays: None,
         hit_rays: None,
+        one_level: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,
@@ -387,6 +393,7 @@ pub fn field_case() -> Case {
         bounce_rest: None,
         bounce_rays: None,
         hit_rays: None,
+        one_level: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,
@@ -398,6 +405,15 @@ pub fn field_case() -> Case {
         origin,
         scene: field.scene,
     }
+}
+
+/// The field as the viewer shows it: the sun alone, no sky (so two bounces
+/// by default). Not one of the scorecard's seven; for development.
+pub fn field_sun_case() -> Case {
+    let mut case = field_case();
+    case.name = "field_sun";
+    case.sky = None;
+    case
 }
 
 /// The showcase's static surfaces (M10 gate 25's room), or with its two
@@ -445,6 +461,7 @@ pub fn room_case(with_movers: bool) -> Case {
         bounce_rest: None,
         bounce_rays: None,
         hit_rays: None,
+        one_level: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,

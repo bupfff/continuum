@@ -167,7 +167,7 @@ Cycles, after every change that may move them
 ([`docs/results/basics-scorecard.md`](docs/results/basics-scorecard.md)):
 
 <p align="center">
-  <img alt="Bar chart: error from Cycles for seven scenes at the start of phase 1 and now: Sponza 30.43% to 25.35%, closed room 46.55% to 6.93%, room with movers 44.46% to 5.40%, boulder field 1.68% to 1.29%, DamagedHelmet 4.46%, Fox 8.73% to 2.17%, BrainStem 9.47% to 3.28%" src="docs/images/how/scorecard.svg" width="860">
+  <img alt="Bar chart: error from Cycles for seven scenes at the start of phase 1 and now: Sponza 30.43% to 25.08%, closed room 46.55% to 6.65%, room with movers 44.46% to 5.31%, boulder field 1.68% to 1.13%, DamagedHelmet 4.46% to 4.47%, Fox 8.73% to 2.11%, BrainStem 9.47% to 3.27%" src="docs/images/how/scorecard.svg" width="860">
 </p>
 
 The comparisons below are Continuum's cached lighting, settled, against
@@ -200,7 +200,8 @@ Selected numbers (1280×720, Apple M4, release builds):
 | A textured glTF scene against Cycles | 0.43% error; 1.5 ms a warm frame | M6 G1 |
 | Three colored lights over the field | 1.22% from Cycles; flights 14–15 ms | M5 G6 |
 | Point and spot lights | 1.35% from Cycles | M5 G8 |
-| A closed room's bounce light, by default | 6.93% from Cycles' fully bounced image (46.55% with one bounce) | M22 G8, G10 |
+| A closed room's bounce light, by default | 6.65% from Cycles' fully bounced image (46.55% with one bounce) | M22 G8, M23 G3 |
+| The million-boulder field with bounce light settling | 11 s (never within a minute before), 1.13% from Cycles | M23 G3 |
 | Moving objects among a million | 1.06–1.09× a still frame, never stale | M9 G1 |
 | A sun moving at real speed over the million | 0.98–1.02× a still sun, every shown result within a certified bound | M9 G6 |
 | The boulder field from 40 m up | 10.41% from Cycles (13.83% before coarse texels averaged their area) | M22 G10 |
@@ -351,10 +352,12 @@ App::new()
   (`KHR_materials_sheen`), double-sided faces, texture transforms and wrap
   modes.
 - **Indirect light**, in the cache: by default two bounces with the rest
-  estimated where only local lights light the scene (a closed room 6.9%
+  estimated where only local lights light the scene (a closed room 6.7%
   from Cycles' fully bounced image, 46.6% with one), one bounce outdoors
   (a sky, an environment or a sun); more on request
-  (`CacheOptions::bounces`).
+  (`CacheOptions::bounces`). Bounce rays' hits are lit by rays, so a view
+  settles without waiting on the pages of everything its bounce rays
+  reach.
 - **Moving objects**, exactly, in the same frame; glTF animations play
   through them.
 - **Animated characters:** glTF skins and morph targets, posed as Blender
@@ -388,14 +391,14 @@ App::new()
 - **Measured on Apple silicon (Metal) only.** CI checks correctness on Linux
   (Vulkan, software adapter) and that the shaders compile for Windows
   (DX12). NVIDIA, AMD and real Windows GPUs are untested.
-- **Bounce light in very large instanced worlds does not settle.** On the
-  million-boulder field, bounce samples keep re-baking as their hits' pages
-  come and go; the viewer turns bounce light off there. Elsewhere it is on
-  by default: 1.06–1.12× the frame and about 190 MB of GPU memory, and a
-  view settles in 1.8–3.2× the frames. Not yet with moving lights.
+- **Bounce light costs time to settle at scale.** On by default
+  (1.06–1.12× the frame and about 190 MB of GPU memory): the
+  million-boulder field under its sun and sky settles in about 10 s, Sponza
+  in about 30 s. Under a sun alone (two bounces) the field still takes
+  minutes. Not yet with moving lights.
 - **Real assets still come further from Cycles than test scenes:** Sponza
   is 25% from Cycles (bounce light's sampling of small bright patches, and
-  materials), against 1.3–7% for the scorecard's other scenes.
+  materials), against 1.1–7% for the scorecard's other scenes.
 - **Detail smaller than a pixel** still shimmers far away: anti-aliasing
   smooths edges, but a field of tiny distant objects needs the
   experimental sub-pixel path (static scenes), where anti-aliasing costs
@@ -432,8 +435,10 @@ nothing). The work runs in three phases:
    in motion, and real scenes within a stated bar of Cycles. Done so far:
    bounce light by default (a closed room 46.6% → 6.9% from Cycles),
    characters in motion (pixels without lighting 38% → 2.2%), a fix that
-   brought Sponza from 30.4% to 25.4%, and coarse texels that average
-   their area. Next: the boulder field's bounce light settling.
+   brought Sponza from 30.4% to 25.1%, coarse texels that average their
+   area, and bounce light that settles everywhere on the scorecard (the
+   boulder field in 9 s, Sponza in 31 s). Next: the field under a sun
+   alone, and the rest of Sponza's gap.
 2. **Compatibility:** the glTF features and effects still missing (a second
    texture coordinate set, the remaining material extensions, particles,
    decals, animated emission), checked by a compatibility scorecard.

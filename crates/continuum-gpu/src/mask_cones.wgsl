@@ -5461,7 +5461,8 @@ fn bounce_job(wg: vec3<u32>) -> BounceJob {
     ind_gen = 15.0;
     ind_short = 0.0;
     ind_albedo = 0.0;
-    let rays = (vc.extra.y & FAR_PAGE_BIT) != 0u && mip >= vc_top_mip(c, m);
+    // `CacheOptions::one_level` (bit 22): every sample the last level.
+    let rays = ((vc.extra.y & FAR_PAGE_BIT) != 0u && mip >= vc_top_mip(c, m)) || (vc.extra.y & 0x400000u) != 0u;
     let bounces = select(max(job.y >> 8u, 1u), 1u, rays);
     return BounceJob(e, k, listed && first, vc_surface(m, c, n, texel), bounces, rays, page, n);
 }

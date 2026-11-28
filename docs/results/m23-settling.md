@@ -176,3 +176,21 @@ Not settled in 4,000 frames either way: two bounces' first-level pages
 alone (`Renderer`'s rule counts a sun as distant only past 100 scene
 radii; the field's is at 1 km), a higher `EVICT_ABOVE` (the pool holds
 524,288), first-level pages' samples shared across a chart.
+
+## The viewer's field (2026-11-28)
+
+The viewer's field defaults to its sun and sky (one bounce), but the
+viewer turned bounce light off there because it never settled.
+`viewer_repro VR_SKY=1` (new; 1470×923, bloom, anti-aliasing, the 11 ms
+cap): settled at frame 1,406; after turning to the sun and back, 0.00% of
+the ground darker than settled. Bounce light now on by default in the
+viewer's field too.
+
+Tried for the sun alone (two bounces): `one_level` (every sample the last
+level, the orders past one bounce estimated by `bounce_rest`; off,
+experimental): the closed room 6.66% → 20.24% from Cycles, the movers
+5.30% → 16.96%; the series cannot stand in for a real second bounce
+indoors. The sun-only field against Cycles (`pair_dev SC_ONLY=field_sun`,
+new) is not measurable at the scorecard's samples: its mean is 0.0003
+(the sky gives nearly all of the sky-lit field's 0.03), and Cycles' noise
+gives 150–163% either way.

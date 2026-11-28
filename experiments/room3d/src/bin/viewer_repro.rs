@@ -1,5 +1,6 @@
 //! Development (the user's viewer session, 2026-11-22): the field as the
-//! viewer builds it (a million boulders, the sun, no sky, bounce light,
+//! viewer builds it (a million boulders, the sun, no sky unless `VR_SKY=1`,
+//! bounce light,
 //! anti-aliasing, bloom, PBR Neutral), settled at the viewer's start; then
 //! the camera turns up toward the sun over `VR_TURN` frames (90), holds
 //! `VR_HOLD` (30), turns back as it came, and stays. Each frame prints the
@@ -133,6 +134,8 @@ fn main() {
             bloom: (std::env::var("VR_BLOOM").as_deref() != Ok("0"))
                 .then(continuum_gpu::Bloom::default),
             tone_map: continuum_gpu::ToneMap::PbrNeutral,
+            // `VR_SKY=1`: the field's sky too (the viewer's default lighting).
+            sky: std::env::var_os("VR_SKY").map(|_| field.sky()),
             // `VR_AUTO=0`: a fixed exposure (for comparing frames).
             auto_exposure: (std::env::var("VR_AUTO").as_deref() != Ok("0"))
                 .then(continuum_gpu::AutoExposure::default),

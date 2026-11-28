@@ -282,6 +282,10 @@ pub struct CacheOptions {
     /// in 60; the field 1.23% → 1.13% from Cycles, the room 6.93% →
     /// 6.65%). Hardware ray queries; without them hits read pages.
     pub hit_rays: bool,
+    /// With more than one bounce and hardware ray queries: every sample
+    /// baked as the last level, its hits lit by rays and the orders past
+    /// one estimated (`bounce_rest`), so no bounce sample reads a page.
+    pub one_level: bool,
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
     pub sky_ray_cost: u32,
@@ -470,6 +474,7 @@ impl Default for CacheOptions {
             last_rays: false,
             far_samples: false,
             hit_rays: true,
+            one_level: false,
             sky_ray_cost: 1,
             bounces: 0,
             ledger_epsilon: 0.01,
@@ -2692,7 +2697,7 @@ impl VirtualCache {
     /// and the cache's flags: settling (8), `sky_lag` (9), `bounce_rest`
     /// (10), rays a bin (11–13), area texels (14), `far_rays` (15),
     /// `last_rays` (16), `far_samples` (17), the hits' mip offset (18–20),
-    /// `hit_rays` (21).
+    /// `hit_rays` (21), `one_level` (22).
     fn extra_y(&self) -> u32 {
         let o = &self.options;
         let hw = self.bounce_rays;
@@ -2707,6 +2712,7 @@ impl VirtualCache {
             | ((bounce_flag("far_samples", o.far_samples) && hw) as u32) << 17
             | bounce_coarser(o.bounce_coarser).min(7) << 18
             | ((bounce_flag("hit_rays", o.hit_rays) && hw) as u32) << 21
+            | ((bounce_flag("one_level", o.one_level) && hw) as u32) << 22
     }
 
     /// Bounce rays are hardware ray queries from now on.

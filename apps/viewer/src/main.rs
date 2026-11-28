@@ -191,11 +191,11 @@ impl World {
         }
     }
 
-    /// Whether the scene wants bounce light: not the field, whose bounce rays
-    /// reach thousands of boulders, each wanting its own page, so its view
-    /// never settles (and outdoors one bounce adds little).
+    /// Whether the scene wants bounce light: every scene since bounce hits
+    /// are lit by rays (M23 gate 3; the field under its sun and sky settles
+    /// in about 15 s at 1470×923, where its bounce never settled before).
     fn bounce_by_default(&self) -> bool {
-        self.name != "field"
+        true
     }
 
     /// The lighting the scene looks best in: the field under its sun and
