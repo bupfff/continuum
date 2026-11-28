@@ -280,9 +280,15 @@ fn main() {
                 glossy_rays: std::env::var("GD_GLOSSY").as_deref() != Ok("0"),
                 // `GD_CACHE_BOUNCES`: the cache's bounces (`GD_BOUNCES` is
                 // Cycles').
-                bounces: num("GD_CACHE_BOUNCES", 1),
+                bounces: num(
+                    "GD_CACHE_BOUNCES",
+                    continuum_gpu::CacheOptions::default().bounces,
+                ),
                 bounce_rest: std::env::var_os("GD_BOUNCE_REST").is_some(),
-                bounce_rays: num("GD_BOUNCE_RAYS", 1),
+                bounce_rays: num(
+                    "GD_BOUNCE_RAYS",
+                    continuum_gpu::CacheOptions::default().bounce_rays,
+                ),
                 // `GD_PPT`: pixels a texel spans (2 by default).
                 pixels_per_texel: std::env::var("GD_PPT")
                     .ok()

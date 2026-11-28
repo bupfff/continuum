@@ -326,10 +326,15 @@ impl Renderer {
         // Bounces 0 (the default): two, with the rest estimated, where only
         // local lights light the scene (bounce light is most of what is not
         // direct there: a closed room 46.55% → 7.68% from Cycles, M22 gate
-        // 8); one outdoors, under a sky, an environment or a distant light
-        // (a sun more than 100 scene radii away), where more cost settling
-        // and gained nothing measured (Sponza under a sun alone: 69.6% →
-        // 70.3% from Cycles, settling 1.78× slower).
+        // 8); one outdoors, under a sky, an environment or a sun, where more
+        // cost settling and gained nothing measured (Sponza under a sun
+        // alone: 69.6% → 70.3% from Cycles, settling 1.78× slower). A sun: a
+        // rect light more than 100 scene radii away, or outside the scene's
+        // box and under 2° across from its centre (the million-boulder
+        // field's sun, 1 km up over a field 2 km across, which with two
+        // bounces baked first-level hit pages for minutes:
+        // `docs/results/m23-settling.md`). A lamp's panel is inside the box
+        // or many degrees across.
         if cache_options.bounces == 0 {
             let outdoors =
                 environment.is_some() || options.sky.is_some_and(|s| s != Vec3::ZERO) || {
@@ -338,8 +343,13 @@ impl Renderer {
                     let radius = ((hi - lo).length() * 0.5).max(1e-3);
                     all_lights.iter().any(|l| match l.emitter {
                         crate::Emitter::Rect(r) => {
-                            (r.corner + (r.edge_u + r.edge_v) * 0.5 - center).length()
-                                > 100.0 * radius
+                            let middle = r.corner + (r.edge_u + r.edge_v) * 0.5;
+                            let distance = (middle - center).length();
+                            let outside = middle.cmplt(lo).any() || middle.cmpgt(hi).any();
+                            let across = (r.edge_u.length().max(r.edge_v.length())
+                                / distance.max(1e-6))
+                            .atan();
+                            distance > 100.0 * radius || (outside && across < 2f32.to_radians())
                         }
                         crate::Emitter::Sphere(_) => false,
                     })

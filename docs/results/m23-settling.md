@@ -225,3 +225,32 @@ motions (`pair_dev PAIR_A=1 PAIR_B=2 PAIR_PASSES=3`): Sponza 25.09% →
 at 0.71–1.23× (the field 7.20 → 8.48 s, Sponza 37.38 → 26.71 s). M24 gate
 1 stub: two rays a bin by default. Kept: ray-lit hits trace no sky ray
 without a sky.
+
+## The field under the sun alone (2026-11-28)
+
+A higher `EVICT_ABOVE` does not settle it: at 0.6 and 0.9 of the pool
+(313,000 and 471,000 pages resident) `viewer_repro` uncapped still baked
+150–200 first-level pages a frame after 4,000 frames: two bounces' hit
+pages on a million boulders outnumber the pool. `Renderer`'s rule now
+counts as a sun (one bounce outdoors) a rect light outside the scene's box
+and under 2° across from its centre, as well as one past 100 scene radii:
+the field's sun (1 km up, the field 2 km across) qualifies; the
+showcase room's skylight does not (the room 6.52%, the movers 5.04% from
+Cycles, unchanged). The viewer's field under its sun alone then settles at
+frame 989 (about 11 s at the 11 ms cap, 1470×923); after turning to the
+sun and back the ground comes back 2% brighter than its settled start
+(0.1408 against 0.1379), none darker. One bounce there leaves shadows lit
+by one bounce of sunlight only (no sky); not compared with Cycles (at the
+scorecard's samples Cycles' noise dominates a sun-only field).
+
+`gltf_dev` now takes the cache's bounces and rays a bin from
+`CacheOptions`'s defaults (it fixed one ray, so it read Sponza at 25.07%
+where the scorecard reads 23.60%).
+
+Sponza's remaining gap, by surface (`gltf_dev` at the scorecard's end
+view, `GD_IDS`): the red drape over the arch (3.1% of pixels) 19.8% of the
+squared error, ours 0.62 of Cycles and more saturated (blue half, red
+two-thirds); not its normal map (0.618 without); in clay it is no worse
+than its neighbours, so its material response, unexplained (it is rough,
+0.98, dielectric). The arches 16.7% (0.96), the spandrels 12.1% (0.92),
+the floor 11.3% (1.05).
