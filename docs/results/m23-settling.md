@@ -297,3 +297,18 @@ slower to settle: 2,289 frames against 1,737). Side by side (top 10, flat;
 three motions): Sponza 23.61% → 23.89%, the field 1.12% → 1.26%, the room
 6.52% → 6.12%, the field from above 12.18% → 11.67%, the rest equal;
 frames 0.996–1.023×, settling 0.89–1.17×. M25 gate 1 stub.
+
+## BrainStem's moving frames (2026-11-28, diagnosis only)
+
+`anim_dev` (BrainStem, 59 deforming meshes, sky lag): moving frames 28.66
+ms median (p90 39.97). The bake pass alone 13.98 ms: about 40 of the
+character's pages (3,000 texels) re-bake every frame by cones. Skipping
+those cones (a timing hack, not kept): the bake 2.54 ms, but the frame
+still 27.15 ms (p90 29.36): the profiled passes then sum to about 16 ms,
+the rest outside them (rebuilding the 59 meshes' acceleration structures
+every frame, uploads). `sample` shows the CPU mostly waiting on the GPU
+(posing about 3%, refits 2%). Both halves need work: the re-bakes by
+hardware shadow rays (a movers-aware area pass; `vc_bake` is at Metal's 29
+buffers a stage, so not there), and refitting the structures instead of
+rebuilding them, which is where BrainStem's GPU hangs happened
+(2026-11-22): not to be tried unattended.

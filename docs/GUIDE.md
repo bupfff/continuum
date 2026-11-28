@@ -112,7 +112,10 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   their first bake; the boulder field settles in 11 s and Sponza in 35
   (neither did within a minute), the field 1.13% and the closed room 6.65%
   from Cycles. Pages hits ask for wait their turn rather than being
-  dropped, and a sample's retry waits until they have baked.
+  dropped, and a sample's retry waits until they have baked. Each of a
+  sample's 192 bins takes two rays (`CacheOptions::bounce_rays`, M24
+  gate 1: Sponza 25.09% → 23.60% from Cycles; one ray aliased a recess's
+  view of a sunlit courtyard into blotches).
   `CacheOptions::bounces` carries it further: a bounce
   sample gathers the bounce light of the pages it hits, and pages re-bake
   until their hits hold enough. A closed room lit by one panel goes from
@@ -124,8 +127,10 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   the closed room 7.68% from Cycles, at no cost a frame (M22 gate 8). A
   scene outdoors (a sky, an environment, or a light more than 100 scene
   radii away, such as a sun) keeps one. Coarse texels that curve average
-  their area (`CacheOptions::area_texels`, on by default, M22 gate 10): a
-  texel in the top three mips of its chart lights itself from 16 points
+  their area (`CacheOptions::area_texels`, on by default, M22 gate 10;
+  flat texels too over the top ten mips since M25 gate 1, `area_flat`,
+  `area_mips`, so flying up no longer shows dark patches of ground): a
+  texel in its chart's top mips lights itself from 16 points
   over its area (hardware rays) instead of its centre alone, so a distant
   boulder (one chart) is no longer lit or left dark by one point (the
   boulder field from above 13.83% → 10.41% from Cycles without bounce
