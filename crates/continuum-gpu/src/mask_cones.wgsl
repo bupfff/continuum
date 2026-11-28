@@ -3361,7 +3361,14 @@ const AREA_POINTS: u32 = 16u;
 fn area_texel(t: PageTexel) -> bool {
     if ((vc.extra.y & AREA_BIT) == 0u) { return false; }
     let mip = t.e.y >> KEY_MIP_SHIFT;
-    return mip + 2u >= vc_top_mip(t.c, t.m);
+    // `CacheOptions::area_mips` (extra.y bits 24–28): the chart's top mips
+    // that average.
+    return mip + ((vc.extra.y >> 24u) & 31u) > vc_top_mip(t.c, t.m);
+}
+
+// `CacheOptions::area_flat` (extra.y bit 29): flat texels average too.
+fn area_flat() -> bool {
+    return (vc.extra.y & 0x20000000u) != 0u;
 }
 
 // Point `i` (of 16, 4 × 4) of texel `t`, placed on the surface as a texel's

@@ -1650,7 +1650,7 @@ fn hw_vc_bake_area(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocati
         if (p.ok && surface_inside && dot(p.normal, centre.normal) < 0.866) { atomicStore(&area_curves, 1u); }
     }
     workgroupBarrier();
-    let curved = atomicLoad(&area_curves) == 1u;
+    let curved = atomicLoad(&area_curves) == 1u || area_flat();
     // x: the visible light, y: the unshadowed light, z: points on the
     // surface (each lane a quarter of its point).
     var acc = vec3<f32>(0.0);
@@ -1734,7 +1734,7 @@ fn hw_vc_bake_sky(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_
     // A coarse texel's rays from its 16 points in turn (M22 gate 9): bin b
     // from point b mod 16, around that point's normal (bins whose point lies
     // off the surface count as the texel's centre's).
-    let area = on && area_texel(t) && area_curved(t, s.normal);
+    let area = on && area_texel(t) && (area_flat() || area_curved(t, s.normal));
     if (on) {
         for (var q = 0u; q < 32u; q++) {
             let b = 32u * f + q;

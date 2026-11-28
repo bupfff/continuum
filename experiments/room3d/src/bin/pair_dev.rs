@@ -4,7 +4,9 @@
 //! against Cycles. `SC_ONLY=a,b`: only those scenes. `PAIR_OPTION=hit_rays`:
 //! `CacheOptions::hit_rays` instead (the values 0 and 1); `one_level` the
 //! same; `bounces` (`CacheOptions::bounces`). `SC_ONLY=field_sun` adds the
-//! viewer's field (the sun alone), not one of the seven. `PAIR_PASSES=<n>`:
+//! viewer's field (the sun alone), not one of the seven. `area`: 0 the
+//! area texels as M22 gate 10 left them, 1 flat texels too over the top 10
+//! mips. `PAIR_PASSES=<n>`:
 //! the motion played n times (`speed_pair_passes`). `SC_QUALITY=0`: speed
 //! only.
 //!
@@ -46,6 +48,7 @@ fn main() -> std::io::Result<()> {
             "hit_rays" => case.hit_rays = Some(v != 0),
             "one_level" => case.one_level = Some(v != 0),
             "bounces" => case.bounces = Some(v),
+            "area" => case.area = Some(if v == 0 { (3, false) } else { (10, true) }),
             _ => case.bounce_rays = Some(v),
         }
         case

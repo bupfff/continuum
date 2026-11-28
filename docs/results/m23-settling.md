@@ -286,3 +286,14 @@ the dark pages are coarser than wanted but finer than that. Levers: area
 visibility for texels by size (larger than the occluders), or shadow rays
 for coarse texels; faster arrival of the wanted pages (distant boulders
 each take a page).
+
+Confirmed: area visibility (16 hardware rays) on every texel removes the
+patches (settled at 256 pixels a texel, sun alone: the near band 0.1179
+against 0.1097 with cones, 0.1281 at 2 pixels a texel). New options
+`area_mips` (a chart's top mips that average; 3) and `area_flat` (flat
+texels too). The 40 m rise, on arrival at most half as bright: 4.81%
+before; flat over the top 10 mips 0.52%; over all mips 0.45% (the start
+slower to settle: 2,289 frames against 1,737). Side by side (top 10, flat;
+three motions): Sponza 23.61% → 23.89%, the field 1.12% → 1.26%, the room
+6.52% → 6.12%, the field from above 12.18% → 11.67%, the rest equal;
+frames 0.996–1.023×, settling 0.89–1.17×. M25 gate 1 stub.

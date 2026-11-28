@@ -87,6 +87,8 @@ pub struct Case {
     pub hit_rays: Option<bool>,
     /// `CacheOptions::one_level` instead of the default.
     pub one_level: Option<bool>,
+    /// `CacheOptions::area_mips` and `area_flat` instead of the defaults.
+    pub area: Option<(u32, bool)>,
     /// `CacheOptions::area_texels` instead of the default (M22 gate 9).
     pub area_texels: Option<bool>,
     /// Bounce light (`RendererOptions::bounce`) instead of the default.
@@ -163,6 +165,10 @@ impl Case {
         }
         if let Some(o) = self.one_level {
             cache_options.one_level = o;
+        }
+        if let Some((mips, flat)) = self.area {
+            cache_options.area_mips = mips;
+            cache_options.area_flat = flat;
         }
         if let Some(a) = self.area_texels {
             cache_options.area_texels = a;
@@ -340,6 +346,7 @@ pub fn gltf_case(
         bounce_rays: None,
         hit_rays: None,
         one_level: None,
+        area: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,
@@ -394,6 +401,7 @@ pub fn field_case() -> Case {
         bounce_rays: None,
         hit_rays: None,
         one_level: None,
+        area: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,
@@ -462,6 +470,7 @@ pub fn room_case(with_movers: bool) -> Case {
         bounce_rays: None,
         hit_rays: None,
         one_level: None,
+        area: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,

@@ -250,6 +250,15 @@ pub struct CacheOptions {
     /// rays (not with movers, streamed levels or alpha-blended objects). On
     /// by default.
     pub area_texels: bool,
+    /// With `area_texels`: how many of a chart's top mips average their
+    /// area (3: as M22 gate 10 chose).
+    pub area_mips: u32,
+    /// With `area_texels`: flat texels average their area too (their
+    /// centre stands for their unshadowed light but not for the shadows
+    /// across them: coarse ground texels over a boulder field, their sun
+    /// traced as cones through the prefiltered hierarchy, came out dark in
+    /// patches, shown while flying up; `docs/results/m23-settling.md`).
+    pub area_flat: bool,
     /// Far bounce hits lit by rays (M23 gate 1): with one bounce, a hit whose
     /// footprint asks for its chart's top mip (a distant boulder) reads no
     /// page; its direct light is the unshadowed light at the hit times one
@@ -472,6 +481,8 @@ impl Default for CacheOptions {
             sky_rays: true,
             wide_rays: false,
             area_texels: true,
+            area_mips: 3,
+            area_flat: false,
             far_rays: false,
             last_rays: false,
             far_samples: false,
@@ -2699,7 +2710,8 @@ impl VirtualCache {
     /// and the cache's flags: settling (8), `sky_lag` (9), `bounce_rest`
     /// (10), rays a bin (11–13), area texels (14), `far_rays` (15),
     /// `last_rays` (16), `far_samples` (17), the hits' mip offset (18–20),
-    /// `hit_rays` (21), `one_level` (22).
+    /// `hit_rays` (21), `one_level` (22), `area_mips` (24–28), `area_flat`
+    /// (29).
     fn extra_y(&self) -> u32 {
         let o = &self.options;
         let hw = self.bounce_rays;
@@ -2715,6 +2727,8 @@ impl VirtualCache {
             | bounce_coarser(o.bounce_coarser).min(7) << 18
             | ((bounce_flag("hit_rays", o.hit_rays) && hw) as u32) << 21
             | ((bounce_flag("one_level", o.one_level) && hw) as u32) << 22
+            | area_mips(o.area_mips).min(31) << 24
+            | (bounce_flag("area_flat", o.area_flat) as u32) << 29
     }
 
     /// Bounce rays are hardware ray queries from now on.
@@ -4100,6 +4114,17 @@ fn bounce_flag(name: &str, option: bool) -> bool {
     } else {
         option
     }
+}
+
+/// Diagnostics: `CONTINUUM_AREA_MIPS=<n>` overrides `CacheOptions::area_mips`.
+fn area_mips(option: u32) -> u32 {
+    static V: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("CONTINUUM_AREA_MIPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
+    .unwrap_or(option)
 }
 
 /// Diagnostics: `CONTINUUM_BOUNCE_COARSER=<n>` overrides
