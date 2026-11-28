@@ -140,3 +140,14 @@ Nearer bands with `hit_rays` are closer to Cycles than without (band RMSE
 0.0026–0.0035 against 0.0047–0.0049). Without `hit_rays`, the retries'
 `EVICT_AGE` timeout brought the field back to 1.22% (2.22% with tickets
 alone).
+
+## After gate 2 (failed on Fox moving 1.138×)
+
+Repeated side by side, one pass of the motion: Fox 1.010×, 0.989×;
+BrainStem 1.009×, then 1.195× (its side without the candidate 34.18, then
+29.10 ms). Three passes (`speed_pair_passes`, new; `pair_dev
+PAIR_PASSES=3`): Fox 0.969×, 0.994×; BrainStem 0.963×, 0.989×; movers
+1.006×, 1.030×. The ray-lit hits' shadow rays now go opaque and end at the
+first hit (`hw_segment_open`): `hw_segment_open_but` with nothing to skip
+visited every candidate along a ray across the field for the same answer.
+Gate 3: the same criteria, three passes.

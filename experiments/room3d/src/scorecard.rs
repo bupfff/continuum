@@ -1092,6 +1092,20 @@ fn settle_pair(sides: &mut [Side; 2], camera: Camera, cap: f64) {
 /// motion alternates frame by frame; the settling after it alternates as the
 /// warm-up does (at half the cap).
 pub fn speed_pair(a: &Case, b: &Case, run_start: Instant, cap: f64) -> [Speed; 2] {
+    speed_pair_passes(a, b, run_start, cap, 1)
+}
+
+/// [`speed_pair`] with the motion played `passes` times over (each pass the
+/// same camera move or animation from its start, alternated frame by frame;
+/// the moving frames' median and p99 over all of them): animated scenes'
+/// moving medians moved by up to 1.2× between runs of one pass (M23 gate 2).
+pub fn speed_pair_passes(
+    a: &Case,
+    b: &Case,
+    run_start: Instant,
+    cap: f64,
+    passes: usize,
+) -> [Speed; 2] {
     let load_min = run_start.elapsed().as_secs_f64() / 60.0;
     let cases = [a, b];
     let mut sides = [Side::new(a), Side::new(b)];
@@ -1110,7 +1124,7 @@ pub fn speed_pair(a: &Case, b: &Case, run_start: Instant, cap: f64) -> [Speed; 2
     }
     let mut moving = [Vec::new(), Vec::new()];
     let mut shares = [Vec::new(), Vec::new()];
-    for f in 1..=MOTION_FRAMES {
+    for f in (0..passes.max(1)).flat_map(|_| 1..=MOTION_FRAMES) {
         let x = f as f32 / MOTION_FRAMES as f32;
         for (k, s) in sides.iter_mut().enumerate() {
             let camera = cases[k].camera_at(x * x * (3.0 - 2.0 * x));

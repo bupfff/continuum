@@ -2,7 +2,9 @@
 //! `CacheOptions::bounce_rays`, `PAIR_A` and `PAIR_B` (1 and 2), speed side
 //! by side (`scorecard::speed_pair`, warm-up capped at 120 s) then each
 //! against Cycles. `SC_ONLY=a,b`: only those scenes. `PAIR_OPTION=hit_rays`:
-//! `CacheOptions::hit_rays` instead (the values 0 and 1).
+//! `CacheOptions::hit_rays` instead (the values 0 and 1). `PAIR_PASSES=<n>`:
+//! the motion played n times (`speed_pair_passes`). `SC_QUALITY=0`: speed
+//! only.
 //!
 //! `cargo run --release -p room3d --bin pair_dev`
 
@@ -42,7 +44,14 @@ fn main() -> std::io::Result<()> {
     let opt = |v: Option<(usize, f64)>| v.map_or("never".to_string(), |(_, t)| format!("{t:.2} s"));
     println!("{option} {a} against {b}");
     for (name, build) in &builds {
-        let [one, two] = speed_pair(&configured(build, a), &configured(build, b), start, 120.0);
+        let passes = value("PAIR_PASSES", 1) as usize;
+        let [one, two] = speed_pair_passes(
+            &configured(build, a),
+            &configured(build, b),
+            start,
+            120.0,
+            passes,
+        );
         println!(
             "{name}: settled frame {:.2} / {:.2} ms ({:.3}×), moving {:.2} / {:.2} ms ({:.3}×), settled at {} / {}",
             one.frame.0,
@@ -55,7 +64,10 @@ fn main() -> std::io::Result<()> {
             opt(two.settled)
         );
     }
-    for (name, build) in &builds {
+    for (name, build) in builds
+        .iter()
+        .filter(|_| std::env::var("SC_QUALITY").as_deref() != Ok("0"))
+    {
         let qa = quality(&configured(build, a), &card_out)?;
         let qb = quality(&configured(build, b), &card_out)?;
         println!(

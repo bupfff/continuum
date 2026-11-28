@@ -1426,7 +1426,9 @@ fn far_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<functi
         if (e <= 0.0) { continue; }
         let d = light_center(lights[l]) - f.hp;
         let dist = length(d);
-        if (!hw_segment_open_but(f.hp, d / dist, dist * 0.999, NONE)) { continue; }
+        // Opaque, ending at the first hit: nothing to skip, so the same
+        // answer as `hw_segment_open_but` without visiting every candidate.
+        if (!hw_segment_open(f.hp, d / dist, dist * 0.999)) { continue; }
         far_add(f, l, e, sum);
     }
     let sky_dir = far_sky_dir(f, key);
@@ -1454,7 +1456,7 @@ fn far_gather_movers(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr
         let d = light_center(lights[l]) - f.hp;
         let dist = length(d);
         let u = d / dist;
-        if (!hw_segment_open_but(f.hp, u, dist * 0.999, NONE) || !hw_movers_open(f.hp, u, dist * 0.999)) { continue; }
+        if (!hw_segment_open(f.hp, u, dist * 0.999) || !hw_movers_open(f.hp, u, dist * 0.999)) { continue; }
         far_add(f, l, e, sum);
     }
     let sky_dir = far_sky_dir(f, key);
