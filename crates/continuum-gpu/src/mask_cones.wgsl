@@ -5348,7 +5348,7 @@ fn bounce_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<fun
     // with the footprint in world units: Sponza settled in 53 s instead of
     // 36, its error from Cycles the same (2026-11-22).
     let settles = (vc.extra.y & 0x100u) != 0u;
-    want = min(want + select(0u, 2u, settles), top);
+    want = min(want + select(0u, (vc.extra.y >> 18u) & 7u, settles), top);
     var slot = NONE;
     var r: PageRef;
     var found = want;
@@ -5423,7 +5423,24 @@ struct BounceJob {
     surf: TexelSurface,
     // The bounces its samples should hold (M10 gate 25; at least 1).
     bounces: u32,
+    // Every hit lit by rays (`CacheOptions::far_samples`): a page at its
+    // chart's top mip, baked as the last level.
+    rays: bool,
+    // Its page and the chart's grid at its mip.
+    page: vec2<u32>,
+    n: vec2<u32>,
 }
+
+// Sample `k`'s texel on page `page` of a grid `n`: a 3×3 grid four texels
+// apart, clamped to the chart. On a page at the chart's edge several
+// samples can share a texel (all nine on a chart of one texel: a distant
+// boulder's page); the first of them is baked and stored for all.
+fn sample_texel(page: vec2<u32>, n: vec2<u32>, k: u32) -> vec2<u32> {
+    return min(page * PAGE + vec2<u32>(4u * (k % 3u), 4u * (k / 3u)), n - vec2<u32>(1u));
+}
+
+// `CacheOptions::far_samples` (extra.y bit 17).
+const FAR_PAGE_BIT: u32 = 0x20000u;
 
 fn bounce_job(wg: vec3<u32>) -> BounceJob {
     let j = wg.x + wg.y * 65535u;
@@ -5436,11 +5453,17 @@ fn bounce_job(wg: vec3<u32>) -> BounceJob {
     let page = vec2<u32>(e.z & 0xffffu, e.z >> 16u);
     let n = vc_grid(c, m, mip);
     let k = job.y & 0xffu;
-    let texel = min(page * PAGE + vec2<u32>(4u * (k % 3u), 4u * (k / 3u)), n - vec2<u32>(1u));
+    let texel = sample_texel(page, n, k);
+    var first = true;
+    for (var q = 0u; q < k; q++) {
+        if (all(sample_texel(page, n, q) == texel)) { first = false; }
+    }
     ind_gen = 15.0;
     ind_short = 0.0;
     ind_albedo = 0.0;
-    return BounceJob(e, k, listed, vc_surface(m, c, n, texel), max(job.y >> 8u, 1u));
+    let rays = (vc.extra.y & FAR_PAGE_BIT) != 0u && mip >= vc_top_mip(c, m);
+    let bounces = select(max(job.y >> 8u, 1u), 1u, rays);
+    return BounceJob(e, k, listed && first, vc_surface(m, c, n, texel), bounces, rays, page, n);
 }
 
 // Sums the workgroup's bins and stores the sample (lane 0), listing its page
@@ -5479,9 +5502,15 @@ fn bounce_finish(li: u32, job: BounceJob, sum: array<vec3<f32>, 5>, missing: f32
         if (job.bounces == 1u && (vc.extra.y & 0xffu) > 1u && (vc.extra.y & 0x400u) != 0u) {
             rest = 1.0 / (1.0 - min(ind_albedo_wg[0], 0.9));
         }
+        let texel = sample_texel(job.page, job.n, job.k);
         for (var ch = 0u; ch < IND_CH; ch++) {
             let v = ind_partial[ch].xyz * rest;
-            indirect[indirect_at(job.e.w, job.k, ch)] = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, held)));
+            let packed = vec2<u32>(pack2x16float(v.xy), pack2x16float(vec2<f32>(v.z, held)));
+            for (var q = job.k; q < 9u; q++) {
+                if (q == job.k || all(sample_texel(job.page, job.n, q) == texel)) {
+                    indirect[indirect_at(job.e.w, q, ch)] = packed;
+                }
+            }
         }
         // Retried while hits were missing, or held too few bounces.
         if (ind_missing[0] + ind_short_wg[0] > 0.01 * 3.14159265) {

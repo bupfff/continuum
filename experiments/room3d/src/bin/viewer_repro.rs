@@ -113,6 +113,10 @@ fn main() {
                 // `VR_FRAME_BUDGET`: the frame period's cap (ms; 0: none).
                 // `VR_FAR=1`: far bounce hits lit by rays.
                 far_rays: std::env::var_os("VR_FAR").is_some(),
+                // `VR_LAST=1`: the deepest bounce lit by rays.
+                last_rays: std::env::var_os("VR_LAST").is_some(),
+                // `VR_FARS=1`: distant objects' bounce lit by rays.
+                far_samples: std::env::var_os("VR_FARS").is_some(),
                 // `VR_PPT`: pixels a texel spans.
                 pixels_per_texel: std::env::var("VR_PPT")
                     .ok()

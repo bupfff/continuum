@@ -1,7 +1,8 @@
 //! Development (not a gate): the basics scorecard's scenes with two values of
 //! `CacheOptions::bounce_rays`, `PAIR_A` and `PAIR_B` (1 and 2), speed side
 //! by side (`scorecard::speed_pair`, warm-up capped at 120 s) then each
-//! against Cycles. `SC_ONLY=a,b`: only those scenes.
+//! against Cycles. `SC_ONLY=a,b`: only those scenes. `PAIR_OPTION=hit_rays`:
+//! `CacheOptions::hit_rays` instead (the values 0 and 1).
 //!
 //! `cargo run --release -p room3d --bin pair_dev`
 
@@ -29,13 +30,17 @@ fn main() -> std::io::Result<()> {
         .into_iter()
         .filter(|(n, _)| only.as_ref().is_none_or(|o| o.iter().any(|x| x == n)))
         .collect();
-    let configured = |build: &Build, rays: u32| {
+    let option = std::env::var("PAIR_OPTION").unwrap_or_else(|_| "bounce_rays".into());
+    let configured = |build: &Build, v: u32| {
         let mut case = build();
-        case.bounce_rays = Some(rays);
+        match option.as_str() {
+            "hit_rays" => case.hit_rays = Some(v != 0),
+            _ => case.bounce_rays = Some(v),
+        }
         case
     };
     let opt = |v: Option<(usize, f64)>| v.map_or("never".to_string(), |(_, t)| format!("{t:.2} s"));
-    println!("bounce_rays {a} against {b}");
+    println!("{option} {a} against {b}");
     for (name, build) in &builds {
         let [one, two] = speed_pair(&configured(build, a), &configured(build, b), start, 120.0);
         println!(

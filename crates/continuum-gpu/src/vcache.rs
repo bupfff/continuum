@@ -126,6 +126,20 @@ const PROBE_BYTES: u64 = 64;
 /// `BOUNCE_WANT`, M14 gate 8).
 const BOUNCE_WANT: u32 = 0x8000_0000;
 const INDIRECT_RETRY: u32 = 4;
+/// Pages asked for by bounce rays' hits waiting for the bake, at most; more
+/// are asked for again when their samples retry.
+const HIT_PENDING_CAP: usize = 1 << 18;
+
+/// What `plan_page` did with a page.
+#[derive(PartialEq)]
+enum Planned {
+    Baked,
+    /// Not baked, and not to be (resident, outside its grid, or waiting
+    /// for a lighting level).
+    Skipped,
+    /// Not baked: the budget or the pool is spent.
+    Full,
+}
 /// Request priorities' flags (the shader's `SECONDARY`, `WANTS_SAMPLES`),
 /// and the bounces a page's samples should hold (bits 24–27; with
 /// `SECONDARY` only, M10 gate 25).
@@ -242,9 +256,27 @@ pub struct CacheOptions {
     /// hardware shadow ray toward each light, its sky one ray
     /// cosine-distributed about its normal. It never requests a page, so a
     /// ground sample's rays at thousands of distant objects wait on none.
-    /// Hardware ray queries, without movers. Off by default; experimental
-    /// (M23 gate 1 parked unrun: the field's misses are near pages).
+    /// Hardware ray queries. Off by default; experimental (M23 gate 1
+    /// parked unrun: the field's misses are near pages).
     pub far_rays: bool,
+    /// The deepest bounce lit by rays: with more than one bounce, the hits
+    /// of samples holding one bounce (the last level) read no page: their
+    /// light is the unshadowed light times one shadow ray toward each
+    /// light, their sky one ray about their normal (as `far_rays`). The
+    /// last level then never requests a page nor counts a miss, so its
+    /// pages' samples finish in one bake. Hardware ray queries.
+    pub last_rays: bool,
+    /// Distant objects' bounce lit by rays: a page at its chart's top mip
+    /// (the whole chart one page: a boulder a few pixels across) bakes its
+    /// samples as the last level (one bounce, the orders past it estimated
+    /// as `bounce_rest` does), every hit lit as `far_rays` lights one. On
+    /// the field, 28,000 distant boulders' samples otherwise asked for
+    /// about 330,000 pages of their neighbours. Hardware ray queries.
+    pub far_samples: bool,
+    /// Every hit of a one-bounce sample lit by rays (as `far_rays` lights
+    /// a far one): bounce samples read no page, so they finish in their
+    /// first bake and ask for nothing. Hardware ray queries.
+    pub hit_rays: bool,
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
     pub sky_ray_cost: u32,
@@ -326,6 +358,9 @@ pub struct CacheOptions {
     /// footprint is read and kept (finer pages arriving later never reach
     /// it). On by default.
     pub bounce_settles: bool,
+    /// With `bounce_settles`: how many mips coarser than a bin's footprint
+    /// its hit's light is read (0 to 7; 2 by default).
+    pub bounce_coarser: u32,
     /// Anti-aliasing at silhouettes (M7 gates 3–4): pixels whose neighbours
     /// see another object or depth average four rays through their
     /// quarters. With hardware camera rays (and no movers) the rays are ray
@@ -427,6 +462,9 @@ impl Default for CacheOptions {
             wide_rays: false,
             area_texels: true,
             far_rays: false,
+            last_rays: false,
+            far_samples: false,
+            hit_rays: false,
             sky_ray_cost: 1,
             bounces: 0,
             ledger_epsilon: 0.01,
@@ -440,6 +478,7 @@ impl Default for CacheOptions {
             bounce_rest: true,
             bounce_rays: 1,
             bounce_settles: true,
+            bounce_coarser: 2,
             edge_rays: false,
             deforming_budget: 512,
             edge_samples: 4,
@@ -1143,8 +1182,18 @@ pub(crate) struct VirtualCache {
     /// Bounce light: this frame's samples (entry in `bake_list`, sample),
     /// and slots whose samples to re-bake, each with the frame it is due.
     indirect_jobs: Vec<[u32; 2]>,
-    retry: std::collections::VecDeque<(u32, u32)>,
+    /// (slot, frame due, the frame read back whose pages asked for by its
+    /// samples' hits it waits for; 0: none).
+    retry: std::collections::VecDeque<(u32, u32, u32)>,
     retrying: std::collections::HashSet<u32>,
+    /// Pages bounce rays' hits asked for that no frame's bake has had room
+    /// for yet (key, priority, the frame read back that asked), oldest
+    /// first, and their keys. A sample's retry waits until those asked for
+    /// with it have baked: dropped, they were asked for again only by the
+    /// retry, which then found them missing and waited its turn again (the
+    /// field never settled, 2026-11-27).
+    hit_pending: std::collections::VecDeque<([u32; 3], u32, u32)>,
+    hit_pending_keys: std::collections::HashSet<[u32; 3]>,
     /// Bounce light's ledger (M22): listed slots in the order listed (the
     /// largest charges first did worse: pages next to a mover take a large
     /// charge again each frame and starve the rest), and the set of them.
@@ -1190,6 +1239,11 @@ pub(crate) struct VirtualCache {
     /// Movers under a sky: slots whose sky to re-bake, each with the frame
     /// it is due.
     sky_due: HashMap<u32, u32>,
+    /// This frame's skies baked alone: (slot, object). One whose object
+    /// moves in the same frame is due again: the stale pass re-bakes the
+    /// page for the move, marking its sky a guess after the sky's bake
+    /// cleared it, and does not list it again (listed once per sky bake).
+    skies_planned: Vec<(u32, u32)>,
     /// Silhouette rays through ray queries (M7 gate 4): `hw_edges` lists
     /// edge pixels for `vc_shade_edges` (buffer 81; counted in the stats).
     hardware_edges: bool,
@@ -1197,6 +1251,9 @@ pub(crate) struct VirtualCache {
     sky_rays: bool,
     /// Coarse texels average their area (M22 gate 9): the pass exists.
     area_rays: bool,
+    /// Bounce rays are hardware ray queries (the paths that light hits by
+    /// rays exist).
+    bounce_rays: bool,
     /// Per slot: the bounces its samples should hold (0: no samples), and
     /// its samples' retries since it was allocated (M10 gate 25).
     slot_target: Vec<u8>,
@@ -1740,6 +1797,8 @@ impl VirtualCache {
             sky_mean: Vec3::ZERO,
             indirect_jobs: Vec::new(),
             retry: Default::default(),
+            hit_pending: Default::default(),
+            hit_pending_keys: Default::default(),
             retrying: Default::default(),
             bounce_queue: Default::default(),
             bounce_queued: Default::default(),
@@ -1756,9 +1815,11 @@ impl VirtualCache {
             lit_bounce: Vec::new(),
             lit_pins: Vec::new(),
             sky_due: HashMap::new(),
+            skies_planned: Vec::new(),
             hardware_edges: false,
             sky_rays: false,
             area_rays: false,
+            bounce_rays: false,
             slot_target: vec![0; options.pages as usize],
             slot_retries: vec![0; options.pages as usize],
             extra_samples: false,
@@ -2223,13 +2284,7 @@ impl VirtualCache {
             // z: probe pixels (M4 gate 13).
             extra: [
                 (self.options.indirect && self.options.emission_bounce) as u32,
-                self.options.bounces.clamp(1, 8)
-                    | (self.options.bounce_settles as u32) << 8
-                    | (self.options.sky_lag as u32) << 9
-                    | (self.options.bounce_rest as u32) << 10
-                    | self.options.bounce_rays.clamp(1, 4) << 11
-                    | ((self.options.area_texels && self.area_rays) as u32) << 14
-                    | (self.options.far_rays as u32) << 15,
+                self.extra_y(),
                 self.probes(),
                 self.options.aa_rays.max(0.0).to_bits(),
             ],
@@ -2394,6 +2449,11 @@ impl VirtualCache {
         self.moved.push(v4(all.1, 0.0));
         self.moved.extend(entries);
         self.moved_count = moved.len() as u32;
+        for &(slot, object) in &self.skies_planned {
+            if moved.iter().any(|m| m.object == object) {
+                self.sky_due.insert(slot, self.frame + SKY_SETTLE);
+            }
+        }
     }
 
     /// Texel jobs the stale passes may append to a frame's bake.
@@ -2569,18 +2629,7 @@ impl VirtualCache {
             !self.options.glossy_rays as u32,
             0,
         ];
-        params.extra = [
-            self.options.emission_bounce as u32,
-            self.options.bounces.clamp(1, 8)
-                | (self.options.bounce_settles as u32) << 8
-                | (self.options.sky_lag as u32) << 9
-                | (self.options.bounce_rest as u32) << 10
-                | self.options.bounce_rays.clamp(1, 4) << 11
-                | ((self.options.area_texels && self.area_rays) as u32) << 14
-                | (self.options.far_rays as u32) << 15,
-            0,
-            0,
-        ];
+        params.extra = [self.options.emission_bounce as u32, self.extra_y(), 0, 0];
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         [0, 0, 0, list.len() as u32, 0, 0]
     }
@@ -2634,6 +2683,32 @@ impl VirtualCache {
         self.area_rays = true;
     }
 
+    /// The shader's `vc.extra.y`: bounces (bits 0–7), then bounce light's
+    /// and the cache's flags: settling (8), `sky_lag` (9), `bounce_rest`
+    /// (10), rays a bin (11–13), area texels (14), `far_rays` (15),
+    /// `last_rays` (16), `far_samples` (17), the hits' mip offset (18–20),
+    /// `hit_rays` (21).
+    fn extra_y(&self) -> u32 {
+        let o = &self.options;
+        let hw = self.bounce_rays;
+        o.bounces.clamp(1, 8)
+            | (o.bounce_settles as u32) << 8
+            | (o.sky_lag as u32) << 9
+            | (o.bounce_rest as u32) << 10
+            | o.bounce_rays.clamp(1, 4) << 11
+            | ((o.area_texels && self.area_rays) as u32) << 14
+            | (bounce_flag("far_rays", o.far_rays) as u32) << 15
+            | (bounce_flag("last_rays", o.last_rays) as u32) << 16
+            | ((bounce_flag("far_samples", o.far_samples) && hw) as u32) << 17
+            | bounce_coarser(o.bounce_coarser).min(7) << 18
+            | ((bounce_flag("hit_rays", o.hit_rays) && hw) as u32) << 21
+    }
+
+    /// Bounce rays are hardware ray queries from now on.
+    pub(crate) fn set_bounce_rays(&mut self) {
+        self.bounce_rays = true;
+    }
+
     /// The bounces a request's page should hold in its samples: a pixel's,
     /// all of them; a page wanted for light at bounce hits, what its bits say
     /// (0: no samples).
@@ -2649,7 +2724,7 @@ impl VirtualCache {
     /// they already wait or, with several bounces, have retried too often
     /// (a page whose hits never gain bounces must not keep the view from
     /// settling).
-    fn schedule_retry(&mut self, slot: u32, due: u32) {
+    fn schedule_retry(&mut self, slot: u32, due: u32, wait: u32) {
         let s = slot as usize;
         if self.options.bounces > 1 {
             let cap = (4 * self.options.bounces + 8).min(255) as u8;
@@ -2659,7 +2734,7 @@ impl VirtualCache {
         }
         if self.retrying.insert(slot) {
             self.slot_retries[s] = self.slot_retries[s].saturating_add(1);
-            self.retry.push_back((slot, due));
+            self.retry.push_back((slot, due, wait));
         }
     }
 
@@ -3193,7 +3268,7 @@ impl VirtualCache {
         // alone left samples that read slightly coarse pages stale, M22
         // gate 5's development.)
         for slot in incomplete {
-            self.schedule_retry(slot, frame + INDIRECT_RETRY);
+            self.schedule_retry(slot, frame + INDIRECT_RETRY, frame);
         }
         // Pages baked against absent lighting levels (M14 gate 4): shown as
         // missing until re-baked; they wait for those objects.
@@ -3213,7 +3288,7 @@ impl VirtualCache {
             if bounce {
                 self.lit_bounce.push((object, frame + INDIRECT_RETRY + 8));
                 if self.retrying.insert(slot) {
-                    self.retry.push_back((slot, frame + INDIRECT_RETRY));
+                    self.retry.push_back((slot, frame + INDIRECT_RETRY, 0));
                 }
                 continue;
             }
@@ -3356,7 +3431,7 @@ impl VirtualCache {
     /// (see `pinned`), at most a quarter of the pool, the latest first;
     /// releases them once none wait.
     fn refresh_pinned(&mut self) {
-        if self.retry.is_empty() && self.bounce_queue.is_empty() {
+        if self.retry.is_empty() && self.bounce_queue.is_empty() && self.hit_pending.is_empty() {
             self.pinned.clear();
             return;
         }
@@ -3480,6 +3555,7 @@ impl VirtualCache {
                 continue;
             }
             self.sky_due.remove(&slot);
+            self.skies_planned.push((slot, k[0]));
             self.last_used[slot as usize] = self.frame;
             let (m, c, mip, page) = unpack(k);
             if trace_bakes() {
@@ -3588,6 +3664,7 @@ impl VirtualCache {
 
     fn plan(&mut self, device: &wgpu::Device, requests: Vec<([u32; 3], u32)>) {
         self.sky_rebaked = 0;
+        self.skies_planned.clear();
         self.bake_list.clear();
         self.bake_bounds.clear();
         self.indirect_jobs.clear();
@@ -3607,17 +3684,34 @@ impl VirtualCache {
                 let s = slot as usize;
                 self.slot_target[s] = self.slot_target[s].max(target);
                 if self.retrying.insert(slot) {
-                    self.retry.push_front((slot, self.frame));
+                    self.retry.push_front((slot, self.frame, 0));
                 }
             }
         }
         // Pages planned in the frame between are resident already. Pixels'
-        // requests sort first; secondary ones (for light at hits) last.
-        let mut order: Vec<(u32, [u32; 3])> = requests
-            .into_iter()
-            .filter(|(k, p)| p & WANTS_SAMPLES == 0 && !self.map.contains_key(k))
-            .map(|(k, priority)| (priority, k))
-            .collect();
+        // requests are planned first; secondary ones (for light at hits)
+        // join the pending hits, planned last.
+        if trace_bakes() && requests.len() <= 4 {
+            for (k, p) in &requests {
+                let (m, c, mip, page) = unpack(*k);
+                eprintln!(
+                    "request frame {} page m{m} c{c} mip{mip} {page:?} priority {p:#x} resident {}",
+                    self.frame,
+                    self.map.contains_key(k)
+                );
+            }
+        }
+        let mut order: Vec<(u32, [u32; 3])> = Vec::with_capacity(requests.len());
+        for (k, priority) in requests {
+            if priority & WANTS_SAMPLES != 0 || self.map.contains_key(&k) {
+                continue;
+            }
+            if priority & SECONDARY == 0 {
+                order.push((priority, k));
+            } else if self.hit_pending.len() < HIT_PENDING_CAP && self.hit_pending_keys.insert(k) {
+                self.hit_pending.push_back((k, priority, self.latest));
+            }
+        }
         // Pages pending for lighting levels (M14 gate 4): those whose level
         // is now resident join the order; the rest are wanted, oldest first
         // (pending more than 240 frames: no longer asked for, dropped).
@@ -3663,138 +3757,17 @@ impl VirtualCache {
             self.sky && self.options.sky_later && self.moving == 0 && !self.options.indirect;
         let mut lit_reserved = 0u32;
         for (priority, k) in order {
-            let secondary = priority & SECONDARY != 0;
-            let later = sky_later && !secondary;
-            // A fingerprint collision can list a page twice.
-            if self.map.contains_key(&k) {
-                continue;
-            }
-            let (m, c, mip, page) = unpack(k);
-            // The shader's grid (f32) can be one texel larger than this
-            // one: a page starting just past this grid is still asked for
-            // (M10 gate 6), and its texels outside the shader's are skipped.
-            let n = self.grid(c, m, mip).map(|x| x + 1);
-            let inside = [
-                (n[0] - (page[0] * PAGE).min(n[0])).min(STRIDE),
-                (n[1] - (page[1] * PAGE).min(n[1])).min(STRIDE),
-            ];
-            if inside[0] == 0 || inside[1] == 0 {
-                continue;
-            }
-            // One texel past the grid on each side too, in case the shader's
-            // grid is a rounding larger; it skips texels outside its own.
-            let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
-            let stride = self.sky_stride(m, mip);
-            let samples = if self.sky && !later {
-                listed[0].div_ceil(stride) * listed[1].div_ceil(stride)
-            } else {
-                0
-            };
-            // The bounces its samples should hold (0: none; M10 gate 25).
-            let target = if self.options.indirect {
-                self.request_target(priority)
-            } else {
-                0
-            };
-            let bounce = if target > 0 {
-                INDIRECT_SAMPLES * self.options.indirect_sample_cost
-            } else {
-                0
-            };
-            let cost = inside[0] * inside[1] * self.lights + samples * self.sky_cost() + bounce;
-            // The first page always fits, so a page costlier than the whole
-            // budget still gets baked.
-            if self.spent + lit_reserved + cost > budget
-                && !(self.bake_list.is_empty() && lit_reserved == 0)
-            {
+            let planned = self.plan_page(
+                device,
+                (priority, k),
+                budget,
+                sky_later,
+                &mut evicted_now,
+                &mut lit_reserved,
+            );
+            if planned == Planned::Full {
                 break;
             }
-            // A page on an object whose lighting level is absent waits for
-            // it (M14 gate 4), keeping its share of the budget, so only as
-            // many levels are asked for as the bake can use.
-            if self.lighting
-                && !self
-                    .lit_resident
-                    .get(k[0] as usize)
-                    .copied()
-                    .unwrap_or(true)
-            {
-                self.lit_wants.push(k[0]);
-                lit_reserved += cost;
-                if self.lit_pending.len() < 1 << 16 && self.lit_pending_keys.insert(k) {
-                    self.lit_pending.push_back((k, priority, self.frame));
-                }
-                continue;
-            }
-            if self.free.is_empty() && !evicted_now {
-                evicted_now = true;
-                self.evicted += self.evict_now(device, 2);
-            }
-            let Some(slot) = self.free.pop() else { break };
-            let Some(entry) = self.table.insert(k, slot) else {
-                self.free.push(slot);
-                continue;
-            };
-            self.slot_extent = self.slot_extent.max(slot + 1);
-            self.map.insert(k, (slot, entry));
-            self.slot_key[slot as usize] = k;
-            self.last_used[slot as usize] = self.frame;
-            self.alloc_frame[slot as usize] = self.frame;
-            if self.lighting {
-                self.lit_pins.push(k[0]);
-            }
-            if secondary && self.options.indirect {
-                self.pinned.push_back((slot, k));
-            }
-            let index = self.bake_list.len() as u32;
-            self.bake_list.push([k[0], k[1], k[2], slot]);
-            let b = self.page_bounds(m, c, mip, page);
-            self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
-            // w 1: no bounce samples planned (the fill clears the slot's);
-            // w 2: lights only, the sky a guess until it is baked alone.
-            let bare = self.options.indirect && target == 0;
-            self.slot_target[slot as usize] = target;
-            self.slot_retries[slot as usize] = 0;
-            let kind = if later { 2.0 } else { bare as u32 as f32 };
-            self.bake_bounds.push([b[4], b[5], b[6], kind]);
-            // Light by light, so neighbouring invocations trace one light.
-            for l in 0..self.lights {
-                for y in 0..listed[1] {
-                    for x in 0..listed[0] {
-                        self.jobs.push([index, (y * STRIDE + x) | l << 8]);
-                    }
-                }
-            }
-            if self.sky {
-                let first = self.sky_samples.len() as u32;
-                if !later {
-                    for y in (0..listed[1]).step_by(stride as usize) {
-                        for x in (0..listed[0]).step_by(stride as usize) {
-                            self.sky_samples.push([index, y * STRIDE + x]);
-                        }
-                    }
-                }
-                self.page_sky.push([first, samples | stride << 24]);
-            }
-            // Its sky alone from the next frame: in this one the fill would
-            // race the guess's mark against the sky's clearing it.
-            if later {
-                self.sky_due.insert(slot, self.frame + 1);
-            }
-            if target > 0 {
-                for k in 0..INDIRECT_SAMPLES {
-                    self.indirect_jobs.push([index, k | (target as u32) << 8]);
-                }
-            }
-            if trace_bakes() {
-                eprintln!(
-                    "bake frame {} page m{m} c{c} mip{mip} {page:?} slot {slot} priority {priority:#x}",
-                    self.frame
-                );
-            }
-            self.texels += inside[0] * inside[1];
-            self.spent += cost;
-            self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] += cost;
         }
         // Then skies to re-bake alone with what is left.
         self.plan_due_skies(budget);
@@ -3821,7 +3794,7 @@ impl VirtualCache {
                 continue;
             }
             if !self.lighting_ready(k) {
-                self.schedule_retry(slot, self.frame + INDIRECT_RETRY);
+                self.schedule_retry(slot, self.frame + INDIRECT_RETRY, 0);
                 continue;
             }
             if trace_bakes() {
@@ -3830,15 +3803,20 @@ impl VirtualCache {
             self.plan_bounce_rebake(slot, k);
             share -= bounce;
         }
+        // Retries once due and once the pages their hits asked for have
+        // baked (`hit_pending`), or `EVICT_AGE` frames after asking: behind a
+        // long backlog a retry with some of its hits beats none.
+        let pending = self.hit_pending.front().map(|h| h.2);
+        let frame = self.frame;
         while self.options.indirect
             && self.spent + bounce <= budget
             && self.bake_list.len() < budget as usize
-            && self
-                .retry
-                .front()
-                .is_some_and(|&(_, due)| due <= self.frame)
+            && self.retry.front().is_some_and(|&(_, due, wait)| {
+                due <= frame
+                    && (wait == 0 || pending.is_none_or(|p| p > wait) || wait + EVICT_AGE < frame)
+            })
         {
-            let (slot, _) = self.retry.pop_front().expect("a retry");
+            let (slot, _, wait) = self.retry.pop_front().expect("a retry");
             let k = self.slot_key[slot as usize];
             if k[0] == EMPTY {
                 self.retrying.remove(&slot);
@@ -3846,7 +3824,8 @@ impl VirtualCache {
             }
             if !self.lighting_ready(k) {
                 // Again later, its levels wanted meanwhile.
-                self.retry.push_back((slot, self.frame + INDIRECT_RETRY));
+                self.retry
+                    .push_back((slot, self.frame + INDIRECT_RETRY, wait));
                 continue;
             }
             self.retrying.remove(&slot);
@@ -3859,6 +3838,25 @@ impl VirtualCache {
             }
             self.plan_bounce_rebake(slot, k);
         }
+        // Then the pages bounce rays' hits asked for, oldest first, with
+        // what is left.
+        while let Some(&(k, priority, _)) = self.hit_pending.front() {
+            if !self.map.contains_key(&k) {
+                let planned = self.plan_page(
+                    device,
+                    (priority, k),
+                    budget,
+                    sky_later,
+                    &mut evicted_now,
+                    &mut lit_reserved,
+                );
+                if planned == Planned::Full {
+                    break;
+                }
+            }
+            self.hit_pending.pop_front();
+            self.hit_pending_keys.remove(&k);
+        }
         if trace_jobs() {
             eprintln!(
                 "jobs frame {}: budget {:.0}, spent {}, pages {}, jobs {}",
@@ -3869,6 +3867,154 @@ impl VirtualCache {
                 self.jobs.len()
             );
         }
+    }
+
+    /// Plans page `k` (asked for at `priority`) into the frame's bake if it
+    /// fits what is left of `budget`.
+    fn plan_page(
+        &mut self,
+        device: &wgpu::Device,
+        (priority, k): (u32, [u32; 3]),
+        budget: u32,
+        sky_later: bool,
+        evicted_now: &mut bool,
+        lit_reserved: &mut u32,
+    ) -> Planned {
+        let secondary = priority & SECONDARY != 0;
+        let later = sky_later && !secondary;
+        // A fingerprint collision can list a page twice.
+        if self.map.contains_key(&k) {
+            return Planned::Skipped;
+        }
+        let (m, c, mip, page) = unpack(k);
+        // The shader's grid (f32) can be one texel larger than this
+        // one: a page starting just past this grid is still asked for
+        // (M10 gate 6), and its texels outside the shader's are skipped.
+        let n = self.grid(c, m, mip).map(|x| x + 1);
+        let inside = [
+            (n[0] - (page[0] * PAGE).min(n[0])).min(STRIDE),
+            (n[1] - (page[1] * PAGE).min(n[1])).min(STRIDE),
+        ];
+        if inside[0] == 0 || inside[1] == 0 {
+            return Planned::Skipped;
+        }
+        // One texel past the grid on each side too, in case the shader's
+        // grid is a rounding larger; it skips texels outside its own.
+        let listed = [(inside[0] + 1).min(STRIDE), (inside[1] + 1).min(STRIDE)];
+        let stride = self.sky_stride(m, mip);
+        let samples = if self.sky && !later {
+            listed[0].div_ceil(stride) * listed[1].div_ceil(stride)
+        } else {
+            0
+        };
+        // The bounces its samples should hold (0: none; M10 gate 25).
+        let target = if self.options.indirect {
+            self.request_target(priority)
+        } else {
+            0
+        };
+        let bounce = if target > 0 {
+            self.distinct_samples(m, c, mip, page) * self.options.indirect_sample_cost
+        } else {
+            0
+        };
+        let cost = inside[0] * inside[1] * self.lights + samples * self.sky_cost() + bounce;
+        // The first page always fits, so a page costlier than the whole
+        // budget still gets baked.
+        if self.spent + *lit_reserved + cost > budget
+            && !(self.bake_list.is_empty() && *lit_reserved == 0)
+        {
+            return Planned::Full;
+        }
+        // A page on an object whose lighting level is absent waits for
+        // it (M14 gate 4), keeping its share of the budget, so only as
+        // many levels are asked for as the bake can use.
+        if self.lighting
+            && !self
+                .lit_resident
+                .get(k[0] as usize)
+                .copied()
+                .unwrap_or(true)
+        {
+            self.lit_wants.push(k[0]);
+            *lit_reserved += cost;
+            if self.lit_pending.len() < 1 << 16 && self.lit_pending_keys.insert(k) {
+                self.lit_pending.push_back((k, priority, self.frame));
+            }
+            return Planned::Skipped;
+        }
+        if self.free.is_empty() && !*evicted_now {
+            *evicted_now = true;
+            self.evicted += self.evict_now(device, 2);
+        }
+        let Some(slot) = self.free.pop() else {
+            return Planned::Full;
+        };
+        let Some(entry) = self.table.insert(k, slot) else {
+            self.free.push(slot);
+            return Planned::Skipped;
+        };
+        self.slot_extent = self.slot_extent.max(slot + 1);
+        self.map.insert(k, (slot, entry));
+        self.slot_key[slot as usize] = k;
+        self.last_used[slot as usize] = self.frame;
+        self.alloc_frame[slot as usize] = self.frame;
+        if self.lighting {
+            self.lit_pins.push(k[0]);
+        }
+        if secondary && self.options.indirect {
+            self.pinned.push_back((slot, k));
+        }
+        let index = self.bake_list.len() as u32;
+        self.bake_list.push([k[0], k[1], k[2], slot]);
+        let b = self.page_bounds(m, c, mip, page);
+        self.bake_bounds.push([b[0], b[1], b[2], b[3]]);
+        // w 1: no bounce samples planned (the fill clears the slot's);
+        // w 2: lights only, the sky a guess until it is baked alone.
+        let bare = self.options.indirect && target == 0;
+        self.slot_target[slot as usize] = target;
+        self.slot_retries[slot as usize] = 0;
+        let kind = if later { 2.0 } else { bare as u32 as f32 };
+        self.bake_bounds.push([b[4], b[5], b[6], kind]);
+        // Light by light, so neighbouring invocations trace one light.
+        for l in 0..self.lights {
+            for y in 0..listed[1] {
+                for x in 0..listed[0] {
+                    self.jobs.push([index, (y * STRIDE + x) | l << 8]);
+                }
+            }
+        }
+        if self.sky {
+            let first = self.sky_samples.len() as u32;
+            if !later {
+                for y in (0..listed[1]).step_by(stride as usize) {
+                    for x in (0..listed[0]).step_by(stride as usize) {
+                        self.sky_samples.push([index, y * STRIDE + x]);
+                    }
+                }
+            }
+            self.page_sky.push([first, samples | stride << 24]);
+        }
+        // Its sky alone from the next frame: in this one the fill would
+        // race the guess's mark against the sky's clearing it.
+        if later {
+            self.sky_due.insert(slot, self.frame + 1);
+        }
+        if target > 0 {
+            for k in 0..INDIRECT_SAMPLES {
+                self.indirect_jobs.push([index, k | (target as u32) << 8]);
+            }
+        }
+        if trace_bakes() {
+            eprintln!(
+                "bake frame {} page m{m} c{c} mip{mip} {page:?} slot {slot} priority {priority:#x}",
+                self.frame
+            );
+        }
+        self.texels += inside[0] * inside[1];
+        self.spent += cost;
+        self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] += cost;
+        Planned::Baked
     }
 
     /// Adds slot `slot`'s page (key `k`) to the frame's bake for its bounce
@@ -3889,13 +4035,56 @@ impl VirtualCache {
         for s in 0..INDIRECT_SAMPLES {
             self.indirect_jobs.push([index, s | target << 8]);
         }
-        self.spent += INDIRECT_SAMPLES * self.options.indirect_sample_cost;
+        self.spent += self.distinct_samples(m, c, mip, page) * self.options.indirect_sample_cost;
+    }
+
+    /// The bounce samples a page bakes: its 3×3 grid's distinct texels (the
+    /// shader bakes samples sharing a texel once; for the cost only, so
+    /// this grid's rounding may differ from the shader's).
+    fn distinct_samples(&self, m: u32, c: u32, mip: u32, page: [u32; 2]) -> u32 {
+        let n = self.grid(c, m, mip);
+        let axis = |p: u32, n: u32| {
+            let last = n.max(1) - 1;
+            let a = (p * PAGE).min(last);
+            let b = (p * PAGE + 4).min(last);
+            let c = (p * PAGE + 8).min(last);
+            1 + (b != a) as u32 + (c != b) as u32
+        };
+        axis(page[0], n[0]) * axis(page[1], n[1])
     }
 }
 
 fn trace_jobs() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("CONTINUUM_TRACE_JOBS").is_some())
+}
+
+/// Diagnostics: `CONTINUUM_BOUNCE_FLAGS=far_rays,last_rays,far_samples`
+/// turns those options on (`-name` off).
+fn bounce_flag(name: &str, option: bool) -> bool {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(flags) = V.get_or_init(|| std::env::var("CONTINUUM_BOUNCE_FLAGS").ok()) else {
+        return option;
+    };
+    if flags.split(',').any(|f| f == name) {
+        true
+    } else if flags.split(',').any(|f| f.strip_prefix('-') == Some(name)) {
+        false
+    } else {
+        option
+    }
+}
+
+/// Diagnostics: `CONTINUUM_BOUNCE_COARSER=<n>` overrides
+/// `CacheOptions::bounce_coarser`.
+fn bounce_coarser(option: u32) -> u32 {
+    static V: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("CONTINUUM_BOUNCE_COARSER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
+    .unwrap_or(option)
 }
 
 /// Diagnostics: the bounce samples' lighting-level wants kept a frame.

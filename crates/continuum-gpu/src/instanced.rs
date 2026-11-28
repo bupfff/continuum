@@ -2058,6 +2058,11 @@ impl InstancedRenderer {
         {
             c.state.set_area_rays();
         }
+        if let Some(c) = &mut cache
+            && c.indirect_hw
+        {
+            c.state.set_bounce_rays();
+        }
         let colors = Self::colors_buffer(&device, width, height);
         let mut renderer = InstancedRenderer {
             device: device.clone(),

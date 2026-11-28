@@ -1344,13 +1344,21 @@ fn hw_bounce_hit(eye: vec3<f32>, dir: vec3<f32>, own: u32) -> Hit {
 // page, so it never requests one nor counts as missing.
 const FAR_BIT: u32 = 0x8000u;
 
+// The deepest bounce lit by rays (`CacheOptions::last_rays`, bit 16): with
+// more than one bounce, every hit of a sample holding one.
+const LAST_BIT: u32 = 0x10000u;
+
 fn far_hit(hit: Hit, bounces: u32) -> bool {
-    if ((vc.extra.y & FAR_BIT) == 0u || bounces != 1u || hit.mesh == NONE) { return false; }
+    if (bounces != 1u || hit.mesh == NONE) { return false; }
+    if ((vc.extra.y & LAST_BIT) != 0u && (vc.extra.y & 0xffu) > 1u) { return true; }
+    // Every one-bounce sample's hit (`CacheOptions::hit_rays`, bit 21).
+    if ((vc.extra.y & 0x200000u) != 0u) { return true; }
+    if ((vc.extra.y & FAR_BIT) == 0u) { return false; }
     // `bounce_gather`'s wanted mip.
     let ratio = hit.distance * IND_BIN_ANGLE * vc.params.x;
     var want = 0u;
     if (ratio > 1.0) { want = u32(round(log2(ratio))); }
-    if ((vc.extra.y & 0x100u) != 0u) { want += 2u; }
+    if ((vc.extra.y & 0x100u) != 0u) { want += (vc.extra.y >> 18u) & 7u; }
     return want >= vc_top_mip(tri_vchart[hit.tri], hit.mesh);
 }
 
@@ -1358,12 +1366,20 @@ fn far_hit(hit: Hit, bounces: u32) -> bool {
 // light's unshadowed light at the hit times one shadow ray toward the
 // light's centre; its sky from one ray cosine-distributed about its normal
 // (π times open: the sky's irradiance per unit radiance), turned by `key`.
-fn far_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>, key: vec3<u32>) {
+struct FarPoint {
+    ok: bool,
+    hp: vec3<f32>,
+    hn: vec3<f32>,
+    reflect: vec3<f32>,
+}
+
+// The hit's point, normal and reflectance (adding its emission); not ok on
+// a back face (the sample sees inside geometry; no light).
+fn far_point(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>) -> FarPoint {
     let p = apex + dir * hit.distance;
     let tv = 3u * hit.tri;
     let geometric = normal_to_world(hit.mesh, cross(tris[tv + 1u].xyz - tris[tv].xyz, tris[tv + 2u].xyz - tris[tv].xyz));
-    // A back face: the sample sees inside geometry; no light.
-    if (dot(geometric, dir) > 0.0) { return; }
+    if (dot(geometric, dir) > 0.0) { return FarPoint(false, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)); }
     let footprint = hit.distance * IND_BIN_ANGLE;
     if (vc.extra.x == 1u) {
         (*sum)[IND_GLOW] += bounce_emission_at(hit.mesh, hit.tri, p, footprint) * w;
@@ -1372,28 +1388,76 @@ fn far_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<functi
     let hp = p + hit.normal * surface_offset(length(p));
     let reflect = bounce_albedo(hit.mesh, hit.tri, p, footprint) * (w / 3.14159265);
     ind_albedo += dot(reflect, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let lights_n = min(arrayLength(&lights), IND_SKY);
-    for (var l = 0u; l < arrayLength(&lights); l++) {
-        let r = lights[l];
-        let e = unshadowed_rect(hp, hn, r) * spot_falloff(r, normalize(hp - light_center(r)));
-        if (e <= 0.0) { continue; }
-        let d = light_center(r) - hp;
-        let dist = length(d);
-        if (!hw_segment_open_but(hp, d / dist, dist * 0.999, NONE)) { continue; }
-        if (l < lights_n) {
-            (*sum)[l] += reflect * e;
-        } else {
-            (*sum)[IND_GLOW] += reflect * e * r.radiance.xyz;
-        }
+    return FarPoint(true, hp, hn, reflect);
+}
+
+// Light `l`'s unshadowed light at the point (0: facing away).
+fn far_light_e(f: FarPoint, l: u32) -> f32 {
+    let r = lights[l];
+    return unshadowed_rect(f.hp, f.hn, r) * spot_falloff(r, normalize(f.hp - light_center(r)));
+}
+
+// Adds light `l`'s light `e` (its channel, or emission's at its radiance).
+fn far_add(f: FarPoint, l: u32, e: f32, sum: ptr<function, array<vec3<f32>, 5>>) {
+    if (l < min(arrayLength(&lights), IND_SKY)) {
+        (*sum)[l] += f.reflect * e;
+    } else {
+        (*sum)[IND_GLOW] += f.reflect * e * lights[l].radiance.xyz;
     }
+}
+
+// The sky ray's direction (cosine-distributed about the normal).
+fn far_sky_dir(f: FarPoint, key: vec3<u32>) -> vec3<f32> {
     let h = vc_hash(key);
     let u1 = f32(h & 0xffffu) / 65536.0;
     let u2 = f32(h >> 16u) / 65536.0;
     let rr = sqrt(u1);
     let a = 6.2831853 * u2;
-    let sky_dir = normalize(bin_world(hn, vec3<f32>(rr * cos(a), rr * sin(a), sqrt(max(1.0 - u1, 0.0)))));
-    if (sky_dir.z > 0.0 && hw_sky_open(hp, sky_dir)) {
-        (*sum)[IND_SKY] += reflect * 3.14159265;
+    return normalize(bin_world(f.hn, vec3<f32>(rr * cos(a), rr * sin(a), sqrt(max(1.0 - u1, 0.0)))));
+}
+
+fn far_gather(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>, key: vec3<u32>) {
+    let f = far_point(apex, dir, hit, w, sum);
+    if (!f.ok) { return; }
+    for (var l = 0u; l < arrayLength(&lights); l++) {
+        let e = far_light_e(f, l);
+        if (e <= 0.0) { continue; }
+        let d = light_center(lights[l]) - f.hp;
+        let dist = length(d);
+        if (!hw_segment_open_but(f.hp, d / dist, dist * 0.999, NONE)) { continue; }
+        far_add(f, l, e, sum);
+    }
+    let sky_dir = far_sky_dir(f, key);
+    if (sky_dir.z > 0.0 && hw_sky_open(f.hp, sky_dir)) {
+        (*sum)[IND_SKY] += f.reflect * 3.14159265;
+    }
+}
+
+// Whether the movers (`movers_as`, as they are now) leave the segment from
+// `p` along `w` for `t` open.
+fn hw_movers_open(p: vec3<f32>, w: vec3<f32>, t: f32) -> bool {
+    var mq: ray_query;
+    rayQueryInitialize(&mq, movers_as, RayDesc(0x5u, 0xffu, 0.0, t, p, w));
+    rayQueryProceed(&mq);
+    return rayQueryGetCommittedIntersection(&mq).kind == 0u;
+}
+
+// `far_gather` with movers: its shadow and sky rays see them too.
+fn far_gather_movers(apex: vec3<f32>, dir: vec3<f32>, hit: Hit, w: f32, sum: ptr<function, array<vec3<f32>, 5>>, key: vec3<u32>) {
+    let f = far_point(apex, dir, hit, w, sum);
+    if (!f.ok) { return; }
+    for (var l = 0u; l < arrayLength(&lights); l++) {
+        let e = far_light_e(f, l);
+        if (e <= 0.0) { continue; }
+        let d = light_center(lights[l]) - f.hp;
+        let dist = length(d);
+        let u = d / dist;
+        if (!hw_segment_open_but(f.hp, u, dist * 0.999, NONE) || !hw_movers_open(f.hp, u, dist * 0.999)) { continue; }
+        far_add(f, l, e, sum);
+    }
+    let sky_dir = far_sky_dir(f, key);
+    if (sky_dir.z > 0.0 && hw_sky_open_movers(f.hp, sky_dir)) {
+        (*sum)[IND_SKY] += f.reflect * 3.14159265;
     }
 }
 
@@ -1416,7 +1480,7 @@ fn hw_vc_bake_indirect(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invo
             for (var q = 0u; q < rays; q++) {
                 let dir = bounce_ray(job.surf.normal, b, q);
                 let hit = hw_bounce_hit(job.surf.apex, dir, job.e.x);
-                if (far_hit(hit, job.bounces)) {
+                if ((job.rays && hit.mesh != NONE) || far_hit(hit, job.bounces)) {
                     far_gather(job.surf.apex, dir, hit, wb, &sum, vec3<u32>(job.e.w * 9u + job.k, b, q));
                 } else {
                     missing += bounce_gather(job.surf.apex, dir, hit, wb, &sum, job.bounces);
@@ -1463,7 +1527,11 @@ fn hw_vc_bake_indirect_movers(@builtin(workgroup_id) wg: vec3<u32>, @builtin(loc
             for (var q = 0u; q < rays; q++) {
                 let dir = bounce_ray(job.surf.normal, b, q);
                 let hit = hw_bounce_hit_movers(job.surf.apex, dir, job.e.x);
-                missing += bounce_gather(job.surf.apex, dir, hit, wb, &sum, job.bounces);
+                if ((job.rays && hit.mesh != NONE) || far_hit(hit, job.bounces)) {
+                    far_gather_movers(job.surf.apex, dir, hit, wb, &sum, vec3<u32>(job.e.w * 9u + job.k, b, q));
+                } else {
+                    missing += bounce_gather(job.surf.apex, dir, hit, wb, &sum, job.bounces);
+                }
             }
         }
     }

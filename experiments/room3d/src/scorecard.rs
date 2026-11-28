@@ -83,6 +83,8 @@ pub struct Case {
     pub bounce_rest: Option<bool>,
     /// `CacheOptions::bounce_rays` instead of the default.
     pub bounce_rays: Option<u32>,
+    /// `CacheOptions::hit_rays` instead of the default.
+    pub hit_rays: Option<bool>,
     /// `CacheOptions::area_texels` instead of the default (M22 gate 9).
     pub area_texels: Option<bool>,
     /// Bounce light (`RendererOptions::bounce`) instead of the default.
@@ -153,6 +155,9 @@ impl Case {
         }
         if let Some(r) = self.bounce_rays {
             cache_options.bounce_rays = r;
+        }
+        if let Some(h) = self.hit_rays {
+            cache_options.hit_rays = h;
         }
         if let Some(a) = self.area_texels {
             cache_options.area_texels = a;
@@ -328,6 +333,7 @@ pub fn gltf_case(
         bounces: None,
         bounce_rest: None,
         bounce_rays: None,
+        hit_rays: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,
@@ -380,6 +386,7 @@ pub fn field_case() -> Case {
         bounces: None,
         bounce_rest: None,
         bounce_rays: None,
+        hit_rays: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,
@@ -437,6 +444,7 @@ pub fn room_case(with_movers: bool) -> Case {
         bounces: None,
         bounce_rest: None,
         bounce_rays: None,
+        hit_rays: None,
         area_texels: None,
         bounce_light: None,
         far_rays: None,
@@ -465,6 +473,10 @@ pub fn median_p(v: &[f64], p: f64) -> (f64, f64) {
     (s[s.len() / 2], s[at])
 }
 
+fn trace_every() -> Option<usize> {
+    std::env::var("SC_TRACE").ok().and_then(|v| v.parse().ok())
+}
+
 /// Renders still until settled (32 quiet frames) or `cap_s` seconds; the
 /// frame and seconds where the quiet run began.
 pub fn settle(
@@ -484,6 +496,23 @@ pub fn settle(
         let t = start.elapsed().as_secs_f64();
         stamps.push(t);
         on_frame(r, f, t);
+        // Diagnostics: `SC_TRACE=<n>` prints the cache's counters every n
+        // frames while settling (stderr).
+        if let Some(n) = trace_every()
+            && f % n == 0
+        {
+            let st = r.stats().unwrap_or_default();
+            eprintln!(
+                "settle {f} ({t:.1} s): resident {} baked {} requests {} bounce {} incomplete {} budget {} spent {}",
+                st.resident,
+                st.pages_baked,
+                st.requests,
+                st.indirect_samples,
+                st.indirect_incomplete,
+                st.budget,
+                st.spent
+            );
+        }
         if f > 32 && r.is_settled(32) {
             return Some((f - 32, stamps[f - 33]));
         }
