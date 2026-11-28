@@ -2064,11 +2064,11 @@ estimates, and gates fail often, so treat them as ranges.
 History lives in git and `docs/results/`; the plan below.
 - **Now:** phase 1 (strengthen the basics), measured by the basics
   scorecard (`cargo run --release -p room3d --bin scorecard`). From
-  Cycles: Sponza 25.08%, the field 1.13%, the room 6.65%, the movers
-  5.31%, the helmet 4.47%, Fox 2.11%, BrainStem 3.27%; every scene
+  Cycles: Sponza 23.60%, the field 1.12%, the room 6.52%, the movers
+  5.04%, the helmet 4.47%, Fox 2.06%, BrainStem 3.28%; every scene
   settles (Sponza 31 s, the field 9 s). M23 G3 passed: one-bounce hits lit
   by rays (`hit_rays`, on), hit requests queued, retries ticketed
-  (`docs/results/m23-settling.md`).
+  (`docs/results/m23-settling.md`); M24 G1 passed: two rays a bounce bin.
 - **Next:** (a) the viewer's field (sun alone, so two bounces) still bakes
   first-level pages for minutes (levers at the end of
   `m23-settling.md`); (b) flying high, new coarse ground pages show

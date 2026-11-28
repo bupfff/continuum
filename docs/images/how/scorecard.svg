@@ -19,26 +19,26 @@
 <text x="30" y="124" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">3 million triangles, sun and sky</text>
 <rect x="300" y="94" width="304.3" height="12" rx="3" fill="#5b6577"/>
 <text x="610.3" y="105" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">30.43%</text>
-<rect x="300" y="110" width="250.8" height="12" rx="3" fill="#ffc15e"/>
-<text x="556.8" y="121" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">25.08%</text>
+<rect x="300" y="110" width="236.0" height="12" rx="3" fill="#ffc15e"/>
+<text x="542.0" y="121" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">23.60%</text>
 <text x="30" y="156" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">Closed room</text>
 <text x="30" y="174" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">one skylight panel, light bouncing</text>
 <rect x="300" y="144" width="465.5" height="12" rx="3" fill="#5b6577"/>
 <text x="771.5" y="155" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">46.55%</text>
-<rect x="300" y="160" width="66.5" height="12" rx="3" fill="#ffc15e"/>
-<text x="372.5" y="171" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">6.65%</text>
+<rect x="300" y="160" width="65.2" height="12" rx="3" fill="#ffc15e"/>
+<text x="371.2" y="171" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">6.52%</text>
 <text x="30" y="206" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">Room with movers</text>
 <text x="30" y="224" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">a ball and a cube moving</text>
 <rect x="300" y="194" width="444.6" height="12" rx="3" fill="#5b6577"/>
 <text x="750.6" y="205" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">44.46%</text>
-<rect x="300" y="210" width="53.1" height="12" rx="3" fill="#ffc15e"/>
-<text x="359.1" y="221" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">5.31%</text>
+<rect x="300" y="210" width="50.4" height="12" rx="3" fill="#ffc15e"/>
+<text x="356.4" y="221" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">5.04%</text>
 <text x="30" y="256" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">Boulder field</text>
 <text x="30" y="274" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">a million boulders, sun and sky</text>
 <rect x="300" y="244" width="16.8" height="12" rx="3" fill="#5b6577"/>
 <text x="322.8" y="255" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">1.68%</text>
-<rect x="300" y="260" width="11.3" height="12" rx="3" fill="#ffc15e"/>
-<text x="317.3" y="271" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">1.13%</text>
+<rect x="300" y="260" width="11.2" height="12" rx="3" fill="#ffc15e"/>
+<text x="317.2" y="271" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">1.12%</text>
 <text x="30" y="306" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">DamagedHelmet</text>
 <text x="30" y="324" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">metal, normal maps, emission</text>
 <rect x="300" y="294" width="44.6" height="12" rx="3" fill="#5b6577"/>
@@ -49,14 +49,14 @@
 <text x="30" y="374" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">a skinned character</text>
 <rect x="300" y="344" width="87.3" height="12" rx="3" fill="#5b6577"/>
 <text x="393.3" y="355" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">8.73%</text>
-<rect x="300" y="360" width="21.1" height="12" rx="3" fill="#ffc15e"/>
-<text x="327.1" y="371" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">2.11%</text>
+<rect x="300" y="360" width="20.6" height="12" rx="3" fill="#ffc15e"/>
+<text x="326.6" y="371" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">2.06%</text>
 <text x="30" y="406" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#f2eee6" text-anchor="start">BrainStem</text>
 <text x="30" y="424" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">59 skinned meshes</text>
 <rect x="300" y="394" width="94.7" height="12" rx="3" fill="#5b6577"/>
 <text x="400.7" y="405" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#a9aeb8" text-anchor="start">9.47%</text>
-<rect x="300" y="410" width="32.7" height="12" rx="3" fill="#ffc15e"/>
-<text x="338.7" y="421" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">3.27%</text>
+<rect x="300" y="410" width="32.8" height="12" rx="3" fill="#ffc15e"/>
+<text x="338.8" y="421" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f2eee6" text-anchor="start">3.28%</text>
 <rect x="30" y="469" width="14" height="12" rx="3" fill="#5b6577"/>
 <text x="52" y="480" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#a9aeb8" text-anchor="start">start of phase 1 (2026-11-22)</text>
 <rect x="260" y="469" width="14" height="12" rx="3" fill="#ffc15e"/>

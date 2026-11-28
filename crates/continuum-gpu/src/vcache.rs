@@ -357,7 +357,9 @@ pub struct CacheOptions {
     /// its centre), 2 (its diagonal quarters') or 4 (all four quarters').
     /// Too few let samples next to each other catch small bright patches
     /// (sunlit surfaces seen through openings) differently, which shows as
-    /// blotches. (Hardware ray queries; the compute path traces one.)
+    /// blotches. 2 by default (M24 gate 1: Sponza 25.09% → 23.60% from
+    /// Cycles, the movers 5.30% → 5.04%, frames within 1.051×, settling
+    /// 0.84–1.13×). (Hardware ray queries; the compute path traces one.)
     pub bounce_rays: u32,
     /// Bounce light that settles (M22 gate 3): bounce rays read their hits'
     /// light two mips coarser than a bin's footprint, and a bin that finds
@@ -486,7 +488,7 @@ impl Default for CacheOptions {
             bounce_share: 0.75,
             bounce_tail: 0.15,
             bounce_rest: true,
-            bounce_rays: 1,
+            bounce_rays: 2,
             bounce_settles: true,
             bounce_coarser: 2,
             edge_rays: false,
