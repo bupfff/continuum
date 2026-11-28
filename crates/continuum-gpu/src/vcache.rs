@@ -273,9 +273,14 @@ pub struct CacheOptions {
     /// the field, 28,000 distant boulders' samples otherwise asked for
     /// about 330,000 pages of their neighbours. Hardware ray queries.
     pub far_samples: bool,
-    /// Every hit of a one-bounce sample lit by rays (as `far_rays` lights
-    /// a far one): bounce samples read no page, so they finish in their
-    /// first bake and ask for nothing. Hardware ray queries.
+    /// Every hit of a one-bounce sample (with more bounces, the last
+    /// level's) lit by rays: the unshadowed light at the hit times one
+    /// shadow ray toward each light, the sky one ray cosine-distributed
+    /// about its normal (movers seen too). Bounce samples read no page, so
+    /// they finish in their first bake and ask for nothing. On by default
+    /// (M23 gate 3: the field settles in 11 s and Sponza in 35, neither did
+    /// in 60; the field 1.23% → 1.13% from Cycles, the room 6.93% →
+    /// 6.65%). Hardware ray queries; without them hits read pages.
     pub hit_rays: bool,
     /// What a sky sample through rays counts against the bake budget, in
     /// sun texels (at least 1; about 1.2 measured).
@@ -464,7 +469,7 @@ impl Default for CacheOptions {
             far_rays: false,
             last_rays: false,
             far_samples: false,
-            hit_rays: false,
+            hit_rays: true,
             sky_ray_cost: 1,
             bounces: 0,
             ledger_epsilon: 0.01,
@@ -3803,9 +3808,50 @@ impl VirtualCache {
             self.plan_bounce_rebake(slot, k);
             share -= bounce;
         }
-        // Retries once due and once the pages their hits asked for have
-        // baked (`hit_pending`), or `EVICT_AGE` frames after asking: behind a
-        // long backlog a retry with some of its hits beats none.
+        // Retries whose hits have arrived, then the pages hits asked for,
+        // then (with what is left) retries `EVICT_AGE` frames after asking:
+        // behind a long backlog a retry with some of its hits beats none,
+        // but ahead of the backlog they took the whole budget, cheap pages
+        // retrying every frame, and the hits never baked (the viewer's
+        // field, two bounces, 2026-11-27).
+        self.plan_retries(budget, bounce, false);
+        // Then the pages bounce rays' hits asked for, oldest first, with
+        // what is left.
+        while let Some(&(k, priority, _)) = self.hit_pending.front() {
+            if !self.map.contains_key(&k) {
+                let planned = self.plan_page(
+                    device,
+                    (priority, k),
+                    budget,
+                    sky_later,
+                    &mut evicted_now,
+                    &mut lit_reserved,
+                );
+                if planned == Planned::Full {
+                    break;
+                }
+            }
+            self.hit_pending.pop_front();
+            self.hit_pending_keys.remove(&k);
+        }
+        self.plan_retries(budget, bounce, true);
+        if trace_jobs() {
+            eprintln!(
+                "jobs frame {}: budget {:.0}, spent {}, pages {}, jobs {}",
+                self.frame,
+                self.budget,
+                self.spent,
+                self.bake_list.len(),
+                self.jobs.len()
+            );
+        }
+    }
+
+    /// Plans the bounce retries due, from the front of the queue, within
+    /// `budget` (each about `bounce`): those not waiting for hits or whose
+    /// hits have baked (`hit_pending`), and with `timeout` those that asked
+    /// more than `EVICT_AGE` frames ago.
+    fn plan_retries(&mut self, budget: u32, bounce: u32, timeout: bool) {
         let pending = self.hit_pending.front().map(|h| h.2);
         let frame = self.frame;
         while self.options.indirect
@@ -3813,7 +3859,9 @@ impl VirtualCache {
             && self.bake_list.len() < budget as usize
             && self.retry.front().is_some_and(|&(_, due, wait)| {
                 due <= frame
-                    && (wait == 0 || pending.is_none_or(|p| p > wait) || wait + EVICT_AGE < frame)
+                    && (wait == 0
+                        || pending.is_none_or(|p| p > wait)
+                        || (timeout && wait + EVICT_AGE < frame))
             })
         {
             let (slot, _, wait) = self.retry.pop_front().expect("a retry");
@@ -3837,35 +3885,6 @@ impl VirtualCache {
                 );
             }
             self.plan_bounce_rebake(slot, k);
-        }
-        // Then the pages bounce rays' hits asked for, oldest first, with
-        // what is left.
-        while let Some(&(k, priority, _)) = self.hit_pending.front() {
-            if !self.map.contains_key(&k) {
-                let planned = self.plan_page(
-                    device,
-                    (priority, k),
-                    budget,
-                    sky_later,
-                    &mut evicted_now,
-                    &mut lit_reserved,
-                );
-                if planned == Planned::Full {
-                    break;
-                }
-            }
-            self.hit_pending.pop_front();
-            self.hit_pending_keys.remove(&k);
-        }
-        if trace_jobs() {
-            eprintln!(
-                "jobs frame {}: budget {:.0}, spent {}, pages {}, jobs {}",
-                self.frame,
-                self.budget,
-                self.spent,
-                self.bake_list.len(),
-                self.jobs.len()
-            );
         }
     }
 

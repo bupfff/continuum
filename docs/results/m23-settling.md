@@ -151,3 +151,28 @@ PAIR_PASSES=3`): Fox 0.969×, 0.994×; BrainStem 0.963×, 0.989×; movers
 first hit (`hw_segment_open`): `hw_segment_open_but` with nothing to skip
 visited every candidate along a ray across the field for the same answer.
 Gate 3: the same criteria, three passes.
+
+## After gate 3 (passed): on by default; the viewer's field
+
+`hit_rays` on by default. The viewer's field (no sky, so two bounces:
+camera samples' hits still read pages, which hold ray-lit samples of
+their own) then showed a starvation the retry timeout brought: cheap
+one-texel pages' retries, timed out, took the whole budget every frame
+ahead of the pending hits they waited for (~2,500 retries a frame, all
+incomplete, resident pages flat at 75,571 for 2,000 frames). Now retries
+whose hits arrived go first, then the pending hits, then timed-out retries
+with what is left. `viewer_repro` after (4,000 frames):
+
+| | Requests, incomplete | Pages baked a frame at 3,950 | Resident |
+|---|---|---|---|
+| Uncapped | 0, 0 from frame 300 | 221 | ~190,000 (evicting) |
+| The frame cap (11 ms) | 0, 0 from frame 1,000 | 76 | 179,000 |
+| Uncapped, `far_samples` | 0, 0 (a burst at 1,000) | 167 | ~190,000 |
+| Capped, `far_samples` | 0 from 1,000 | 26 | 163,000 |
+
+Not settled in 4,000 frames either way: two bounces' first-level pages
+(each with nine samples) outnumber what stays resident under
+`EVICT_ABOVE` (131,072). Levers left: one bounce outdoors under a sun
+alone (`Renderer`'s rule counts a sun as distant only past 100 scene
+radii; the field's is at 1 km), a higher `EVICT_ABOVE` (the pool holds
+524,288), first-level pages' samples shared across a chart.
