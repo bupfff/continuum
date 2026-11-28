@@ -2071,8 +2071,9 @@ History lives in git and `docs/results/`; the plan below.
   rays a bounce bin), M25 G1 (flat coarse texels average their area: no
   dark band flying up); a small light outside the scene counts as a sun
   (`docs/results/m23-settling.md`).
-- **Next:** (a) the rest of Sponza's gap: its red drape is 0.62 of
-  Cycles, more saturated (material response; `m23-settling.md`); (b) after
+- **Next:** (a) the rest of Sponza's gap is its specular layer (diffuse
+  only, both renderers: 15.6% against 24.3%): the drape's specular 15×
+  under Cycles', the floor's 2–3× over (`m23-settling.md`, end); (b) after
   a 40 m rise the field takes ~2,800 frames to settle (distant boulders
   each take a page); (c) BrainStem's moving frames (34 ms, p99 94 ms).
 - **Pitfalls:** a GPU hang logs the user out: try dispatch-lengthening

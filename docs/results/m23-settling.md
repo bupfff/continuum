@@ -346,3 +346,13 @@ takes darker directions. The next lever: glossy light integrated over the
 lobe (several rays a pixel reading the cache at the lobe's footprint, or a
 directional estimate per texel), worth up to about 8 of Sponza's 24
 points.
+
+Tried (not kept): rough surfaces' environment light from one ray along
+the GGX lobe's dominant direction (Frostbite's), blended half with the
+hemisphere average: 24.34% → 27.10% from Cycles (the floor 1.05 → 1.26 of
+Cycles; the drape unchanged at 0.62). So the drape's missing light is not
+the environment lobe's direction: ours adds almost nothing there, as if
+its specular layer's albedo or the environment term never applied to it;
+next, print the drape pixels' `albedo_spec`, `seen` and the lights'
+specular against Cycles' (a Principled BSDF at roughness 0.98, specular
+level 0.5).
