@@ -297,6 +297,85 @@ fn main() {
         }
         return;
     }
+    // `VR_RISE=<meters>`: from the settled start the eye rises that far over
+    // `VR_RISE_FRAMES` (240) frames, its direction kept; at the top the
+    // image as it arrives is compared with the same view settled (the share
+    // of pixels at most half as bright, the lower half's means), with the
+    // most pixels without their page during the rise; then stops. (The
+    // user's "dark band in the middle distance" flying up, 2026-11-22.)
+    if let Ok(rise) = std::env::var("VR_RISE").map(|v| v.parse::<f32>().expect("meters")) {
+        let frames = num("VR_RISE_FRAMES", 240).max(1);
+        let at = |k: usize| {
+            let up = continuum::glam::Vec3::Z * (rise * k as f32 / frames as f32);
+            Camera {
+                eye: camera.eye + up,
+                target: camera.target + up,
+                vertical_fov_degrees: camera.vertical_fov_degrees,
+            }
+        };
+        let mut worst = 0u32;
+        for k in 1..=frames {
+            render(&mut r, at(k));
+            worst = worst.max(r.stats().map_or(0, |s| s.fallback_pixels));
+        }
+        let arrived = grab(&r, &texture);
+        let st = r.stats().unwrap_or_default();
+        println!(
+            "arrived: sampled pixels {} of which at their wanted mip {}, without a page {}, requests {}",
+            st.samples, st.at_wanted, st.fallback_pixels, st.requests
+        );
+        let mut settled_at = None;
+        for f in 0..4000 {
+            render(&mut r, at(frames));
+            if f > 32 && r.is_settled(32) {
+                settled_at = Some(f);
+                break;
+            }
+        }
+        let settled = grab(&r, &texture);
+        // `VR_OUT`: both images saved (`rise_arrived.png`, `rise_settled.png`).
+        std::fs::create_dir_all(&out).expect("the output folder");
+        for (img, name) in [
+            (&arrived, "rise_arrived.png"),
+            (&settled, "rise_settled.png"),
+        ] {
+            let mut image = flatland::img::Image::new(w as usize, h as usize, [0; 3]);
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let i = 4 * (y * w as usize + x);
+                    image.set(x, y, [img[i], img[i + 1], img[i + 2]]);
+                }
+            }
+            image.save(&out.join(name)).expect("the frame");
+        }
+        let lum =
+            |img: &[u8], i: usize| -> f32 { (0..3).map(|k| linear(img[i + k])).sum::<f32>() / 3.0 };
+        let (mut dark, mut bright, mut a_low, mut s_low, mut n_low) =
+            (0usize, 0usize, 0.0f32, 0.0f32, 0usize);
+        for (p, i) in (0..arrived.len()).step_by(4).enumerate() {
+            let (a, b) = (lum(&arrived, i), lum(&settled, i));
+            if b > 0.003 && a < 0.5 * b {
+                dark += 1;
+            }
+            if a > 0.003 && b < 0.5 * a {
+                bright += 1;
+            }
+            if p as u32 / w >= h / 2 {
+                a_low += a;
+                s_low += b;
+                n_low += 1;
+            }
+        }
+        let n = (arrived.len() / 4) as f32;
+        println!(
+            "rose {rise} m in {frames} frames: most pixels without their page {worst}; settled again after {settled_at:?} frames; as it arrived {:.2}% of pixels at most half as bright as settled ({:.2}% twice as bright), lower half {:.4} against {:.4}",
+            100.0 * dark as f32 / n,
+            100.0 * bright as f32 / n,
+            a_low / n_low.max(1) as f32,
+            s_low / n_low.max(1) as f32
+        );
+        return;
+    }
     // `VR_PRE`: frames more at the start, the last of them the reference.
     for _ in 0..num("VR_PRE", 0) {
         render(&mut r, pose(0.0));

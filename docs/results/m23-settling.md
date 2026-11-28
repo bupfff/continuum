@@ -254,3 +254,35 @@ two-thirds); not its normal map (0.618 without); in clay it is no worse
 than its neighbours, so its material response, unexplained (it is rough,
 0.98, dielectric). The arches 16.7% (0.96), the spandrels 12.1% (0.92),
 the floor 11.3% (1.05).
+
+## Flying up: the dark band (2026-11-28, diagnosis)
+
+`viewer_repro VR_RISE=<m>` (new): from the settled start the eye rises
+that far over `VR_RISE_FRAMES` (240) frames; on arrival the image is
+compared with the same view settled. The viewer's field (sun, sky, bounce,
+1470×923, the 11 ms cap):
+
+| Rise | Most pixels without a page | On arrival: darker than half, brighter than twice | Settles again |
+|---|---|---|---|
+| 40 m in 240 frames | 75,926 (5.6%) | 4.81%, 2.78% | 2,953 frames |
+| 40 m in 2,000 frames | 7,443 | 4.78%, 2.86% | 2,164 frames |
+| 150 m in 240 frames | 198,274 (14.6%) | 0.71%, 2.06% | not in 4,000 |
+
+The band is the user's: dark patches of ground between boulders in the
+middle distance and near the camera. On arrival only 26% of sampled pixels
+show their wanted mip (a slow rise the same): the ground shows pages
+coarser than wanted, and those are dark in patches. Not the pixels without
+any page (those are the far boulders, shown unshadowed and brighter); not
+bounce light (the same without it); not a finer page standing in (tried:
+no change). Settled at 256 pixels a texel, sun alone, no bounce, the same
+patches appear: the near band 14% darker than at 2 pixels a texel (0.1097
+against 0.1281), the whole lower half within 2.5%. So coarse ground texels'
+sun visibility, traced as cones through the prefiltered hierarchy over
+many small boulders, comes out dark in places, and flights show those
+pages while the wanted ones bake (about 30 pages a frame at the cap).
+Area texels (16 hardware rays) cover only a chart's top three mips and
+curved texels; forced over the top six and flat texels too, no change, so
+the dark pages are coarser than wanted but finer than that. Levers: area
+visibility for texels by size (larger than the occluders), or shadow rays
+for coarse texels; faster arrival of the wanted pages (distant boulders
+each take a page).
