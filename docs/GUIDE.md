@@ -105,7 +105,15 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   pages whose view a move may have changed (`bounce_epsilon`, within
   `bounce_share` of the bake budget; M22). A settled view's bounce light
   matches a fresh bake (`bounce_settles`, M22 gate 3): bounce rays ask for
-  their hits' pages and samples re-bake once they arrive. `CacheOptions::bounces` carries it further: a bounce
+  their hits' pages and samples re-bake once they arrive. With hardware
+  ray queries a one-bounce sample's hits read no page at all
+  (`CacheOptions::hit_rays`, on by default, M23 gate 3): each hit is lit by
+  one shadow ray toward each light and one sky ray, so samples are done in
+  their first bake; the boulder field settles in 11 s and Sponza in 35
+  (neither did within a minute), the field 1.13% and the closed room 6.65%
+  from Cycles. Pages hits ask for wait their turn rather than being
+  dropped, and a sample's retry waits until they have baked.
+  `CacheOptions::bounces` carries it further: a bounce
   sample gathers the bounce light of the pages it hits, and pages re-bake
   until their hits hold enough. A closed room lit by one panel goes from
   45% to 6.5% of Cycles' 12-bounce image with 8 (M10 gate 25), settling in

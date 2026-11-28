@@ -1330,6 +1330,30 @@ re-bake in bursts every ~250 frames, residency past `EVICT_ABOVE` evicting
 again: the field's settling is a cycle among re-bakes, near hits' pages
 and eviction. `far_rays` kept, off, experimental.
 
+**M23 gates 2–3 (2026-11-27): every one-bounce hit lit by rays.** Found
+why the field never settled (`docs/results/m23-settling.md`): a frame's
+requests for hit pages the bake could not fit were dropped, asked for
+again only by a retry that waited ~470 frames behind ~100,000 others and
+found them still missing; with two bounces (no sky) the hit pages carry
+samples whose hits need pages too; and 28,000 distant boulders' one-texel
+pages each baked nine identical samples. Changes: requests for hit pages
+wait in a FIFO (`hit_pending`); a retry waits until the pages its samples
+asked for have baked (a ticket: the readback frame), then the pending
+hits, then retries that asked more than `EVICT_AGE` frames ago; samples
+sharing a texel bake once. And the candidate, `far_rays` extended to
+every hit of a one-bounce sample (with more bounces, the last level's):
+`hit_rays`, each hit lit by one opaque shadow ray toward each light's
+centre and one cosine-distributed sky ray (open below the horizon too),
+movers seen through their own structure. Samples finish in their first
+bake and ask for nothing. Prior art as for M23 (DDGI's probe rays shade
+their hits with shadow rays; Lumen's far field). G2 failed on Fox's
+moving frames (1.138×; one pass of an animation moved by up to 1.2×
+between runs); G3, measured over three passes, **passed**: the field
+settles in 10.97 s, Sponza in 34.80 s (neither did within 60 s), the
+field 1.13% and the room 6.65% from Cycles. On by default. Not yet: the
+viewer's field under the sun alone (two bounces) still bakes first-level
+pages for minutes (levers in the results file).
+
 #### Bounce light with movers (M22 design, 2026-11-16)
 
 Item 5's first gap: bounce light (`CacheOptions::indirect`) is off by
@@ -2036,17 +2060,20 @@ estimates, and gates fail often, so treat them as ranges.
 
 ### 3.8 Next steps, in order (updated 2026-11-20, sixteenth session)
 
-**Start here (updated 2026-11-27, end of the eighteenth session, v0.3.2 + fixes).**
+**Start here (updated 2026-11-28, end of the nineteenth session, v0.3.2 + M23).**
 History lives in git and `docs/results/`; the plan below.
 - **Now:** phase 1 (strengthen the basics), measured by the basics
   scorecard (`cargo run --release -p room3d --bin scorecard`). From
-  Cycles: Sponza 25.35%, the field 1.29%, the room 6.93%, the movers
-  5.40%, the helmet 4.46%, Fox 2.17%, BrainStem 3.28%. M22 G10 passed
-  (area texels); M23 G1 parked unrun; README rebuilt.
-- **Next:** (a) the field's bounce samples re-bake in bursts every ~250
-  frames at rest (`docs/results/m23-gate1.md`): find why, so it settles;
-  (b) flying high, new coarse ground pages show darker until their sky
-  bakes; (c) the rest of Sponza's gap (clay 18.5% at one bounce).
+  Cycles: Sponza 25.08%, the field 1.13%, the room 6.65%, the movers
+  5.31%, the helmet 4.47%, Fox 2.11%, BrainStem 3.27%; every scene
+  settles (Sponza 31 s, the field 9 s). M23 G3 passed: one-bounce hits lit
+  by rays (`hit_rays`, on), hit requests queued, retries ticketed
+  (`docs/results/m23-settling.md`).
+- **Next:** (a) the viewer's field (sun alone, so two bounces) still bakes
+  first-level pages for minutes (levers at the end of
+  `m23-settling.md`); (b) flying high, new coarse ground pages show
+  darker until their sky bakes; (c) the rest of Sponza's gap (clay 18.5%
+  at one bounce).
 - **Pitfalls:** a GPU hang logs the user out: try dispatch-lengthening
   changes alone and short first, read `gpuEvent-*.ips` after one. The
   user runs `dist/Continuum Viewer.app`: rebuild it after viewer changes

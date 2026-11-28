@@ -380,3 +380,34 @@ PAIR_B=4`, side by side, then each against Cycles):
 
 Default left at 1: Sponza gains 1.7 points for 1.26× its settling, the
 room and the movers lose 0.5 and 0.2, BrainStem settles 1.73× slower.
+
+## Bounce hits lit by rays (2026-11-27, after M23 gate 3)
+
+`hit_rays` on by default, with pending hit requests, retry tickets and
+shared sample texels (`docs/results/m23-settling.md`). Full scorecard,
+3.0 minutes (`experiments/room3d/out/scorecard_m23.out`). **Every scene
+settles now** (Sponza and the field did not within 60 s).
+
+| Scene | Warm-up: under 1% / settled | Settled frame (median, p90) | Motion frame (median, p99) | Without page in motion (mean, worst) | Stop vs settled | Settles again |
+|---|---|---|---|---|---|---|
+| sponza | 16.96 s / **31.40 s** | 22.63, 23.68 ms | 30.44, 49.19 ms | 0.00%, 0.01% | 18.62% | **18.32 s** |
+| field | 0.19 s / **9.27 s** | 6.58, 6.72 ms | 10.47, 14.17 ms | 0.03%, 0.07% | 3.40% | **3.61 s** |
+| room | 0.08 s / 1.89 s | 5.64, 5.72 ms | 8.42, 13.54 ms | 0.00%, 0.00% | 0.03% | 0.09 s |
+| movers | 0.09 s / 1.85 s | 5.34, 5.55 ms | 20.82, 29.77 ms | 0.04%, 0.24% | 8.87% | 0.89 s |
+| helmet | 0.10 s / 0.86 s | 5.06, 5.18 ms | 7.09, 8.51 ms | 0.00%, 0.00% | 0.00% | 0.10 s |
+| fox | 0.08 s / 1.36 s | 6.02, 6.27 ms | 9.13, 12.42 ms | 0.00%, 0.00% | 6.17% | 2.07 s |
+| brainstem | 0.32 s / 3.35 s | 6.91, 7.32 ms | 34.11, 94.00 ms | 0.07%, 0.45% | 14.06% | 6.15 s |
+
+| Scene | Against Cycles | Pixels off > 10% | Settled at | Mean: ours, Cycles |
+|---|---|---|---|---|
+| sponza | 25.08% | 57.59% | frame 114 | 0.0014, 0.0015 |
+| field | **1.13%** | 0.10% | frame 139 | 0.0300, 0.0301 |
+| room | **6.65%** | 31.00% | frame 41 | 0.2656, 0.2624 |
+| movers | 5.31% | 13.24% | frame 47 | 0.3173, 0.3132 |
+| helmet | 4.47% | 1.78% | frame 58 | 0.2073, 0.2071 |
+| fox | 2.11% | 0.71% | frame 92 | 0.3322, 0.3355 |
+| brainstem | 3.27% | 1.70% | frame 96 | 0.3273, 0.3297 |
+
+Still to do from these rows: Sponza's 25% (item c), BrainStem's moving
+frames (34 ms, p99 94 ms) and its stop against settled (14%), the movers'
+21 ms moving frames.
