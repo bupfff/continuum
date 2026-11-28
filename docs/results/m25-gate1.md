@@ -57,3 +57,22 @@ Apple M4 (fanless MacBook Air), release build, run once at full size on
 - The field's start view and Sponza move slightly away from Cycles.
 - Settled frames vary by ±5% this run on both sides (heat); the settled
   frame does not depend on the bake.
+
+## After the gate (2026-11-28)
+
+On by default. Two tests then failed: a settled image against per-pixel
+cones (13.8% against its 13% bound: coarse texels now average by rays
+where per-pixel cones do not; that test keeps the old area settings), and
+a white metallic-roughness texture changing the image by 0.22%: the area
+list (`WIDE_CAP`, 16,384 texel jobs a frame) overflowed, so which texels
+kept their cones' values depended on the GPU's order, and two renders of
+one scene differed. The gate ran with that overflow. Now the plan counts
+each page's texels for area rays and stops before `AREA_CAP` (three
+quarters of a doubled `WIDE_CAP`, 32,768); tests pass. Full scorecard after
+(`experiments/room3d/out/scorecard_m25.out`, with half the doubled cap):
+every scene settles as before (Sponza 32.11 s, the field 9.77 s, the room
+2.08 s); against Cycles Sponza 23.90%, the field 1.24%, the room **5.84%**
+(every qualifying texel now averaged), the movers 5.04%, the helmet 4.44%,
+Fox 2.06%, BrainStem 3.28%. At the fixed quality budget pages settle later
+(with three quarters of the doubled cap: Sponza frame 151 against 114, the
+field 205 against 139, the room 63 against 41; the same accuracy).

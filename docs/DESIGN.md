@@ -2064,16 +2064,17 @@ estimates, and gates fail often, so treat them as ranges.
 History lives in git and `docs/results/`; the plan below.
 - **Now:** phase 1 (strengthen the basics), measured by the basics
   scorecard (`cargo run --release -p room3d --bin scorecard`). From
-  Cycles: Sponza 23.60%, the field 1.12%, the room 6.52%, the movers
-  5.04%, the helmet 4.47%, Fox 2.06%, BrainStem 3.28%; every scene
-  settles (Sponza 31 s, the field 9 s). M23 G3 passed: one-bounce hits lit
-  by rays (`hit_rays`, on), hit requests queued, retries ticketed
-  (`docs/results/m23-settling.md`); M24 G1 passed: two rays a bounce bin.
-- **Next:** (a) the viewer's field (sun alone, so two bounces) still bakes
-  first-level pages for minutes (levers at the end of
-  `m23-settling.md`); (b) flying high, new coarse ground pages show
-  darker until their sky bakes; (c) the rest of Sponza's gap (clay 18.5%
-  at one bounce).
+  Cycles: Sponza 23.76%, the field 1.26%, the room 6.12%, the movers
+  5.04%, the helmet 4.45%, Fox 2.06%, BrainStem 3.28%; every scene
+  settles (Sponza 31 s, the field 9 s). This session: M23 G3 (one-bounce
+  hits lit by rays, hit requests queued, retries ticketed), M24 G1 (two
+  rays a bounce bin), M25 G1 (flat coarse texels average their area: no
+  dark band flying up); a small light outside the scene counts as a sun
+  (`docs/results/m23-settling.md`).
+- **Next:** (a) the rest of Sponza's gap: its red drape is 0.62 of
+  Cycles, more saturated (material response; `m23-settling.md`); (b) after
+  a 40 m rise the field takes ~2,800 frames to settle (distant boulders
+  each take a page); (c) BrainStem's moving frames (34 ms, p99 94 ms).
 - **Pitfalls:** a GPU hang logs the user out: try dispatch-lengthening
   changes alone and short first, read `gpuEvent-*.ips` after one. The
   user runs `dist/Continuum Viewer.app`: rebuild it after viewer changes

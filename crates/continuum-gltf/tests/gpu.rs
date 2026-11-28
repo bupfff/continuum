@@ -531,6 +531,11 @@ fn cache_settles_near_per_pixel() {
                 frame_target_ms: 0.0,
                 // A small pool: software adapters have little memory to spare.
                 pages: 1 << 15,
+                // Coarse texels as cones, as the per-pixel image (flat ones
+                // averaging their area by rays, M25 gate 1, differ from
+                // cones by design: 13.8% here).
+                area_mips: 3,
+                area_flat: false,
                 ..Default::default()
             },
             // One ray a pixel, as the per-pixel image.

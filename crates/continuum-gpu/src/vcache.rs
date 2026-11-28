@@ -111,7 +111,9 @@ const INDIRECT_CHANNELS: u64 = 5;
 const INCOMPLETE_CAP: u32 = 1 << 14;
 /// Texels a frame's bake lists for rays to wide lights at most (M5 gate
 /// 15); more keep their cones' estimates.
-pub(crate) const WIDE_CAP: u32 = 1 << 14;
+pub(crate) const WIDE_CAP: u32 = 1 << 15;
+/// Area texels' share of `WIDE_CAP` a frame (the rest for wide lights).
+const AREA_CAP: u32 = WIDE_CAP / 4 * 3;
 /// Pages whose bake met an absent lighting level (M14 gate 4), with that
 /// geometry's object, listed per frame at most (pairs after the incomplete
 /// list; the shader's `MISSING_CAP`).
@@ -251,13 +253,17 @@ pub struct CacheOptions {
     /// by default.
     pub area_texels: bool,
     /// With `area_texels`: how many of a chart's top mips average their
-    /// area (3: as M22 gate 10 chose).
+    /// area: 10 by default (M25 gate 1, with `area_flat`; M22 gate 10 chose
+    /// 3).
     pub area_mips: u32,
     /// With `area_texels`: flat texels average their area too (their
     /// centre stands for their unshadowed light but not for the shadows
     /// across them: coarse ground texels over a boulder field, their sun
     /// traced as cones through the prefiltered hierarchy, came out dark in
-    /// patches, shown while flying up; `docs/results/m23-settling.md`).
+    /// patches, shown while flying up; `docs/results/m23-settling.md`). On
+    /// by default (M25 gate 1: after a 40 m rise 4.81% → 0.52% of pixels at
+    /// most half as bright as settled; the room 6.52% → 6.12% from Cycles,
+    /// the field from above 12.18% → 11.67%).
     pub area_flat: bool,
     /// Far bounce hits lit by rays (M23 gate 1): with one bounce, a hit whose
     /// footprint asks for its chart's top mip (a distant boulder) reads no
@@ -481,8 +487,8 @@ impl Default for CacheOptions {
             sky_rays: true,
             wide_rays: false,
             area_texels: true,
-            area_mips: 3,
-            area_flat: false,
+            area_mips: 10,
+            area_flat: true,
             far_rays: false,
             last_rays: false,
             far_samples: false,
@@ -1308,6 +1314,11 @@ pub(crate) struct VirtualCache {
     bake_list: Vec<[u32; 4]>,
     jobs: Vec<[u32; 2]>,
     texels: u32,
+    /// This frame's texel jobs listed for area rays (`area_texels`), as the
+    /// plan counts them: at most `AREA_CAP`, so the list never overflows
+    /// (an overflow kept arbitrary texels' cone values, and two renders of
+    /// one scene differed).
+    area_listed: u32,
     /// Whether the sky channel is baked; this frame's sky samples (page
     /// entry, texel) and each page's (first sample, count); and the budget
     /// the frame's plan used, in sun texels.
@@ -1862,6 +1873,7 @@ impl VirtualCache {
             bake_list: Vec::new(),
             jobs: Vec::new(),
             texels: 0,
+            area_listed: 0,
             sky,
             lights,
             sky_samples: Vec::new(),
@@ -3699,6 +3711,7 @@ impl VirtualCache {
         self.sky_samples.clear();
         self.page_sky.clear();
         self.texels = 0;
+        self.area_listed = 0;
         self.spent = 0;
         self.spent_by_mip = [0; 8];
         // Resident pages shown without bounce samples, or wanted with more
@@ -3967,6 +3980,16 @@ impl VirtualCache {
         {
             return Planned::Full;
         }
+        // Its texels for area rays (every one, counted: the shader lists
+        // those that qualify, each light's job), within `AREA_CAP`.
+        let area = if self.area_page(m, c, mip) {
+            listed[0] * listed[1] * self.lights
+        } else {
+            0
+        };
+        if self.area_listed + area > AREA_CAP && !self.bake_list.is_empty() {
+            return Planned::Full;
+        }
         // A page on an object whose lighting level is absent waits for
         // it (M14 gate 4), keeping its share of the budget, so only as
         // many levels are asked for as the bake can use.
@@ -4053,6 +4076,7 @@ impl VirtualCache {
             );
         }
         self.texels += inside[0] * inside[1];
+        self.area_listed += area;
         self.spent += cost;
         self.spent_by_mip[(mip.clamp(6, 13) - 6) as usize] += cost;
         Planned::Baked
@@ -4077,6 +4101,20 @@ impl VirtualCache {
             self.indirect_jobs.push([index, s | target << 8]);
         }
         self.spent += self.distinct_samples(m, c, mip, page) * self.options.indirect_sample_cost;
+    }
+
+    /// Whether page (`m`, `c`, `mip`)'s texels may be listed for area rays:
+    /// within a mip more of the shader's (`area_texel`), whose grid can round
+    /// one texel larger than this one.
+    fn area_page(&self, m: u32, c: u32, mip: u32) -> bool {
+        if !(self.options.area_texels && self.area_rays) {
+            return false;
+        }
+        let mut top = 0;
+        while top < 30 && self.grid(c, m, top) != [1, 1] {
+            top += 1;
+        }
+        mip + area_mips(self.options.area_mips).min(31) + 1 > top
     }
 
     /// The bounce samples a page bakes: its 3×3 grid's distinct texels (the
