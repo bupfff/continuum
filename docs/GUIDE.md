@@ -125,8 +125,9 @@ Measured on an Apple M4 MacBook Air (fanless) at 1280×720:
   bounces with the orders past them estimated (`bounce_rest`: the last
   level's samples times 1 / (1 − ρ), ρ their closure-weighted albedo):
   the closed room 7.68% from Cycles, at no cost a frame (M22 gate 8). A
-  scene outdoors (a sky, an environment, or a light more than 100 scene
-  radii away, such as a sun) keeps one. Coarse texels that curve average
+  scene outdoors (a sky, an environment, or a sun: a light more than 100
+  scene radii away, or outside the scene's box and under 2° across) keeps
+  one. Coarse texels that curve average
   their area (`CacheOptions::area_texels`, on by default, M22 gate 10;
   flat texels too over the top ten mips since M25 gate 1, `area_flat`,
   `area_mips`, so flying up no longer shows dark patches of ground): a
